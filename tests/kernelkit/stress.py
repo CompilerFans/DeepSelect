@@ -289,7 +289,12 @@ def do_stress_test(
             glitcher = Glitcher.remote(os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7"))
             glitcher.run_main_loop.remote()
         else:
-            print(f"{colors["RED_BG"]}Glitching disabled\n{colors["CLEAR"]}")
+            # [MACA] 上游此处写作 f"{colors["RED_BG"]}..."，即 PEP 701 的 f-string
+            #   同类引号嵌套（Python >= 3.12 才允许）。本机是 3.10，那种写法是
+            #   SyntaxError，而 `kernelkit/__init__.py` 会 `from . import stress`，
+            #   于是整个官方套件连 import 都进不去。仅把内层引号换成单引号，
+            #   语义逐字节不变（同一字典的同一键）。这是本目录相对上游唯一的一处改动。
+            print(f"{colors['RED_BG']}Glitching disabled\n{colors['CLEAR']}")
 
         nxt_testcase_idx = 0
         num_finished_testcases = num_filtered_testcases

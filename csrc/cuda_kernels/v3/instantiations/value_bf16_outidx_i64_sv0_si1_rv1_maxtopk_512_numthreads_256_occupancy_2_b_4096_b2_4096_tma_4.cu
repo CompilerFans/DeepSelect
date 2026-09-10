@@ -4,7 +4,7 @@ namespace topk_select_bf16_normal {
 
 template
 void run_topk_select_kernel<
-    TopkSelectConfig<nv_bfloat16, int64_t, false, true, true, 512, 256, 2, 4096, 4096, 4, 512, 1>
+    TopkSelectConfig<maca_bfloat16, int64_t, false, true, true, 512, 256, 2, 4096, 4096, 4, 512, 1>
 >(const TopkSelectArgs &args);
 
 }   // topk_select_bf16_normal

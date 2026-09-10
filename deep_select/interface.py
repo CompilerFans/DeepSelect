@@ -29,6 +29,7 @@ def topk(
     value_oob_fill_value: float = float("-inf"),
     return_value: bool = True,
     abort_when_nan_found: bool = True,
+    backend: str = "maca_c",
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """
     Arguments:
@@ -48,6 +49,9 @@ def topk(
         return_value: bool. If False, only return indices without values to accelerate the kernel. The return value is still a Tuple, but the first element will be None.
         abort_when_nan_found: bool. When a NaN is found, if True, aborts the whole kernel; if False, writes 0x3F3F3F3F to the corresponding output_idx[batch_idx][0] and exits.
                 The NaN check itself is always enabled. Exception: when the row's length <= topk, it is skipped.
+        backend: str. Implementation to run. `maca_c` (default) is the MACA-native
+                kernel; `torch` is a reference implementation of the same
+                contract built on torch ops.
 
     Return:
         output_val: (b, topk), dtype=input.dtype.
@@ -75,17 +79,130 @@ def topk(
 
     assert begin is None, "`begin` is not supported now"
     assert hint is None, "`hint` is not supported now"
-    backend_args = (
-        input,
-        topk,
-        begin, end,
-        sorted, sorted_index,
-        output_val, output_idx,
-        output_idx_offset,
-        idx_oob_fill_value,
-        value_oob_fill_value,
-        return_value,
-        abort_when_nan_found,
-    )
-    _backend.topk(*backend_args)
-    return output_val, output_idx
+
+    if backend == "torch":
+        return topk_torch(
+            input, topk, sorted=sorted, end=end, indices_type=indices_type,
+            sorted_index=sorted_index, output_idx=output_idx,
+            output_idx_offset=output_idx_offset,
+            idx_oob_fill_value=idx_oob_fill_value,
+            value_oob_fill_value=value_oob_fill_value,
+            return_value=return_value,
+            abort_when_nan_found=abort_when_nan_found,
+        )
+    elif backend == "maca_c":
+        backend_args = (
+            input,
+            topk,
+            begin, end,
+            sorted, sorted_index,
+            output_val, output_idx,
+            output_idx_offset,
+            idx_oob_fill_value,
+            value_oob_fill_value,
+            return_value,
+            abort_when_nan_found,
+        )
+        _backend.topk(*backend_args)
+        return output_val, output_idx
+    else:
+        raise ValueError(f"Unsupported backend: {backend!r}. Expected: maca_c, torch")
+
+
+def topk_torch(
+    input: torch.Tensor,
+    topk: int,
+    sorted: bool = False,
+    end: Optional[torch.Tensor] = None,
+    indices_type: torch.dtype = torch.int64,
+    sorted_index: bool = False,
+    output_idx: Optional[torch.Tensor] = None,
+    output_idx_offset: Optional[torch.Tensor] = None,
+    idx_oob_fill_value: int = 2147483647,
+    value_oob_fill_value: float = float("-inf"),
+    return_value: bool = True,
+    abort_when_nan_found: bool = True,
+) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
+    """Reference `torch` implementation of the `topk` contract.
+
+    Same contract as `topk`, expressed with torch ops only, so it runs on any
+    device and any dtype.  Rows longer than `topk` are handled by masking the
+    out-of-window tail to `-inf` and taking one `torch.topk` over the padded
+    row, which reproduces the per-row window without a loop over rows.
+    """
+    if topk <= 0:
+        raise ValueError(f"topk must be positive, got {topk}")
+    if topk > 4096:
+        raise ValueError(f"topk must be <= 4096, got {topk}")
+    if sorted and input.dtype != torch.float32:
+        raise ValueError("`sorted` is only supported for float32 input")
+
+    n_rows, vocab_size = input.shape
+    device = input.device
+
+    # `end` is an exclusive per-row upper bound.  The kernel never NaN-checks
+    # a row whose visible length is <= topk; the check itself is always on.
+    if end is not None:
+        lengths = end.to(torch.int64).clamp(min=0, max=vocab_size)
+    else:
+        lengths = torch.full((n_rows,), vocab_size, dtype=torch.int64, device=device)
+
+    nan_rows = torch.zeros(n_rows, dtype=torch.bool, device=device)
+    checked = lengths > topk
+    if bool(checked.any().item()):
+        cols = torch.arange(vocab_size, device=device)
+        visible = torch.isnan(input.float()) & (cols.unsqueeze(0) < lengths.unsqueeze(1))
+        nan_rows = visible.any(dim=1)
+    if bool(nan_rows.any().item()):
+        if abort_when_nan_found:
+            raise RuntimeError("NaN detected in the input")
+        if output_idx is None:
+            output_idx = torch.empty((n_rows, topk), dtype=indices_type, device=device)
+        output_idx[nan_rows, 0] = 0x3F3F3F3F
+        values = None
+        if return_value:
+            values = torch.full((n_rows, topk), value_oob_fill_value,
+                                dtype=input.dtype, device=device)
+        return values, output_idx
+
+    # Rows shorter than topk select their whole visible prefix and are padded
+    # with the fill values; masking the hidden tail to -inf makes a single
+    # torch.topk reproduce that.
+    work = input
+    if bool((lengths < vocab_size).any().item()):
+        cols = torch.arange(vocab_size, device=device)
+        work = input.masked_fill(cols.unsqueeze(0) >= lengths.unsqueeze(1),
+                                 float("-inf"))
+
+    k_eff = min(topk, vocab_size)
+    values, indices = torch.topk(work, k_eff, dim=1, sorted=bool(sorted))
+
+    # Padding picked up by torch.topk on short rows becomes the fill value.
+    valid = torch.arange(k_eff, device=device).unsqueeze(0) < lengths.unsqueeze(1)
+    out_idx = torch.full((n_rows, topk), idx_oob_fill_value,
+                         dtype=indices_type, device=device)
+    idx_sel = indices.to(indices_type)
+    if output_idx_offset is not None:
+        idx_sel = idx_sel + output_idx_offset.to(indices_type).unsqueeze(1)
+    out_idx[:, :k_eff] = torch.where(valid, idx_sel,
+                                     torch.full_like(idx_sel, idx_oob_fill_value))
+
+    out_val = None
+    if return_value:
+        out_val = torch.full((n_rows, topk), value_oob_fill_value,
+                             dtype=input.dtype, device=device)
+        out_val[:, :k_eff] = torch.where(valid, values.to(input.dtype),
+                                         out_val[:, :k_eff])
+
+    if sorted_index:
+        # torch.gather requires an int64 index regardless of the output dtype.
+        order = torch.argsort(out_idx.to(torch.int64), dim=1, stable=True)
+        out_idx = torch.gather(out_idx, 1, order)
+        if return_value:
+            out_val = torch.gather(out_val, 1, order)
+
+    if output_idx is not None:
+        output_idx.copy_(out_idx)
+        out_idx = output_idx
+
+    return out_val, out_idx

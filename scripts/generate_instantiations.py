@@ -8,7 +8,7 @@ Usage:
     For example,
         python3 scripts/generate_instantiations.py csrc/cuda_kernels/v3/instantiations
         python3 scripts/generate_instantiations.py csrc/cuda_kernels/v3_fp32/instantiations
-        python3 scripts/generate_instantiations.py csrc/cuda_kernels/v3_cluster/instantiations
+        # [MACA] 原还有 v3_cluster/instantiations；该变体已随 cluster/TMA 一并删除。
 
     The script will:
     1. Create .cu files in the target directory, one per config
@@ -143,15 +143,9 @@ def main(instantiation_dir: str):
                 for max_topk, (num_threads, occ, b, b2, tma) in tuple_by_max_topk.items():
                     configs.append(TopkSelectConfigs("float", out_idx_t, sv, si, rv, max_topk, num_threads, occ, b, b2, tma))
         generate_instantiations(instantiation_dir, "topk_select_fp32", configs)
-    elif instantiation_dir == "csrc/cuda_kernels/v3_cluster/instantiations":
-        remove_and_remake_dir()
-        # The cluster tier is bf16 + mk1024 only and always uses a 16-CTA cluster.
-        configs = []
-        for out_idx_t in ["int32_t", "int64_t"]:
-            for si in [False, True]:
-                for rv in [False, True]:
-                    configs.append(TopkSelectConfigs("nv_bfloat16", out_idx_t, False, si, rv, 1024, 256, 1, 4096, 4096, 16, 16))
-        generate_instantiations(instantiation_dir, "topk_select_bf16_cluster", configs)
+    # [MACA] 原有一个 `csrc/cuda_kernels/v3_cluster/instantiations` 分支
+    #   （bf16 + mk1024 + 16-CTA cluster，`topk_select_bf16_cluster`）。
+    #   MACA 无 cluster 也无 TMA，该目录与变体已整体删除，分支一并移除。
     else:
         raise ValueError(f"Invalid `instantiation_dir: {instantiation_dir}")
 

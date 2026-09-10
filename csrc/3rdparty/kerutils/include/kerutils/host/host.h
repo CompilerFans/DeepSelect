@@ -97,92 +97,6 @@ inline __host__ __device__ constexpr T find_next_power_of_2(const T& x) {
     return find_next_power_of_2<T, LOWER_BOUND*2>(x);
 }
 
-// A wrapper for make_tensor_map
-static inline CUtensorMap make_tensor_map(
-    const std::vector<uint64_t> &size,
-    const std::vector<uint64_t> &strides,   // PAY ATTENTION: In BYTES
-    const std::vector<uint32_t> &box_size,
-    void* global_ptr,
-    CUtensorMapDataType data_type,
-    CUtensorMapSwizzle swizzle_mode,
-    CUtensorMapL2promotion l2_promotion,
-    CUtensorMapInterleave interleave_mode = CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-    CUtensorMapFloatOOBfill oob_fill = CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
-    const std::vector<uint32_t> &element_strides_ = {}
-) {
-    int dim = size.size();
-    KU_ASSERT(dim >= 1);
-    
-    std::vector<uint32_t> element_strides;
-    if (element_strides_.empty()) {
-        for (int i = 0; i < dim; ++i)
-            element_strides.push_back(1);
-    } else {
-        element_strides = element_strides_;
-    }
-    KU_ASSERT(strides.size() == (uint32_t)dim-1 && box_size.size() == (uint32_t)dim && element_strides.size() == (uint32_t)dim);
-
-    auto call_cuTensorMapEncodeTiled = [&]<typename... Args>(Args... args) {
-        cudaDriverEntryPointQueryResult cuda_status;
-        void* pfn = nullptr;
-#if (__CUDACC_VER_MAJOR__ > 12)
-        KU_CUDA_CHECK(cudaGetDriverEntryPointByVersion(
-            "cuTensorMapEncodeTiled",
-            &pfn, 12000,
-            cudaEnableDefault,
-            &cuda_status));
-#else
-        KU_CUDA_CHECK(cudaGetDriverEntryPoint(
-            "cuTensorMapEncodeTiled",
-            &pfn,
-            cudaEnableDefault,
-            &cuda_status));
-#endif
-        if (cuda_status != cudaDriverEntryPointSuccess) {
-            KU_ASSERT(false, "Failed to load `cuTensorMapEncodeTiled`. cuda_status = %d", cuda_status);
-        }
-        return reinterpret_cast<decltype(&cuTensorMapEncodeTiled)>(pfn)(args...); \
-    };
-
-    CUtensorMap result;
-    CUresult ret_code = call_cuTensorMapEncodeTiled(
-        &result,
-        data_type,
-        dim,
-        global_ptr,
-        size.data(),
-        strides.data(),
-        box_size.data(),
-        element_strides.data(),
-        interleave_mode,
-        swizzle_mode,
-        l2_promotion,
-        oob_fill
-    );
-    if (ret_code != CUresult::CUDA_SUCCESS) {
-        auto print_vector = [&](auto t, const char* fmt, const char end='\n') {
-            for (auto elem : t) {
-                printf(fmt, elem);
-            }
-            printf("%c", end);
-        };
-        fprintf(stderr, "Failed to create tensormap\n");
-        fprintf(stderr, "Dim: %d\n", dim);
-        printf("size: "); print_vector(size, "%lu ");
-        printf("strides: "); print_vector(strides, "%lu ");
-        printf("box_size: "); print_vector(box_size, "%u ");
-        printf("element_strides: "); print_vector(element_strides, "%u ");
-        printf("global ptr: 0x%lx\n", (int64_t)global_ptr);
-        printf("data_type: %d\n", (int)data_type);
-        printf("swizzle_mode: %d\n", (int)swizzle_mode);
-        printf("l2_promotion: %d\n", (int)l2_promotion);
-        printf("interleave_mode: %d\n", (int)interleave_mode);
-        printf("oob_fill: %d\n", (int)oob_fill);
-        KU_ASSERT(false);
-    }
-    return result;
-}
-
 // Given strides (in number of elements), this function converts their datatype in uint64_t and then multiplies by elem_size
 template<typename T>
 static inline std::vector<uint64_t> make_stride_helper(const std::vector<T> &strides_in_elems, size_t elem_size) {
@@ -221,58 +135,31 @@ void launch_kernel(const KernelLaunchConfig &cfg, KernelFunc kernel, Args&&... a
             static_cast<int>(cfg.dynamic_smem)));
     }
 
-    const bool is_cluster     = !(cfg.cluster.x == 1 && cfg.cluster.y == 1 && cfg.cluster.z == 1);
-    const bool need_kernel_ex = is_cluster || cfg.use_pdl;
-
-    if (is_cluster && cfg.cooperative) {
-        KU_ASSERT(false, "cluster and cooperative launch are mutually exclusive");
+    // [MACA] 原来这里还有 cooperative / cluster / PDL 三条启动分支，已整组删除：
+    //   * cluster —— MACA 无 cluster 支持（JIT/驱动侧直接拒绝 cluster launch），
+    //     依赖它的 v3_cluster 变体已整体删除，没有任何调用方会传 cluster != {1,1,1}；
+    //   * PDL（programmatic dependent launch）—— MACA 同样不支持；
+    //   * cooperative —— cu-bridge 没有 cudaLaunchCooperativeKernel 的对应物。
+    //  三者的共同点是「不启用时就退化成最普通的 <<<>>> 启动」，所以这里只留
+    //  那一条。
+    //  请求了但得不到满足时**只警告、不中断**：启动照常按普通 <<<>>> 走，
+    //  同时打印一条说明。静默忽略是最难查的那种失败，而直接抛异常又会把一个
+    //  可降级的启动变成硬失败 —— 警告是这两者之间正确的取舍。
+    if (cfg.cluster.x != 1 || cfg.cluster.y != 1 || cfg.cluster.z != 1) {
+        fprintf(stderr, "[kerutils] warning: cluster launch is not supported on MACA; "
+                        "the cluster dimension request is ignored\n");
     }
-
+    if (cfg.use_pdl) {
+        fprintf(stderr, "[kerutils] warning: programmatic dependent launch is not supported on MACA; "
+                        "the request is ignored\n");
+    }
     if (cfg.cooperative) {
-        void* kernel_args[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {};
-        if constexpr (sizeof...(Args) > 0) {
-            size_t i = 0;
-            ((kernel_args[i++] = detail::kernel_arg_ptr(std::forward<Args>(args))), ...);
-        }
-        KU_CUDA_CHECK(cudaLaunchCooperativeKernel(
-            kernel, cfg.grid, cfg.block,
-            sizeof...(Args) > 0 ? kernel_args : nullptr,
-            static_cast<unsigned int>(cfg.dynamic_smem), cfg.stream));
-    } else if (need_kernel_ex) {
-        if (is_cluster) {
-            KU_ASSERT(cfg.grid.x % cfg.cluster.x == 0 &&
-                      cfg.grid.y % cfg.cluster.y == 0 &&
-                      cfg.grid.z % cfg.cluster.z == 0);
-            if (cfg.cluster.x * cfg.cluster.y * cfg.cluster.z > 8) {
-                KU_CUDA_CHECK(cudaFuncSetAttribute(
-                    reinterpret_cast<const void*>(kernel),
-                    cudaFuncAttributeNonPortableClusterSizeAllowed, 1));
-            }
-        }
-
-        const unsigned int num_attrs = is_cluster ? 2 : 1;
-        cudaLaunchAttribute attrs[2];
-        if (is_cluster) {
-            attrs[0].id = cudaLaunchAttributeClusterDimension;
-            attrs[0].val.clusterDim = {cfg.cluster.x, cfg.cluster.y, cfg.cluster.z};
-        }
-        attrs[num_attrs - 1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-        attrs[num_attrs - 1].val.programmaticStreamSerializationAllowed = cfg.use_pdl ? 1 : 0;
-
-        cudaLaunchConfig_t config = {
-            {cfg.grid.x, cfg.grid.y, cfg.grid.z},
-            {cfg.block.x, cfg.block.y, cfg.block.z},
-            cfg.dynamic_smem,
-            cfg.stream,
-            attrs,
-            num_attrs
-        };
-        KU_CUDA_CHECK(cudaLaunchKernelEx(
-            &config, kernel, std::forward<Args>(args)...));
-    } else {
-        kernel<<<cfg.grid, cfg.block, cfg.dynamic_smem, cfg.stream>>>(
-            std::forward<Args>(args)...);
+        fprintf(stderr, "[kerutils] warning: cooperative launch is not supported on MACA; "
+                        "launching without the co-residency guarantee\n");
     }
+
+    kernel<<<cfg.grid, cfg.block, cfg.dynamic_smem, cfg.stream>>>(
+        std::forward<Args>(args)...);
 
     KU_CHECK_KERNEL_LAUNCH();
 }

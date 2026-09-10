@@ -12,7 +12,8 @@
 #include "cuda_kernels/v3/topk_select.h"
 #include "cuda_kernels/v3_fp32/topk_select.h"
 #include <cstdlib>
-#include "cuda_kernels/v3_cluster/topk_select.h"
+// [MACA] 原为 `#include "cuda_kernels/v3_cluster/topk_select.h"`。cluster 变体
+//   （CTA 协同寻址 + TMA 多播）在 MACA 上整体删除，见下方 bf16 分发的说明。
 
 void topk(
     torch::Tensor &input,
@@ -125,16 +126,15 @@ void topk(
         TORCH_CHECK((uint32_t)vocab_size < MAX_VOCAB_SIZE,
                     "vocab_size must be < 2^23 for bfloat16 input");
         TORCH_CHECK(topk <= 4096, "topk must be <= 4096");
-        if (batch_size <= 6 && (uint32_t)vocab_size >= 512u * 1024u && topk <= 1024) {  // TODO Tune
-            INTEGER_TYPE_SWITCH(output_index_t, OutIdxT, [&]() {
-                BOOL_SWITCH(sorted_index, SORTED_INDEX, [&]() {
-                    BOOL_SWITCH(return_value, RETURN_VALUE, [&]() {
-                        topk_select_bf16_cluster::run_topk_select_kernel<
-                            TopkSelectConfig<nv_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, 1024, 256, 1, 4096, 4096, 16, 512, 16>>(args);
-                    });
-                });
-            });
-        } else {
+        // [MACA] 此处原为小 batch 专用的一档 cluster 分发：
+        //   `batch_size <= 6 && vocab_size >= 512K && topk <= 1024` →
+        //   `topk_select_bf16_cluster`（cluster=16，CTA 间分摊同一行、协同寻址，
+        //   配合 TMA 多播把长行的读带宽摊到多个 CTA）。
+        //   MACA 无 cluster（无 cluster 维、无分布式共享内存、无 cluster 屏障）也无
+        //   TMA，该变体连同 `csrc/cuda_kernels/v3_cluster/` 整体删除；
+        //   bf16 一律走 normal 路径。少掉的只是"小 batch + 超长行"这一档的吞吐，
+        //   正确性覆盖不受影响（normal 路径对该 shape 本就正确，只是慢）。
+        {
             INTEGER_TYPE_SWITCH(output_index_t, OutIdxT, [&]() {
                 BOOL_SWITCH(sorted_index, SORTED_INDEX, [&]() {
                     BOOL_SWITCH(return_value, RETURN_VALUE, [&]() {

@@ -37,7 +37,7 @@
       using FP_TYPE = float;                            \
       return __VA_ARGS__();                             \
     } else if (type == at::ScalarType::BFloat16) {      \
-      using FP_TYPE = nv_bfloat16;                      \
+      using FP_TYPE = maca_bfloat16;                      \
       return __VA_ARGS__();                             \
     } else {                                            \
       TORCH_CHECK(                                      \

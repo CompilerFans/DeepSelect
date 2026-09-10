@@ -11,7 +11,6 @@ Usage caveats:
 #include "topk_select.h"
 
 #include <cutlass/kernel_launch.h>
-#include <cute/arch/copy_sm90_tma.hpp>
 #include <kerutils/kerutils.cuh>
 
 #include "structs.h"
@@ -26,7 +25,6 @@ class TopkSelectKernelBF16Normal : public topk_select_common::TopkSelectKernelBF
 public:
     using ValueT = typename BF16Base::ValueT;
     using OutIdxT = typename BF16Base::OutIdxT;
-    using TmaParams = typename BF16Base::TmaParams;
     using SharedMemoryPlanBase = typename BF16Base::SharedMemoryPlanBase;
     using EpilogueT = typename BF16Base::EpilogueT;
     using BF16Base::NUM_THREADS;
@@ -45,14 +43,14 @@ public:
     struct SharedMemoryPlan : SharedMemoryPlanBase {};
 
     static __device__ __forceinline__
-    void topk_select_kernel_devfunc(const TopkSelectArgs &args, const TmaParams &tma_params) {
+    void topk_select_kernel_devfunc(const TopkSelectArgs &args) {
         uint32_t batch_idx = blockIdx.x;
         uint32_t end_vocab_idx = args.end_ptr == nullptr ? args.vocab_size : __ldg(args.end_ptr + batch_idx);
 
         extern __shared__ CUTE_ALIGNAS(1024) char wksp_buf[];
         SharedMemoryPlan &smem = *reinterpret_cast<SharedMemoryPlan*>(wksp_buf);
 
-        uint32_t warp_idx = cutlass::canonical_warp_idx_sync();
+        uint32_t warp_idx = ku::canonical_warp_idx_sync();
         uint32_t lane_idx = threadIdx.x % 32;
 
         if (end_vocab_idx <= args.topk) {
@@ -79,7 +77,7 @@ public:
         uint32_t num_init_rounds = min(num_rounds, (uint32_t)NUM_INIT_ROUNDS_MAX);
 
         BF16Base::template scan_segs<false>(
-            tma_params, smem, 
+            args, smem,
             batch_idx, end_vocab_idx, args.topk,
             warp_idx, lane_idx,
             num_perm_segs,
@@ -112,10 +110,15 @@ public:
     }
 };
 
+// [MACA] 原本还有一个 `__grid_constant__ const TmaParams tma_params` 形参（TMA 的
+//   CUtensorMap 需要通过 grid constant 传入），随 TMA 一并删除。
+// [MACA] 原为 `__grid_constant__ const TopkSelectArgs args`。MACA 无该限定符
+//   （cu-bridge 不提供），而这里它带来的只是「按值传入、内核内只读」的约束，
+//   普通按值形参在 MACA 上同样是 kernarg 直传，语义足够。
 template<typename Kernel>
 __launch_bounds__(Kernel::NUM_THREADS, Kernel::TARGET_OCCUPANCY, 1)
-__global__ void topk_kernel(__grid_constant__ const TopkSelectArgs args, __grid_constant__ const typename Kernel::TmaParams tma_params) {
-    Kernel::topk_select_kernel_devfunc(args, tma_params);
+__global__ void topk_kernel(const TopkSelectArgs args) {
+    Kernel::topk_select_kernel_devfunc(args);
 }
 
 template<typename Config>
@@ -123,7 +126,7 @@ void run_topk_select_kernel(const TopkSelectArgs &args) {
     KU_ASSERT(args.sorted_value == Config::sorted_value, "Dispatch failure");
     KU_ASSERT(args.sorted_index == Config::sorted_index, "Dispatch failure");
     KU_ASSERT(args.return_value == Config::return_value, "Dispatch failure");
-    static_assert(cute::is_same_v<typename Config::ValueT, nv_bfloat16>);
+    static_assert(cute::is_same_v<typename Config::ValueT, maca_bfloat16>);
     KU_ASSERT(args.vocab_size < MAX_VOCAB_SIZE, "`vocab_size` is too big");
 
     using Kernel = TopkSelectKernelBF16Normal<Config>;
@@ -136,14 +139,13 @@ void run_topk_select_kernel(const TopkSelectArgs &args) {
     KU_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
     KU_ASSERT(args.stride_input_batch % 8 == 0, "stride_input_batch must be 16B-aligned");
-    typename Kernel::TmaParams tma_params = {Kernel::make_topk_tensor_map(args)};
 
     ku::launch_kernel(ku::KernelLaunchConfig {
         dim3(args.batch_size),
         dim3(Kernel::NUM_THREADS),
         smem_size,
         args.stream
-    }, kernel, args, tma_params);
+    }, kernel, args);
 }
 
 }   // topk_select_bf16_normal
