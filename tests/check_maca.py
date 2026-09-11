@@ -25,10 +25,12 @@ draw is a code snippet (`INPUT_GENERATORS`) that both sides execute against the
 same seed, so the reference ranks exactly the values the kernel sees.
 """
 import argparse
+import concurrent.futures
 import json
 import os
 import subprocess
 import sys
+import time
 
 import torch
 
@@ -92,11 +94,16 @@ DTYPE_NAMES = {torch.bfloat16: "bf16", torch.float32: "fp32"}
 UINT_OF = {torch.float32: torch.uint32, torch.bfloat16: torch.uint16}
 
 
-def _make(batch, vocab, dtype, seed, gen, topk, plant=()):
-    """Draw the padded buffer the kernel reads; returns (view, vocab_rounded)."""
+def _vocab_rounded(vocab, dtype):
+    """The padded row length both sides allocate (`_make` and `_ref_topk`)."""
     stride_bytes = deep_select.get_stride_requirement()[0]
     align = stride_bytes // torch.empty((), dtype=dtype).element_size()
-    vocab_rounded = ((vocab + align - 1) // align) * align
+    return ((vocab + align - 1) // align) * align
+
+
+def _make(batch, vocab, dtype, seed, gen, topk, plant=()):
+    """Draw the padded buffer the kernel reads; returns (view, vocab_rounded)."""
+    vocab_rounded = _vocab_rounded(vocab, dtype)
     # Generate the whole padded buffer on the device: the same values the
     # reference process sees for the first `vocab` columns, and nothing the
     # kernel can read for the pad.  (Filling via `copy_` from a CPU tensor
@@ -114,6 +121,29 @@ def _plant(buf, col, bits, dtype):
     buf[:, col] = torch.tensor([bits], dtype=UINT_OF[dtype]).view(dtype)
 
 
+# ── the reference, and why it is fetched in parallel ────────────────────────
+#
+# Every reference is a fresh interpreter, and on this MACA driver a fresh
+# interpreter pays a fixed context build: measured here, `import torch` is
+# 4.7 s and the first `torch.cuda.init()` another ~13.7 s, almost all of it
+# *system* time faulting in 17.7 GB of anonymous pages (a 5.96 GB block, a
+# 3.8 GB heap, ~50 x 62 MB and 64 x 8 MB regions, plus ~1.9 GB of MACA library
+# pages -- `libmcFlashAttn` alone is 846 MB).  It is not the kernel driver
+# (`macainfo` initialises it in 0.07 s and 8 MB), and it is not serial: four
+# concurrent inits each finished in 18.2 s and eight in 18.2..19.0 s, for a
+# wall clock of 19 s, on a box with 224 cores and 2 TB of RAM.
+#
+# So the suite's dominant cost is `cases x 18 s` of waiting, not of work.  The
+# references are computed up front `--jobs` at a time and served from here in
+# case order; the kernel checks themselves, which run in this process, do not
+# change at all.
+_REF_CACHE = {}
+
+
+def _ref_key(batch, vocab_rounded, ends, topk, dtype, seed, gen):
+    return (batch, vocab_rounded, tuple(ends), topk, str(dtype), seed, gen)
+
+
 def _ref_topk(batch, vocab_rounded, ends, topk, dtype, seed, gen):
     """Per-row torch.topk values, in a fresh process.
 
@@ -121,6 +151,15 @@ def _ref_topk(batch, vocab_rounded, ends, topk, dtype, seed, gen):
     generator, same seed) -- otherwise the reference ranks a different draw
     than the kernel sees.
     """
+    key = _ref_key(batch, vocab_rounded, ends, topk, dtype, seed, gen)
+    if key in _REF_CACHE:
+        return _REF_CACHE[key]
+    rows = _ref_topk_uncached(batch, vocab_rounded, ends, topk, dtype, seed, gen)
+    _REF_CACHE[key] = rows
+    return rows
+
+
+def _ref_topk_uncached(batch, vocab_rounded, ends, topk, dtype, seed, gen):
     code = f"""
 import json, torch
 torch.manual_seed({seed})
@@ -144,6 +183,55 @@ print("RESULT" + json.dumps(rows))
             return json.loads(line[len("RESULT"):])
     print(out.stdout[-2000:], out.stderr[-2000:])
     raise RuntimeError("reference torch.topk subprocess failed")
+
+
+def _case_seed(spec):
+    """The seed `main` derives per case; the prefetch has to use the same one."""
+    return (spec["batch"] * 131 + spec["vocab"] * 7 + spec["topk"]) % 10000
+
+
+def _ref_args(spec):
+    """Exactly the `_ref_topk` call `check` makes for this case spec."""
+    batch, vocab = spec["batch"], spec["vocab"]
+    end_len = spec.get("end_len")
+    visible = ([vocab] * batch if end_len is None
+               else [end_len] * batch if isinstance(end_len, int)
+               else list(end_len))
+    return (batch, _vocab_rounded(vocab, spec["dtype"]), visible, spec["topk"],
+            spec["dtype"], spec["seed"],
+            INPUT_GENERATORS[spec.get("gen", "normal")])
+
+
+def _prefetch_refs(cases, jobs):
+    """Fetch every case's reference up front, `jobs` at a time.
+
+    A job that fails is not cached: the sequential path then runs it again and
+    raises where that error belongs, so a broken reference still fails its case
+    rather than being skipped.
+    """
+    specs = []
+    for case in cases:
+        spec = dict(case)
+        spec.pop("name", None)
+        spec.pop("group", None)
+        spec["seed"] = _case_seed(spec)
+        specs.append(spec)
+    if not specs:
+        return
+    started = time.time()
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = [pool.submit(_ref_topk, *_ref_args(s)) for s in specs]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                fut.result()
+            except Exception:  # noqa: BLE001 -- re-raised in case order instead
+                pass
+            done += 1
+            if done % 16 == 0 or done == len(specs):
+                print(f"  references {done}/{len(specs)}  "
+                      f"({time.time() - started:.0f}s, {jobs} at a time)",
+                      flush=True)
 
 
 # ── the check ────────────────────────────────────────────────────────────────
@@ -752,6 +840,12 @@ def main():
     ap.add_argument("--no-nan", action="store_true",
                     help="skip the NaN and rejection blocks")
     ap.add_argument("--list", action="store_true", help="list cases and exit")
+    ap.add_argument("--jobs", type=int, default=8,
+                    help="references to compute concurrently.  Each one is a "
+                         "fresh interpreter that pays this driver's ~18 s "
+                         "context build, and nothing about that build "
+                         "serialises, so the default pays it 8 at a time; "
+                         "--jobs 1 runs the references in case order instead")
     ap.add_argument("--backend", default="maca_c",
                     choices=["maca_c", "torch", "deep_gemm"],
                     help="implementation under test: 'maca_c' (default) is the "
@@ -835,11 +929,14 @@ def main():
         except deep_select.UnsupportedByBackend as exc:
             return gap(label, exc)
 
+    jobs = max(1, args.jobs)
+    if jobs > 1:
+        _prefetch_refs(cases, jobs)
+
     for case in cases:
         spec = dict(case)
         name, group = spec.pop("name"), spec.pop("group")
-        spec["seed"] = (spec["batch"] * 131 + spec["vocab"] * 7
-                        + spec["topk"]) % 10000
+        spec["seed"] = _case_seed(spec)
         try:
             ok = check(name=name, **spec)
         except deep_select.UnsupportedByBackend as exc:
