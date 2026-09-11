@@ -11,8 +11,21 @@
 //     is the shipping backend.  See `csrc/cuda_kernels/common_parts.cuh`.
 //   * `v3_cluster` is deleted outright (MACA has no cluster launch and no TMA).
 //
-// Algorithm (modeled on the in-tree MACA reference
-// `mcDeepGEMM/csrc/kernels/fp32_topk.cu`):
+// ── the contract layer, and the two dataflows under it ──────────────────────
+//
+// Every mode shares one contract layer: the `length <= topk` shortcut, the NaN
+// bit-pattern check (`abort_when_nan_found` / the 0x3F3F3F3F guard), the index
+// offsets, the out-of-band fills, and the optional ordered emit.  Two selection
+// dataflows feed it, chosen by dtype:
+//
+//   * bfloat16 -> the ported radix core (`radix_core.cuh`, provenance banner in
+//     that file): one histogram pass over the high key byte plus one vectorized
+//     collect pass that refines the threshold bin's low byte in shared memory.
+//     Two passes over the row in total, whatever the key width.
+//   * float32 -> the byte-wise walk below (modeled on the in-tree MACA
+//     reference `mcDeepGEMM/csrc/kernels/fp32_topk.cu`).
+//
+// The byte-wise walk, which the fp32 path still runs:
 //
 //   1. Map each value onto an order-preserving unsigned key, so unsigned key
 //      order equals value order.  NaN is *not* ranked by this order (the encode
@@ -30,10 +43,12 @@
 //      bit-identical keys, so any `take` of them complete the answer.
 //
 //      Each round is two full passes over the row (histogram, collect), so
-//      the kernel performs 2*R passes, R = 4 for fp32 and 2 for bf16 -- the
-//      same shape as the in-tree reference.  Rescanning is what makes the
-//      refine exact: carrying only the ties that fit (`take` of them) would
-//      discard precisely the values the next byte has to rank.
+//      the kernel performs 2*R passes, R = 4 for fp32 -- the same shape as the
+//      in-tree reference.  Rescanning is what makes the refine exact: carrying
+//      only the ties that fit (`take` of them) would discard precisely the
+//      values the next byte has to rank.  The radix core keeps the same
+//      no-truncation rule in a different shape: a threshold bin too large for
+//      its arena falls back to a full-row rescan.
 //
 // Portable primitives only: `__shfl_down_sync`, `atomicAdd`, `__ldg`,
 // `__syncthreads`, `__syncthreads_or`.  No inline asm, no TMA, no mbarrier,
@@ -72,6 +87,11 @@
 #include <cstdio>
 
 #include "structs.h"
+// The ported C500 dataflow (see the provenance banner in that file).  It is
+// included here so that this translation unit -- the one `setup.py` builds --
+// is what proves it compiles under the mxcc/cu-bridge toolchain, and so that
+// the bf16 selection path below is a header-only dependency.
+#include "radix_core.cuh"
 
 namespace deep_select_maca {
 
@@ -231,10 +251,11 @@ struct Arena {
 };
 
 // Ascending bitonic sort of `n` (power of two) 64-bit keys over the CTA.
+template <int BLOCK>
 static __device__ __forceinline__ void bitonic_sort_u64(uint64_t *data, int n) {
     for (int k = 2; k <= n; k <<= 1) {
         for (int j = k >> 1; j > 0; j >>= 1) {
-            for (int i = threadIdx.x; i < n; i += kThreads) {
+            for (int i = threadIdx.x; i < n; i += BLOCK) {
                 const int ixj = i ^ j;
                 if (ixj > i) {
                     const bool ascending = ((i & k) == 0);
@@ -264,15 +285,17 @@ static __device__ __forceinline__ void bitonic_sort_u64(uint64_t *data, int n) {
 //
 // `n_pad` is `topk` rounded up to a bitonic power of two; the tail is padded
 // with `~0ull`, which sorts past every real key and is never emitted.
-template <typename ValueT, typename OutIdxT, bool RV, bool SV>
+//
+// `sort_buf` comes from the caller: the two selection kernels place it
+// differently in dynamic shared memory (see `radix_layout`).
+template <typename ValueT, typename OutIdxT, int BLOCK, bool RV, bool SV>
 static __device__ __forceinline__ void emit_ordered(
-    Arena &arena, const uint32_t *selected, const ValueT *input_row,
+    uint64_t *sort_buf, const uint32_t *selected, const ValueT *input_row,
     OutIdxT *out_index_row, ValueT *out_value_row, const RowParams &params,
     uint32_t n_out, uint32_t topk, int32_t idx_offset) {
-    uint64_t *sort_buf = arena.sort_buf;
     uint32_t n_pad = 1;
     while (n_pad < topk) n_pad <<= 1;
-    for (uint32_t i = threadIdx.x; i < n_pad; i += kThreads) {
+    for (uint32_t i = threadIdx.x; i < n_pad; i += BLOCK) {
         uint64_t pack = ~0ull;  // pads sort last and are never emitted
         if (i < n_out) {
             const uint32_t src = selected[i];
@@ -284,7 +307,7 @@ static __device__ __forceinline__ void emit_ordered(
         sort_buf[i] = pack;
     }
     __syncthreads();
-    bitonic_sort_u64(sort_buf, (int)n_pad);
+    bitonic_sort_u64<BLOCK>(sort_buf, (int)n_pad);
     __syncthreads();
 
     for (uint32_t i = threadIdx.x; i < topk; i += kThreads) {
@@ -357,9 +380,9 @@ __global__ __launch_bounds__(kThreads) void topk_kernel(RowParams params) {
             // Hand the whole window to the ordered emit as the selection.
             for (uint32_t i = tid; i < length; i += kThreads) selected[i] = i;
             __syncthreads();
-            emit_ordered<ValueT, OutIdxT, RV, SV>(
-                arena, selected, input_row, out_index_row, out_value_row, params,
-                length, topk, idx_offset);
+            emit_ordered<ValueT, OutIdxT, kThreads, RV, SV>(
+                arena.sort_buf, selected, input_row, out_index_row, out_value_row,
+                params, length, topk, idx_offset);
         } else {
             // Index order is already what `sorted_index` asks for, and the
             // other modes leave the order unspecified.
@@ -497,8 +520,150 @@ __global__ __launch_bounds__(kThreads) void topk_kernel(RowParams params) {
         return;
     }
     if constexpr (SI || SV) {
-        emit_ordered<ValueT, OutIdxT, RV, SV>(
-            arena, selected, input_row, out_index_row, out_value_row, params,
+        emit_ordered<ValueT, OutIdxT, kThreads, RV, SV>(
+            arena.sort_buf, selected, input_row, out_index_row, out_value_row,
+            params, n_out, topk, idx_offset);
+    }
+}
+
+// ── the radix operator kernel (one row per CTA) ─────────────────────────────
+//
+// Same kernel-level contract as `topk_kernel` above -- the `length <= topk`
+// shortcut, the NaN path, the fills, the ordered emit -- with only the
+// selection stage replaced by the ported radix dataflow (`radix_core.cuh`):
+// two passes over the row (a histogram of the high key byte, then one
+// vectorized collect that writes everything above the threshold bin straight to
+// the output and refines the threshold bin's low byte in shared memory)
+// instead of the bytewise kernel's two full passes per key byte.
+//
+// Dynamic shared memory starts with the core's arena -- `s_input_flat` is an
+// `extern __shared__` array inside the header, so it can only sit at the base --
+// and is followed by the staging buffer the emit reads.  The ordered emit's
+// scratch is only live after the arena is dead, so it aliases it; the worst
+// case (topk = kMaxTopK, sorted) is 48 KB, the same budget as `Arena`.
+//
+// The contract code below is a copy of the bytewise kernel's; the two must be
+// kept in sync until the bytewise path is retired.
+constexpr size_t kRadixArenaBytes =
+    (size_t)rk::kSmemInputSize * sizeof(uint32_t);
+
+static __device__ __forceinline__ void radix_layout(
+    uint8_t *base, uint32_t topk, bool sorted, uint32_t *&selected,
+    uint64_t *&sort_buf) {
+    uint32_t n_pad = 1;
+    if (sorted) {
+        while (n_pad < topk) n_pad <<= 1;
+    }
+    const size_t sort_bytes =
+        sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
+    sort_buf = reinterpret_cast<uint64_t *>(base);
+    selected = reinterpret_cast<uint32_t *>(
+        base + (sort_bytes > kRadixArenaBytes ? sort_bytes : kRadixArenaBytes));
+}
+
+// The core's runtime-k row entry covers every key length and every k up to
+// `rk::kMaxTopK`: a threshold bin too large for the arena falls back to a
+// full-row rescan rather than to a truncated candidate set.
+template <typename ValueT, int BLOCK>
+static __device__ __forceinline__ void radix_select_row(
+    const ValueT *input_row, uint32_t length, int32_t *out_idx, uint32_t topk) {
+    static_assert(std::is_same<ValueT, maca_bfloat16>::value,
+                  "only the 16-bit key path has a radix core; float32 still "
+                  "rides the bytewise kernel");
+    rk::radix_topk_row_bf16_b<BLOCK>(input_row, out_idx, length, topk);
+}
+
+// BLOCK is `rk::kBlockSize`, or `rk::kLongRowBlockSize` for the regime the
+// ported dispatcher picks the wider block for (see `needs_long_row_bf16`).
+template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV>
+__global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
+    const int tid = threadIdx.x;
+    const uint32_t row = blockIdx.x;
+
+    __shared__ int32_t row_offset;
+    extern __shared__ uint8_t arena_raw[];
+    uint32_t *selected;
+    uint64_t *sort_buf;
+    radix_layout(arena_raw, params.topk, SI || SV, selected, sort_buf);
+
+    if (tid == 0) {
+        row_offset =
+            params.idx_offset_ptr ? __ldg(params.idx_offset_ptr + row) : 0;
+    }
+    __syncthreads();
+    const int32_t idx_offset = row_offset;
+
+    const uint32_t length = params.end_ptr ? (uint32_t)__ldg(params.end_ptr + row)
+                                           : params.vocab_size;
+    const uint32_t topk = params.topk;
+    const ValueT *input_row = (const ValueT *)((const char *)params.input +
+                                              (uint64_t)row * params.stride_input_batch);
+    OutIdxT *out_index_row = (OutIdxT *)((char *)params.output_index +
+                                        (uint64_t)row * params.stride_output_index_batch);
+    ValueT *out_value_row =
+        RV ? (ValueT *)((char *)params.output_value +
+                        (uint64_t)row * params.stride_output_value_batch)
+           : nullptr;
+
+    // Shortcut contract, as in the bytewise kernel: the window is no longer
+    // than k, so the whole window is the answer.  Index order is what
+    // `sorted_index` asks for and what the modes that leave the order
+    // unspecified accept; `sorted_value` still goes through the ordered emit.
+    if (length <= topk) {
+        if constexpr (SV) {
+            for (uint32_t i = tid; i < length; i += BLOCK) selected[i] = i;
+            __syncthreads();
+            emit_ordered<ValueT, OutIdxT, BLOCK, RV, SV>(
+                sort_buf, selected, input_row, out_index_row, out_value_row,
+                params, length, topk, idx_offset);
+        } else {
+            for (uint32_t i = tid; i < topk; i += BLOCK) {
+                const bool valid = i < length;
+                out_index_row[i] =
+                    valid ? (OutIdxT)((int64_t)i + idx_offset) : (OutIdxT)params.idx_fill;
+                if (RV) {
+                    out_value_row[i] =
+                        valid ? __ldg(input_row + i) : float_to_value<ValueT>(params.value_fill);
+                }
+            }
+        }
+        return;
+    }
+
+    // ── NaN detection ───────────────────────────────────────────────────────
+    bool nan_local = false;
+    for (uint32_t i = tid; i < length; i += BLOCK) {
+        nan_local |= is_nan_value<ValueT>(__ldg(input_row + i));
+    }
+    if (__syncthreads_or((int)nan_local) != 0) {
+        if (params.abort_on_nan) {
+            if (tid == 0) printf("[deep_select] NaN detected. Aborting.\n");
+            __trap();
+        }
+        if (tid == 0) out_index_row[0] = (OutIdxT)0x3F3F3F3F;
+        return;
+    }
+
+    // ── selection ───────────────────────────────────────────────────────────
+    // Exactly `topk` slots come out filled: everything above the threshold bin
+    // plus the first `topk - excess` of its members, which are bit-identical.
+    // `length > topk` holds here, so the count is `topk` and not one less.
+    radix_select_row<ValueT, BLOCK>(input_row, length, (int32_t *)selected, topk);
+
+    // ── emit ────────────────────────────────────────────────────────────────
+    const uint32_t n_out = topk;
+
+    if constexpr (!SI && !SV) {
+        for (uint32_t i = tid; i < topk; i += BLOCK) {
+            const uint32_t src = selected[i];
+            out_index_row[i] = (OutIdxT)((int64_t)src + idx_offset);
+            if (RV) out_value_row[i] = __ldg(input_row + src);
+        }
+        return;
+    }
+    if constexpr (SI || SV) {
+        emit_ordered<ValueT, OutIdxT, BLOCK, RV, SV>(
+            sort_buf, selected, input_row, out_index_row, out_value_row, params,
             n_out, topk, idx_offset);
     }
 }
@@ -508,12 +673,81 @@ namespace detail {
 
 inline size_t arena_bytes() { return sizeof(Arena); }
 
+// Bytes the radix path reserves: the core arena (or the ordered scratch, which
+// aliases it and can be larger) followed by the staging buffer.
+inline size_t radix_smem_bytes(uint32_t topk, bool sorted) {
+    uint32_t n_pad = 1;
+    if (sorted) {
+        while (n_pad < topk) n_pad <<= 1;
+    }
+    const size_t sort_bytes =
+        sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
+    const size_t lead = sort_bytes > kRadixArenaBytes ? sort_bytes : kRadixArenaBytes;
+    return lead + sizeof(uint32_t) * kMaxTopK;
+}
+
 template <typename ValueT, typename OutIdxT, bool SI, bool RV, bool SV>
 inline cudaError_t configure() {
     return cudaFuncSetAttribute(
         (const void *)topk_kernel<ValueT, OutIdxT, SI, RV, SV>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         (int)arena_bytes());
+}
+
+template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV>
+inline void set_radix_attr() {
+    // The worst case over the ordered modes is the same 48 KB the bytewise
+    // Arena reserves, so both kernels are configured with one value; each
+    // launch then asks for exactly what its own mode needs.
+    const cudaError_t rc = cudaFuncSetAttribute(
+        (const void *)topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, (int)arena_bytes());
+    if (rc != cudaSuccess) {
+        std::fprintf(stderr, "[deep_select] radix smem attribute: %s\n",
+                     cudaGetErrorString(rc));
+    }
+}
+
+// The ported dispatcher's long-row regime is the only thing that differs
+// between the two block widths (`rk::needs_long_row_bf16`); the batch is the
+// launch's row count, one row per CTA.
+inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk) {
+    const rk::TopKConfig cfg{(int)batches, (int)vocab_size, (int)topk};
+    return rk::needs_long_row_bf16(cfg) ? rk::kLongRowBlockSize : rk::kBlockSize;
+}
+
+template <typename ValueT, typename OutIdxT>
+void launch_typed_radix(const RowParams &params, uint32_t batches,
+                        cudaStream_t stream, bool sorted_index,
+                        bool sorted_value, bool return_value, int block) {
+    const size_t smem =
+        radix_smem_bytes(params.topk, sorted_index || sorted_value);
+    auto run = [&](auto si, auto sv, auto rv) {
+        constexpr bool SI = decltype(si)::value;
+        constexpr bool SV = decltype(sv)::value;
+        constexpr bool RV = decltype(rv)::value;
+        if (block == rk::kLongRowBlockSize) {
+            set_radix_attr<ValueT, OutIdxT, rk::kLongRowBlockSize, SI, RV, SV>();
+            topk_kernel_radix<ValueT, OutIdxT, rk::kLongRowBlockSize, SI, RV, SV>
+                <<<batches, rk::kLongRowBlockSize, smem, stream>>>(params);
+        } else {
+            set_radix_attr<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>();
+            topk_kernel_radix<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>
+                <<<batches, rk::kBlockSize, smem, stream>>>(params);
+        }
+    };
+    using T = std::true_type;
+    using F = std::false_type;
+    // sorted_value implies return_value (validated by the caller).
+    if (sorted_value) {
+        run(T{}, T{}, T{});
+    } else if (sorted_index) {
+        if (return_value) run(T{}, F{}, T{});
+        else run(T{}, F{}, F{});
+    } else {
+        if (return_value) run(F{}, F{}, T{});
+        else run(F{}, F{}, F{});
+    }
 }
 
 template <typename ValueT, typename OutIdxT>
@@ -562,13 +796,15 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
             detail::launch_typed<float, int64_t>(params, n, cuda_stream,
                                                  sorted_index, sorted_value, rv);
         }
-    } else {  // bfloat16
+    } else {  // bfloat16 -- the ported radix dataflow
+        const int block =
+            detail::radix_block_for(n, params.vocab_size, params.topk);
         if (index_dtype == 0) {
-            detail::launch_typed<maca_bfloat16, int32_t>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv);
+            detail::launch_typed_radix<maca_bfloat16, int32_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
         } else {
-            detail::launch_typed<maca_bfloat16, int64_t>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv);
+            detail::launch_typed_radix<maca_bfloat16, int64_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
         }
     }
 }
