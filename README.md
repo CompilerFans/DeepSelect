@@ -10,36 +10,54 @@ DeepSelect is a high performance implementation of the TopK kernel used in DeepS
 ## MACA support
 
 This tree also carries a MACA (MetaX) port of the operator, used by `mcDeepGEMM`.
-The upstream CUDA kernels under `csrc/cuda_kernels/{v3,v3_fp32,v3_cluster}` are
-**not built** there: they are written against TMA tensor-map loads, mbarriers and
-cluster launches, none of which the platform provides. `csrc/maca_topk.cu`
-reimplements the same operator -- the same public contract, the same
-`deep_select.interface.topk` signature -- with portable primitives only
-(shuffle, `atomicAdd`, `__syncthreads`, `__syncthreads_or`), as a radix refine
-over an order-preserving key of each value. It is the only translation unit in
-the MACA extension, so both scenarios below are served by that one general
-kernel.
+The kernel tree is split by the shared memory a part has per SM, because that is
+what a top-K kernel's staging buffers are sized against:
+
+| tree | parts | kernel |
+| --- | --- | --- |
+| `csrc/xcore1000/` | C500 (64 KiB per SM) | `maca_topk.cu`, written for MACA |
+| `csrc/xcore1600/` | C600, C600U (128 KiB per SM) | the upstream kernels, ported |
+
+Which one a device runs is a property of the device, not a choice: `setup.py`
+builds one extension per architecture, and `deep_select.topk` loads the one its
+device has.
+
+`csrc/xcore1000/maca_topk.cu` reimplements the operator -- the same public
+contract, the same `deep_select.interface.topk` signature -- with portable
+primitives only (shuffle, `atomicAdd`, `__syncthreads`, `__syncthreads_or`), as
+a radix refine over an order-preserving key of each value.
+
+`csrc/xcore1600/` keeps upstream's algorithm (a threshold-and-compact scan in a
+random block order, one global read per element) and replaces its device-side
+dependencies: TMA tensor-map loads become cooperative `ldg`, mbarriers a single
+buffer with `__syncthreads`, inline PTX MACA builtins. Its config tuples are
+re-derived for 128 KiB, since upstream's are sized for an H100's 227 KiB.
+`v3_cluster` was deleted rather than ported: MACA has no cluster launch.
 
 Consequences:
 
-- The `v3_cluster` dispatch arm (`bfloat16`, `batch_size <= 6`,
-  `vocab_size >= 512K`, `topk <= 1024`) has no MACA equivalent and is not
-  selected; those shapes fall through to the general kernel. They are served
-  (a cluster-less schedule), not rejected.
-- The `vocab_size < 2^23` restriction is not enforced on MACA. It exists
-  upstream because the CUDA kernels do their census with fp32-simulated integer
-  arithmetic; the MACA kernel ranks integer keys and has no such bound (verified
-  for `float32` at `vocab_size = 2^23`, case `fp32-vocab-2^23` in
+- `topk` above 1024 is served by `maca_topk.cu` only. The ported kernel's tuples
+  cover `max_topk` 512 and 1024 -- a 4096 tuple cannot fit 128 KiB, since its
+  survivor-pairs and extra-pairs regions alone come to exactly 128 KiB -- so a
+  C600 / C600U rejects `topk` in `(1024, 4096]`.
+- The `vocab_size < 2^23` restriction is enforced by the ported kernel, as
+  upstream; it comes from the fp32-simulated census there. It is not enforced by
+  `maca_topk.cu`, which ranks integer keys (verified for `float32` at
+  `vocab_size = 2^23`, case `fp32-vocab-2^23` in
   [`tests/check_maca.py`](tests/check_maca.py)).
-- `sorted_value` is accepted for `torch.bfloat16` on MACA: the ordering comes
-  from the same key, so both the descending order and the value/index pairing
-  hold. Upstream rejects this as fp32-only, and `backend="torch"` keeps that
-  restriction.
+- `sorted_value` is accepted for `torch.bfloat16` by `maca_topk.cu`: the ordering
+  comes from the same key, so both the descending order and the value/index
+  pairing hold. The ported kernel rejects it, as upstream does (fp32 only), and
+  so does `backend="torch"`.
+- The `v3_cluster` dispatch arm (`bfloat16`, `batch_size <= 6`,
+  `vocab_size >= 512K`, `topk <= 1024`) was deleted with the variant; those
+  shapes are served by the general kernel (a cluster-less schedule), not
+  rejected.
 - `begin` and `hint` are rejected, as upstream.
-- Everything else in this document -- the two scenarios, the `topk <= 4096`
-  bound, `sorted_index` / `return_value` / `end` / `output_idx` /
-  `output_idx_offset` / `idx_oob_fill_value` / `value_oob_fill_value`, and the
-  NaN contract below -- behaves identically on MACA.
+- Everything else in this document -- the two scenarios, `sorted_index` /
+  `return_value` / `end` / `output_idx` / `output_idx_offset` /
+  `idx_oob_fill_value` / `value_oob_fill_value`, and the NaN contract below --
+  behaves identically on MACA.
 - MACA performance is **not** measured in this tree; the numbers in
   [Performance](#performance) are the upstream CUDA kernels'.
 
@@ -75,8 +93,8 @@ on the same input. The metric is effective memory bandwidth: TopK does no
 floating-point math, so a FLOP rate would not be meaningful here.
 
 > These figures belong to the upstream CUDA kernels. The MACA port
-> (`csrc/maca_topk.cu`) has not been benchmarked here -- see
-> [MACA support](#maca-support).
+> (`csrc/xcore1000/maca_topk.cu`, and the ported `csrc/xcore1600/`) has not been
+> benchmarked here -- see [MACA support](#maca-support).
 
 ### Lightning Indexer Scenario
 
@@ -101,21 +119,34 @@ pip install -v .
 
 ### MACA (MetaX)
 
-Neither the single submodule (`csrc/3rdparty/cutlass`) nor the vendored
-`csrc/3rdparty/kerutils` is referenced by the MACA build, which compiles
-`csrc/maca_topk.cu` alone. It needs the MACA toolkit (`$MACA_PATH`, default
-`/opt/maca`) and a MACA-compatible PyTorch:
+The build needs the MACA toolkit (`$MACA_PATH`, default `/opt/maca`) and a
+MACA-compatible PyTorch. The `csrc/3rdparty/cutlass` submodule is not referenced
+-- `cutlass/kernel_launch.h` resolves to MACA's own `mctlass` -- while the
+vendored `csrc/3rdparty/kerutils` is. Each architecture is built as its own
+extension, since a config's staging buffers are sized against the shared memory
+of the architecture it was compiled for:
 
 ```bash
-python setup.py build_ext --inplace     # builds deep_select/deep_select_cuda*.so
-PYTHONPATH=. python tests/check_maca.py # correctness, see Testing below
+CUCC_TARGETS=xcore1000 python setup.py build_ext --inplace             # C500
+CUCC_TARGETS=xcore1600 python setup.py build_ext --inplace             # C600, C600U
+CUCC_TARGETS=xcore1000,xcore1600 python setup.py build_ext --inplace   # both
+PYTHONPATH=. python tests/check_maca.py                                # correctness
 ```
 
-`setup.py` compiles the device code with `mxcc --offload-arch=xcore1000` (the
-C500 / xcore1000 target) and passes `-ftz=false` on top of `--use_fast_math`
-(which would otherwise enable FTZ). The ranking path is integer-only and
-indifferent either way; the flag keeps the fill-value conversion exact for a
-denormal `value_oob_fill_value`.
+`CUCC_TARGETS` defaults to `native`, the device the build is running on (the
+same variable and meaning as the host repository's `build.sh`), and each target
+builds the kernel that fits it -- `csrc/xcore1000/` for a 64 KiB part,
+`csrc/xcore1600/` for a 128 KiB one -- producing
+`deep_select/deep_select_xcore<N>*.so`.
+
+Device code is compiled by `mxcc` directly, with `--offload-arch=xcore<N>`;
+neither cu-bridge's `cucc` wrapper nor a `-gencode` derived from the building
+machine's device is involved, so an extension is for the architecture it is
+named after and no other. `-use-fast-math` is passed with FTZ turned back off
+(`-Xclang -fdenormal-fp-math-f32=ieee`): the ranking path is integer-only and
+indifferent either way, and the flag keeps the fill-value conversion exact for a
+denormal `value_oob_fill_value`. `api.cpp` is host code and is compiled by
+`g++`.
 
 `pip install .` does not currently work, for a reason inherited from upstream:
 `setup.py` stamps the version with `datetime.now()` (upstream `setup.py:204`,
@@ -154,13 +185,15 @@ Both outputs are allocated by the call, and their strides are aligned to `deep_s
 
 For the full signature, see [`deep_select/interface.py`](deep_select/interface.py).
 
-`backend=` picks the implementation: `"maca_c"` (default) is the MACA-native
-kernel described above, `"torch"` is a reference implementation of the same
-contract built from torch ops. The reference runs on any device and dtype, so it
-is usable on a machine without the MACA kernel and for differentially checking
-results; unlike the kernel it rejects `bfloat16` + `sorted_value`, matching
-upstream. It is not covered by `tests/check_maca.py`, which compares against
-`torch.topk` directly.
+`backend=` picks the implementation. The default (`None`) is the kernel this
+device has; the kernel names are architecture names -- `"xcore1000"`,
+`"xcore1500"`, `"xcore1600"` -- each naming the kernel built for that
+architecture, so the value selects a kernel by the device it belongs to rather
+than a variant of one. `"torch"` is a reference implementation of the same
+contract built from torch ops: it runs on any device and dtype, so it is usable
+on a machine with no MACA kernel built at all, and for differentially checking
+results (`tests/check_maca.py --backend torch`). Unlike the kernels it rejects
+`bfloat16` + `sorted_value`, matching upstream.
 
 ### Variable-length rows
 
@@ -193,9 +226,10 @@ excluded from any value comparison, as the test suites do.
 kernel -- it needs only `deep_select` importable:
 
 ```bash
-PYTHONPATH=. python tests/check_maca.py            # all cases
-PYTHONPATH=. python tests/check_maca.py --quick    # two-case smoke test
+PYTHONPATH=. python tests/check_maca.py                 # all cases
+PYTHONPATH=. python tests/check_maca.py --quick         # two-case smoke test
 PYTHONPATH=. python tests/check_maca.py --group ties
+PYTHONPATH=. python tests/check_maca.py --backend torch # the reference, not a kernel
 PYTHONPATH=. python tests/check_maca.py --list
 ```
 
