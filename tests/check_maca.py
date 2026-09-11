@@ -408,6 +408,13 @@ CASES = [
     C("bf16-wide-range", "indexer", 4, 32768, 512, BF16, I32, gen="wide"),
     C("bf16-narrow-range", "indexer", 4, 32768, 512, BF16, I32,
       gen="narrow"),
+    # The long-row regime (L >= 60000, k in 512/1024) runs 1024-thread blocks
+    # and, at L < 262144, stays on the row path -- the only shapes whose
+    # ordered emit runs at that width.  Nothing else in the table reaches it.
+    C("bf16-wideblk-sv", "indexer", 4, 100000, 512, BF16, I32,
+      sorted_value=True),
+    C("bf16-wideblk-si", "indexer", 4, 100000, 1024, BF16, I64,
+      sorted_index=True, return_value=False),
     # ── Sampling: fp32, vocab ~128K ─────────────────────────────────────────
     C("fp32-sampler-sv", "sampler", 6, 129280, 512, FP32, I64,
       sorted_value=True),

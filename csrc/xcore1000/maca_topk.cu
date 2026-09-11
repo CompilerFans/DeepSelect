@@ -11,44 +11,30 @@
 //     is the shipping backend.  See `csrc/cuda_kernels/common_parts.cuh`.
 //   * `v3_cluster` is deleted outright (MACA has no cluster launch and no TMA).
 //
-// ── the contract layer, and the two dataflows under it ──────────────────────
+// ── the contract layer, and the one dataflow under it ───────────────────────
 //
 // Every mode shares one contract layer: the `length <= topk` shortcut, the NaN
 // bit-pattern check (`abort_when_nan_found` / the 0x3F3F3F3F guard), the index
-// offsets, the out-of-band fills, and the optional ordered emit.  Two selection
-// dataflows feed it, chosen by dtype:
+// offsets, the out-of-band fills, and the optional ordered emit.  One selection
+// dataflow feeds it for both dtypes: the ported radix core
+// (`radix_core.cuh`, provenance banner in that file) -- one histogram pass over
+// the high key byte plus one vectorized collect pass that refines the threshold
+// bin in shared memory, so two passes over the row whatever the key width.
+// The 16-bit row walks a bf16 key, the 32-bit row a fp32 one; the dtype picks
+// the row entry, not the dataflow.
 //
-//   * bfloat16 -> the ported radix core (`radix_core.cuh`, provenance banner in
-//     that file): one histogram pass over the high key byte plus one vectorized
-//     collect pass that refines the threshold bin's low byte in shared memory.
-//     Two passes over the row in total, whatever the key width.
-//   * float32 -> the byte-wise walk below (modeled on the in-tree MACA
-//     reference `mcDeepGEMM/csrc/kernels/fp32_topk.cu`).
-//
-// The byte-wise walk, which the fp32 path still runs:
-//
-//   1. Map each value onto an order-preserving unsigned key, so unsigned key
-//      order equals value order.  NaN is *not* ranked by this order (the encode
-//      sends +NaN to the largest key and -NaN to the smallest), so NaN presence
-//      is detected separately, by bit pattern, and takes over the row:
-//        fp32: bits & 0x80000000 ? ~bits : bits | 0x80000000
-//        bf16: the same trick on 16 bits -- no fp32->half conversion needed.
-//   2. Walk the key one byte at a time, most significant first.  Each round
-//      histograms the current byte over the elements that still match the
-//      confirmed high-byte prefix, suffix-scans the histogram, and takes the
-//      bin the k-th remaining element falls in as the pivot.  Elements
-//      strictly above the pivot are final: they are appended to `selected`.
-//      The pivot bin itself is not carried -- the next round rescans the row
-//      under the extended prefix.  On the last round the pivot bin holds
-//      bit-identical keys, so any `take` of them complete the answer.
-//
-//      Each round is two full passes over the row (histogram, collect), so
-//      the kernel performs 2*R passes, R = 4 for fp32 -- the same shape as the
-//      in-tree reference.  Rescanning is what makes the refine exact: carrying
-//      only the ties that fit (`take` of them) would discard precisely the
-//      values the next byte has to rank.  The radix core keeps the same
-//      no-truncation rule in a different shape: a threshold bin too large for
-//      its arena falls back to a full-row rescan.
+// What that replaced, for the record: this file used to walk the key one byte
+// at a time (most significant first).  Each round histogrammed the current byte
+// over the elements still matching the confirmed prefix, suffix-scanned it, and
+// took the bin the k-th remaining element fell in as the pivot, appending
+// everything strictly above it to the answer.  The pivot bin was not carried
+// between rounds -- the next round rescanned the row under the extended prefix,
+// which is what makes the refine exact (carrying only the ties that fit would
+// discard precisely the values the next byte has to rank).  That is 2*R passes
+// over the row, R = 4 for fp32 and 2 for bf16, against the ported core's 2, and
+// it was element-at-a-time with no vectorized body.  The ported core keeps the
+// same no-truncation rule in a different shape: a threshold bin too large for
+// the candidate arena falls back to a full-row rescan.
 //
 // Portable primitives only: `__shfl_down_sync`, `atomicAdd`, `__ldg`,
 // `__syncthreads`, `__syncthreads_or`.  No inline asm, no TMA, no mbarrier,
@@ -66,9 +52,9 @@
 // arm have been deleted, and
 // those shapes fall through to this single general kernel -- the same path
 // every other shape takes.  They are NOT a hole: `topk <= 1024 <= 4096` holds
-// and vocabulary is unbounded here (the kernel makes 2 passes over the row per
-// key byte regardless of length), so the arm's shapes are served, only without
-// the cluster-specific scheduling the original gave them.  Covered by the
+// and vocabulary is unbounded here (the kernel makes 2 passes over the row
+// regardless of length), so the arm's shapes are served, only without the
+// cluster-specific scheduling the original gave them.  Covered by the
 // `b=4 v=524288 k=1024 bf16` case in `tests/check_maca.py`.
 //
 // The other CUDA-era dispatch arms keep their behaviour: `v3` (bf16) and
@@ -96,17 +82,13 @@
 namespace deep_select_maca {
 
 // ── tunables ────────────────────────────────────────────────────────────────
-constexpr int kMaxTopK = 4096;      // public contract: `topk <= 4096`
-constexpr int kRadix = 256;         // bins per round (one key byte)
-constexpr int kThreads = 256;       // 4 MACA waves of 64 lanes
-constexpr int kWarpSize = 64;       // MACA wave width
-constexpr int kMaxWaves = kThreads / kWarpSize;
-// MACA waves are 64 lanes wide, so a shuffle over the whole wave needs all 64
-// mask bits.  The CUDA-era 0xFFFFFFFF names only lanes 0..31; with it, every
-// reduction silently returns wrong values for the upper half (measured:
-// an inclusive suffix sum over an all-ones 64-lane wave came out as 64 for
-// lanes 0..31 instead of 64-i).
-constexpr unsigned long long kWarpMask = 0xFFFFFFFFFFFFFFFFull;
+// The public contract: `topk <= 4096` (checked in `topk()`), which the radix
+// row entries serve as they come -- they take `topk` at runtime and the staging
+// buffer below is sized for the whole range.  The ported core's own `kMaxTopK`
+// (2048) is the *kernel arm* limit of its static-k dispatch, not the row
+// entries'; the chunked gate stays inside it because its merge only compiles
+// the k=512/1024 arms.
+constexpr int kMaxTopK = 4096;
 
 struct RowParams {
     const void *input;
@@ -145,26 +127,6 @@ __device__ __forceinline__ uint32_t key_of<maca_bfloat16>(maca_bfloat16 v) {
     return (bits & 0x8000u) ? (~bits & 0xFFFFu) : (bits | 0x8000u);
 }
 
-template <typename ValueT>
-static __device__ __forceinline__ ValueT value_of_key(uint32_t key);
-
-template <>
-__device__ __forceinline__ float value_of_key<float>(uint32_t key) {
-    const uint32_t bits = (key & 0x80000000u) ? ~key : (key & 0x7FFFFFFFu);
-    return __uint_as_float(bits);
-}
-
-template <>
-__device__ __forceinline__ maca_bfloat16 value_of_key<maca_bfloat16>(uint32_t key) {
-    const uint32_t key16 = key & 0xFFFFu;
-    const uint16_t bits =
-        (key16 & 0x8000u) ? (uint16_t)(~key16 & 0xFFFFu) : (uint16_t)(key16 & 0x7FFFu);
-    return __ushort_as_bfloat16(bits);
-}
-
-// fp32 -> 4 key bytes, bf16 -> 2 key bytes.
-template <typename ValueT>
-static constexpr int kNumRounds = (int)sizeof(ValueT);
 
 // float -> ValueT.  MACA's `__maca_bfloat16` has no implicit float conversion,
 // so the bf16 case needs the explicit intrinsic.
@@ -203,57 +165,6 @@ __device__ __forceinline__ bool is_nan_value<maca_bfloat16>(maca_bfloat16 v) {
     const uint32_t bits = (uint32_t)__bfloat16_as_ushort(v);
     return (bits & 0x7F80u) == 0x7F80u && (bits & 0x007Fu) != 0u;
 }
-
-// ── block-wide inclusive suffix scan over the 256-bin histogram ─────────────
-//
-// On return `histogram[b]` = number of counted elements whose current key byte
-// is >= b.  One bin per thread, so this is a two-level shuffle scan.
-static __device__ __forceinline__ void suffix_scan(uint32_t *histogram,
-                                                   uint32_t *wave_totals) {
-    const int tid = threadIdx.x;
-    const int lane = tid % kWarpSize;
-    const int wave = tid / kWarpSize;
-
-    const uint32_t own = histogram[tid];
-    uint32_t acc = own;
-#pragma unroll
-    for (int off = 1; off < kWarpSize; off <<= 1) {
-        const uint32_t other =
-            (uint32_t)__shfl_down_sync(kWarpMask, acc, off, kWarpSize);
-        if (lane + off < kWarpSize) acc += other;
-    }
-    if (lane == 0) wave_totals[wave] = acc;
-
-    __syncthreads();
-    if (tid == 0) {
-        uint32_t higher = 0;
-        for (int w = kMaxWaves - 1; w >= 0; --w) {
-            const uint32_t cur = wave_totals[w];
-            wave_totals[w] = higher;
-            higher += cur;
-        }
-    }
-    __syncthreads();
-    histogram[tid] = own + (acc - own) + wave_totals[wave];
-    // Sentinel: the pivot test reads histogram[kRadix] for the top bin.
-    if (tid == 0) histogram[kRadix] = 0;
-    __syncthreads();
-}
-
-// Scratch the kernel allocates in dynamic shared memory.
-//
-// `selected[0..k)` holds the answer as it is accumulated: each round appends
-// the elements strictly above its pivot, then the last round appends `take`
-// bit-identical pivot-bin elements.  `k` therefore lands exactly on `topk`.
-//
-// `sort_buf` backs the ordered emit (sorted_index / sorted_value) only; it is
-// dead weight in the other modes, but it is a compile-time member either way,
-// so the arena is a flat 16 KB + 32 KB.  `sort_slots` (4096) is `kMaxTopK`
-// rounded up to the bitonic power of two.
-struct Arena {
-    uint32_t selected[kMaxTopK];           // final answer, descending value order
-    uint64_t sort_buf[kMaxTopK];
-};
 
 // Ascending bitonic sort of `n` (power of two) 64-bit keys over the CTA.
 template <int BLOCK>
@@ -315,7 +226,7 @@ static __device__ __forceinline__ void emit_ordered(
     bitonic_sort_u64<BLOCK>(sort_buf, (int)n_pad);
     __syncthreads();
 
-    for (uint32_t i = threadIdx.x; i < topk; i += kThreads) {
+    for (uint32_t i = threadIdx.x; i < topk; i += BLOCK) {
         const bool valid = i < n_out;
         const uint32_t slot = (uint32_t)(sort_buf[i] & 0xFFFu);
         const uint32_t src = valid ? selected[slot] : 0u;
@@ -330,225 +241,19 @@ static __device__ __forceinline__ void emit_ordered(
 
 // ── the operator kernel (one row per CTA) ───────────────────────────────────
 //
-// RV = also produce output values
-// SI = sorted_index: emit indices ascending
-// SV = sorted_value: emit values descending (implies RV)
-template <typename ValueT, typename OutIdxT, bool SI, bool RV, bool SV>
-__global__ __launch_bounds__(kThreads) void topk_kernel(RowParams params) {
-    const int tid = threadIdx.x;
-    const uint32_t row = blockIdx.x;
-
-    // hist[0] is used for every round; the +1 slot is the zero sentinel the
-    // pivot test reads at bin kRadix-1.  (Only one buffer is needed now that
-    // each round's histogram is built in its own pass.)
-    __shared__ uint32_t histogram[kRadix + 1];
-    __shared__ uint32_t wave_totals[kMaxWaves];
-    __shared__ uint32_t pivot_bin;
-    __shared__ uint32_t counter;
-    __shared__ uint32_t ties_seen;
-    __shared__ uint32_t num_selected;
-    __shared__ int32_t row_offset;
-    extern __shared__ uint8_t arena_raw[];
-    Arena &arena = *reinterpret_cast<Arena *>(arena_raw);
-    uint32_t *selected = arena.selected;
-
-    if (tid == 0) {
-        row_offset =
-            params.idx_offset_ptr ? __ldg(params.idx_offset_ptr + row) : 0;
-    }
-    __syncthreads();
-    const int32_t idx_offset = row_offset;
-
-    const uint32_t length = params.end_ptr ? (uint32_t)__ldg(params.end_ptr + row)
-                                           : params.vocab_size;
-    const uint32_t topk = params.topk;
-    const ValueT *input_row = (const ValueT *)((const char *)params.input +
-                                              (uint64_t)row * params.stride_input_batch);
-    OutIdxT *out_index_row = (OutIdxT *)((char *)params.output_index +
-                                        (uint64_t)row * params.stride_output_index_batch);
-    ValueT *out_value_row =
-        RV ? (ValueT *)((char *)params.output_value +
-                        (uint64_t)row * params.stride_output_value_batch)
-           : nullptr;
-
-    // Shortcut contract: the window is no longer than k, so the whole window is
-    // the answer.  Emitting it in index order is what `sorted_index` asks for
-    // and what the modes that leave the order unspecified accept; `sorted_value`
-    // is the exception and goes through the ordered emit below.  The NaN check
-    // is deliberately skipped on this path either way, matching the original
-    // operator (`abort_when_nan_found` is documented as ignored when
-    // `end <= topk`).
-    if (length <= topk) {
-        if constexpr (SV) {
-            // The window is the answer, but not yet in the requested order:
-            // index order is ascending, `sorted_value` wants value descending.
-            // Hand the whole window to the ordered emit as the selection.
-            for (uint32_t i = tid; i < length; i += kThreads) selected[i] = i;
-            __syncthreads();
-            emit_ordered<ValueT, OutIdxT, kThreads, RV, SV>(
-                arena.sort_buf, selected, input_row, out_index_row, out_value_row,
-                params, length, topk, idx_offset);
-        } else {
-            // Index order is already what `sorted_index` asks for, and the
-            // other modes leave the order unspecified.
-            for (uint32_t i = tid; i < topk; i += kThreads) {
-                const bool valid = i < length;
-                out_index_row[i] =
-                    valid ? (OutIdxT)((int64_t)i + idx_offset) : (OutIdxT)params.idx_fill;
-                if (RV) {
-                    out_value_row[i] =
-                        valid ? __ldg(input_row + i) : float_to_value<ValueT>(params.value_fill);
-                }
-            }
-        }
-        return;
-    }
-
-    // ── NaN detection ───────────────────────────────────────────────────────
-    bool nan_local = false;
-    for (uint32_t i = tid; i < length; i += kThreads) {
-        nan_local |= is_nan_value<ValueT>(__ldg(input_row + i));
-    }
-    if (__syncthreads_or((int)nan_local) != 0) {
-        if (params.abort_on_nan) {
-            if (tid == 0) printf("[deep_select] NaN detected. Aborting.\n");
-            __trap();
-        }
-        if (tid == 0) out_index_row[0] = (OutIdxT)0x3F3F3F3F;
-        return;
-    }
-
-    constexpr int kRounds = kNumRounds<ValueT>;
-    constexpr int kBitsPerRound = 8;
-
-    if (tid == 0) {
-        counter = 0;
-        num_selected = 0;
-    }
-    __syncthreads();
-
-    // ── refine rounds ───────────────────────────────────────────────────────
-    // `remaining` is how many of the top-k are still unaccounted for.  Each
-    // round narrows by one key byte:
-    //   A. histogram the byte under the confirmed byte prefix, suffix-scan it,
-    //      and take the bin holding the `remaining`-th element as the pivot;
-    //   B. collect everything strictly above the pivot into `selected`, and on
-    //      the last byte also the first `take` elements of the pivot bin (they
-    //      are bit-identical, so any `take` of them finish the answer).
-    //
-    // The pivot bin itself is *not* carried between rounds: the next round
-    // rescans the row under the extended prefix.  Carrying a truncated subset
-    // of the ties would throw away exactly the values the next byte has to rank,
-    // and the whole bin does not fit in a fixed buffer (a single top-byte bin
-    // holds `length/256`-ish elements, unbounded in `topk`).
-    uint32_t remaining = topk;
-    uint32_t prefix_mask = 0;   // key bits above the current byte that must match
-    uint32_t prefix_value = 0;
-
-#pragma unroll
-    for (int round = 0; round < kRounds; ++round) {
-        if (remaining == 0) break;
-        const int shift = (kRounds - 1 - round) * kBitsPerRound;
-        const bool is_last = (round == kRounds - 1);
-        const bool filtered = (prefix_mask != 0);
-
-        // ── A. histogram the current byte over the live prefix ──────────────
-        for (int b = tid; b < kRadix; b += kThreads) histogram[b] = 0;
-        __syncthreads();
-        for (uint32_t i = tid; i < length; i += kThreads) {
-            const uint32_t key = key_of<ValueT>(__ldg(input_row + i));
-            if (filtered && (key & prefix_mask) != prefix_value) continue;
-            atomicAdd(&histogram[(key >> shift) & 0xFFu], 1u);
-        }
-        __syncthreads();
-        suffix_scan(histogram, wave_totals);
-
-        if (tid < kRadix) {
-            // The remaining-th element (from the top) falls in the largest bin
-            // b whose inclusive suffix count still covers it.
-            if (histogram[tid] >= remaining
-                && histogram[tid + 1] < remaining) {
-                pivot_bin = (uint32_t)tid;
-            }
-        }
-        __syncthreads();
-        const uint32_t pivot = pivot_bin;
-        const uint32_t excess = histogram[pivot + 1];
-        const uint32_t take = remaining - excess;   // pivot-bin picks still needed
-
-        // ── B. collect ──────────────────────────────────────────────────────
-        // `excess` is exact (the histogram is frozen behind the barrier above),
-        // so the collected count needs no atomic tally: exactly `excess`
-        // elements satisfy `bin > pivot`.
-        const uint32_t base = num_selected;
-        if (tid == 0) {
-            counter = 0;
-            ties_seen = 0;
-        }
-        __syncthreads();
-        for (uint32_t i = tid; i < length; i += kThreads) {
-            const uint32_t key = key_of<ValueT>(__ldg(input_row + i));
-            if (filtered && (key & prefix_mask) != prefix_value) continue;
-            const uint32_t bin = (key >> shift) & 0xFFu;
-            if (bin > pivot) {
-                selected[base + atomicAdd(&counter, 1u)] = i;
-            } else if (is_last && bin == pivot) {
-                // Ties on the final byte: any `take` of them are equally valid.
-                const uint32_t pos = atomicAdd(&ties_seen, 1u);
-                if (pos < take) selected[base + excess + pos] = i;
-            }
-        }
-        __syncthreads();
-        if (tid == 0) num_selected = base + excess + (is_last ? take : 0u);
-        __syncthreads();
-        if (is_last) break;   // `remaining` is now 0: the answer is complete
-        remaining -= excess;
-
-        prefix_mask |= (uint32_t)0xFFu << shift;
-        prefix_value |= pivot << shift;
-    }
-
-    // ── emit ────────────────────────────────────────────────────────────────
-    const uint32_t n_out = num_selected;
-
-    if constexpr (!SI && !SV) {
-        for (uint32_t i = tid; i < topk; i += kThreads) {
-            const bool valid = i < n_out;
-            const uint32_t src = valid ? selected[i] : 0u;
-            out_index_row[i] =
-                valid ? (OutIdxT)((int64_t)src + idx_offset) : (OutIdxT)params.idx_fill;
-            if (RV) {
-                out_value_row[i] =
-                    valid ? __ldg(input_row + src) : float_to_value<ValueT>(params.value_fill);
-            }
-        }
-        return;
-    }
-    if constexpr (SI || SV) {
-        emit_ordered<ValueT, OutIdxT, kThreads, RV, SV>(
-            arena.sort_buf, selected, input_row, out_index_row, out_value_row,
-            params, n_out, topk, idx_offset);
-    }
-}
-
-// ── the radix operator kernel (one row per CTA) ─────────────────────────────
-//
-// Same kernel-level contract as `topk_kernel` above -- the `length <= topk`
-// shortcut, the NaN path, the fills, the ordered emit -- with only the
-// selection stage replaced by the ported radix dataflow (`radix_core.cuh`):
-// two passes over the row (a histogram of the high key byte, then one
-// vectorized collect that writes everything above the threshold bin straight to
-// the output and refines the threshold bin's low byte in shared memory)
-// instead of the bytewise kernel's two full passes per key byte.
+// The contract layer -- the `length <= topk` shortcut, the NaN path, the fills,
+// the offsets, the ordered emit -- over the ported radix selection
+// (`radix_core.cuh`): two passes over the row (a histogram of the high key
+// byte, then one vectorized collect that writes everything above the threshold
+// bin straight to the output and refines that bin in shared memory), whatever
+// the key width.
 //
 // Dynamic shared memory starts with the core's arena -- `s_input_flat` is an
 // `extern __shared__` array inside the header, so it can only sit at the base --
 // and is followed by the staging buffer the emit reads.  The ordered emit's
 // scratch is only live after the arena is dead, so it aliases it; the worst
-// case (topk = kMaxTopK, sorted) is 48 KB, the same budget as `Arena`.
-//
-// The contract code below is a copy of the bytewise kernel's; the two must be
-// kept in sync until the bytewise path is retired.
+// case (topk = kMaxTopK, sorted) is 48 KB, the same budget as the retired
+// byte-wise path's `Arena` (and what `kSmemBudgetBytes` reserves).
 constexpr size_t kRadixArenaBytes =
     (size_t)rk::kSmemInputSize * sizeof(uint32_t);
 
@@ -620,10 +325,13 @@ __global__ __launch_bounds__(kScanBlock) void nan_scan_kernel(
 // ported dispatcher picks the wider block for (see `needs_long_row_bf16`).
 //
 // `kPreSelected` is for the chunked path: the two-stage split over a long row
-// has already written its answer into the output buffer (raw column indices,
-// `topk` of them per row), so this kernel skips selection and starts from the
-// emit -- the shortcut, the NaN contract, the fills, the offsets and the
-// ordering are the same code either way.
+// has already ranked it and left its answer in the workspace (raw column
+// indices, `topk` of them per row, plus the NaN flag its own wider scan raised),
+// so this kernel skips selection and starts from the emit -- the shortcut, the
+// NaN contract, the fills, the offsets and the ordering are the same code
+// either way.  That is what keeps `return_value` / `sorted_index` /
+// `sorted_value` / int64 indices / ragged windows on the split path free of
+// new cases.
 template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV,
           bool kPreSelected = false>
 __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
@@ -655,7 +363,7 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
                         (uint64_t)row * params.stride_output_value_batch)
            : nullptr;
 
-    // Shortcut contract, as in the bytewise kernel: the window is no longer
+    // Shortcut contract: the window is no longer
     // than k, so the whole window is the answer.  Index order is what
     // `sorted_index` asks for and what the modes that leave the order
     // unspecified accept; `sorted_value` still goes through the ordered emit.
@@ -748,7 +456,12 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
 // ── host-side launch ────────────────────────────────────────────────────────
 namespace detail {
 
-inline size_t arena_bytes() { return sizeof(Arena); }
+// The dynamic-smem ceiling every mode is configured with.  It is the retired
+// byte-wise path's `Arena` (kMaxTopK * (4 + 8) bytes), which was the worst case
+// over all of them; `cudaFuncSetAttribute` only has to admit what a launch
+// actually asks for, and every mode asks for less than this.
+constexpr size_t kSmemBudgetBytes =
+    (size_t)kMaxTopK * (sizeof(uint32_t) + sizeof(uint64_t));
 
 // Bytes the radix path reserves: the core arena (or the ordered scratch, which
 // aliases it and can be larger) followed by the staging buffer.
@@ -763,23 +476,15 @@ inline size_t radix_smem_bytes(uint32_t topk, bool sorted) {
     return lead + sizeof(uint32_t) * kMaxTopK;
 }
 
-template <typename ValueT, typename OutIdxT, bool SI, bool RV, bool SV>
-inline cudaError_t configure() {
-    return cudaFuncSetAttribute(
-        (const void *)topk_kernel<ValueT, OutIdxT, SI, RV, SV>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        (int)arena_bytes());
-}
 
 template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV,
           bool PRE = false>
 inline void set_radix_attr() {
-    // The worst case over the ordered modes is the same 48 KB the bytewise
-    // Arena reserves, so both kernels are configured with one value; each
-    // launch then asks for exactly what its own mode needs.
+    // Every mode is configured with the one ceiling; each launch then asks for
+    // exactly what its own mode needs (`radix_smem_bytes`).
     const cudaError_t rc = cudaFuncSetAttribute(
         (const void *)topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, PRE>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, (int)arena_bytes());
+        cudaFuncAttributeMaxDynamicSharedMemorySize, (int)kSmemBudgetBytes);
     if (rc != cudaSuccess) {
         std::fprintf(stderr, "[deep_select] radix smem attribute: %s\n",
                      cudaGetErrorString(rc));
@@ -937,36 +642,6 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
     launch_typed_radix<maca_bfloat16, OutIdxT>(merged, batches, stream,
                                                sorted_index, sorted_value,
                                                return_value, block, preselected);
-}
-
-template <typename ValueT, typename OutIdxT>
-void launch_typed(const RowParams &params, uint32_t batches, cudaStream_t stream,
-                  bool sorted_index, bool sorted_value, bool return_value) {
-    auto run = [&](auto si, auto sv, auto rv) {
-        constexpr bool SI = decltype(si)::value;
-        constexpr bool SV = decltype(sv)::value;
-        constexpr bool RV = decltype(rv)::value;
-        const size_t smem = arena_bytes();
-        const cudaError_t rc = configure<ValueT, OutIdxT, SI, RV, SV>();
-        if (rc != cudaSuccess) {
-            std::fprintf(stderr, "[deep_select] smem attribute: %s\n",
-                         cudaGetErrorString(rc));
-        }
-        topk_kernel<ValueT, OutIdxT, SI, RV, SV>
-            <<<batches, kThreads, smem, stream>>>(params);
-    };
-    using T = std::true_type;
-    using F = std::false_type;
-    // sorted_value implies return_value (validated by the caller).
-    if (sorted_value) {
-        run(T{}, T{}, T{});
-    } else if (sorted_index) {
-        if (return_value) run(T{}, F{}, T{});
-        else run(T{}, F{}, F{});
-    } else {
-        if (return_value) run(F{}, F{}, T{});
-        else run(F{}, F{}, F{});
-    }
 }
 
 }  // namespace detail
