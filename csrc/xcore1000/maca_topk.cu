@@ -289,6 +289,53 @@ static __device__ __forceinline__ void radix_select_row(
     }
 }
 
+// ── the NaN scan, vectorized ────────────────────────────────────────────────
+//
+// The bit-pattern test is one compare per element and the bytes have to be read
+// either way, so the pass is pure overhead in the best case.  Written one
+// element per load it was also the only pass in the row dataflow that moved no
+// vector: the radix passes move eight 16-bit (or four 32-bit) elements per load,
+// this moved one.  Both readers of the row go through here -- the contract
+// half's own window check and the chunked path's `nan_scan_kernel`.
+//
+// Vector while the row slice is 16-byte aligned (it always is: rows are padded
+// to a 1024-byte stride and the chunk bases are multiples of 8 elements), then
+// a scalar tail for the remainder.
+static __device__ __forceinline__ bool nan_in_block(const float4 &v) {
+    return is_nan_value(v.x) || is_nan_value(v.y) || is_nan_value(v.z) ||
+           is_nan_value(v.w);
+}
+
+static __device__ __forceinline__ bool nan_in_block(const uint4 &v) {
+    const maca_bfloat16 *h = reinterpret_cast<const maca_bfloat16 *>(&v);
+    bool found = false;
+#pragma unroll
+    for (int i = 0; i < 8; i++) found |= is_nan_value(h[i]);
+    return found;
+}
+
+template <typename ValueT>
+static __device__ __forceinline__ bool row_has_nan(const ValueT *row,
+                                                   uint32_t start,
+                                                   uint32_t end) {
+    constexpr int kN = (sizeof(ValueT) == 4) ? 4 : 8;
+    using VecT = typename std::conditional<sizeof(ValueT) == 4, float4, uint4>::type;
+    bool found = false;
+    uint32_t done = start;
+    if ((reinterpret_cast<uintptr_t>(row + start) & 15u) == 0) {
+        const VecT *vrow = reinterpret_cast<const VecT *>(row + start);
+        const uint32_t n_vec = (end - start) / kN;
+        for (uint32_t k = threadIdx.x; k < n_vec; k += blockDim.x) {
+            found |= nan_in_block(__ldg(vrow + k));
+        }
+        done = start + n_vec * kN;
+    }
+    for (uint32_t i = done + threadIdx.x; i < end; i += blockDim.x) {
+        found |= is_nan_value<ValueT>(__ldg(row + i));
+    }
+    return found;
+}
+
 // The chunked path's NaN scan, on the split's own grid: one CTA per (row,
 // chunk).  The contract kernel is one CTA per row by construction, which on a
 // small batch is the whole machine parked on six CTAs reading a 12 MB row; this
@@ -312,10 +359,7 @@ __global__ __launch_bounds__(kScanBlock) void nan_scan_kernel(
     const ValueT *row_ptr = (const ValueT *)((const char *)input +
                                              (uint64_t)row * stride_elems *
                                                  sizeof(ValueT));
-    bool found = false;
-    for (uint32_t i = start + threadIdx.x; i < end; i += kScanBlock) {
-        found |= is_nan_value<ValueT>(__ldg(row_ptr + i));
-    }
+    const bool found = row_has_nan(row_ptr, start, end);
     if (__syncthreads_or((int)found) != 0 && threadIdx.x == 0) {
         atomicOr(flags + row, 1);
     }
@@ -397,9 +441,7 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
     if constexpr (kPreSelected) {
         nan_local = params.nan_flags[row] != 0;
     } else {
-        for (uint32_t i = tid; i < length; i += BLOCK) {
-            nan_local |= is_nan_value<ValueT>(__ldg(input_row + i));
-        }
+        nan_local = row_has_nan(input_row, 0, length);
         nan_local = __syncthreads_or((int)nan_local) != 0;
     }
     if (nan_local) {
