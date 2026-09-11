@@ -463,17 +463,30 @@ def topk_torch(
 
     # The window mask is `-inf`, which is also a value a row can hold: a hidden
     # slot then ties with the visible ones and `torch.topk`'s tie order is
-    # unspecified, so it can hand back an index outside the window.  A hidden
-    # slot can only win by tying at `-inf`, which means every visible value is
-    # `-inf` -- so answering with the window's own first `k_eff` indices selects
-    # the same values and keeps every index inside the window.  (Slots past the
-    # visible length are turned into the fill value below, whatever they hold.)
+    # unspecified, so it can hand back an index outside the window.
+    #
+    # Such a row is answered by re-picking from its window alone.  Rewriting the
+    # row's indices to the window's first `k_eff` *positions* instead -- which
+    # is what this did -- keeps the values sorted and the indices in window, but
+    # splits the two: `value_i` is `torch.topk`'s i-th largest while `index_i`
+    # is position i, so the row reports a value it does not hold at the index it
+    # reports (`3.0, 2.0, 1.0` against indices `0, 1, 2` of the row
+    # `3.0, 1.0, 2.0`).  A hidden slot can only be selected when the window
+    # holds fewer than `k_eff` values above `-inf`, so `min(k_eff, length)`
+    # entries is all the window can answer with, and the rest of the row stays
+    # padding, masked into the fill values below.
     in_window = indices < lengths.unsqueeze(1)
     if bool((~in_window).any().item()):
-        tied_rows = (~in_window).any(dim=1)
-        first_visible = (torch.arange(k_eff, device=device)
-                         .unsqueeze(0).expand_as(indices))
-        indices = torch.where(tied_rows.unsqueeze(1), first_visible, indices)
+        for row in (~in_window).any(dim=1).nonzero().flatten().tolist():
+            length = int(lengths[row])
+            picked = min(k_eff, length)
+            if picked == 0:
+                continue
+            row_values, row_indices = torch.topk(
+                input[row, :length], picked, sorted=bool(sorted)
+            )
+            values[row, :picked] = row_values
+            indices[row, :picked] = row_indices
 
     # Padding picked up by torch.topk on short rows becomes the fill value.
     valid = torch.arange(k_eff, device=device).unsqueeze(0) < lengths.unsqueeze(1)
