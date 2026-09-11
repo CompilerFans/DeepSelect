@@ -58,8 +58,9 @@ Consequences:
   `return_value` / `end` / `output_idx` / `output_idx_offset` /
   `idx_oob_fill_value` / `value_oob_fill_value`, and the NaN contract below --
   behaves identically on MACA.
-- MACA performance is **not** measured in this tree; the numbers in
-  [Performance](#performance) are the upstream CUDA kernels'.
+- MACA performance is measured by `tests/check_maca.py --perf`, which
+  benchmarks the kernel and `torch.topk` side by side on the same shapes. The
+  numbers in [Performance](#performance) are still the upstream CUDA kernels'.
 
 ## Supported Cases
 
@@ -92,9 +93,10 @@ Measured with the benchmark in [`tests/test.py`](tests/test.py)
 on the same input. The metric is effective memory bandwidth: TopK does no
 floating-point math, so a FLOP rate would not be meaningful here.
 
-> These figures belong to the upstream CUDA kernels. The MACA port
-> (`csrc/xcore1000/maca_topk.cu`, and the ported `csrc/xcore1600/`) has not been
-> benchmarked here -- see [MACA support](#maca-support).
+> These figures belong to the upstream CUDA kernels. For the MACA port, run
+> `tests/check_maca.py --perf` on the target device -- what it measures and how
+> the two implementations compare there is in
+> [MACA support](#maca-support).
 
 ### Lightning Indexer Scenario
 
@@ -185,15 +187,17 @@ Both outputs are allocated by the call, and their strides are aligned to `deep_s
 
 For the full signature, see [`deep_select/interface.py`](deep_select/interface.py).
 
-`backend=` picks the implementation. The default (`None`) is the kernel this
-device has; the kernel names are architecture names -- `"xcore1000"`,
-`"xcore1500"`, `"xcore1600"` -- each naming the kernel built for that
-architecture, so the value selects a kernel by the device it belongs to rather
-than a variant of one. `"torch"` is a reference implementation of the same
-contract built from torch ops: it runs on any device and dtype, so it is usable
-on a machine with no MACA kernel built at all, and for differentially checking
-results (`tests/check_maca.py --backend torch`). Unlike the kernels it rejects
-`bfloat16` + `sorted_value`, matching upstream.
+`backend=` picks the implementation, and it names implementations rather than
+architectures -- the same vocabulary as the host repository. `"maca_c"` (the
+default) is the MACA kernel this device has: the hand-written kernel on a
+64 KiB part, the ported one on a 128 KiB part. Which of the two that is, is a
+property of the device rather than a choice, so no architecture name appears at
+this level (`setup.py` still builds one kernel per architecture, and
+`CUCC_TARGETS` still selects which). `"torch"` is a reference implementation of
+the same contract built from torch ops: it runs on any device and dtype, so it
+is usable on a machine with no MACA kernel built at all, and for differentially
+checking results (`tests/check_maca.py --backend torch`). Unlike the kernels it
+rejects `bfloat16` + `sorted_value`, matching upstream.
 
 ### Variable-length rows
 
@@ -230,6 +234,7 @@ PYTHONPATH=. python tests/check_maca.py                 # all cases
 PYTHONPATH=. python tests/check_maca.py --quick         # two-case smoke test
 PYTHONPATH=. python tests/check_maca.py --group ties
 PYTHONPATH=. python tests/check_maca.py --backend torch # the reference, not a kernel
+PYTHONPATH=. python tests/check_maca.py --perf          # benchmark; no checks
 PYTHONPATH=. python tests/check_maca.py --list
 ```
 
@@ -239,6 +244,24 @@ both scenarios, both index dtypes, ragged and short `end` windows,
 strides, tie-heavy inputs, the NaN contract, and the contract rejections. Each
 case is compared against `torch.topk` run in a separate process (see the module
 docstring for why).
+
+`--perf` benchmarks instead of checking, and it benchmarks two implementations
+as peers: `maca_c`, and `topk` -- raw `torch.topk`, the baseline this kernel
+exists to beat. (`topk` is deliberately not a `backend=` value: it implements
+no part of the contract, so it is only comparable where the two coincide --
+no window, no offset, a row at least `topk` long, which is how the perf shapes
+are drawn.) It prints one row per shape and backend, `Latency(ms)`,
+`BW(GB/s)` over the bytes the shape moves (input row + index output, + value
+output when the shape asks for one), and the ratio against `topk`; the timer is
+`tests/kernelkit/bench.py`'s kineto harness with L2 flushed, the same one
+upstream's `--perf-only` uses, so numbers from the two are directly
+comparable.
+`--perf-full` runs upstream's whole performance grid instead of the default
+subset, and `--perf-iters` sets the runs per measurement (10, as upstream's
+`performance_cases`).
+
+Because it is a timing run, the device must be otherwise idle --
+`pgrep -f check_maca` first, as with any benchmark.
 
 Upstream's [`tests/test.py`](tests/test.py) runs here too, over a slice of its
 own table. The harness needed two changes under `tests/kernelkit/` to get that

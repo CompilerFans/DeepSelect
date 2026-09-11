@@ -103,8 +103,9 @@ def kernel_directory(family: int) -> str:
     hand-written MACA kernel, which has no capacity gate to satisfy.
 
     The directory name is the same string the build names the extension after
-    (`deep_select_xcore<N>`) and the same one `topk(backend=...)` accepts, so
-    all three describe one thing.
+    (`deep_select_xcore<N>`), so one name covers the tree and the module; it is
+    also what `topk(backend="maca_c")` resolves to on a device of this family,
+    though that resolution names no architecture at the call site.
     """
     return "xcore1000" if CAPACITY_BYTES.get(family, 0) < XCORE1600_KERNEL_CAPACITY_BYTES \
         else "xcore1600"

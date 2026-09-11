@@ -35,12 +35,12 @@ import torch
 import deep_select
 
 
-# Backend under test, set from `--backend`.  `None` (the default) is the kernel
-# this device has; `torch` drives `deep_select.interface.topk_torch`.  Running
-# the same table against both is the point: the table is the operator's
+# Backend under test, set from `--backend`.  `maca_c` (the default) is the
+# kernel this device has; `torch` drives `deep_select.interface.topk_torch`.
+# Running the same table against both is the point: the table is the operator's
 # contract, so an implementation that disagrees with it is wrong whichever one
 # it is.
-BACKEND = None
+BACKEND = "maca_c"
 
 
 def _topk(*args, **kwargs):
@@ -477,6 +477,170 @@ CASES = [
 ]
 
 
+# ── performance ─────────────────────────────────────────────────────────────
+#
+# Two implementations, benchmarked as peers: `maca_c`, and `topk` -- raw
+# `torch.topk`, the baseline this kernel exists to beat.  `topk` is
+# deliberately not a `backend=` value: it implements no part of the contract
+# (`end`, the out-of-band fills, `output_idx_offset`), so it is a fair
+# comparison only where the two coincide -- no window, no offset, and a row at
+# least as long as `topk` -- which is how every shape below is drawn.  It is
+# the same guard upstream's perf block applies (`tests/test.py:147`).
+#
+# The timer is `tests/kernelkit/bench.py`'s kineto harness (L2 flushed, marker
+# kernel around the measured range) -- the one upstream's `--perf-only` uses,
+# so the numbers are comparable with it.
+PERF_BACKENDS = ("maca_c", "topk")
+
+
+# Byte accounting, as upstream's: the row that was read, plus the outputs that
+# were written.  Stated here because "equivalent bandwidth" means nothing
+# without it.
+def _perf_bytes(shape):
+    itemsize = torch.empty((), dtype=shape["dtype"]).element_size()
+    idx_bytes = torch.empty((), dtype=shape["index_dtype"]).element_size()
+    total = shape["batch"] * shape["vocab"] * itemsize
+    if shape["return_value"]:
+        total += shape["batch"] * shape["topk"] * itemsize
+    return total + shape["batch"] * shape["topk"] * idx_bytes
+
+
+# The two scenarios the operator serves, with the flags upstream's
+# `performance_cases` gives them (`tests/test.py:225-242`): the Lightning
+# Indexer (bfloat16, indices only) and the Sampler (float32, sorted values,
+# int64 indices).
+def _indexer_shapes(batches, seqlens, topks):
+    return [dict(name=f"indexer-b{b}-s{seqlen}-k{k}", batch=b, vocab=seqlen,
+                 topk=k, dtype=BF16, index_dtype=I32, return_value=False)
+            for k in topks for b in batches for seqlen in seqlens]
+
+
+def _sampler_shapes(batches, vocab=129280, topk=512):
+    return [dict(name=f"sampler-b{b}", batch=b, vocab=vocab, topk=topk,
+                 dtype=FP32, index_dtype=I64, return_value=True)
+            for b in batches]
+
+
+# Decode (small b) to prefill (b=4096), short rows to long, at both topk
+# values -- a subset of upstream's 95-shape grid, which `--perf-full` runs.
+PERF_SHAPES = (
+    _indexer_shapes([6, 256, 4096], [4096, 65536, 262144, 1048576], [512])
+    + _indexer_shapes([256, 4096], [65536, 262144], [1024])
+    + _sampler_shapes([6, 256, 4096])
+)
+
+PERF_SHAPES_FULL = (
+    _indexer_shapes([6, 256, 512, 768, 4096],
+                    [256, 1024, 4096, 16384, 65536, 131072, 262144, 524288,
+                     1048576],
+                    [512, 1024])
+    + _sampler_shapes([6, 256, 512, 768, 4096])
+)
+
+
+def _perf_launcher(shape, backend, scores):
+    """A callable running one shape on one backend, for the timer to run."""
+    if backend == "topk":
+        def launch():
+            return torch.topk(scores, shape["topk"], dim=1,
+                              sorted=shape["return_value"])
+    else:
+        def launch():
+            return deep_select.topk(
+                scores, shape["topk"], sorted=shape["return_value"],
+                indices_type=shape["index_dtype"],
+                return_value=shape["return_value"], backend="maca_c")
+    return launch
+
+
+# What the profiler records for each backend's own kernels, matched
+# case-insensitively.  `maca_c` is one kernel, named for what it does.
+# `torch.topk` is not one thing here: it dispatches to the vendor's `mbtopk*`
+# on long rows and to ATen's `gatherTopK` + `radixSortKVInPlace` on short ones,
+# so the match is a set of stems rather than one substring.  Neither stem can
+# match the benchmark's own traffic -- the L2 flush (`...FillFunctor<int>`) and
+# the runtime's API events (`mcLaunchKernel`, `mcMemsetAsync`, ...), which the
+# profiler also records.
+_PERF_KERNEL_MATCH = {
+    "maca_c": ("topk",),
+    "topk": ("topk", "radixsort"),
+}
+
+
+def _perf_time_ms(launch, num_iters, backend):
+    """Mean per-run time of `launch`'s kernels, in milliseconds.
+
+    Kineto records everything between two markers, so the match is what
+    separates the measured kernels from the benchmark's own traffic.  A
+    several-name match is the op's span, not an error: both backends here can
+    be more than one kernel.
+    """
+    try:
+        from kernelkit import bench as kk_bench
+    except ImportError:                  # `python -m tests.check_maca`
+        from tests.kernelkit import bench as kk_bench
+    result = kk_bench(launch, num_iters)
+    keys = _PERF_KERNEL_MATCH[backend]
+    names = [n for n in result.get_kernel_names()
+             if any(k in n.lower() for k in keys)]
+    if not names:
+        raise RuntimeError(
+            f"no kernel of {backend!r} matched {keys}; the profiler saw "
+            f"{result.get_kernel_names()}")
+    if len(names) == 1:
+        return result.get_kernel_time(names[0]) * 1e3
+    return result.get_e2e_time(names) * 1e3
+
+
+def run_perf(num_iters, full):
+    shapes = PERF_SHAPES_FULL if full else PERF_SHAPES
+    print(f"\nperformance: {' vs '.join(PERF_BACKENDS)} -- "
+          f"{len(shapes)} shapes x {num_iters} iters, kineto timer, L2 flushed",
+          flush=True)
+    print("bytes moved = input row + index output"
+          " (+ value output when the shape asks for one)\n", flush=True)
+    print(f"{'Shape':<30} {'Backend':>8} {'Latency(ms)':>12} "
+          f"{'BW(GB/s)':>10} {'vs topk':>8}")
+    print("-" * 74, flush=True)
+
+    failures = []
+    for shape in shapes:
+        moved = _perf_bytes(shape)
+        # A fixed draw per shape, as the correctness table does; the padded
+        # buffer keeps the row stride the kernel requires.
+        scores, _ = _make(shape["batch"], shape["vocab"], shape["dtype"],
+                          seed=shape["batch"] * 131 + shape["vocab"] * 7
+                          + shape["topk"], gen=INPUT_GENERATORS["normal"],
+                          topk=shape["topk"])
+        times = {}
+        for backend in PERF_BACKENDS:
+            launch = _perf_launcher(shape, backend, scores)
+            try:
+                times[backend] = _perf_time_ms(launch, num_iters, backend)
+            except Exception as exc:  # noqa: BLE001 - report the shape, keep going
+                print(f"{shape['name']:<30} {backend:>8}   ERROR "
+                      f"{type(exc).__name__}: {str(exc).splitlines()[0][:60]}",
+                      flush=True)
+                failures.append(f"{shape['name']}/{backend}")
+        for backend in PERF_BACKENDS:
+            if backend not in times:
+                continue
+            ms = times[backend]
+            bw = moved / (ms * 1e-3) / 1e9
+            ratio = ("%.2fx" % (times["topk"] / ms)) if backend != "topk" \
+                and "topk" in times else "--"
+            print(f"{shape['name']:<30} {backend:>8} {ms:>12.4f} "
+                  f"{bw:>10.1f} {ratio:>8}", flush=True)
+        del scores
+        torch.cuda.empty_cache()
+
+    print(flush=True)
+    if failures:
+        print(f"{len(failures)} shape(s) could not be measured: {failures}")
+        return 1
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true",
@@ -485,10 +649,20 @@ def main():
     ap.add_argument("--no-nan", action="store_true",
                     help="skip the NaN and rejection blocks")
     ap.add_argument("--list", action="store_true", help="list cases and exit")
-    ap.add_argument("--backend", default=None,
-                    help="implementation under test: a backend name "
-                         "(xcore1000/xcore1500/xcore1600), 'torch', or unset for "
-                         "the kernel this device has")
+    ap.add_argument("--backend", default="maca_c", choices=["maca_c", "torch"],
+                    help="implementation under test: 'maca_c' (default) is the "
+                         "MACA kernel for this device, whichever that is; "
+                         "'torch' is the reference implementation")
+    ap.add_argument("--perf", action="store_true",
+                    help="benchmark instead of checking: maca_c against "
+                         "torch.topk over the perf shapes (ignores --backend, "
+                         "--group, --quick)")
+    ap.add_argument("--perf-iters", type=int, default=10,
+                    help="runs per measurement in --perf (default 10, as "
+                         "upstream's performance_cases)")
+    ap.add_argument("--perf-full", action="store_true",
+                    help="--perf over upstream's whole performance grid "
+                         "instead of the default subset")
     args = ap.parse_args()
 
     global BACKEND
@@ -500,8 +674,11 @@ def main():
         return
 
     from deep_select._arch import native_target
+    # `maca_c` resolves to the kernel built for this device, so name both: a
+    # run that loaded some other extension should be visible in the header.
     print(f"device: {torch.cuda.get_device_name(0)}  "
-          f"backend: {BACKEND or native_target()}", flush=True)
+          f"backend: {BACKEND}{' -> ' + native_target() if BACKEND == 'maca_c' else ''}",
+          flush=True)
 
     # `interface.get_stride_requirement` falls back to a constant when no
     # kernel is built (so `backend="torch"` works on a bare machine).  A
@@ -521,6 +698,9 @@ def main():
                   f"the fallback constant says {tuple(_ALIGNMENT_REQUIREMENT_BYTES)}")
             return 1
         print(f"alignment contract: kernel and fallback agree at {built}", flush=True)
+
+    if args.perf:
+        return run_perf(num_iters=args.perf_iters, full=args.perf_full)
 
     cases = CASES
     if args.group:

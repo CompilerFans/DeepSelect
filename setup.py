@@ -149,8 +149,9 @@ def build_for_maca():
     `csrc/xcore1600/`.  Each is built as its own extension, named for the
     architecture it serves -- `deep_select.deep_select_xcore<N>` -- because a
     config's shared memory footprint is only valid for the architecture it was
-    sized for, and because `deep_select.topk`'s `backend=` selects among them
-    by exactly that name.
+    sized for, and because `topk(backend="maca_c")` resolves to one of them by
+    exactly that name -- the architecture is named here, in the build, and not
+    in the public `backend=`.
 
     Which architectures get built comes from `CUCC_TARGETS` (default
     `native`), the same variable and meaning as the host repository's
@@ -278,7 +279,7 @@ def build_for_maca():
         capacity_kib = CAPACITY_BYTES[family] // 1024
         # Every architecture gets the kernel that was built for its capacity,
         # so there is no opt-in and no skip: an architecture with no kernel
-        # would be a hole in `backend=`, not a smaller build.
+        # would be a hole in `backend="maca_c"`, not a smaller build.
         if kernel_directory(family) == "xcore1000":
             sources = XCORE1000_SOURCES
             which = "the MACA-native kernel"

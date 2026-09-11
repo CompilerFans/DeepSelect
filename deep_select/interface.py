@@ -7,25 +7,32 @@ from typing import Optional, Tuple
 from ._arch import FAMILY_OF_TARGET, native_target
 
 
-# A backend name is an architecture name: `xcore1000`, `xcore1500`,
-# `xcore1600`.  Each names the kernel built for that architecture -- setup.py
-# builds one extension per architecture, `deep_select.deep_select_xcore<N>`,
-# holding the kernel whose capacity fits it -- so `backend=` selects a kernel
-# by architecture and nothing else, and `topk` with no `backend` runs the
-# kernel this device has.  `torch` is not a kernel: it is a reference
-# implementation of the same contract, and runs anywhere.
-_BACKEND_NAMES = tuple(f"xcore{family}"
-                       for family in sorted(set(FAMILY_OF_TARGET.values())))
+# The public backend names.  `maca_c` is the MACA kernel for this device.
+# Which kernel that is -- the hand-written one on a 64 KiB part, the ported one
+# on a 128 KiB part -- is a property of the device, not a choice a caller
+# makes, so the name does not name an architecture (the host repository's
+# `backend=` names implementations the same way, e.g. `maca_c`, `mctlassEx`).
+# `torch` is not a kernel: it is a reference implementation of the same
+# contract, and runs anywhere.
+_BACKENDS = ("maca_c", "torch")
+
+# The kernels the build produces, one per architecture -- setup.py builds one
+# extension per architecture, `deep_select.deep_select_xcore<N>`, holding the
+# kernel whose shared memory capacity fits it.  Internal: this is how `maca_c`
+# resolves on a given device, and it is the vocabulary of the build, not of the
+# API.
+_KERNEL_NAMES = tuple(f"xcore{family}"
+                      for family in sorted(set(FAMILY_OF_TARGET.values())))
 
 
 @functools.lru_cache(maxsize=None)
 def _backend_for(name: str):
-    """The extension module that implements `name`.
+    """The extension module that implements the kernel `name`.
 
     Imported on demand and cached: the module holds a device binary, and a
     process that never calls `topk` on a kernel should not load one.
     """
-    assert name in _BACKEND_NAMES, name
+    assert name in _KERNEL_NAMES, name
     try:
         return importlib.import_module(f".deep_select_{name}", __package__)
     except ImportError as exc:
@@ -72,7 +79,7 @@ def topk(
     value_oob_fill_value: float = float("-inf"),
     return_value: bool = True,
     abort_when_nan_found: bool = True,
-    backend: Optional[str] = None,
+    backend: str = "maca_c",
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """
     Arguments:
@@ -93,15 +100,14 @@ def topk(
         return_value: bool. If False, only return indices without values to accelerate the kernel. The return value is still a Tuple, but the first element will be None.
         abort_when_nan_found: bool. When a NaN is found, if True, aborts the whole kernel; if False, writes 0x3F3F3F3F to the corresponding output_idx[batch_idx][0] and exits.
                 The NaN check itself is always enabled. Exception: when the row's length <= topk, it is skipped.
-        backend: str. Which implementation to run, or None (the default) for
-                the kernel this device has.  A backend name is an architecture
-                name -- `xcore1000`, `xcore1500`, `xcore1600` -- and each names
-                the kernel built for that architecture: `xcore1000` is the
-                MACA-native kernel, `xcore1600` is the ported one, and which of
-                them a given device runs is a property of the device, not a
-                choice.  `torch` is not a kernel; it is a reference
-                implementation of the same contract, built on torch ops, and
-                runs on any device.
+        backend: str. Which implementation to run.  `"maca_c"` (the default)
+                is the MACA kernel this device has: the hand-written kernel on
+                a 64 KiB part, the ported one on a 128 KiB part -- which of
+                the two is a property of the device, not a choice, so the name
+                does not name an architecture.  `"torch"` is a reference
+                implementation of the same contract, built on torch ops; it
+                runs on any device and dtype, including where no kernel is
+                built.
 
     Return:
         output_val: (b, topk), dtype=input.dtype.
@@ -112,11 +118,11 @@ def topk(
     # Checked before anything is read off `input`: a caller who mistyped a
     # backend name should hear about that, not about whatever the None they
     # passed in place of a tensor does to the next line.
-    if backend is not None and backend != "torch" and backend not in _BACKEND_NAMES:
+    if backend not in _BACKENDS:
         raise ValueError(
             f"Unsupported backend: {backend!r}. Expected one of "
-            f"{', '.join(_BACKEND_NAMES)}, 'torch', or None for the kernel this "
-            f"device has"
+            f"{', '.join(_BACKENDS)} -- 'maca_c' runs the kernel this device "
+            f"has, 'torch' the reference implementation"
         )
 
     N = input.shape[0]
@@ -163,10 +169,10 @@ def topk(
             return_value,
             abort_when_nan_found,
         )
-        # No `backend` means this device's kernel; resolving it here rather
-        # than in the signature keeps `torch` usable on a machine with no MACA
-        # device at all.
-        _backend_for(backend if backend is not None else native_target()).topk(*backend_args)
+        # `maca_c` means this device's kernel: which extension that is gets
+        # resolved here rather than in the signature, which keeps `torch`
+        # usable on a machine with no MACA device at all.
+        _backend_for(native_target()).topk(*backend_args)
         return output_val, output_idx
 
 
