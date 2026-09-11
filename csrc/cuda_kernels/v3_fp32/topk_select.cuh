@@ -605,6 +605,11 @@ void run_topk_select_kernel(const TopkSelectArgs &args) {
 
     auto kernel = topk_kernel<Kernel>;
     constexpr size_t smem_size = sizeof(typename Kernel::SharedMemoryPlanFP32);
+    // [MACA] See the bf16 twin in `v3/topk_select.cuh`.
+    static_assert(smem_size * Kernel::TARGET_OCCUPANCY <= NATIVE_SHARED_MEMORY_PER_SM_BYTES,
+                  "config does not fit one SM of the architecture being built "
+                  "(TARGET_OCCUPANCY CTAs of `smem_size` each): it needs a 128 KiB "
+                  "target (xcore1500/xcore1600), or a smaller tuple");
     KU_ASSERT(smem_size * Kernel::TARGET_OCCUPANCY <= args.shared_memory_size_per_sm);
     KU_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 

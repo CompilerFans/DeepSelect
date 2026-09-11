@@ -54,15 +54,21 @@ class TopkSelectConfigs:
 
 
 def generate_instantiation_file(instantiation_dir: str, namespace: str, config: TopkSelectConfigs) -> str:
+    # The config vocabulary above is upstream's (and the CUDA build's); the
+    # emitted source spells the bf16 value type the way MACA's headers declare
+    # it.  `nv_bfloat16` is not a type on MACA -- `structs.h` includes
+    # `<maca_bfloat16.h>` -- so emitting the upstream spelling verbatim
+    # produces a TU that does not compile.
+    emitted_value_t = {"nv_bfloat16": "maca_bfloat16", "float": "float"}[config.ValueT]
     file_content = \
 f"""#include "../topk_select.cuh"
 
 namespace {namespace} {{
 
+using Config = TopkSelectConfig<{emitted_value_t}, {config.OutIdxT}, {str(config.sorted_value).lower()}, {str(config.sorted_index).lower()}, {str(config.return_value).lower()}, {config.max_topk}, {config.num_threads}, {config.target_occupancy}, {config.elements_per_round}, {config.reconstruct_threshold}, {config.tma_buffer_depth}, 512, {config.cluster}>;
+
 template
-void run_topk_select_kernel<
-    TopkSelectConfig<{config.ValueT}, {config.OutIdxT}, {str(config.sorted_value).lower()}, {str(config.sorted_index).lower()}, {str(config.return_value).lower()}, {config.max_topk}, {config.num_threads}, {config.target_occupancy}, {config.elements_per_round}, {config.reconstruct_threshold}, {config.tma_buffer_depth}, 512, {config.cluster}>
->(const TopkSelectArgs &args);
+void run_topk_select_kernel<Config>(const TopkSelectArgs &args);
 
 }}   // {namespace}
 """

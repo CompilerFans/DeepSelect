@@ -1,9 +1,42 @@
 import functools
+import importlib
 import torch
 
 from typing import Optional, Tuple
 
 from . import deep_select_cuda as _backend
+
+
+# Backends that implement the same `topk` / `get_alignment_requirement` pair.
+# `maca_c` is the MACA-native kernel; `upstream` is the ported upstream one,
+# which is built one shared object per architecture and selected here by the
+# architecture torch reports for the current device.
+_BACKENDS = ("maca_c", "upstream")
+
+
+@functools.lru_cache(maxsize=None)
+def _backend_for(name: str):
+    """Resolve a backend name to the module that implements it.
+
+    The upstream kernel is gated at compile time on the shared memory capacity
+    of the architecture it targets -- a config that cannot fit one SM is a
+    compile error -- so exactly one build per architecture exists and the one
+    to load is a property of the current device.  The mapping from the device's
+    CUDA-compatible capability to that build lives in `._arch`, together with
+    the table setup.py used to name the builds.
+    """
+    if name == "maca_c":
+        return _backend
+    from ._arch import native_target
+
+    target = native_target()
+    try:
+        return importlib.import_module(f".deep_select_upstream_{target}", __package__)
+    except ImportError as exc:
+        raise RuntimeError(
+            f"backend {name!r} has no build for {target} (this device); "
+            f"build with CUCC_TARGETS containing {target}"
+        ) from exc
 
 
 @functools.lru_cache(maxsize=1)
@@ -50,8 +83,10 @@ def topk(
         abort_when_nan_found: bool. When a NaN is found, if True, aborts the whole kernel; if False, writes 0x3F3F3F3F to the corresponding output_idx[batch_idx][0] and exits.
                 The NaN check itself is always enabled. Exception: when the row's length <= topk, it is skipped.
         backend: str. Implementation to run. `maca_c` (default) is the MACA-native
-                kernel; `torch` is a reference implementation of the same
-                contract built on torch ops.
+                kernel; `upstream` is the ported upstream kernel (one build per
+                architecture, selected by the current device); `torch` is a
+                reference implementation of the same contract built on torch
+                ops.
 
     Return:
         output_val: (b, topk), dtype=input.dtype.
@@ -90,7 +125,7 @@ def topk(
             return_value=return_value,
             abort_when_nan_found=abort_when_nan_found,
         )
-    elif backend == "maca_c":
+    elif backend in _BACKENDS:
         backend_args = (
             input,
             topk,
@@ -103,10 +138,13 @@ def topk(
             return_value,
             abort_when_nan_found,
         )
-        _backend.topk(*backend_args)
+        _backend_for(backend).topk(*backend_args)
         return output_val, output_idx
     else:
-        raise ValueError(f"Unsupported backend: {backend!r}. Expected: maca_c, torch")
+        raise ValueError(
+            f"Unsupported backend: {backend!r}. "
+            f"Expected: {', '.join(_BACKENDS + ('torch',))}"
+        )
 
 
 def topk_torch(

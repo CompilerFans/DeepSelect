@@ -12,8 +12,13 @@
 #include "cuda_kernels/v3/topk_select.h"
 #include "cuda_kernels/v3_fp32/topk_select.h"
 #include <cstdlib>
+// [MACA] 配合下方 `check_dim0_stride` 里把 `std::format` 换成 `snprintf`：
+//   宿主是 GCC 11.4，`<format>` 不存在（libstdc++ 到 GCC 13 才有），
+//   所以这里不能用 `#include <format>` 解决。
+#include <cstdio>
 // [MACA] 原为 `#include "cuda_kernels/v3_cluster/topk_select.h"`。cluster 变体
 //   （CTA 协同寻址 + TMA 多播）在 MACA 上整体删除，见下方 bf16 分发的说明。
+
 
 void topk(
     torch::Tensor &input,
@@ -76,12 +81,18 @@ void topk(
     auto check_dim0_stride = [&](const char tensor_name[], torch::Tensor &tensor, uint32_t alignment_requirement_bytes) {
         int64_t cur_stride = tensor.stride(0);
         uint64_t itemsize = tensor.dtype().itemsize();
-        TORCH_CHECK(cur_stride * itemsize % alignment_requirement_bytes == 0,
-            std::format("{}.stride(0) (currently {} numbers) must be a multiple of {} Bytes ({} numbers)",
-                tensor_name, cur_stride,
-                alignment_requirement_bytes, alignment_requirement_bytes / itemsize
-            )
-        );
+        // [MACA] 原为 `std::format("{}.stride(0) (currently {} numbers) ...", ...)`。
+        //   `std::format` 要 C++20 的 libstdc++（GCC >= 13），本机宿主是 GCC 11.4，
+        //   `<format>` 根本不存在（是宿主编译器能力问题，不是传递引入问题）。
+        //   改用 snprintf：不引入新依赖（fmt 是外层仓的 submodule，本仓不该依赖它），
+        //   且报文文本与 std::format 逐字符相同。
+        char msg[256];
+        std::snprintf(msg, sizeof(msg),
+            "%s.stride(0) (currently %lld numbers) must be a multiple of %u Bytes (%llu numbers)",
+            tensor_name, (long long)cur_stride,
+            (unsigned)alignment_requirement_bytes,
+            (unsigned long long)(alignment_requirement_bytes / itemsize));
+        TORCH_CHECK(cur_stride * itemsize % alignment_requirement_bytes == 0, msg);
     };
     check_dim0_stride("input", input, INPUT_STRIDE_ALIGNMENT_REQUIREMENT);
     check_dim0_stride("output_index", output_index, OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT);
@@ -140,13 +151,19 @@ void topk(
                     BOOL_SWITCH(return_value, RETURN_VALUE, [&]() {
                         //   wave == 1 -> occ1 (512t / B8192 / B2 4096 / TMA5 rounds)
                         //   otherwise -> occ2 (256t / B4096 / B2 4096 / TMA3 or 4)
+                        //
+                        // [MACA] These five tuples are upstream's, tuned for 227 KiB of shared
+                        // memory, and the big-topk one needs 183296 B -- so this arm only
+                        // compiles for an architecture that has 128 KiB (xcore1500/xcore1600).
+                        // An xcore1000 build has to bring its own <= 64 KiB tuples; until it
+                        // does, the static_asserts below fail the compile, which is the point.
                         auto dispatch = [&]<uint32_t MAX_TOPK>() {
                             if (num_waves == 1)
-                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<nv_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 512, 1, 8192, 4096, 5>>(args);
+                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 512, 1, 8192, 4096, 5>>(args);
                             else if constexpr (MAX_TOPK <= 512)
-                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<nv_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 256, 2, 4096, 4096, 4>>(args);
+                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 256, 2, 4096, 4096, 4>>(args);
                             else
-                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<nv_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 256, 2, 4096, 4096, 3>>(args);
+                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 256, 2, 4096, 4096, 3>>(args);
                         };
                         if (topk <= 512) {
                             dispatch.template operator()<512>();
@@ -155,7 +172,7 @@ void topk(
                         } else {
                             // Big-topk coverage tier, topk in (1024, 4096]: one correctness-only tuple
                             // (512t / occ1 / B8192 / B2 4096 / TMA3 / max_topk 4096), no wave split.
-                            topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<nv_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, 4096, 512, 1, 8192, 4096, 3>>(args);
+                            topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, 4096, 512, 1, 8192, 4096, 3>>(args);
                         }
                     });
                 });
@@ -169,6 +186,9 @@ void topk(
         INTEGER_TYPE_SWITCH(output_index_t, OutIdxT, [&]() {
             //   topk <= 1024        -> 512t / B8192 / B2 4096 / TMA3
             //   topk in (1024,4096] -> 256t / B4096 / B2 4096 / TMA3 (correctness-only coverage tier)
+            //
+            // [MACA] Same 128 KiB floor as the bf16 arm above: the topk <= 1024 tuple needs
+            // 142336 B here, because fp32 keeps its keys 64 bits wide.
             auto dispatch = [&]<bool SORTED_VALUE, bool SORTED_INDEX, bool RETURN_VALUE>() {
                 auto launch = [&]<uint32_t MAX_TOPK, uint32_t NUM_THREADS, uint32_t B>() {
                     topk_select_fp32::run_topk_select_kernel<TopkSelectConfig<float, OutIdxT, SORTED_VALUE, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, NUM_THREADS, 1, B, 4096, 3>>(args);
