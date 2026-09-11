@@ -6,8 +6,8 @@ Usage:
         python3 scripts/generate_instantiations.py <relative/path/to/the/instantiations/directory>
 
     For example,
-        python3 scripts/generate_instantiations.py csrc/cuda_kernels/v3/instantiations
-        python3 scripts/generate_instantiations.py csrc/cuda_kernels/v3_fp32/instantiations
+        python3 scripts/generate_instantiations.py csrc/xcore1600/v3/instantiations
+        python3 scripts/generate_instantiations.py csrc/xcore1600/v3_fp32/instantiations
         # [MACA] 原还有 v3_cluster/instantiations；该变体已随 cluster/TMA 一并删除。
 
     The script will:
@@ -159,7 +159,7 @@ def main(instantiation_dir: str):
         if os.path.exists(instantiation_dir):
             shutil.rmtree(instantiation_dir)
         os.makedirs(instantiation_dir, exist_ok=True)
-    if instantiation_dir == "csrc/cuda_kernels/v3/instantiations":
+    if instantiation_dir == "csrc/xcore1600/v3/instantiations":
         remove_and_remake_dir()
         # bf16: sv0 x si{0,1} x rv{0,1}
         valid_si_rv_combinations = [
@@ -205,7 +205,7 @@ def main(instantiation_dir: str):
                     for num_threads, occ, b, b2, tma in fast_path_tuples:
                         configs.append(TopkSelectConfigs("nv_bfloat16", out_idx_t, False, si, rv, max_topk, num_threads, occ, b, b2, tma))
         generate_instantiations(instantiation_dir, "topk_select_bf16_normal", configs)
-    elif instantiation_dir == "csrc/cuda_kernels/v3_fp32/instantiations":
+    elif instantiation_dir == "csrc/xcore1600/v3_fp32/instantiations":
         remove_and_remake_dir()
         # fp32: sv0 x si{0,1} x rv{0,1} + sv1_si0_rv1
         valid_sv_si_rv_combinations_fp32 = [

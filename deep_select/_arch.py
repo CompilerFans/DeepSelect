@@ -36,14 +36,10 @@ CAPACITY_BYTES = {
     1600: 128 * 1024,
 }
 
-# The capacity the ported upstream kernel's tuples were re-derived against
+# The capacity the ported kernel's tuples were re-derived against
 # (`scripts/generate_instantiations.py`, which refuses to emit a tuple whose
-# `occupancy * shared_memory_bytes()` exceeds it).  A family with less gets no
-# upstream build at all: not because no tuple could ever fit, but because the
-# table that would go with it does not exist, and a part cannot use another
-# part's table -- that is the whole point of the compile-time gate.  xcore1000
-# keeps `csrc/maca_topk.cu`, which has no capacity gate, as its topk.
-UPSTREAM_CAPACITY_BYTES = 128 * 1024
+# `occupancy * shared_memory_bytes()` exceeds it).
+XCORE1600_KERNEL_CAPACITY_BYTES = 128 * 1024
 
 # The CUDA-compat sm spelling torch reports -> family base.  Which of the three
 # xcore1600 spellings a part reports depends on the SDK generation, so the
@@ -98,14 +94,20 @@ def native_target() -> str:
     return f"xcore{family}"
 
 
-def upstream_available(family: int) -> bool:
-    """Whether the ported upstream kernel is buildable for this family at all.
+def kernel_directory(family: int) -> str:
+    """Which kernel tree under `csrc/` serves this family.
 
-    False means no `CUCC_TARGETS` value would help -- the tuples do not exist
-    for a part this size, which is a different situation from "you did not
-    build it", and the two want different messages.
+    The split is by capacity, not by name: a part with 128 KiB of shared memory
+    per SM runs `csrc/xcore1600/`, whose config tuples were re-derived for
+    exactly that figure, and the 64 KiB part runs `csrc/xcore1000/`, the
+    hand-written MACA kernel, which has no capacity gate to satisfy.
+
+    The directory name is the same string the build names the extension after
+    (`deep_select_xcore<N>`) and the same one `topk(backend=...)` accepts, so
+    all three describe one thing.
     """
-    return CAPACITY_BYTES.get(family, 0) >= UPSTREAM_CAPACITY_BYTES
+    return "xcore1000" if CAPACITY_BYTES.get(family, 0) < XCORE1600_KERNEL_CAPACITY_BYTES \
+        else "xcore1600"
 
 
 def resolve_targets(spec: Optional[str]) -> list:

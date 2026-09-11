@@ -5,8 +5,8 @@
 
 #include "structs.h"
 #include "utils.cuh"
-#include "cuda_kernels/config.h"
-#include "cuda_kernels/bit_utils.cuh"
+#include "config.h"
+#include "bit_utils.cuh"
 
 // [MACA] 原头部还有两行 Hopper 专有依赖，已拆除：
 //   #include <cutlass/arch/barrier.h>        —— MACA 上无此文件（mctlass/arch 下没有 barrier.h）

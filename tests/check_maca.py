@@ -35,11 +35,12 @@ import torch
 import deep_select
 
 
-# Backend under test, set from `--backend`.  `maca_c` drives the MACA kernel;
-# `torch` drives `deep_select.interface.topk_torch`.  Running the same table
-# against both is the point: the table is the operator's contract, so an
-# implementation that disagrees with it is wrong whichever one it is.
-BACKEND = "maca_c"
+# Backend under test, set from `--backend`.  `None` (the default) is the kernel
+# this device has; `torch` drives `deep_select.interface.topk_torch`.  Running
+# the same table against both is the point: the table is the operator's
+# contract, so an implementation that disagrees with it is wrong whichever one
+# it is.
+BACKEND = None
 
 
 def _topk(*args, **kwargs):
@@ -470,8 +471,10 @@ def main():
     ap.add_argument("--no-nan", action="store_true",
                     help="skip the NaN and rejection blocks")
     ap.add_argument("--list", action="store_true", help="list cases and exit")
-    ap.add_argument("--backend", default="maca_c",
-                    help="implementation under test: maca_c (default) or torch")
+    ap.add_argument("--backend", default=None,
+                    help="implementation under test: a backend name "
+                         "(xcore1000/xcore1500/xcore1600), 'torch', or unset for "
+                         "the kernel this device has")
     args = ap.parse_args()
 
     global BACKEND
@@ -482,7 +485,28 @@ def main():
             print(f"  {c['group']:<8} {c['name']}")
         return
 
-    print(f"device: {torch.cuda.get_device_name(0)}  backend: {BACKEND}", flush=True)
+    from deep_select._arch import native_target
+    print(f"device: {torch.cuda.get_device_name(0)}  "
+          f"backend: {BACKEND or native_target()}", flush=True)
+
+    # `interface.get_stride_requirement` falls back to a constant when no
+    # kernel is built (so `backend="torch"` works on a bare machine).  A
+    # constant that mirrors another value can drift from it, so whenever a
+    # kernel IS present, assert the two agree -- the fallback stays a mirror
+    # instead of quietly becoming a second source of truth.
+    from deep_select.interface import _ALIGNMENT_REQUIREMENT_BYTES
+    try:
+        built = tuple(deep_select.interface._backend_for(
+            native_target()).get_alignment_requirement())
+    except RuntimeError:
+        print("alignment contract: no kernel built for this device, "
+              "fallback not checked", flush=True)
+    else:
+        if built != tuple(_ALIGNMENT_REQUIREMENT_BYTES):
+            print(f"ALIGNMENT CONTRACT MISMATCH: the kernel says {built}, "
+                  f"the fallback constant says {tuple(_ALIGNMENT_REQUIREMENT_BYTES)}")
+            return 1
+        print(f"alignment contract: kernel and fallback agree at {built}", flush=True)
 
     cases = CASES
     if args.group:

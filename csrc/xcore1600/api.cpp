@@ -8,9 +8,9 @@
 
 #include "dispatch_utils.h"
 
-#include "cuda_kernels/config.h"
-#include "cuda_kernels/v3/topk_select.h"
-#include "cuda_kernels/v3_fp32/topk_select.h"
+#include "config.h"
+#include "v3/topk_select.h"
+#include "v3_fp32/topk_select.h"
 #include <cstdlib>
 // [MACA] 配合下方 `check_dim0_stride` 里把 `std::format` 换成 `snprintf`：
 //   宿主是 GCC 11.4，`<format>` 不存在（libstdc++ 到 GCC 13 才有），

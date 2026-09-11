@@ -14,8 +14,8 @@ Usage caveats:
 #include <kerutils/kerutils.cuh>
 
 #include "structs.h"
-#include "cuda_kernels/utils.cuh"
-#include "cuda_kernels/common_parts.cuh"
+#include "utils.cuh"
+#include "common_parts.cuh"
 
 namespace topk_select_bf16_normal {
 
