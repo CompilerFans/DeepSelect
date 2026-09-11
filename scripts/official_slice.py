@@ -137,6 +137,11 @@ def main():
                         help="implementation under test; unset leaves the "
                              "library's own choice, which is what the official "
                              "suite runs with unmodified")
+    parser.add_argument("--shard", default=None, metavar="I/N",
+                        help="run every N-th case of the sample, offset I "
+                             "(0-based): N processes together cover the whole "
+                             "sample, which is how a full-table run is kept "
+                             "down to one process's wall clock")
     args = parser.parse_args()
 
     if args.backend is not None:
@@ -146,9 +151,13 @@ def main():
     table = cases()
     light = [p for p in table if p.batch_size * p.vocab_size <= ELEM_BUDGET]
     sample = random.Random(args.seed).sample(light, min(args.sample, len(light)))
+    if args.shard is not None:
+        index, count = (int(part) for part in args.shard.split("/"))
+        sample = sample[index::count]
     print(f"official table: {len(table)} cases, {len(light)} within "
           f"{ELEM_BUDGET} elements; running {len(sample)} sampled with seed "
-          f"{args.seed}", flush=True)
+          f"{args.seed}"
+          + (f", shard {args.shard}" if args.shard else ""), flush=True)
 
     passed, failed, skipped = 0, [], 0
     started = time.time()
