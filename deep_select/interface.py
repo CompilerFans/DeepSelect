@@ -68,7 +68,8 @@ def topk(
     Arguments:
         input: (b, vocab_size), dtype=torch.bfloat16/torch.float. stride(0) must be a multiple of `deep_select.get_stride_requirement()[0]` bytes, and stride(1) must be 1.
         topk: int. Select topk elements for each row.
-        sorted: bool. Whether to return sorted **output_val**. Only supports fp32.
+        sorted: bool. Whether to return sorted **output_val**. fp32 on the
+                upstream contract; the MACA kernel also supports bfloat16.
         begin(optional): (b,), dtype=int32. CURRENTLY NOT SUPPORTED. The left(inclusive) range for input row, default is 0.
         end(optional): (b,), dtype=int32. The right(exclusive) range for input row, default is vocab_size. The stride of this tensor must be 1.
                        Note when end[i] <= topk, valid elements will be gathered at the beginning of values and indices returned. The rest of `values` will be filled with `value_oob_fill_value`, while the rest of `indices` will be filled with `idx_oob_fill_value` (won't be plused by `output_idx_offset`).
@@ -172,8 +173,40 @@ def topk_torch(
         raise ValueError(f"topk must be positive, got {topk}")
     if topk > 4096:
         raise ValueError(f"topk must be <= 4096, got {topk}")
-    if sorted and input.dtype != torch.float32:
-        raise ValueError("`sorted` is only supported for float32 input")
+    # The same contract rejections the kernel path enforces (upstream:
+    # csrc/api.cpp).  They are part of the operator's contract, not of any one
+    # implementation -- a caller that passes a strided view must get an error
+    # rather than a silently different answer just because it chose this
+    # backend.
+    #
+    # Note what is *not* here: upstream restricts `sorted` to float32, and the
+    # kernel path keeps that restriction, but this repository's kernel
+    # implements it for bfloat16 too (see `csrc/maca_topk.cu`).  The reference
+    # describes the operator this repository ships, so it follows the wider
+    # contract; `torch.topk` orders bfloat16 natively, so nothing extra is
+    # needed for it.
+    if sorted and not return_value:
+        raise ValueError("`return_value` must be enabled when `sorted` is True")
+    if sorted and sorted_index:
+        raise ValueError("`sorted` and `sorted_index` cannot be used at the same time")
+    if input.dim() != 2:
+        raise ValueError(f"input must be 2-D, got {input.dim()} dimensions")
+    if input.dtype not in (torch.float32, torch.bfloat16):
+        raise ValueError(f"input dtype must be float32 or bfloat16, got {input.dtype}")
+    if input.stride(1) != 1:
+        raise ValueError("input.stride(1) must be 1")
+    if indices_type not in (torch.int32, torch.int64):
+        raise ValueError(f"indices_type must be int32 or int64, got {indices_type}")
+    if output_idx is not None:
+        if output_idx.dtype != indices_type:
+            raise ValueError(f"output_idx dtype must be {indices_type}, got {output_idx.dtype}")
+        if output_idx.stride(1) != 1:
+            raise ValueError("output_idx.stride(1) must be 1")
+        if (output_idx.size(0) < input.shape[0]
+                or output_idx.size(1) < topk):
+            raise ValueError(
+                f"output_idx must be at least (batch_size, topk) = "
+                f"({input.shape[0]}, {topk}), got {tuple(output_idx.shape)}")
 
     n_rows, vocab_size = input.shape
     device = input.device

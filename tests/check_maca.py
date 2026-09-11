@@ -35,6 +35,18 @@ import torch
 import deep_select
 
 
+# Backend under test, set from `--backend`.  `maca_c` drives the MACA kernel;
+# `torch` drives `deep_select.interface.topk_torch`.  Running the same table
+# against both is the point: the table is the operator's contract, so an
+# implementation that disagrees with it is wrong whichever one it is.
+BACKEND = "maca_c"
+
+
+def _topk(*args, **kwargs):
+    """`deep_select.topk` against the backend selected on the command line."""
+    return deep_select.topk(*args, backend=BACKEND, **kwargs)
+
+
 # ── input draws ──────────────────────────────────────────────────────────────
 # Each snippet runs against `buf` on the device, with only `torch`, `buf` and
 # `topk` in scope -- the same three names exist in the parent and in the
@@ -150,7 +162,7 @@ def check(name, batch, vocab, topk, dtype, idx_dtype, seed,
                                   device="cuda")[:, :topk]
     else:
         out_idx = None
-    val, idx = deep_select.topk(
+    val, idx = _topk(
         x, topk, sorted=sorted_value, end=end, indices_type=idx_dtype,
         sorted_index=sorted_index, return_value=return_value,
         output_idx=out_idx, output_idx_offset=off,
@@ -267,7 +279,7 @@ def check_nan(dtype, idx_dtype, patterns, end_len=None):
     end = (None if end_len is None else
            torch.full((batch,), end_len, dtype=torch.int32, device="cuda"))
     idx = torch.zeros((batch, topk), dtype=idx_dtype, device="cuda")
-    _val, idx = deep_select.topk(x, topk, end=end, indices_type=idx_dtype,
+    _val, idx = _topk(x, topk, end=end, indices_type=idx_dtype,
                                  output_idx=idx, abort_when_nan_found=False)
     torch.cuda.synchronize()
     tag = (f"NaN {DTYPE_NAMES[dtype]:<5} {str(idx_dtype).split('.')[-1]:<7} "
@@ -304,7 +316,7 @@ buf = torch.empty(1, 4096, dtype={dtype!r}, device="cuda")
 buf.normal_(0, 1)
 for i, b in enumerate({bits!r}):
     buf[:, 10 + 20 * i] = torch.tensor([b], dtype={UINT_OF[dtype]!r}).view({dtype!r})
-deep_select.topk(buf, 512, abort_when_nan_found=True)
+deep_select.topk(buf, 512, abort_when_nan_found=True, backend={BACKEND!r})
 torch.cuda.synchronize()
 print("NO_ABORT")
 """
@@ -326,26 +338,26 @@ def check_rejections():
     one_row = torch.zeros(2, dtype=torch.int32, device="cuda")
     wide = torch.empty(2, 2048, dtype=torch.int32, device="cuda")
     cases = [
-        ("topk=0", lambda: deep_select.topk(x, 0)),
-        ("topk=4097", lambda: deep_select.topk(x, 4097)),
+        ("topk=0", lambda: _topk(x, 0)),
+        ("topk=4097", lambda: _topk(x, 4097)),
         ("sorted_value with return_value=False",
-         lambda: deep_select.topk(x, 16, sorted=True, return_value=False)),
+         lambda: _topk(x, 16, sorted=True, return_value=False)),
         ("sorted_value with sorted_index",
-         lambda: deep_select.topk(x, 16, sorted=True, sorted_index=True)),
-        ("begin (unsupported)", lambda: deep_select.topk(x, 16, begin=one_row)),
-        ("hint (unsupported)", lambda: deep_select.topk(x, 16, hint=one_row)),
-        ("input.stride(1) != 1", lambda: deep_select.topk(x[:, ::2], 16)),
-        ("value dtype fp16", lambda: deep_select.topk(x.half(), 16)),
+         lambda: _topk(x, 16, sorted=True, sorted_index=True)),
+        ("begin (unsupported)", lambda: _topk(x, 16, begin=one_row)),
+        ("hint (unsupported)", lambda: _topk(x, 16, hint=one_row)),
+        ("input.stride(1) != 1", lambda: _topk(x[:, ::2], 16)),
+        ("value dtype fp16", lambda: _topk(x.half(), 16)),
         ("indices_type fp32",
-         lambda: deep_select.topk(x, 16, indices_type=torch.float32)),
+         lambda: _topk(x, 16, indices_type=torch.float32)),
         # The kernel writes output_index[row, i] assuming stride(1) == 1, so a
         # strided view must be refused rather than silently scrambled
         # (upstream: csrc/api.cpp KU_CHECK_LAST_DIM_CONTIGUOUS).
         ("output_idx.stride(1) != 1",
-         lambda: deep_select.topk(x, 512, output_idx=wide[:, ::2],
+         lambda: _topk(x, 512, output_idx=wide[:, ::2],
                                   indices_type=torch.int32)),
         ("output_idx.size(1) < topk",
-         lambda: deep_select.topk(x, 512, output_idx=wide[:, :100],
+         lambda: _topk(x, 512, output_idx=wide[:, :100],
                                   indices_type=torch.int32)),
     ]
     ok = True
@@ -458,14 +470,19 @@ def main():
     ap.add_argument("--no-nan", action="store_true",
                     help="skip the NaN and rejection blocks")
     ap.add_argument("--list", action="store_true", help="list cases and exit")
+    ap.add_argument("--backend", default="maca_c",
+                    help="implementation under test: maca_c (default) or torch")
     args = ap.parse_args()
+
+    global BACKEND
+    BACKEND = args.backend
 
     if args.list:
         for c in CASES:
             print(f"  {c['group']:<8} {c['name']}")
         return
 
-    print(f"device: {torch.cuda.get_device_name(0)}", flush=True)
+    print(f"device: {torch.cuda.get_device_name(0)}  backend: {BACKEND}", flush=True)
 
     cases = CASES
     if args.group:
