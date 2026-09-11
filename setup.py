@@ -309,7 +309,6 @@ def build_for_maca():
                     f"-L{maca_root}/lib",
                     f"-Wl,-rpath,{maca_root}/lib",
                 ],
-                define_macros=[("DEEP_SELECT_TARGET", f'"{target}"')],
             )
         )
         print(f"deep_select: building xcore{family} "
