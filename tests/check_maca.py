@@ -69,6 +69,13 @@ INPUT_GENERATORS = {
     # subnormal (fp32) / all-zero (bf16 underflows here): ftz must be off
     "denormal": "buf.normal_(0, 1); buf.mul_(1e-42)",
     "zeros": "buf.fill_(-0.0)",
+    # A flat draw puts thousands of values in one coarse key bin at the k-th
+    # element -- far past the candidate arena a radix row kernel stages into.
+    # That is the regime where dropping the members that do not fit answers
+    # from a truncated candidate set: the row is then ranked against a subset
+    # of the values it should have ranked, and the result is still `topk` in
+    # range, distinct indices, so only the values reveal it.
+    "uniform": "buf.uniform_(-1.0, 1.0)",
 }
 
 # NaN bit patterns.  The bf16 value is the top half of the fp32 one.
@@ -431,6 +438,11 @@ CASES = [
       sorted_value=True),
     C("tie-fp32-equal", "ties", 4, 4096, 512, FP32, I32, gen="equal"),
     C("tie-fp32-split", "ties", 2, 16384, 2333, FP32, I32, gen="tie_split"),
+    # the candidate-overflow regime, at the two vocabularies the operator sees
+    C("tie-fp32-overflow", "ties", 4, 129280, 512, FP32, I32, gen="uniform"),
+    C("tie-fp32-overflow-k4096", "ties", 2, 262144, 4096, FP32, I64,
+      gen="uniform"),
+    C("tie-bf16-overflow", "ties", 4, 129280, 512, BF16, I32, gen="uniform"),
     C("tie-bf16-subnormal", "ties", 4, 32768, 1024, BF16, I32,
       gen="denormal"),
     C("tie-fp32-zeros", "ties", 4, 4096, 512, FP32, I64, gen="zeros"),

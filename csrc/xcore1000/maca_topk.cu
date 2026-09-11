@@ -561,16 +561,22 @@ static __device__ __forceinline__ void radix_layout(
         base + (sort_bytes > kRadixArenaBytes ? sort_bytes : kRadixArenaBytes));
 }
 
-// The core's runtime-k row entry covers every key length and every k up to
-// `rk::kMaxTopK`: a threshold bin too large for the arena falls back to a
-// full-row rescan rather than to a truncated candidate set.
+// Both row entries cover every key length and every k up to `rk::kMaxTopK`, and
+// both resolve a threshold bin too large for the arena by re-walking the row
+// rather than by ranking a truncated candidate set.
 template <typename ValueT, int BLOCK>
 static __device__ __forceinline__ void radix_select_row(
     const ValueT *input_row, uint32_t length, int32_t *out_idx, uint32_t topk) {
-    static_assert(std::is_same<ValueT, maca_bfloat16>::value,
-                  "only the 16-bit key path has a radix core; float32 still "
-                  "rides the bytewise kernel");
-    rk::radix_topk_row_bf16_b<BLOCK>(input_row, out_idx, length, topk);
+    if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
+        rk::radix_topk_row_bf16_b<BLOCK>(input_row, out_idx, length, topk);
+    } else {
+        static_assert(std::is_same<ValueT, float>::value,
+                      "the operator serves bfloat16 and float32 only");
+        // The fp32 row picks its own block width, one width for every shape.
+        static_assert(BLOCK == rk::kBlockSize,
+                      "the fp32 row runs at rk::kBlockSize");
+        rk::radix_topk_row_f32(input_row, out_idx, length, topk);
+    }
 }
 
 // BLOCK is `rk::kBlockSize`, or `rk::kLongRowBlockSize` for the regime the
@@ -726,10 +732,19 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
         constexpr bool SI = decltype(si)::value;
         constexpr bool SV = decltype(sv)::value;
         constexpr bool RV = decltype(rv)::value;
-        if (block == rk::kLongRowBlockSize) {
-            set_radix_attr<ValueT, OutIdxT, rk::kLongRowBlockSize, SI, RV, SV>();
-            topk_kernel_radix<ValueT, OutIdxT, rk::kLongRowBlockSize, SI, RV, SV>
-                <<<batches, rk::kLongRowBlockSize, smem, stream>>>(params);
+        // The fp32 row has a single width, so only the 16-bit row compiles the
+        // wide-block arm (a runtime branch would instantiate it for fp32 too,
+        // where it cannot be launched).
+        if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
+            if (block == rk::kLongRowBlockSize) {
+                set_radix_attr<ValueT, OutIdxT, rk::kLongRowBlockSize, SI, RV, SV>();
+                topk_kernel_radix<ValueT, OutIdxT, rk::kLongRowBlockSize, SI, RV, SV>
+                    <<<batches, rk::kLongRowBlockSize, smem, stream>>>(params);
+            } else {
+                set_radix_attr<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>();
+                topk_kernel_radix<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>
+                    <<<batches, rk::kBlockSize, smem, stream>>>(params);
+            }
         } else {
             set_radix_attr<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>();
             topk_kernel_radix<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>
@@ -788,17 +803,21 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     auto *cuda_stream = reinterpret_cast<cudaStream_t>(stream);
     const uint32_t n = (uint32_t)batches;
     const bool rv = return_value || sorted_value;
+    // Both dtypes run the ported radix dataflow; only the block width differs,
+    // and the fp32 row has a single width.
+    const int block = (value_dtype == 0)
+                          ? (int)rk::kBlockSize
+                          : detail::radix_block_for(n, params.vocab_size,
+                                                    params.topk);
     if (value_dtype == 0) {  // float32
         if (index_dtype == 0) {
-            detail::launch_typed<float, int32_t>(params, n, cuda_stream,
-                                                 sorted_index, sorted_value, rv);
+            detail::launch_typed_radix<float, int32_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
         } else {
-            detail::launch_typed<float, int64_t>(params, n, cuda_stream,
-                                                 sorted_index, sorted_value, rv);
+            detail::launch_typed_radix<float, int64_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
         }
-    } else {  // bfloat16 -- the ported radix dataflow
-        const int block =
-            detail::radix_block_for(n, params.vocab_size, params.topk);
+    } else {  // bfloat16
         if (index_dtype == 0) {
             detail::launch_typed_radix<maca_bfloat16, int32_t>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block);

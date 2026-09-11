@@ -19,7 +19,14 @@
 // Deliberately NOT copied from `float_to_uint8`: that one rounds fp32 through
 // fp16 before binning, which a bf16 input has no source for.
 // The fp32 half of the file (`float_to_uint*`, `radix_topk_row_f32*`, the
-// k2048 family) is still verbatim, and is what fp32 will be built on.
+// k2048 family) is otherwise verbatim and is what fp32 is built on, with one
+// deliberate addition: `radix_topk_row_f32_rescan`, called from
+// `radix_topk_row_f32` when its coarse bin does not fit the candidate arena.
+// Upstream that case ranks the members it managed to stage and mis-answers
+// quietly -- a uniform L=129280 k=512 row puts 8025 members in the bin against
+// an arena of 1757, and 391 of the 512 picks land below the row's true k-th
+// largest.  The addition applies the no-truncation rule the 16-bit path
+// already follows; nothing else in that half is touched.
 //
 // ────────────────────────────────────────────────────────────────────────────
 /*
@@ -338,6 +345,88 @@ __device__ __forceinline__ uint32_t run_cumsum_warp(
 // FP32 radix topk row
 // ============================================================
 
+// [DeepSelect] Overflow resolution for the fp32 row below.
+//
+// The staging pass of `radix_topk_row_f32` keeps only the first
+// `SMEM_INPUT_SIZE` members of the coarse (half-rounded) threshold bin and
+// drops the rest silently, after which the refinement ranks that subset -- not
+// the bin.  The answer is still `topk` indices wide and still distinct, so
+// nothing looks wrong at the boundary: the values are simply from the wrong
+// place.  Measured on a uniform row of L=129280, k=512 the bin holds 8025
+// members against an arena of 1757, and 391 of the 512 picks land below the
+// row's true k-th largest.
+//
+// Upstream the 16-bit path handles the same situation by re-walking the row
+// (see the `overflow` branch of `radix_topk_row_bf16_b`); this is that rule for
+// a four-byte key: the members of the coarse bin are ranked by the exact fp32
+// key bytes, one level per round, each round one histogram pass and one
+// emit-and-narrow pass over the row.  The candidate set shrinks by construction
+// (the pivot bin always holds enough -- the coarse histogram said so), so the
+// tail slots are filled by the last byte's ties exactly as the arena path fills
+// them, and the caller can still rely on `topk` written indices.
+//
+// `excess_coarse` members above the coarse bin are already emitted and
+// `s_counter` counts them; `remain` are still needed, all from inside the bin.
+__device__ __forceinline__ void radix_topk_row_f32_rescan(
+    const float* input, int32_t* output, uint32_t length, uint32_t topk,
+    uint32_t coarse_bin, uint32_t remain,
+    uint32_t (&s_histogram_buf)[2][kRadix + 32], uint32_t& s_counter,
+    int32_t& s_last_remain)
+{
+    constexpr uint32_t BLOCK_SIZE = kBlockSize;
+    const uint32_t tx = threadIdx.x;
+    auto& s_histogram = s_histogram_buf[0];
+    __shared__ uint32_t s_threshold_bin_id;
+
+    uint32_t prefix_mask = 0, prefix_value = 0;
+    #pragma unroll
+    for (int round = 0; round < 4; ++round) {
+        const int shift = 24 - round * 8;
+        const bool is_last = (round == 3);
+        const bool filtered = (prefix_mask != 0);
+
+        for (uint32_t b = tx; b < kRadix + 1; b += BLOCK_SIZE) s_histogram[b] = 0;
+        __syncthreads();
+        for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
+            const float raw = __ldg(input + idx);
+            if (float_to_uint8(raw) != coarse_bin) continue;
+            const uint32_t key = float_to_uint32(raw);
+            if (filtered && (key & prefix_mask) != prefix_value) continue;
+            atomicAdd(&s_histogram[(key >> shift) & 0xFFu], 1u);
+        }
+        __syncthreads();
+        run_cumsum(s_histogram_buf, tx);
+
+        if (tx < kRadix && s_histogram[tx] > remain && s_histogram[tx + 1] <= remain) {
+            s_threshold_bin_id = tx;
+            s_last_remain = static_cast<int32_t>(remain - s_histogram[tx + 1]);
+        }
+        __syncthreads();
+        const uint32_t pivot = s_threshold_bin_id;
+        remain -= s_histogram[pivot + 1];
+
+        for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
+            const float raw = __ldg(input + idx);
+            if (float_to_uint8(raw) != coarse_bin) continue;
+            const uint32_t key = float_to_uint32(raw);
+            if (filtered && (key & prefix_mask) != prefix_value) continue;
+            const uint32_t bin = (key >> shift) & 0xFFu;
+            if (bin > pivot) {
+                output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+            } else if (is_last && bin == pivot) {
+                // The whole key is now known: any `remain` of the ties are
+                // equally valid, and the tail slots take exactly that many.
+                const int32_t p = atomicAdd(&s_last_remain, -1);
+                if (p > 0) output[topk - p] = static_cast<int32_t>(idx);
+            }
+        }
+        __syncthreads();
+        if (is_last || remain == 0) break;
+        prefix_mask |= (uint32_t)0xFFu << shift;
+        prefix_value |= pivot << shift;
+    }
+}
+
 __device__ __forceinline__ void radix_topk_row_f32(
     const float* input, int32_t* output, uint32_t length, uint32_t topk)
 {
@@ -407,6 +496,15 @@ __device__ __forceinline__ void radix_topk_row_f32(
             }
         }
         __syncthreads();
+    }
+
+    // A threshold bin that does not fit the arena is ranked over the row
+    // instead of inside it; see `radix_topk_row_f32_rescan`.
+    if (s_num_input[0] > SMEM_INPUT_SIZE) {
+        radix_topk_row_f32_rescan(input, output, length, topk,
+                                  s_threshold_bin_id, remain_topk,
+                                  s_histogram_buf, s_counter, s_last_remain);
+        return;
     }
 
     #pragma unroll 4
