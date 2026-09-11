@@ -464,6 +464,20 @@ def topk_torch(
     k_eff = min(topk, vocab_size)
     values, indices = torch.topk(work, k_eff, dim=1, sorted=bool(sorted))
 
+    # The window mask is `-inf`, which is also a value a row can hold: a hidden
+    # slot then ties with the visible ones and `torch.topk`'s tie order is
+    # unspecified, so it can hand back an index outside the window.  A hidden
+    # slot can only win by tying at `-inf`, which means every visible value is
+    # `-inf` -- so answering with the window's own first `k_eff` indices selects
+    # the same values and keeps every index inside the window.  (Slots past the
+    # visible length are turned into the fill value below, whatever they hold.)
+    in_window = indices < lengths.unsqueeze(1)
+    if bool((~in_window).any().item()):
+        tied_rows = (~in_window).any(dim=1)
+        first_visible = (torch.arange(k_eff, device=device)
+                         .unsqueeze(0).expand_as(indices))
+        indices = torch.where(tied_rows.unsqueeze(1), first_visible, indices)
+
     # Padding picked up by torch.topk on short rows becomes the fill value.
     valid = torch.arange(k_eff, device=device).unsqueeze(0) < lengths.unsqueeze(1)
     out_idx = torch.full((n_rows, topk), idx_oob_fill_value,
@@ -482,8 +496,20 @@ def topk_torch(
                                          out_val[:, :k_eff])
 
     if sorted_index:
-        # torch.gather requires an int64 index regardless of the output dtype.
-        order = torch.argsort(out_idx.to(torch.int64), dim=1, stable=True)
+        # `torch.gather` requires an int64 index regardless of the output dtype.
+        #
+        # Order the *selected* indices only, and send the padding to the end
+        # explicitly: a selected slot holds `index + output_idx_offset` while a
+        # padding slot holds the raw `idx_oob_fill_value`, so sorting the row as
+        # it stands orders two different currencies -- and whenever the offset
+        # makes a selected value larger than the fill (or, for a negative
+        # offset, smaller) the padding lands in front, in the slots the contract
+        # requires to be real in-window indices.
+        sel = (torch.arange(topk, device=device).unsqueeze(0)
+               < lengths.unsqueeze(1))
+        key = torch.where(sel, out_idx.to(torch.int64),
+                          torch.iinfo(torch.int64).max)
+        order = torch.argsort(key, dim=1, stable=True)
         out_idx = torch.gather(out_idx, 1, order)
         if return_value:
             out_val = torch.gather(out_val, 1, order)
