@@ -10,8 +10,9 @@
 //       等价于 `if (lane_idx + i < 32) x += t`
 //   上游全文按 32 线程/warp 假设（lane_idx = threadIdx.x % 32、ballot 用 32 位掩码），
 //   这里的掩码同样取 0xFFFFFFFF。**前提是 MACA 的 warp 宽度确为 32** ——
-//   若硬件实际是 64 路波前，球内扫描的语义会变，需按 64 重写；这一点由
-//   tests/check_maca.py 的对拍覆盖（见 README 的 MACA 小节）。
+//   若硬件实际是 64 路波前，球内扫描的语义会变，需按 64 重写。本机实测：
+//   C500 的波前是 64 lane，但 ballot/reduce/shfl 按 32 lane 分组，所以按 32
+//   写的扫描语义成立。
 template<typename T>
 __device__ __forceinline__ T warp_level_inclusive_prefix_sum(T x, uint32_t lane_idx) {
     static_assert(sizeof(T) == 4);

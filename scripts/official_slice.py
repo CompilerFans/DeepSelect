@@ -15,9 +15,13 @@ table:
       written; seeding it is the only change to how the table is produced).
 
 Nothing under `tests/` is modified: the table construction is copied into
-`cases()` below, and the checks are the official ones, imported by path.
+`cases()` below, and the checks are the official ones, imported by path.  The
+one thing the official suite cannot express is a backend choice -- it calls
+`deep_select.topk(...)` with no `backend=` -- so `--backend` pins that call here
+instead of editing the official file (see `_bind_backend`).
 
     PYTHONPATH=. python scripts/official_slice.py [--sample N] [--seed S]
+                                                 [--backend {maca_c,torch,deep_gemm}]
 """
 
 import argparse
@@ -35,6 +39,7 @@ import torch  # noqa: E402
 
 torch.set_default_device("cuda")          # as `tests/test.py:167` does
 
+import deep_select  # noqa: E402
 import lib  # noqa: E402
 
 spec = importlib.util.spec_from_file_location(
@@ -108,12 +113,34 @@ def cases():
     return out
 
 
+def _bind_backend(original, backend):
+    """Pin every `deep_select.topk` the official suite makes to one backend.
+
+    `tests/test.py` resolves the name at call time, so rebinding the module
+    attribute is enough -- no official file changes, and the default (no
+    `--backend`) leaves the library's own choice, i.e. exactly what the official
+    suite runs with unmodified.
+    """
+    def bound(*a, **kwargs):
+        kwargs.setdefault("backend", backend)
+        return original(*a, **kwargs)
+    return bound
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sample", type=int, default=200,
                         help="how many cases to draw from the table (default 200)")
     parser.add_argument("--seed", type=int, default=20260911)
+    parser.add_argument("--backend", default=None,
+                        choices=["maca_c", "torch", "deep_gemm"],
+                        help="implementation under test; unset leaves the "
+                             "library's own choice, which is what the official "
+                             "suite runs with unmodified")
     args = parser.parse_args()
+
+    if args.backend is not None:
+        deep_select.topk = _bind_backend(deep_select.topk, args.backend)
 
     random.seed(args.seed)
     table = cases()
@@ -123,13 +150,21 @@ def main():
           f"{ELEM_BUDGET} elements; running {len(sample)} sampled with seed "
           f"{args.seed}", flush=True)
 
-    passed, failed = 0, []
+    passed, failed, skipped = 0, [], 0
     started = time.time()
     for i, p in enumerate(sample, 1):
         torch.cuda.empty_cache()
         print(f"[{i:3d}/{len(sample)}]", flush=True)
         try:
             ok = official.run_testcase(p)
+        except deep_select.UnsupportedByBackend as exc:
+            # A backend whose service range is narrower than the operator's
+            # (the deep_gemm one answers fp32 only) says so explicitly; that is
+            # a gap in its coverage, not a wrong answer, so it does not fail
+            # the run.
+            skipped += 1
+            print(f"    unsupported: {exc}", flush=True)
+            continue
         except Exception as exc:                   # noqa: BLE001
             ok = False
             print(f"    raised {type(exc).__name__}: {exc}", flush=True)
@@ -139,8 +174,8 @@ def main():
             failed.append(p)
             print(f"    FAILED: {p}", flush=True)
 
-    print(f"\n{passed}/{len(sample)} passed, {len(failed)} failed, "
-          f"{time.time() - started:.0f}s", flush=True)
+    print(f"\n{passed}/{len(sample) - skipped} passed, {skipped} unsupported, "
+          f"{len(failed)} failed, {time.time() - started:.0f}s", flush=True)
     for p in failed[:20]:
         print(f"  failed: {p}", flush=True)
     return 1 if failed else 0

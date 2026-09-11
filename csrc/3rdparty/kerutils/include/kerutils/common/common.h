@@ -15,8 +15,8 @@ namespace ku = kerutils;
 // 这件事与 CUDA 构建同构，宏语义保持不变。
 // 用 __MACA__ 而不是 __MACA_ARCH__：mxcc 只在**设备**遍定义 __MACA_ARCH__，
 // 而本文件也要在**宿主**遍成立（host/host.h 里 launch_kernel 等整块都在这个
-// 宏的 #ifdef 之下，宿主遍不定义它就只剩一个 #error）。实测两遍都定义 __MACA__
-// （见本仓 tests/check_maca.py 的构建参数）。
+// 宏的 #ifdef 之下，宿主遍不定义它就只剩一个 #error）。本机用编译探针实测：
+// mxcc 的宿主遍与设备遍都定义 __MACA__。
 // （Hopper/Ampere 专有的 TMA 类型与 sm80/sm90/sm100 内联汇编已在各自文件里
 //   直接删除，不需要额外的平台标记。）
 #if defined(__MACA__) || defined(__MACA_ARCH__)

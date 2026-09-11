@@ -54,8 +54,10 @@
 // every other shape takes.  They are NOT a hole: `topk <= 1024 <= 4096` holds
 // and vocabulary is unbounded here (the kernel makes 2 passes over the row
 // regardless of length), so the arm's shapes are served, only without the
-// cluster-specific scheduling the original gave them.  Covered by the
-// `b=4 v=524288 k=1024 bf16` case in `tests/check_maca.py`.
+// cluster-specific scheduling the original gave them.  Covered by the official
+// performance grid's indexer cases (`tests/test.py --perf-only`: bf16,
+// `topk` 512 and 1024, `vocab` up to 1M, `batch` 6..4096), which check the
+// selection before they time it.
 //
 // The other CUDA-era dispatch arms keep their behaviour: `v3` (bf16) and
 // `v3_fp32` both become this kernel, with the fp32/bf16 split now a template

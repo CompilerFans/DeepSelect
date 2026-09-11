@@ -43,8 +43,8 @@ Consequences:
 - The `vocab_size < 2^23` restriction is enforced by the ported kernel, as
   upstream; it comes from the fp32-simulated census there. It is not enforced by
   `maca_topk.cu`, which ranks integer keys (verified for `float32` at
-  `vocab_size = 2^23`, case `fp32-vocab-2^23` in
-  [`tests/check_maca.py`](tests/check_maca.py)).
+  `vocab_size = 2^23`, the largest vocab in the official table, which is also
+  `(1 << 23) - 1`).
 - `sorted_value` is accepted for `torch.bfloat16` by `maca_topk.cu`: the ordering
   comes from the same key, so both the descending order and the value/index
   pairing hold. The ported kernel rejects it, as upstream does (fp32 only), and
@@ -58,8 +58,9 @@ Consequences:
   `return_value` / `end` / `output_idx` / `output_idx_offset` /
   `idx_oob_fill_value` / `value_oob_fill_value`, and the NaN contract below --
   behaves identically on MACA.
-- MACA performance is measured by `tests/check_maca.py --perf`, which
-  benchmarks the kernel and `torch.topk` side by side on the same shapes. The
+- MACA performance is measured by upstream's own grid --
+  `PYTHONPATH=. python tests/test.py --perf-only` -- which benches each shape
+  with the kernelkit kineto harness and times `torch.topk` beside it. The
   numbers in [Performance](#performance) are still the upstream CUDA kernels'.
 
 ## Supported Cases
@@ -94,7 +95,7 @@ on the same input. The metric is effective memory bandwidth: TopK does no
 floating-point math, so a FLOP rate would not be meaningful here.
 
 > These figures belong to the upstream CUDA kernels. For the MACA port, run
-> `tests/check_maca.py --perf` on the target device -- what it measures and how
+> `tests/test.py --perf-only` on the target device -- what it measures and how
 > the two implementations compare there is in
 > [MACA support](#maca-support).
 
@@ -132,7 +133,7 @@ of the architecture it was compiled for:
 CUCC_TARGETS=xcore1000 python setup.py build_ext --inplace             # C500
 CUCC_TARGETS=xcore1600 python setup.py build_ext --inplace             # C600, C600U
 CUCC_TARGETS=xcore1000,xcore1600 python setup.py build_ext --inplace   # both
-PYTHONPATH=. python tests/check_maca.py                                # correctness
+PYTHONPATH=. python scripts/official_slice.py                          # correctness
 ```
 
 `CUCC_TARGETS` defaults to `native`, the device the build is running on (the
@@ -196,7 +197,7 @@ this level (`setup.py` still builds one kernel per architecture, and
 `CUCC_TARGETS` still selects which). `"torch"` is a reference implementation of
 the same contract built from torch ops: it runs on any device and dtype, so it
 is usable on a machine with no MACA kernel built at all, and for differentially
-checking results (`tests/check_maca.py --backend torch`). Unlike the kernels it
+checking results (`scripts/official_slice.py --backend torch`). Unlike the kernels it
 rejects `bfloat16` + `sorted_value`, matching upstream.
 
 `"deep_gemm"` is the host repository's own indexer selector
@@ -244,72 +245,74 @@ excluded from any value comparison, as the test suites do.
 
 ## Testing
 
-[`tests/check_maca.py`](tests/check_maca.py) is the runnable suite for the MACA
-kernel -- it needs only `deep_select` importable:
+The suite is upstream's, landed unmodified under [`tests/`](tests/) --
+[`tests/test.py`](tests/test.py) builds a correctness table and a performance
+grid and runs both through the same `run_testcase`.  Its checks are the
+contract's own: index range, uniqueness, `value_i == input[index_i]`, the
+definitional `min(selected) >= max(unselected)`, the NaN guard, and the
+orderings.  No reference implementation is computed anywhere, so nothing here
+can drift away from the contract it is checking.
+
+Two edits under `tests/kernelkit/` are the whole delta, and both are needed to
+run at all on MACA: `platform.py` asks torch whether it can see a device
+instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA 3D
+controller, so every MACA host was reported CPU-only and `bench()` refused to
+run), and the one PEP 701 f-string at `stress.py:292` (Python 3.12 syntax; this
+tree builds against 3.10) is rewritten with the same meaning.
+
+### Performance
+
+The performance grid is small, and it runs the way upstream runs it:
 
 ```bash
-PYTHONPATH=. python tests/check_maca.py                 # all cases
-PYTHONPATH=. python tests/check_maca.py --quick         # two-case smoke test
-PYTHONPATH=. python tests/check_maca.py --group ties
-PYTHONPATH=. python tests/check_maca.py --backend torch # the reference, not a kernel
-PYTHONPATH=. python tests/check_maca.py --perf          # benchmark; no checks
-PYTHONPATH=. python tests/check_maca.py --list
+PYTHONPATH=. python tests/test.py --perf-only              # 95 cases
+PYTHONPATH=. python tests/test.py --perf-only -nc          # skip the cooldowns
+PYTHONPATH=. python tests/test.py --perf-only --dtype bf16 # 90 of them
 ```
 
-It covers the option matrix (`sorted_index` x `sorted_value` x `return_value`),
-both scenarios, both index dtypes, ragged and short `end` windows,
-`output_idx_offset`, non-default out-of-band fills, padded input/output row
-strides, tie-heavy inputs, the NaN contract, and the contract rejections. Each
-case is compared against `torch.topk` run in a separate process (see the module
-docstring for why).
+Every case is checked first and timed second, with
+`tests/kernelkit/bench.py`'s kineto harness (L2 flushed): it prints
+`topk : <us>, <TB/s>`, times raw `torch.topk` on the same shape right after,
+and prints the speedup whenever the two are comparable (`end is None`, no
+`output_idx_offset`, `vocab_size >= topk`).  Because the checks run first, a
+performance case that selects wrong is reported as a failure rather than as a
+time.  On C500 the bf16 half of the grid passes in about a minute.
 
-`--backend` runs the same table against another implementation. `torch` is the
-reference and passes all of it; `deep_gemm` needs the host package importable
-and passes the cases inside its contract, while the rest are reported as `GAP`
--- "outside backend 'deep_gemm''s contract", not failures -- and listed in the
-summary line, so a narrower implementation is visible rather than silently
-untested:
+### Correctness
 
-```bash
-PYTHONPATH=/path/to/mcDeepGEMM:. python tests/check_maca.py --backend deep_gemm
-```
-
-`--perf` benchmarks instead of checking, and it benchmarks two implementations
-as peers: `maca_c`, and `topk` -- raw `torch.topk`, the baseline this kernel
-exists to beat. (`topk` is deliberately not a `backend=` value: it implements
-no part of the contract, so it is only comparable where the two coincide --
-no window, no offset, a row at least `topk` long, which is how the perf shapes
-are drawn.) It prints one row per shape and backend, `Latency(ms)`,
-`BW(GB/s)` over the bytes the shape moves (input row + index output, + value
-output when the shape asks for one), and the ratio against `topk`; the timer is
-`tests/kernelkit/bench.py`'s kineto harness with L2 flushed, the same one
-upstream's `--perf-only` uses, so numbers from the two are directly
-comparable.
-`--perf-full` runs upstream's whole performance grid instead of the default
-subset, and `--perf-iters` sets the runs per measurement (10, as upstream's
-`performance_cases`).
-
-Because it is a timing run, the device must be otherwise idle --
-`pgrep -f check_maca` first, as with any benchmark.
-
-Upstream's [`tests/test.py`](tests/test.py) runs here too, over a slice of its
-own table. The harness needed two changes under `tests/kernelkit/` to get that
-far: `platform.py` asks torch whether it can see a device instead of grepping
-`lspci` (a MACA part does not enumerate as an NVIDIA 3D controller, so every
-MACA host was reported CPU-only and `bench()` refused to run), and the one
-PEP 701 f-string at `stress.py:292` (Python 3.12 syntax; this tree builds
-against 3.10) is rewritten with the same meaning. Those two edits plus the new
-`check_maca.py` are the whole delta under `tests/`.
-
-The table itself is 105,138 cases and takes hours, so
+The correctness table is 105,138 cases and takes hours, so
 [`scripts/official_slice.py`](scripts/official_slice.py) drives a seeded uniform
-sample of 200 of them through the official `run_testcase` checks, unchanged
+sample of 200 of them through the same official `run_testcase`, unchanged
 (capped at `batch_size * vocab_size <= 2**28`, which bounds the reference
 `torch.topk` without dropping a shape family):
 
 ```bash
 PYTHONPATH=. python scripts/official_slice.py     # 200/200 passed
 ```
+
+`--backend` is the one thing the official suite cannot express -- its call site
+passes no `backend=` -- so the driver rebinds `deep_select.topk` for the run
+rather than editing the official file:
+
+```bash
+PYTHONPATH=. python scripts/official_slice.py --backend maca_c   # the default
+PYTHONPATH=. python scripts/official_slice.py --backend torch    # the reference
+PYTHONPATH=/path/to/mcDeepGEMM:. python scripts/official_slice.py --backend deep_gemm
+```
+
+A backend whose service range is narrower than the operator's says so through
+`UnsupportedByBackend`, and those cases are counted as `unsupported` in the
+summary instead of failing the run.
+
+Two things neither arm covers, both recorded rather than papered over: the
+contract rejections (a strided input row, the wrong dtype, `topk` out of range,
+an output buffer smaller than `(batch_size, topk)`) -- the official table
+asserts on values and has no exception cases -- and `begin` / `hint` /
+caller-allocated `output_idx`, which the official call site always passes as
+`None`.
+
+A timing run needs the device to itself: `pgrep -f "tests/test.py"` first, as
+with any benchmark.
 
 ## Citation
 
