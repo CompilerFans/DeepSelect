@@ -90,19 +90,23 @@ uint32_t bf16x2_gtu_mask_float(uint32_t a, uint32_t b) {  // PTX set.gtu.bf16x2
     return m0 | (m1 << 16);
 }
 
-__device__ __forceinline__
-uint32_t bf16x2_gt_mask_signed(uint32_t a, uint32_t b) {  // TODO 见上：应为浮点语义
-    uint32_t m0 = (int16_t)(uint16_t)a >  (int16_t)(uint16_t)b ? 0xFFFFu : 0u;
-    uint32_t m1 = (int16_t)(a >> 16)   >  (int16_t)(b >> 16)   ? 0xFFFFu : 0u;
-    return m0 | (m1 << 16);
-}
-
 // bf16 半字是否为 NaN：指数全 1 且尾数非 0（对应 PTX 的 set.nan.bf16）
 __device__ __forceinline__
 bool bf16_is_nan(uint16_t h) {
     return (h & 0x7F80u) == 0x7F80u && (h & 0x007Fu) != 0u;
 }
 
+__device__ __forceinline__
+uint32_t bf16x2_eq_mask_float(uint32_t a, uint32_t b) {   // PTX set.eq.bf16x2
+    // 浮点相等：NaN 不等于任何值（包括自身），+0 与 -0 相等。按位型比较这两条都不成立。
+    uint32_t m0 = bf16_bits_to_float((uint16_t)a)        == bf16_bits_to_float((uint16_t)b)        ? 0xFFFFu : 0u;
+    uint32_t m1 = bf16_bits_to_float((uint16_t)(a >> 16)) == bf16_bits_to_float((uint16_t)(b >> 16)) ? 0xFFFFu : 0u;
+    return m0 | (m1 << 16);
+}
+
+// 逐半字**按位**相等。指针历史：这是 `bf16x2_gt_mask_float` 的整数表亲，只用于
+// `histogram_radix_lsb_for_pivot_msb` 里比较抽出来的高字节（见那里的注释）——
+// 那种场合两边都是 0x00hh 形态、不是 bf16 值，浮点比较反而是错的。
 __device__ __forceinline__
 uint32_t bf16x2_eq_mask(uint32_t a, uint32_t b) {
     uint32_t m0 = (uint16_t)a == (uint16_t)b ? 0xFFFFu : 0u;

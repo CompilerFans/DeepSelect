@@ -950,7 +950,10 @@ public:
             uint32_t raw = bf16x2_to_u32(packed_values[i]);
             // prmt.b32 hi, raw, 0, 0x5341 —— 取两半各自的**高字节**放到 0x00hh 形态
             uint32_t hi = ((raw >> 8) & 0x000000FFu) | ((raw >> 16) & 0x00FF0000u);
-            // set.eq.s32.bf16x2 —— 高字节等于 pivot 的半字给 0xFFFF
+            // set.eq —— 高字节等于 pivot 的半字给 0xFFFF。
+            //   这里比的是**抽出来的高字节**（0x00hh 形态），不是 bf16 值，所以要的是
+            //   逐字节相等，`bf16x2_eq_mask` 的按位比较正是它；不能用 census 那个
+            //   浮点版（0x00hh 会被当成极小的 denormal 去比大小）。
             uint32_t sel = bf16x2_eq_mask(hi, raw_hi8_x2);
             // lop3.b32 lo, raw, low_byte_xor, 0x00ff00ff, 0x28 —— lo = (raw ^ xor) & 0x00ff00ff
             uint32_t lo = (raw ^ low_byte_xor) & 0x00ff00ffu;
@@ -983,8 +986,8 @@ public:
         for (uint32_t i = 0; i < N; i++) {
             if (i % NUM_PACKED_VALUES_ALIGNMENT == 0 && i == num_packed_values) break;
             uint32_t raw = bf16x2_to_u32(values[i]);
-            uint32_t gt_mask = bf16x2_gt_mask_signed(raw, pivot_value_x2_bits);
-            uint32_t eq_mask = bf16x2_eq_mask(raw, pivot_value_x2_bits);
+            uint32_t gt_mask = bf16x2_gt_mask_float(raw, pivot_value_x2_bits);
+            uint32_t eq_mask = bf16x2_eq_mask_float(raw, pivot_value_x2_bits);
             cnt_gt_f  += (float)((gt_mask & 0xFFFFu) ? 1 : 0) + (float)((gt_mask >> 16) ? 1 : 0);
             cnt_eq_f  += (float)((eq_mask & 0xFFFFu) ? 1 : 0) + (float)((eq_mask >> 16) ? 1 : 0);
             cnt_nan_f += (float)(bf16_is_nan((uint16_t)raw) ? 1 : 0)
@@ -1003,17 +1006,22 @@ public:
 
     // 判定一个 bf16 半字是否入选；等于 pivot 时按配额放行并消耗一份配额。
     // 语义严格对应原先内联 PTX 的三条谓词逻辑：
-    //   setp.gt.bf16x2 g  —— 有符号 16 位比较（bf16 位型的浮点全序单调键）
-    //   setp.eq.bf16x2 e + setp.ne.and.u32 t, quota, 0, e  —— 等值且配额还有
+    //   setp.gt.bf16x2 g  —— **浮点**比较，NaN 参与时为假
+    //   setp.eq.bf16x2 e + setp.ne.and.u32 t, quota, 0, e  —— 浮点等值且配额还有
     //   or.pred s = g | t
     // 注意 `gt` 命中的元素**不**消耗配额（原 PTX 只在 t 为真时 sub）。
+    //
+    // [MACA] 原为按位型做 int16 比较。逐半字的**等值**恰好与浮点等值同解（除 NaN
+    //   与 ±0），但**大小**不同解：+NaN 的位型作 int16 是最大的正数，于是
+    //   "+NaN > 任何正数" 为真，而浮点 `gt` 为假 —— 这会让排在 pivot 之后的 NaN
+    //   抢占配额。故一律经 `bf16_bits_to_float` 走真浮点比较。
     static __device__ __forceinline__
     bool select_one_half(uint16_t value_half, uint32_t pivot_value_x2_bits, uint32_t &eq_quota) {
         uint16_t pivot_half = (uint16_t)(pivot_value_x2_bits & 0xFFFFu);
-        bool gt = (int16_t)value_half > (int16_t)pivot_half;
-        if (gt) return true;
-        bool eq = (int16_t)value_half == (int16_t)pivot_half;   // 逐半字相等，有无符号同值
-        if (eq && eq_quota != 0) {
+        float value_f = bf16_bits_to_float(value_half);
+        float pivot_f = bf16_bits_to_float(pivot_half);
+        if (value_f > pivot_f) return true;
+        if (value_f == pivot_f && eq_quota != 0) {
             eq_quota -= 1;
             return true;
         }
