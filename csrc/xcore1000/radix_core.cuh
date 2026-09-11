@@ -28,6 +28,12 @@
 // largest.  The addition applies the no-truncation rule the 16-bit path
 // already follows; nothing else in that half is touched.
 //
+// A third, smaller deviation: the two chunked launchers take the row stride
+// (defaulting to `L`, i.e. upstream's packed-row assumption).  The stage-1
+// kernels have always taken `score_stride` -- the launchers were the only
+// place that assumed `L`; DeepSelect's callers hand over padded rows
+// (`get_stride_requirement()` is 1024 bytes), so the split needs it.
+//
 // ────────────────────────────────────────────────────────────────────────────
 /*
  * Radix TopK CUDA Kernel Template
@@ -1846,7 +1852,8 @@ template <uint32_t TOPK>
 inline cudaError_t launch_topk_bf16_chunked_k(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
     int32_t* candidate_indices, maca_bfloat16* candidate_values,
-    int B, int L, int num_chunks, cudaStream_t stream)
+    int B, int L, int num_chunks, cudaStream_t stream,
+    int64_t score_stride = 0)
 {
     if (TOPK > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
     static bool init = false;
@@ -1863,8 +1870,12 @@ inline cudaError_t launch_topk_bf16_chunked_k(
     const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
     const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
     const int candidate_stride = num_chunks * static_cast<int>(TOPK);
+    // Deviation 3: the row stride can be wider than the window (`L`), which is
+    // how a caller with padded input rows reaches this path; upstream passes
+    // `L` and so can only split packed rows.
+    const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
     topk_bf16_chunk_stage1_kernel_k<TOPK><<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
-        scores, lengths, candidate_indices, candidate_values, L, B, num_chunks, chunk_size);
+        scores, lengths, candidate_indices, candidate_values, stride, B, num_chunks, chunk_size);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return err;
 
@@ -1876,18 +1887,19 @@ inline cudaError_t launch_topk_bf16_chunked_k(
 inline cudaError_t launch_topk_bf16_chunked(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
     int32_t* candidate_indices, maca_bfloat16* candidate_values,
-    int B, int L, int topk, int num_chunks, cudaStream_t stream)
+    int B, int L, int topk, int num_chunks, cudaStream_t stream,
+    int64_t score_stride = 0)
 {
     if (topk > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
     switch (topk) {
     case 512:
         return launch_topk_bf16_chunked_k<512>(
             scores, lengths, indices, candidate_indices, candidate_values,
-            B, L, num_chunks, stream);
+            B, L, num_chunks, stream, score_stride);
     case 1024:
         return launch_topk_bf16_chunked_k<1024>(
             scores, lengths, indices, candidate_indices, candidate_values,
-            B, L, num_chunks, stream);
+            B, L, num_chunks, stream, score_stride);
     default:
         break;
     }
@@ -1906,8 +1918,9 @@ inline cudaError_t launch_topk_bf16_chunked(
     const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
     // Keep each chunk base aligned for the uint4 FP16 vectorized row path.
     const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
+    const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
     topk_bf16_chunk_stage1_kernel<<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
-        scores, lengths, candidate_indices, candidate_values, L, topk, B, num_chunks, chunk_size);
+        scores, lengths, candidate_indices, candidate_values, stride, topk, B, num_chunks, chunk_size);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return err;
 

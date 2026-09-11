@@ -114,6 +114,11 @@ struct RowParams {
     void *output_index;
     const int32_t *end_ptr;         // null means "whole row"
     const int32_t *idx_offset_ptr;  // null means no offset
+    // Chunked path only: the merged column indices the split already ranked,
+    // `topk` per row, and one NaN flag per row raised by the split's own scan.
+    // Null everywhere else.
+    const int32_t *preselected;
+    const int32_t *nan_flags;
     uint64_t stride_input_batch;
     uint64_t stride_output_value_batch;
     uint64_t stride_output_index_batch;
@@ -579,9 +584,48 @@ static __device__ __forceinline__ void radix_select_row(
     }
 }
 
+// The chunked path's NaN scan, on the split's own grid: one CTA per (row,
+// chunk).  The contract kernel is one CTA per row by construction, which on a
+// small batch is the whole machine parked on six CTAs reading a 12 MB row; this
+// asks the same question at the width the row needs.  `flags` is zeroed by the
+// caller and a row's flag is raised by whichever chunk read the bit pattern.
+constexpr int kScanBlock = 256;
+
+template <typename ValueT>
+__global__ __launch_bounds__(kScanBlock) void nan_scan_kernel(
+    const void *input, const int32_t *lengths, int64_t stride_elems,
+    uint32_t vocab_size, uint32_t chunks, int32_t *flags) {
+    const uint32_t row = blockIdx.x / chunks;
+    const uint32_t chunk = blockIdx.x - row * chunks;
+    const uint32_t length = (uint32_t)__ldg(lengths + row);
+    // The same chunk geometry the split walks, so the two cover one window.
+    const uint32_t raw = (vocab_size + chunks - 1) / chunks;
+    const uint32_t chunk_size = (raw + 7u) / 8u * 8u;
+    const uint32_t start = chunk * chunk_size;
+    if (start >= length) return;  // uniform across the CTA
+    const uint32_t end = start + chunk_size < length ? start + chunk_size : length;
+    const ValueT *row_ptr = (const ValueT *)((const char *)input +
+                                             (uint64_t)row * stride_elems *
+                                                 sizeof(ValueT));
+    bool found = false;
+    for (uint32_t i = start + threadIdx.x; i < end; i += kScanBlock) {
+        found |= is_nan_value<ValueT>(__ldg(row_ptr + i));
+    }
+    if (__syncthreads_or((int)found) != 0 && threadIdx.x == 0) {
+        atomicOr(flags + row, 1);
+    }
+}
+
 // BLOCK is `rk::kBlockSize`, or `rk::kLongRowBlockSize` for the regime the
 // ported dispatcher picks the wider block for (see `needs_long_row_bf16`).
-template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV>
+//
+// `kPreSelected` is for the chunked path: the two-stage split over a long row
+// has already written its answer into the output buffer (raw column indices,
+// `topk` of them per row), so this kernel skips selection and starts from the
+// emit -- the shortcut, the NaN contract, the fills, the offsets and the
+// ordering are the same code either way.
+template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV,
+          bool kPreSelected = false>
 __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
     const int tid = threadIdx.x;
     const uint32_t row = blockIdx.x;
@@ -637,11 +681,20 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
     }
 
     // ── NaN detection ───────────────────────────────────────────────────────
+    // The chunked path has already answered this question across the whole row
+    // with the machine busy (`nan_scan_kernel`), which is the difference that
+    // matters when the batch is small: this CTA alone would be the only thing
+    // reading the row.
     bool nan_local = false;
-    for (uint32_t i = tid; i < length; i += BLOCK) {
-        nan_local |= is_nan_value<ValueT>(__ldg(input_row + i));
+    if constexpr (kPreSelected) {
+        nan_local = params.nan_flags[row] != 0;
+    } else {
+        for (uint32_t i = tid; i < length; i += BLOCK) {
+            nan_local |= is_nan_value<ValueT>(__ldg(input_row + i));
+        }
+        nan_local = __syncthreads_or((int)nan_local) != 0;
     }
-    if (__syncthreads_or((int)nan_local) != 0) {
+    if (nan_local) {
         if (params.abort_on_nan) {
             if (tid == 0) printf("[deep_select] NaN detected. Aborting.\n");
             __trap();
@@ -654,7 +707,25 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
     // Exactly `topk` slots come out filled: everything above the threshold bin
     // plus the first `topk - excess` of its members, which are bit-identical.
     // `length > topk` holds here, so the count is `topk` and not one less.
-    radix_select_row<ValueT, BLOCK>(input_row, length, (int32_t *)selected, topk);
+    bool rerank = false;
+    if constexpr (kPreSelected) {
+        // The split already ranked this row; take its answer and check it is
+        // one the merge could fill.  A slot the merge could not fill (-1: every
+        // value in that window is at or below the bf16 floor the chunk stage
+        // pads with) sends the whole row back through the row dataflow, so a
+        // floor-valued row is answered by the same code as any other and never
+        // from an empty slot.
+        const int32_t *merged = params.preselected + (uint64_t)row * topk;
+        for (uint32_t i = tid; i < topk; i += BLOCK) {
+            const int32_t src = merged[i];
+            rerank |= (src < 0);
+            selected[i] = (uint32_t)src;
+        }
+        rerank = __syncthreads_or((int)rerank) != 0;
+    }
+    if (!kPreSelected || rerank) {
+        radix_select_row<ValueT, BLOCK>(input_row, length, (int32_t *)selected, topk);
+    }
 
     // ── emit ────────────────────────────────────────────────────────────────
     const uint32_t n_out = topk;
@@ -700,17 +771,38 @@ inline cudaError_t configure() {
         (int)arena_bytes());
 }
 
-template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV>
+template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV,
+          bool PRE = false>
 inline void set_radix_attr() {
     // The worst case over the ordered modes is the same 48 KB the bytewise
     // Arena reserves, so both kernels are configured with one value; each
     // launch then asks for exactly what its own mode needs.
     const cudaError_t rc = cudaFuncSetAttribute(
-        (const void *)topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV>,
+        (const void *)topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, PRE>,
         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)arena_bytes());
     if (rc != cudaSuccess) {
         std::fprintf(stderr, "[deep_select] radix smem attribute: %s\n",
                      cudaGetErrorString(rc));
+    }
+}
+
+// One launch site for both dataflows of a mode: the row path selects, the
+// chunked path picks up the indices the split left in `params.preselected`.
+template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV>
+inline void launch_radix(const RowParams &params, uint32_t batches,
+                         cudaStream_t stream, size_t smem, bool preselected) {
+    if (preselected) {
+        // The split is 16-bit only, so no other dtype instantiates this arm
+        // (an fp32 instantiation could not be launched).
+        if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
+            set_radix_attr<ValueT, OutIdxT, BLOCK, SI, RV, SV, true>();
+            topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, true>
+                <<<batches, BLOCK, smem, stream>>>(params);
+        }
+    } else {
+        set_radix_attr<ValueT, OutIdxT, BLOCK, SI, RV, SV>();
+        topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, false>
+            <<<batches, BLOCK, smem, stream>>>(params);
     }
 }
 
@@ -722,10 +814,64 @@ inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk)
     return rk::needs_long_row_bf16(cfg) ? rk::kLongRowBlockSize : rk::kBlockSize;
 }
 
+// ── the chunked split, for rows too long for one CTA to carry ───────────────
+//
+// One row per CTA leaves the machine idle when the batch is small and the rows
+// are long: B=6 at L=1M is 6 CTAs for the whole device.  The ported split ranks
+// each row across `kChunkedChunks` CTAs and merges, and this is where
+// DeepSelect enters it.
+//
+// Measured on C500 (bf16, k=512, cudaEvent, warm) against the row path:
+// B=6/L=1M 2.03 -> 0.18 ms, B=6/L=262144 0.43 -> 0.074 ms; at B=256/L=1M the
+// same split is 1.34x, which the batch bound keeps out.  Upstream's own gate
+// (`needs_chunked`: L >= 1M) is the same idea with a higher floor; 262144 is
+// where the row count is still the problem here.
+constexpr uint32_t kChunkedMaxBatches = 64;
+constexpr uint32_t kChunkedMinVocab = 262144;
+constexpr int kChunkedChunks = 16;
+
+struct ChunkedWorkspace {
+    int32_t *candidate_indices;
+    maca_bfloat16 *candidate_values;
+    int32_t *merged;
+    int32_t *nan_flags;
+};
+
+// The split is 16-bit only, and only the two static-k arms of the merge are
+// compiled, which is the whole gate: a 16-bit caller that satisfies it can
+// always be answered by the split (the caller supplies the row table).
+inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
+    if (batches == 0 || batches > kChunkedMaxBatches) return false;
+    if (params.vocab_size < kChunkedMinVocab) return false;
+    return params.topk == 512 || params.topk == 1024;
+}
+
+inline size_t chunked_workspace_bytes(uint32_t batches, uint32_t topk) {
+    const size_t candidates = (size_t)batches * kChunkedChunks * topk;
+    // The merge reads `candidate_values` with the vectorized row path, so the
+    // two candidate arrays are 16-byte apart at the seam.
+    const size_t indices_bytes = candidates * sizeof(int32_t);
+    const size_t values_bytes = candidates * sizeof(maca_bfloat16);
+    return indices_bytes + values_bytes + (size_t)batches * topk * sizeof(int32_t) +
+           (size_t)batches * sizeof(int32_t);
+}
+
+inline ChunkedWorkspace chunked_workspace(void *base, uint32_t batches,
+                                          uint32_t topk) {
+    const size_t candidates = (size_t)batches * kChunkedChunks * topk;
+    ChunkedWorkspace ws{};
+    ws.candidate_indices = (int32_t *)base;
+    ws.candidate_values = (maca_bfloat16 *)((char *)base + candidates * sizeof(int32_t));
+    ws.merged = (int32_t *)((char *)ws.candidate_values + candidates * sizeof(maca_bfloat16));
+    ws.nan_flags = (int32_t *)((char *)ws.merged + (size_t)batches * topk * sizeof(int32_t));
+    return ws;
+}
+
 template <typename ValueT, typename OutIdxT>
 void launch_typed_radix(const RowParams &params, uint32_t batches,
                         cudaStream_t stream, bool sorted_index,
-                        bool sorted_value, bool return_value, int block) {
+                        bool sorted_value, bool return_value, int block,
+                        bool preselected = false) {
     const size_t smem =
         radix_smem_bytes(params.topk, sorted_index || sorted_value);
     auto run = [&](auto si, auto sv, auto rv) {
@@ -737,18 +883,15 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
         // where it cannot be launched).
         if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
             if (block == rk::kLongRowBlockSize) {
-                set_radix_attr<ValueT, OutIdxT, rk::kLongRowBlockSize, SI, RV, SV>();
-                topk_kernel_radix<ValueT, OutIdxT, rk::kLongRowBlockSize, SI, RV, SV>
-                    <<<batches, rk::kLongRowBlockSize, smem, stream>>>(params);
+                launch_radix<ValueT, OutIdxT, rk::kLongRowBlockSize, SI, RV, SV>(
+                    params, batches, stream, smem, preselected);
             } else {
-                set_radix_attr<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>();
-                topk_kernel_radix<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>
-                    <<<batches, rk::kBlockSize, smem, stream>>>(params);
+                launch_radix<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>(
+                    params, batches, stream, smem, preselected);
             }
         } else {
-            set_radix_attr<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>();
-            topk_kernel_radix<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>
-                <<<batches, rk::kBlockSize, smem, stream>>>(params);
+            launch_radix<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>(
+                params, batches, stream, smem, preselected);
         }
     };
     using T = std::true_type;
@@ -763,6 +906,37 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
         if (return_value) run(F{}, F{}, T{});
         else run(F{}, F{}, F{});
     }
+}
+
+// Split, merge, then run the row kernel's contract half over the merged
+// answer.  `params` must satisfy `chunked_bf16_applies`, workspace included.
+template <typename OutIdxT>
+void launch_typed_chunked(const RowParams &params, uint32_t batches,
+                          cudaStream_t stream, bool sorted_index,
+                          bool sorted_value, bool return_value, int block,
+                          void *workspace) {
+    const ChunkedWorkspace ws = chunked_workspace(workspace, batches, params.topk);
+    cudaMemsetAsync(ws.nan_flags, 0, (size_t)batches * sizeof(int32_t), stream);
+    nan_scan_kernel<maca_bfloat16><<<batches * kChunkedChunks, kScanBlock, 0, stream>>>(
+        params.input, params.end_ptr,
+        (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)),
+        params.vocab_size, kChunkedChunks, ws.nan_flags);
+    const cudaError_t rc = rk::launch_topk_bf16_chunked(
+        (const maca_bfloat16 *)params.input, params.end_ptr, ws.merged,
+        ws.candidate_indices, ws.candidate_values, (int)batches,
+        (int)params.vocab_size, (int)params.topk, kChunkedChunks, stream,
+        // The row stride is in bytes at this layer and in elements there.
+        (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)));
+    RowParams merged = params;
+    // A split that could not be launched leaves the workspace unfilled; the row
+    // dataflow answers instead of the contract reading an empty slot.  The gate
+    // keeps this unreachable (the split rejects only what it was gated on).
+    const bool preselected = rc == cudaSuccess;
+    merged.preselected = preselected ? ws.merged : nullptr;
+    merged.nan_flags = preselected ? ws.nan_flags : nullptr;
+    launch_typed_radix<maca_bfloat16, OutIdxT>(merged, batches, stream,
+                                               sorted_index, sorted_value,
+                                               return_value, block, preselected);
 }
 
 template <typename ValueT, typename OutIdxT>
@@ -799,7 +973,8 @@ void launch_typed(const RowParams &params, uint32_t batches, cudaStream_t stream
 
 void topk_launch(const RowParams &params, int64_t batches, void *stream,
                  int value_dtype, int index_dtype, bool sorted_index,
-                 bool sorted_value, bool return_value) {
+                 bool sorted_value, bool return_value,
+                 void *chunked_workspace, size_t chunked_bytes) {
     auto *cuda_stream = reinterpret_cast<cudaStream_t>(stream);
     const uint32_t n = (uint32_t)batches;
     const bool rv = return_value || sorted_value;
@@ -809,6 +984,23 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
                           ? (int)rk::kBlockSize
                           : detail::radix_block_for(n, params.vocab_size,
                                                     params.topk);
+    // Long rows at a small batch go through the split; the caller sized the
+    // workspace for exactly this gate, and the split reads 16-bit input.
+    if (value_dtype == 1 && chunked_workspace != nullptr &&
+        params.end_ptr != nullptr &&
+        chunked_bytes >= detail::chunked_workspace_bytes(n, params.topk) &&
+        detail::chunked_bf16_applies(params, n)) {
+        if (index_dtype == 0) {
+            detail::launch_typed_chunked<int32_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
+                chunked_workspace);
+        } else {
+            detail::launch_typed_chunked<int64_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
+                chunked_workspace);
+        }
+        return;
+    }
     if (value_dtype == 0) {  // float32
         if (index_dtype == 0) {
             detail::launch_typed_radix<float, int32_t>(
@@ -929,8 +1121,31 @@ void topk(torch::Tensor &input, int topk, c10::optional<torch::Tensor> &begin,
     const int index_dtype = (output_index.scalar_type() == at::kInt) ? 0 : 1;
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
+    // The chunked split wants the row lengths as a table and a candidate
+    // workspace; both are sized here, where the gate can be asked before the
+    // launch.  A shape outside the gate pays neither.
+    torch::Tensor lengths_holder, workspace_holder;
+    void *workspace = nullptr;
+    size_t workspace_bytes = 0;
+    if (value_dtype == 1 &&
+        deep_select_maca::detail::chunked_bf16_applies(p, (uint32_t)batches)) {
+        if (!end.has_value()) {
+            // `end` absent means the whole row, which is exactly the table the
+            // split's stage-1 reads per row.
+            lengths_holder = torch::full({input.size(0)}, vocab_size,
+                                         input.options().dtype(at::kInt));
+            p.end_ptr = lengths_holder.data_ptr<int32_t>();
+        }
+        workspace_bytes = deep_select_maca::detail::chunked_workspace_bytes(
+            (uint32_t)batches, (uint32_t)topk);
+        workspace_holder = torch::empty({(int64_t)workspace_bytes},
+                                        input.options().dtype(at::kByte));
+        workspace = workspace_holder.data_ptr();
+    }
+
     topk_launch(p, batches, (void *)stream, value_dtype, index_dtype,
-                sorted_index, sorted_value, return_value);
+                sorted_index, sorted_value, return_value, workspace,
+                workspace_bytes);
     cudaError_t err = cudaGetLastError();
     TORCH_CHECK(err == cudaSuccess, "topk launch failed: ",
                 cudaGetErrorString(err));
