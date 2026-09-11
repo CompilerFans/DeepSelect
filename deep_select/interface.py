@@ -202,11 +202,11 @@ def topk_torch(
     # backend.
     #
     # Note what is *not* here: upstream restricts `sorted` to float32, and the
-    # kernel path keeps that restriction, but this repository's kernel
-    # implements it for bfloat16 too (see `csrc/maca_topk.cu`).  The reference
-    # describes the operator this repository ships, so it follows the wider
-    # contract; `torch.topk` orders bfloat16 natively, so nothing extra is
-    # needed for it.
+    # ported kernel keeps that restriction, but the MACA-native one
+    # (`csrc/xcore1000/maca_topk.cu`) implements it for bfloat16 too.  The
+    # reference describes the operator this repository ships, so it follows the
+    # wider contract; `torch.topk` orders bfloat16 natively, so nothing extra
+    # is needed for it.
     if sorted and not return_value:
         raise ValueError("`return_value` must be enabled when `sorted` is True")
     if sorted and sorted_index:

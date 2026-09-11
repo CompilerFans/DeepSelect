@@ -188,8 +188,8 @@ def main(instantiation_dir: str):
         #     so those two members already fill the SM before a single element
         #     of input is staged.  Upstream carries that tuple because 227 KiB
         #     has room to spare.  `topk` in (1024, 4096] on a 128 KiB part is
-        #     therefore not served by this kernel -- `csrc/maca_topk.cu`, the
-        #     MACA-native one, covers it (kMaxTopK = 4096).
+        #     therefore not served by this kernel -- `csrc/xcore1000/maca_topk.cu`,
+        #     the MACA-native one, covers it (kMaxTopK = 4096).
         #
         # TMA4 costs 109.6 KB of smem per CTA, which fits twice per SM only for max_topk <= 512.
         fast_path_tuples_by_max_topk = {
