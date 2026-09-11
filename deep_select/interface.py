@@ -440,17 +440,14 @@ def topk_torch(
         cols = torch.arange(vocab_size, device=device)
         visible = torch.isnan(input.float()) & (cols.unsqueeze(0) < lengths.unsqueeze(1))
         nan_rows = visible.any(dim=1)
-    if bool(nan_rows.any().item()):
-        if abort_when_nan_found:
-            raise RuntimeError("NaN detected in the input")
-        if output_idx is None:
-            output_idx = torch.empty((n_rows, topk), dtype=indices_type, device=device)
-        output_idx[nan_rows, 0] = 0x3F3F3F3F
-        values = None
-        if return_value:
-            values = torch.full((n_rows, topk), value_oob_fill_value,
-                                dtype=input.dtype, device=device)
-        return values, output_idx
+    if abort_when_nan_found and bool(nan_rows.any().item()):
+        raise RuntimeError("NaN detected in the input")
+    # A NaN row is answered by the guard in its first index slot and is
+    # otherwise left unspecified, which is how the kernel path leaves it -- but
+    # *that row only*.  Returning here for the whole batch, as this did, leaves
+    # every clean row of the batch undefined too: the checks that matter run
+    # per row, so a batch that contains one NaN row was answering every other
+    # row with whatever the output buffer happened to hold.
 
     # Rows shorter than topk select their whole visible prefix and are padded
     # with the fill values; masking the hidden tail to -inf makes a single
@@ -517,5 +514,9 @@ def topk_torch(
     if output_idx is not None:
         output_idx.copy_(out_idx)
         out_idx = output_idx
+
+    # Stamped on the tensor that goes back to the caller, whichever it is.
+    if bool(nan_rows.any().item()):
+        out_idx[nan_rows, 0] = 0x3F3F3F3F
 
     return out_val, out_idx
