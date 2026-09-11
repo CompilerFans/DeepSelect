@@ -13,8 +13,22 @@ from ._arch import FAMILY_OF_TARGET, native_target
 # makes, so the name does not name an architecture (the host repository's
 # `backend=` names implementations the same way, e.g. `maca_c`, `mctlassEx`).
 # `torch` is not a kernel: it is a reference implementation of the same
-# contract, and runs anywhere.
-_BACKENDS = ("maca_c", "torch")
+# contract, and runs anywhere.  `deep_gemm` is the host repository's own MACA
+# selector, which implements a subset of the contract -- see
+# `topk_deep_gemm` for exactly which part.
+_BACKENDS = ("maca_c", "torch", "deep_gemm")
+
+
+class UnsupportedByBackend(ValueError):
+    """This backend does not implement this part of the contract.
+
+    Distinct from the `ValueError` a bad argument gets: the request is valid,
+    the operator offers it, and the chosen implementation is simply narrower --
+    `deep_gemm` is float32-only, for instance, while the operator takes
+    bfloat16 too.  Keeping them apart lets a caller (or a test table) report
+    "outside this backend's contract" instead of "wrong call", and it is still
+    a `ValueError` for anyone who only cares that the call was refused.
+    """
 
 # The kernels the build produces, one per architecture -- setup.py builds one
 # extension per architecture, `deep_select.deep_select_xcore<N>`, holding the
@@ -107,7 +121,10 @@ def topk(
                 does not name an architecture.  `"torch"` is a reference
                 implementation of the same contract, built on torch ops; it
                 runs on any device and dtype, including where no kernel is
-                built.
+                built.  `"deep_gemm"` is the host repository's selector, which
+                is faster on long rows and implements a subset of this
+                contract; what it cannot serve raises `UnsupportedByBackend`
+                (see `topk_deep_gemm`).
 
     Return:
         output_val: (b, topk), dtype=input.dtype.
@@ -156,6 +173,16 @@ def topk(
             return_value=return_value,
             abort_when_nan_found=abort_when_nan_found,
         )
+    if backend == "deep_gemm":
+        return topk_deep_gemm(
+            input, topk, end=end, sorted_value=sorted,
+            sorted_index=sorted_index, indices_type=indices_type,
+            output_idx=output_idx, output_idx_offset=output_idx_offset,
+            idx_oob_fill_value=idx_oob_fill_value,
+            value_oob_fill_value=value_oob_fill_value,
+            return_value=return_value,
+            abort_when_nan_found=abort_when_nan_found,
+        )
     else:
         backend_args = (
             input,
@@ -174,6 +201,167 @@ def topk(
         # usable on a machine with no MACA device at all.
         _backend_for(native_target()).topk(*backend_args)
         return output_val, output_idx
+
+
+# `deep_gemm.kernels.fp32_topk`'s `kMaxTopK`.  Its selector refuses anything
+# larger, so this backend refuses first, with a message that names the gap
+# rather than the kernel's assert.
+_DEEP_GEMM_MAX_TOPK = 2048
+
+
+@functools.lru_cache(maxsize=1)
+def _deep_gemm():
+    """The host repository's package, imported on first use.
+
+    A soft dependency: this repository is standalone -- it is also vendored as
+    a submodule of that same host -- so this is the only place it is imported,
+    and only when `backend="deep_gemm"` is actually asked for.
+    """
+    import deep_gemm
+
+    return deep_gemm
+
+
+def topk_deep_gemm(
+    input: torch.Tensor,
+    topk: int,
+    end: Optional[torch.Tensor] = None,
+    sorted_value: bool = False,
+    sorted_index: bool = False,
+    indices_type: torch.dtype = torch.int64,
+    output_idx: Optional[torch.Tensor] = None,
+    output_idx_offset: Optional[torch.Tensor] = None,
+    idx_oob_fill_value: int = 2147483647,
+    value_oob_fill_value: float = float("-inf"),
+    return_value: bool = True,
+    abort_when_nan_found: bool = True,
+) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
+    """`topk` served by the host repository's indexer selector.
+
+    That kernel (`deep_gemm.fp32_indexer_topk_selector`, `topk_coarse12` /
+    `topk_chunks`) solves the same problem this repository does, and faster on
+    the long-row shapes -- it is the obvious thing to route to when the shapes
+    suit it.  It implements a strict subset of the contract, so it is offered
+    as a backend rather than as a replacement, and what it cannot serve raises
+    `UnsupportedByBackend` instead of quietly answering something narrower:
+
+        * float32 scores only (no bfloat16);
+        * `topk <= 2048`;
+        * an unordered selection (`sorted_value` / `sorted_index` need the
+          kernels);
+        * nothing else: `end`, `output_idx`, `output_idx_offset`, the
+          out-of-band fills, `return_value` and the NaN contract are all
+          implemented here, on top of it.
+
+    Exactness is the host kernel's, and it has one known hole: a kernel
+    collects the members of the threshold *coarse* bin -- the half-precision
+    ordered key >> 6, so everything inside one 64-half-ULP bucket, which a row
+    of near-tied scores fills end to end -- before refining, and the chunked
+    kernel (small batch, long row) silently drops members past its staging
+    capacity instead of re-scanning.  A row with more than 4096 values in one
+    such bucket can therefore get a top-k of an arbitrary subset of it, varying
+    run to run.  `maca_c` has no such hole; in the host repository it is filed
+    as a strict `xfail` in
+    `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`.
+
+    The window is the same one: the selector's `seq_lens` with a single row per
+    group is a per-row exclusive upper bound (`torch_topk_selector.py:23`),
+    which is what `end` is, and its indices are relative to a `seq_starts` of
+    zero -- i.e. absolute -- so only the padding needs translating (`-1` there,
+    `idx_oob_fill_value` here).  Its values are a gather of the input, not a
+    kernel output, which is also how this returns them.
+    """
+    try:
+        module = _deep_gemm()
+    except ImportError as exc:
+        raise RuntimeError(
+            "backend 'deep_gemm' needs the mcDeepGEMM package importable "
+            "(install it, or put its repository root on PYTHONPATH); this "
+            "repository runs standalone too, and that is the only case where "
+            "the import is missing"
+        ) from exc
+
+    # The operator's own contract rejections, as `topk_torch` enforces them:
+    # they are properties of the contract, not of an implementation, so a
+    # caller must hear the same thing whichever backend it picked.
+    if topk <= 0:
+        raise ValueError(f"topk must be positive, got {topk}")
+    if input.dim() != 2:
+        raise ValueError(f"input must be 2-D, got {input.dim()} dimensions")
+    if input.stride(1) != 1:
+        raise ValueError("input.stride(1) must be 1")
+    if indices_type not in (torch.int32, torch.int64):
+        raise ValueError(
+            f"indices_type must be int32 or int64, got {indices_type}")
+    if input.dtype != torch.float32:
+        raise UnsupportedByBackend(
+            f"backend 'deep_gemm' ranks float32 scores, and was given "
+            f"{input.dtype}; 'maca_c' and 'torch' take bfloat16 as well")
+    if topk > _DEEP_GEMM_MAX_TOPK:
+        raise UnsupportedByBackend(
+            f"backend 'deep_gemm' selects at most {_DEEP_GEMM_MAX_TOPK} per "
+            f"row and was asked for {topk}; 'maca_c' goes to 4096")
+    if sorted_value or sorted_index:
+        raise UnsupportedByBackend(
+            "backend 'deep_gemm' returns an unordered selection; "
+            "`sorted_value`/`sorted_index` need backend 'maca_c'")
+
+    n_rows, vocab_size = input.shape
+    device = input.device
+    if input.stride(0) != vocab_size:
+        # The host kernel walks a row as `scores + row * n_cols`, i.e. it
+        # assumes tightly packed rows; a padded row stride would quietly rank
+        # the wrong elements.  Padding is legal in this contract
+        # (`get_stride_requirement`), so normalize instead of refusing.
+        input = input.contiguous()
+    lengths = (torch.full((n_rows,), vocab_size, dtype=torch.int64,
+                          device=device)
+               if end is None
+               else end.to(torch.int64).clamp(min=0, max=vocab_size))
+
+    # The NaN contract, checked as `topk_torch` checks it: always on, and
+    # skipped for a row whose window is not longer than `topk`.
+    if bool((lengths > topk).any().item()):
+        cols = torch.arange(vocab_size, device=device)
+        nan_rows = (torch.isnan(input)
+                    & (cols.unsqueeze(0) < lengths.unsqueeze(1))).any(dim=1)
+        if bool(nan_rows.any().item()):
+            if abort_when_nan_found:
+                raise RuntimeError("NaN detected in the input")
+            if output_idx is None:
+                output_idx = torch.empty((n_rows, topk), dtype=indices_type,
+                                         device=device)
+            output_idx[nan_rows, 0] = 0x3F3F3F3F
+            values = None
+            if return_value:
+                values = torch.full((n_rows, topk), value_oob_fill_value,
+                                    dtype=input.dtype, device=device)
+            return values, output_idx
+
+    selected = module.fp32_indexer_topk_selector(
+        input, lengths.to(torch.int32), topk, return_val=False,
+        backend="maca_c")["indices"]
+    valid = selected >= 0
+
+    # `-1` marks the padding; everything else is already the column index.
+    # (`.to` because the selector answers in int32 whatever `indices_type` is.)
+    columns = selected.to(torch.int64)
+    if output_idx_offset is not None:
+        columns = columns + output_idx_offset.to(torch.int64).unsqueeze(1)
+    out_idx = torch.where(valid, columns,
+                          torch.full_like(columns, idx_oob_fill_value)
+                          ).to(indices_type)
+
+    out_val = None
+    if return_value:
+        gathered = input.gather(1, selected.clamp_min(0).to(torch.int64))
+        out_val = torch.where(valid, gathered,
+                              torch.full_like(gathered, value_oob_fill_value))
+
+    if output_idx is not None:
+        output_idx.copy_(out_idx)
+        out_idx = output_idx
+    return out_val, out_idx
 
 
 def topk_torch(

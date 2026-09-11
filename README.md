@@ -199,6 +199,24 @@ is usable on a machine with no MACA kernel built at all, and for differentially
 checking results (`tests/check_maca.py --backend torch`). Unlike the kernels it
 rejects `bfloat16` + `sorted_value`, matching upstream.
 
+`"deep_gemm"` is the host repository's own indexer selector
+(`deep_gemm.fp32_indexer_topk_selector`), called through its Python API. That
+package is imported only when this backend is asked for, so this repository
+stays standalone without it. It is much faster than the MACA kernel on long
+rows, and it implements a strict subset of the contract -- float32 scores,
+`topk <= 2048`, unordered output -- so what it cannot serve raises
+`deep_select.UnsupportedByBackend` rather than answering something narrower.
+It also carries one known hole, in that kernel rather than in this adapter: a
+kernel collects the members of the threshold *coarse* bin (the half-precision
+ordered key >> 6, so everything inside one 64-half-ULP bucket -- which is what
+a row of near-tied scores fills) before refining, and the chunked kernel
+silently drops members past its staging capacity. A row with more than 4096
+values in one such bucket can therefore be ranked against an arbitrary subset
+of it, varying run to run. That is filed as a strict `xfail` in the host
+repository's suite,
+`deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`;
+`maca_c` has no such hole.
+
 ### Variable-length rows
 
 `end` sets a per-row upper bound (exclusive). Rows shorter than `topk` are padded with
@@ -244,6 +262,17 @@ both scenarios, both index dtypes, ragged and short `end` windows,
 strides, tie-heavy inputs, the NaN contract, and the contract rejections. Each
 case is compared against `torch.topk` run in a separate process (see the module
 docstring for why).
+
+`--backend` runs the same table against another implementation. `torch` is the
+reference and passes all of it; `deep_gemm` needs the host package importable
+and passes the cases inside its contract, while the rest are reported as `GAP`
+-- "outside backend 'deep_gemm''s contract", not failures -- and listed in the
+summary line, so a narrower implementation is visible rather than silently
+untested:
+
+```bash
+PYTHONPATH=/path/to/mcDeepGEMM:. python tests/check_maca.py --backend deep_gemm
+```
 
 `--perf` benchmarks instead of checking, and it benchmarks two implementations
 as peers: `maca_c`, and `topk` -- raw `torch.topk`, the baseline this kernel

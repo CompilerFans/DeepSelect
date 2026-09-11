@@ -538,12 +538,67 @@ PERF_SHAPES_FULL = (
 )
 
 
+# ── cross-kernel comparison ─────────────────────────────────────────────────
+#
+# A third row for the one kernel outside this repository that solves the same
+# problem on this platform: the host repository's topk selector
+# (`deep_gemm.fp32_indexer_topk_selector`, kernel `topk_coarse12`).  It is worth
+# measuring because it is the mature MACA implementation of exactly this
+# operator, so it says what the shapes below should cost.
+#
+# It is not a `backend=` value and not a row in the table above, because the
+# contract it implements is a strict subset: float32 only, `top_k <= 2048`,
+# int32 indices relative to `seq_starts` with `-1` for the padding, no ordered
+# output, no NaN contract, and values as a separate gather.  So this table gives
+# all three implementations the sub-problem they *all* implement -- float32,
+# no window, no offset, indices only, unsorted -- and says so in its header.  A
+# row here is comparable to the row beside it; it is not the full contract, and
+# for a shape with `sorted_value` above it is not the same work.
+#
+# `deep_gemm` is an optional dependency: this file is also run standalone (the
+# repository ships as a submodule of that same host), so the table is skipped
+# with a note when the import is not available.
+PERF_CROSS_BACKENDS = ("maca_c", "deep_gemm", "topk")
+
+
+def _fp32_shapes(batches, seqlens, topks=(512,)):
+    """float32 and indices only -- the sub-problem the cross table compares on."""
+    return [dict(name=f"fp32-b{b}-s{seqlen}-k{k}", batch=b, vocab=seqlen,
+                 topk=k, dtype=FP32, index_dtype=I32, return_value=False)
+            for k in topks for b in batches for seqlen in seqlens]
+
+
+PERF_CROSS_SHAPES = (
+    _fp32_shapes([256, 4096], [65536, 262144, 1048576])
+    + _fp32_shapes([6, 256, 4096], [129280])
+)
+
+
+def _deep_gemm():
+    """The host repository's module, or None when it is not importable."""
+    try:
+        import deep_gemm
+    except ImportError:
+        return None
+    return deep_gemm
+
+
 def _perf_launcher(shape, backend, scores):
     """A callable running one shape on one backend, for the timer to run."""
     if backend == "topk":
         def launch():
             return torch.topk(scores, shape["topk"], dim=1,
                               sorted=shape["return_value"])
+    elif backend == "deep_gemm":
+        # Through the backend, not around it: the row then measures what a
+        # caller gets -- the selector plus the contract work this repository
+        # adds on top of it (the NaN check, the fill/offset mapping), which is
+        # what the row beside it does for `maca_c`.
+        def launch():
+            return deep_select.topk(scores, shape["topk"],
+                                    return_value=shape["return_value"],
+                                    indices_type=shape["index_dtype"],
+                                    backend="deep_gemm")
     else:
         def launch():
             return deep_select.topk(
@@ -564,6 +619,8 @@ def _perf_launcher(shape, backend, scores):
 _PERF_KERNEL_MATCH = {
     "maca_c": ("topk",),
     "topk": ("topk", "radixsort"),
+    # `deep_gemm::indexer::detail::topk_coarse12<...>` / `topk_chunks<...>`.
+    "deep_gemm": ("topk",),
 }
 
 
@@ -592,16 +649,17 @@ def _perf_time_ms(launch, num_iters, backend):
     return result.get_e2e_time(names) * 1e3
 
 
-def run_perf(num_iters, full):
-    shapes = PERF_SHAPES_FULL if full else PERF_SHAPES
-    print(f"\nperformance: {' vs '.join(PERF_BACKENDS)} -- "
-          f"{len(shapes)} shapes x {num_iters} iters, kineto timer, L2 flushed",
-          flush=True)
-    print("bytes moved = input row + index output"
-          " (+ value output when the shape asks for one)\n", flush=True)
-    print(f"{'Shape':<30} {'Backend':>8} {'Latency(ms)':>12} "
-          f"{'BW(GB/s)':>10} {'vs topk':>8}")
-    print("-" * 74, flush=True)
+def _perf_table(title, note, shapes, backends, num_iters, ratio_base):
+    """Benchmark every (shape, backend) and print one row per pair.
+
+    `ratio_base` names the backend the ratio column divides by; the column is
+    left out when it is None.
+    """
+    print(f"\n{title}\n{note}\n", flush=True)
+    head = (f"{'Shape':<30} {'Backend':>9} {'Latency(ms)':>12} {'BW(GB/s)':>10}"
+            + (f" {'vs ' + ratio_base:>9}" if ratio_base else ""))
+    print(head)
+    print("-" * len(head), flush=True)
 
     failures = []
     for shape in shapes:
@@ -613,26 +671,52 @@ def run_perf(num_iters, full):
                           + shape["topk"], gen=INPUT_GENERATORS["normal"],
                           topk=shape["topk"])
         times = {}
-        for backend in PERF_BACKENDS:
+        for backend in backends:
             launch = _perf_launcher(shape, backend, scores)
             try:
                 times[backend] = _perf_time_ms(launch, num_iters, backend)
             except Exception as exc:  # noqa: BLE001 - report the shape, keep going
-                print(f"{shape['name']:<30} {backend:>8}   ERROR "
+                print(f"{shape['name']:<30} {backend:>9}   ERROR "
                       f"{type(exc).__name__}: {str(exc).splitlines()[0][:60]}",
                       flush=True)
                 failures.append(f"{shape['name']}/{backend}")
-        for backend in PERF_BACKENDS:
+        for backend in backends:
             if backend not in times:
                 continue
             ms = times[backend]
             bw = moved / (ms * 1e-3) / 1e9
-            ratio = ("%.2fx" % (times["topk"] / ms)) if backend != "topk" \
-                and "topk" in times else "--"
-            print(f"{shape['name']:<30} {backend:>8} {ms:>12.4f} "
-                  f"{bw:>10.1f} {ratio:>8}", flush=True)
+            ratio = "--"
+            if ratio_base in times and backend != ratio_base:
+                ratio = "%.2fx" % (times[ratio_base] / ms)
+            print(f"{shape['name']:<30} {backend:>9} {ms:>12.4f} "
+                  f"{bw:>10.1f} {ratio:>9}", flush=True)
         del scores
         torch.cuda.empty_cache()
+    return failures
+
+
+def run_perf(num_iters, full):
+    shapes = PERF_SHAPES_FULL if full else PERF_SHAPES
+    failures = _perf_table(
+        f"performance: {' vs '.join(PERF_BACKENDS)} -- {len(shapes)} shapes x "
+        f"{num_iters} iters, kineto timer, L2 flushed",
+        "bytes moved = input row + index output"
+        " (+ value output when the shape asks for one)",
+        shapes, PERF_BACKENDS, num_iters, ratio_base="topk")
+
+    if _deep_gemm() is None:
+        print("\ncross-kernel table skipped: deep_gemm is not importable here",
+              flush=True)
+    else:
+        failures += _perf_table(
+            f"cross-kernel: {' vs '.join(PERF_CROSS_BACKENDS)} -- "
+            f"{len(PERF_CROSS_SHAPES)} shapes x {num_iters} iters",
+            "the sub-problem all three implement: float32, no window, no "
+            "offset, indices only, unsorted\n(each row is one backend's whole "
+            "cost, contract work included; the ratio is against maca_c, so a "
+            "number above 1.00x is how far ahead that backend is)",
+            PERF_CROSS_SHAPES, PERF_CROSS_BACKENDS, num_iters,
+            ratio_base="maca_c")
 
     print(flush=True)
     if failures:
@@ -649,10 +733,14 @@ def main():
     ap.add_argument("--no-nan", action="store_true",
                     help="skip the NaN and rejection blocks")
     ap.add_argument("--list", action="store_true", help="list cases and exit")
-    ap.add_argument("--backend", default="maca_c", choices=["maca_c", "torch"],
+    ap.add_argument("--backend", default="maca_c",
+                    choices=["maca_c", "torch", "deep_gemm"],
                     help="implementation under test: 'maca_c' (default) is the "
                          "MACA kernel for this device, whichever that is; "
-                         "'torch' is the reference implementation")
+                         "'torch' is the reference implementation; "
+                         "'deep_gemm' is the host repository's selector, which "
+                         "serves a subset (cases outside it are reported as "
+                         "gaps, not failures)")
     ap.add_argument("--perf", action="store_true",
                     help="benchmark instead of checking: maca_c against "
                          "torch.topk over the perf shapes (ignores --backend, "
@@ -708,7 +796,26 @@ def main():
     if args.quick:
         cases = cases[:2]
 
-    failures = []
+    failures, gaps = [], []
+
+    def gap(label, exc):
+        """A case outside this backend's contract is named, not failed.
+
+        `UnsupportedByBackend` says the operator offers the case and the chosen
+        implementation does not -- `deep_gemm` is float32-only, say.  That is a
+        property of the backend, so it is counted and printed apart from the
+        verdict; anything else that raises is still a failure.
+        """
+        gaps.append(label)
+        print(f"  {label} -> GAP   [{str(exc).splitlines()[0][:80]}]", flush=True)
+        return True
+
+    def run_check(label, fn, *fn_args, **fn_kwargs):
+        try:
+            return fn(*fn_args, **fn_kwargs)
+        except deep_select.UnsupportedByBackend as exc:
+            return gap(label, exc)
+
     for case in cases:
         spec = dict(case)
         name, group = spec.pop("name"), spec.pop("group")
@@ -716,6 +823,8 @@ def main():
                         + spec["topk"]) % 10000
         try:
             ok = check(name=name, **spec)
+        except deep_select.UnsupportedByBackend as exc:
+            ok = gap(f"{group}/{name}", exc)
         except Exception as exc:  # noqa: BLE001 - report and keep going
             print(f"  {name} -> ERROR {type(exc).__name__}: "
                   f"{str(exc).splitlines()[0][:100]}", flush=True)
@@ -731,23 +840,32 @@ def main():
                                 ("quiet", ["qnan_pos", "qnan_neg"]),
                                 ("allones", ["nan_allones"])]:
                 for idx_dtype in (I32, I64):
-                    if not check_nan(dtype, idx_dtype, [pats[k] for k in keys]):
-                        failures.append(f"nan/{DTYPE_NAMES[dtype]}-{label}")
-            if not check_nan(dtype, I32, [pats["nan_pos"], pats["nan_neg"]],
-                             end_len=100):
-                failures.append(f"nan/{DTYPE_NAMES[dtype]}-short-window")
-            if not check_nan_abort(dtype, [pats["nan_pos"], pats["nan_neg"]]):
-                failures.append(f"nan/{DTYPE_NAMES[dtype]}-abort")
+                    name = f"nan/{DTYPE_NAMES[dtype]}-{label}"
+                    if not run_check(name, check_nan, dtype, idx_dtype,
+                                     [pats[k] for k in keys]):
+                        failures.append(name)
+            name = f"nan/{DTYPE_NAMES[dtype]}-short-window"
+            if not run_check(name, check_nan, dtype, I32,
+                             [pats["nan_pos"], pats["nan_neg"]], end_len=100):
+                failures.append(name)
+            name = f"nan/{DTYPE_NAMES[dtype]}-abort"
+            if not run_check(name, check_nan_abort, dtype,
+                             [pats["nan_pos"], pats["nan_neg"]]):
+                failures.append(name)
 
         print(flush=True)
-        if not check_rejections():
+        if not run_check("reject/contract", check_rejections):
             failures.append("reject/contract")
 
     print(flush=True)
+    if gaps:
+        print(f"{len(gaps)} case(s) outside backend {BACKEND!r}'s contract: "
+              f"{gaps}")
     if failures:
         print(f"{len(failures)} check(s) FAILED: {failures}")
         sys.exit(1)
-    print("all cases passed")
+    print("all cases passed" if not gaps else
+          f"all cases passed ({len(gaps)} gap(s) above)")
 
 
 if __name__ == "__main__":
