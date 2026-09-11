@@ -24,6 +24,19 @@ import shutil
 import sys
 from typing import List
 
+
+# [MACA] The largest shared memory per SM any MACA part has (xcore1500,
+# xcore1600).  Upstream's tables are sized for 227 KiB -- an H100's -- so most
+# of its tuples describe a launch that no MACA part can perform, and the port
+# turns that into a compile error (`topk_select.cuh`: the static_assert beside
+# the capacity KU_ASSERT).  This constant is the same number `structs.h` gets
+# through `-DDEEP_SELECT_NATIVE_ARCH`, and it is used here to refuse to
+# generate a tuple that cannot fit -- so a table edit fails at generation time
+# with the arithmetic, not at compile time on the one architecture that
+# happens to be building.
+MACA_SMEM_CAPACITY_BYTES = 128 * 1024
+
+
 @dataclasses.dataclass
 class TopkSelectConfigs:
     ValueT: str
@@ -38,6 +51,50 @@ class TopkSelectConfigs:
     reconstruct_threshold: int
     tma_buffer_depth: int
     cluster: int = 1
+
+    def shared_memory_bytes(self) -> int:
+        """`sizeof(SharedMemoryPlan)` for this config, in bytes.
+
+        A transcription of `SharedMemoryPlanBase` (common_parts.cuh) and the
+        constants that size it.  Verified against two values the compiler
+        produced for this port: 125952 B for (bf16, 512t, B2=4096) and 84992 B
+        for (bf16, 256t, B2=4096).
+
+        Note what does *not* appear: `tma_buffer_depth`.  The MACA port has no
+        TMA and no pipelining, so `NUM_TMA_LOAD_BUFS` is pinned to 1
+        (common_parts.cuh) and the parameter survives only as a record of
+        upstream's tuning.
+        """
+        elem = 2 if self.ValueT == "nv_bfloat16" else 4
+        num_warps = self.num_threads // 32
+        num_extra_slots = self.reconstruct_threshold + self.elements_per_round
+        num_bucket_slots = (1 << 8) + 4
+
+        def align_up(x, a):
+            return (x + a - 1) // a * a
+
+        off = 0
+        off = align_up(off, 1024) + 2 * self.max_topk * 8
+        off = align_up(off, 1024) + num_extra_slots * 8
+        off = align_up(off, 1024) + self.elements_per_round * elem
+        off += num_warps * 4 + 4 + 4
+        off = align_up(off, 16) + 2 * num_bucket_slots * 4
+        return align_up(off, 1024)          # struct alignment = max member align
+
+    def check_fits_maca(self):
+        """Refuse a tuple that cannot occupy one SM of a 128 KiB MACA part.
+
+        `target_occupancy` CTAs of this footprint share the SM, so the product
+        is the quantity the capacity gate compares -- the same one upstream's
+        own runtime check uses.
+        """
+        total = self.shared_memory_bytes() * self.target_occupancy
+        assert total <= MACA_SMEM_CAPACITY_BYTES, (
+            f"{self.max_topk=} {self.num_threads=} {self.target_occupancy=} "
+            f"{self.elements_per_round=} {self.reconstruct_threshold=}: "
+            f"{self.shared_memory_bytes()} B/CTA x {self.target_occupancy} = "
+            f"{total} B/SM exceeds the {MACA_SMEM_CAPACITY_BYTES} B a MACA SM has"
+        )
 
     def check_validity(self):
         assert self.ValueT in ["nv_bfloat16", "float"], "Invalid `ValueT`"
@@ -90,6 +147,7 @@ void run_topk_select_kernel<Config>(const TopkSelectArgs &args);
 def generate_instantiations(instantiation_dir: str, namespace: str, configs: List[TopkSelectConfigs]):
     for config in configs:
         config.check_validity()
+        config.check_fits_maca()
     setup_py_source_files = []
     for config in configs:
         setup_py_source_files.append(generate_instantiation_file(instantiation_dir, namespace, config))
@@ -110,23 +168,42 @@ def main(instantiation_dir: str):
             (True, False),
             (True, True),
         ]
+        # [MACA] These are upstream's tuples, re-derived for the 128 KiB a MACA
+        # SM has instead of the 227 KiB upstream sized them for.  The edits are
+        # the smallest ones that make each tuple fit; the thread count, B and
+        # the `wave1`/flagship split are upstream's, because a MACA part has no
+        # hardware here to re-tune against (see the header comment of
+        # `deep_select/_arch.py` for what this project can and cannot measure).
+        #
+        #   - Both flagship tuples drop target_occupancy 2 -> 1.  Two CTAs of
+        #     84992 B is 169984 B, which is more than any MACA SM has, so the
+        #     occupancy-upstream-used-to-hide-latency is simply not available
+        #     here; the port has no pipelining to overlap anyway, since TMA and
+        #     its mbarriers were removed with the device-side changes.
+        #   - The mk=1024 wave1 tuple drops B2 4096 -> 3584; 134144 B does not
+        #     fit (131072 does).
+        #   - There is no mk=4096 tuple at all, and there cannot be one:
+        #     `surviving_topk_pairs` alone is 2 * MAX_TOPK * 8 = 65536 B, and
+        #     the extra-pairs region is at least (MAX_TOPK + B) * 8 = 65536 B,
+        #     so those two members already fill the SM before a single element
+        #     of input is staged.  Upstream carries that tuple because 227 KiB
+        #     has room to spare.  `topk` in (1024, 4096] on a 128 KiB part is
+        #     therefore not served by this kernel -- `csrc/maca_topk.cu`, the
+        #     MACA-native one, covers it (kMaxTopK = 4096).
+        #
         # TMA4 costs 109.6 KB of smem per CTA, which fits twice per SM only for max_topk <= 512.
         fast_path_tuples_by_max_topk = {
-            512:  [(256, 2, 4096, 4096, 4),     # flagship (num_waves >= 2)
+            512:  [(256, 1, 4096, 4096, 4),     # flagship (num_waves >= 2)
                    (512, 1, 8192, 4096, 5)],    # wave1
-            1024: [(256, 2, 4096, 4096, 3),     # flagship (num_waves >= 2)
-                   (512, 1, 8192, 4096, 5)],    # wave1
+            1024: [(256, 1, 4096, 4096, 3),     # flagship (num_waves >= 2)
+                   (512, 1, 8192, 3584, 5)],    # wave1
         }
-        # Single coverage tuple for topk in (1024, 4096]: correctness-only
-        big_topk_tuple = (512, 1, 8192, 4096, 3)
         configs = []
         for out_idx_t in ["int32_t", "int64_t"]:
             for si, rv in valid_si_rv_combinations:
                 for max_topk, fast_path_tuples in fast_path_tuples_by_max_topk.items():
                     for num_threads, occ, b, b2, tma in fast_path_tuples:
                         configs.append(TopkSelectConfigs("nv_bfloat16", out_idx_t, False, si, rv, max_topk, num_threads, occ, b, b2, tma))
-                num_threads, occ, b, b2, tma = big_topk_tuple
-                configs.append(TopkSelectConfigs("nv_bfloat16", out_idx_t, False, si, rv, 4096, num_threads, occ, b, b2, tma))
         generate_instantiations(instantiation_dir, "topk_select_bf16_normal", configs)
     elif instantiation_dir == "csrc/cuda_kernels/v3_fp32/instantiations":
         remove_and_remake_dir()
@@ -138,10 +215,13 @@ def main(instantiation_dir: str):
             (False, True, True),
             (True, False, True),
         ]
+        # [MACA] B2 lowered from 4096 to fit 128 KiB; see the bf16 table above.
+        # fp32 pays more than bf16 for the same B2, because `tma_load_buf`
+        # holds B elements of the value type: 32768 B here against 16384 B.
+        # The mk=4096 entry is gone for the same reason it is gone there.
         tuple_by_max_topk = {
-            512: (512, 1, 8192, 4096, 3),
-            1024: (512, 1, 8192, 4096, 3),
-            4096: (256, 1, 4096, 4096, 3),
+            512: (512, 1, 8192, 2560, 3),
+            1024: (512, 1, 8192, 1536, 3),
         }
         configs = []
         for out_idx_t in ["int32_t", "int64_t"]:

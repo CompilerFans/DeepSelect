@@ -66,16 +66,19 @@ def build_for_maca():
     overrides `CUCC_TARGETS` in the environment, so passing it explicitly per
     module keeps the modules independent of each other's builds.)
 
-    Opt-in because that gate is currently red almost everywhere: of upstream's
-    five config tuples only one fits 128 KiB and none fits 64 KiB, so a default
-    build would fail on every architecture this project ships for -- taking the
-    working `maca_c` extension down with it.  The gate's job is to reject an
-    upstream build that cannot launch, not to block the shipping backend; turn
-    it on once per-architecture tuples exist.
+    Still opt-in, though the gate is no longer red where it applies: the tuples
+    are now re-derived for 128 KiB, so an xcore1500/xcore1600 build compiles in
+    full, and an xcore1000 build skips this extension entirely rather than
+    failing on it.  What the flag buys is that `maca_c` -- the shipping backend,
+    and the only one with hardware behind it in this project -- is what a plain
+    `python setup.py build` produces on every architecture, with the upstream
+    tree reached only by asking for it.
     """
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
-    from deep_select._arch import CAPACITY_BYTES, family_of_target, resolve_targets
+    from deep_select._arch import (CAPACITY_BYTES, UPSTREAM_CAPACITY_BYTES,
+                                   family_of_target, resolve_targets,
+                                   upstream_available)
 
     assert CUDA_HOME is not None, "PyTorch must provide a CUDA/MACA toolchain"
 
@@ -85,6 +88,12 @@ def build_for_maca():
 
     include_dirs = [
         os.path.join(this_dir, "csrc"),
+        # `kerutils/kerutils.cuh` and `kerutils/supplemental/torch_tensors.h`,
+        # which `api.cpp` and the ported kernels include.  Vendored under
+        # `csrc/3rdparty`; upstream's own build gets this path from its
+        # `3rdparty/kerutils` layout, so it is spelled out here rather than
+        # guessed from the sources.
+        os.path.join(this_dir, "csrc", "3rdparty", "kerutils", "include"),
         os.path.join(maca_root, "include"),
         os.path.join(maca_root, "tools", "cu-bridge", "include"),
     ]
@@ -145,6 +154,17 @@ def build_for_maca():
                 )
             )
         if not build_upstream:
+            continue
+        # The upstream kernel enters only where its tuples were derived for,
+        # which is the 128 KiB parts.  A capacity test rather than a family
+        # test on purpose: a future 64 KiB part should be skipped for the same
+        # reason, not because of its name.  `csrc/maca_topk.cu` is xcore1000's
+        # topk and has no such gate.
+        if not upstream_available(family):
+            print(f"deep_select: skipping upstream xcore{family} "
+                  f"({capacity_kib} KiB shared memory): its tuples are derived "
+                  f"for {UPSTREAM_CAPACITY_BYTES // 1024} KiB parts, and "
+                  f"xcore{family} keeps csrc/maca_topk.cu as its topk")
             continue
         # The ported upstream kernel, per architecture: its config table is
         # only valid for a given capacity, and `run_topk_select_kernel` checks

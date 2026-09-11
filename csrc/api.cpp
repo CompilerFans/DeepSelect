@@ -149,30 +149,44 @@ void topk(
             INTEGER_TYPE_SWITCH(output_index_t, OutIdxT, [&]() {
                 BOOL_SWITCH(sorted_index, SORTED_INDEX, [&]() {
                     BOOL_SWITCH(return_value, RETURN_VALUE, [&]() {
-                        //   wave == 1 -> occ1 (512t / B8192 / B2 4096 / TMA5 rounds)
-                        //   otherwise -> occ2 (256t / B4096 / B2 4096 / TMA3 or 4)
+                        //   wave == 1 -> 512t / B8192 (occ1)
+                        //   otherwise -> 256t / B4096 (occ1)
                         //
-                        // [MACA] These five tuples are upstream's, tuned for 227 KiB of shared
-                        // memory, and the big-topk one needs 183296 B -- so this arm only
-                        // compiles for an architecture that has 128 KiB (xcore1500/xcore1600).
-                        // An xcore1000 build has to bring its own <= 64 KiB tuples; until it
-                        // does, the static_asserts below fail the compile, which is the point.
-                        auto dispatch = [&]<uint32_t MAX_TOPK>() {
+                        // [MACA] These are upstream's tuples re-derived for the 128 KiB a MACA
+                        // SM has, not the 227 KiB upstream sized them for; see
+                        // `scripts/generate_instantiations.py`, which is where the table lives
+                        // and where the arithmetic is recorded, and which generates exactly the
+                        // set of instantiations these five `run_topk_select_kernel` calls
+                        // resolve against.  The two must be edited together -- a mismatch is a
+                        // link error, not a runtime one.
+                        //
+                        // `target_occupancy` is 1 everywhere: two CTAs of the smallest tuple
+                        // here are 169984 B, more than any MACA SM has.
+                        //
+                        // There is no `topk > 1024` arm.  `max_topk` 4096 is not merely a tight
+                        // fit on 128 KiB, it is impossible: `surviving_topk_pairs` is
+                        // 2 * 4096 * 8 = 65536 B and the extra-pairs region is at least
+                        // (4096 + 4096) * 8 = 65536 B, so those two members fill the SM with
+                        // nothing left for the input staging buffer.  Upstream carries that
+                        // tuple because 227 KiB has room; this port cannot, and says so below
+                        // rather than launching something that would not fit.
+                        auto dispatch = [&]<uint32_t MAX_TOPK, uint32_t B2>() {
                             if (num_waves == 1)
-                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 512, 1, 8192, 4096, 5>>(args);
+                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 512, 1, 8192, B2, 5>>(args);
                             else if constexpr (MAX_TOPK <= 512)
-                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 256, 2, 4096, 4096, 4>>(args);
+                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 256, 1, 4096, 4096, 4>>(args);
                             else
-                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 256, 2, 4096, 4096, 3>>(args);
+                                topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, 256, 1, 4096, 4096, 3>>(args);
                         };
                         if (topk <= 512) {
-                            dispatch.template operator()<512>();
+                            dispatch.template operator()<512, 4096>();
                         } else if (topk <= 1024) {
-                            dispatch.template operator()<1024>();
+                            dispatch.template operator()<1024, 3584>();
                         } else {
-                            // Big-topk coverage tier, topk in (1024, 4096]: one correctness-only tuple
-                            // (512t / occ1 / B8192 / B2 4096 / TMA3 / max_topk 4096), no wave split.
-                            topk_select_bf16_normal::run_topk_select_kernel<TopkSelectConfig<maca_bfloat16, OutIdxT, false, SORTED_INDEX, RETURN_VALUE, 4096, 512, 1, 8192, 4096, 3>>(args);
+                            TORCH_CHECK(false,
+                                "the ported upstream kernel covers topk <= 1024 on this architecture: "
+                                "max_topk 4096 needs 227 KiB of shared memory per SM and no MACA part has "
+                                "more than 128 KiB.  Use backend=\"maca_c\", which covers topk up to 4096.");
                         }
                     });
                 });
@@ -184,21 +198,28 @@ void topk(
         TORCH_CHECK(topk <= 4096, "topk must be <= 4096");
 
         INTEGER_TYPE_SWITCH(output_index_t, OutIdxT, [&]() {
-            //   topk <= 1024        -> 512t / B8192 / B2 4096 / TMA3
-            //   topk in (1024,4096] -> 256t / B4096 / B2 4096 / TMA3 (correctness-only coverage tier)
+            //   topk <= 512         -> 512t / B8192 / B2 2560 / TMA3
+            //   topk <= 1024        -> 512t / B8192 / B2 1536 / TMA3
             //
-            // [MACA] Same 128 KiB floor as the bf16 arm above: the topk <= 1024 tuple needs
-            // 142336 B here, because fp32 keeps its keys 64 bits wide.
+            // [MACA] Same 128 KiB floor, and the same edit, as the bf16 arm above; the table
+            // and its arithmetic live in `scripts/generate_instantiations.py`.  B2 comes out
+            // lower than bf16's at the same max_topk because `tma_load_buf` holds B elements
+            // of the value type -- 32768 B here against 16384 B -- and fp32 keeps its keys 64
+            // bits wide in the surviving and extra pairs regions too.  The `topk > 1024` arm
+            // is gone for the reason given there: max_topk 4096 cannot fit 128 KiB.
             auto dispatch = [&]<bool SORTED_VALUE, bool SORTED_INDEX, bool RETURN_VALUE>() {
-                auto launch = [&]<uint32_t MAX_TOPK, uint32_t NUM_THREADS, uint32_t B>() {
-                    topk_select_fp32::run_topk_select_kernel<TopkSelectConfig<float, OutIdxT, SORTED_VALUE, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, NUM_THREADS, 1, B, 4096, 3>>(args);
+                auto launch = [&]<uint32_t MAX_TOPK, uint32_t NUM_THREADS, uint32_t B, uint32_t B2>() {
+                    topk_select_fp32::run_topk_select_kernel<TopkSelectConfig<float, OutIdxT, SORTED_VALUE, SORTED_INDEX, RETURN_VALUE, MAX_TOPK, NUM_THREADS, 1, B, B2, 3>>(args);
                 };
                 if (topk <= 512) {
-                    launch.template operator()<512, 512, 8192>();
+                    launch.template operator()<512, 512, 8192, 2560>();
                 } else if (topk <= 1024) {
-                    launch.template operator()<1024, 512, 8192>();
+                    launch.template operator()<1024, 512, 8192, 1536>();
                 } else {
-                    launch.template operator()<4096, 256, 4096>();
+                    TORCH_CHECK(false,
+                        "the ported upstream kernel covers topk <= 1024 on this architecture: "
+                        "max_topk 4096 needs 227 KiB of shared memory per SM and no MACA part has "
+                        "more than 128 KiB.  Use backend=\"maca_c\", which covers topk up to 4096.");
                 }
             };
             if (sorted_value) {

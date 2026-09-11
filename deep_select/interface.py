@@ -27,15 +27,25 @@ def _backend_for(name: str):
     """
     if name == "maca_c":
         return _backend
-    from ._arch import native_target
+    from ._arch import FAMILY_OF_TARGET, native_target, upstream_available
 
     target = native_target()
+    # "This part is too small for the upstream tuples" and "it was never built
+    # for this part" are different problems with different fixes, so they get
+    # different messages.  The first one no `CUCC_TARGETS` value can solve.
+    if not upstream_available(FAMILY_OF_TARGET[target]):
+        raise RuntimeError(
+            f"backend {name!r} is not available for {target}: the ported upstream "
+            f"kernel's config tuples are derived for 128 KiB of shared memory per "
+            f"SM, and this part has less.  Use backend=\"maca_c\", the MACA-native "
+            f"kernel, which has no capacity gate."
+        )
     try:
         return importlib.import_module(f".deep_select_upstream_{target}", __package__)
     except ImportError as exc:
         raise RuntimeError(
             f"backend {name!r} has no build for {target} (this device); "
-            f"build with CUCC_TARGETS containing {target}"
+            f"build with DEEP_SELECT_BUILD_UPSTREAM=1 CUCC_TARGETS={target}"
         ) from exc
 
 

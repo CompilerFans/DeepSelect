@@ -36,6 +36,15 @@ CAPACITY_BYTES = {
     1600: 128 * 1024,
 }
 
+# The capacity the ported upstream kernel's tuples were re-derived against
+# (`scripts/generate_instantiations.py`, which refuses to emit a tuple whose
+# `occupancy * shared_memory_bytes()` exceeds it).  A family with less gets no
+# upstream build at all: not because no tuple could ever fit, but because the
+# table that would go with it does not exist, and a part cannot use another
+# part's table -- that is the whole point of the compile-time gate.  xcore1000
+# keeps `csrc/maca_topk.cu`, which has no capacity gate, as its topk.
+UPSTREAM_CAPACITY_BYTES = 128 * 1024
+
 # The CUDA-compat sm spelling torch reports -> family base.  Which of the three
 # xcore1600 spellings a part reports depends on the SDK generation, so the
 # family is the stable key and the spellings are just its aliases.
@@ -87,6 +96,16 @@ def native_target() -> str:
             f"deep_select/_arch.py::FAMILY_OF_SM"
         ) from None
     return f"xcore{family}"
+
+
+def upstream_available(family: int) -> bool:
+    """Whether the ported upstream kernel is buildable for this family at all.
+
+    False means no `CUCC_TARGETS` value would help -- the tuples do not exist
+    for a part this size, which is a different situation from "you did not
+    build it", and the two want different messages.
+    """
+    return CAPACITY_BYTES.get(family, 0) >= UPSTREAM_CAPACITY_BYTES
 
 
 def resolve_targets(spec: Optional[str]) -> list:
