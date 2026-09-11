@@ -509,6 +509,14 @@ constexpr size_t kSmemBudgetBytes =
 
 // Bytes the radix path reserves: the core arena (or the ordered scratch, which
 // aliases it and can be larger) followed by the staging buffer.
+//
+// The staging buffer holds the `topk` selected indices the core writes (the
+// shortcut path, the merge hand-off and the row selector all fill exactly
+// `topk` entries), so it is sized by `topk` and not by the `kMaxTopK` ceiling.
+// At k=512 that is 2 KB instead of 16 KB, and the difference decides the
+// occupancy the launch gets: the static shared state plus the arena plus this
+// buffer has to stay under half of `smemPerSM` for a second CTA to be resident
+// (32 KB static+dynamic per CTA on C500's 64 KB SM).
 inline size_t radix_smem_bytes(uint32_t topk, bool sorted) {
     uint32_t n_pad = 1;
     if (sorted) {
@@ -517,7 +525,7 @@ inline size_t radix_smem_bytes(uint32_t topk, bool sorted) {
     const size_t sort_bytes =
         sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
     const size_t lead = sort_bytes > kRadixArenaBytes ? sort_bytes : kRadixArenaBytes;
-    return lead + sizeof(uint32_t) * kMaxTopK;
+    return lead + sizeof(uint32_t) * topk;
 }
 
 
