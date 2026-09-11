@@ -251,6 +251,55 @@ static __device__ __forceinline__ void bitonic_sort_u64(uint64_t *data, int n) {
     }
 }
 
+// ── ordered emit ────────────────────────────────────────────────────────────
+//
+// Emits the first `n_out` slots of `selected` in the order the caller asked
+// for, by packing each one with its sort key and running the CTA-wide bitonic
+// network over the packed words.  The low 12 bits carry the slot, so ties keep
+// a deterministic order and a value - index pair can be recovered exactly
+// (`cmp` is always < vocab, so it never reaches those 12 bits).
+//
+//   SI: index ascending  -> (index << 12) | slot
+//   SV: value descending -> ((~key) << 12) | slot
+//
+// `n_pad` is `topk` rounded up to a bitonic power of two; the tail is padded
+// with `~0ull`, which sorts past every real key and is never emitted.
+template <typename ValueT, typename OutIdxT, bool RV, bool SV>
+static __device__ __forceinline__ void emit_ordered(
+    Arena &arena, const uint32_t *selected, const ValueT *input_row,
+    OutIdxT *out_index_row, ValueT *out_value_row, const RowParams &params,
+    uint32_t n_out, uint32_t topk, int32_t idx_offset) {
+    uint64_t *sort_buf = arena.sort_buf;
+    uint32_t n_pad = 1;
+    while (n_pad < topk) n_pad <<= 1;
+    for (uint32_t i = threadIdx.x; i < n_pad; i += kThreads) {
+        uint64_t pack = ~0ull;  // pads sort last and are never emitted
+        if (i < n_out) {
+            const uint32_t src = selected[i];
+            const uint64_t cmp = SV
+                ? (uint64_t)(~key_of<ValueT>(__ldg(input_row + src)))
+                : (uint64_t)src;
+            pack = (cmp << 12) | (uint64_t)i;
+        }
+        sort_buf[i] = pack;
+    }
+    __syncthreads();
+    bitonic_sort_u64(sort_buf, (int)n_pad);
+    __syncthreads();
+
+    for (uint32_t i = threadIdx.x; i < topk; i += kThreads) {
+        const bool valid = i < n_out;
+        const uint32_t slot = (uint32_t)(sort_buf[i] & 0xFFFu);
+        const uint32_t src = valid ? selected[slot] : 0u;
+        out_index_row[i] =
+            valid ? (OutIdxT)((int64_t)src + idx_offset) : (OutIdxT)params.idx_fill;
+        if (RV) {
+            out_value_row[i] =
+                valid ? __ldg(input_row + src) : float_to_value<ValueT>(params.value_fill);
+        }
+    }
+}
+
 // ── the operator kernel (one row per CTA) ───────────────────────────────────
 //
 // RV = also produce output values
@@ -294,18 +343,34 @@ __global__ __launch_bounds__(kThreads) void topk_kernel(RowParams params) {
                         (uint64_t)row * params.stride_output_value_batch)
            : nullptr;
 
-    // Shortcut contract: the window is no longer than k, so emit the indices in
-    // order and pad.  The NaN check is deliberately skipped here, matching the
-    // original operator (`abort_when_nan_found` is documented as ignored when
+    // Shortcut contract: the window is no longer than k, so the whole window is
+    // the answer.  Emitting it in index order is what `sorted_index` asks for
+    // and what the modes that leave the order unspecified accept; `sorted_value`
+    // is the exception and goes through the ordered emit below.  The NaN check
+    // is deliberately skipped on this path either way, matching the original
+    // operator (`abort_when_nan_found` is documented as ignored when
     // `end <= topk`).
     if (length <= topk) {
-        for (uint32_t i = tid; i < topk; i += kThreads) {
-            const bool valid = i < length;
-            out_index_row[i] =
-                valid ? (OutIdxT)((int64_t)i + idx_offset) : (OutIdxT)params.idx_fill;
-            if (RV) {
-                out_value_row[i] =
-                    valid ? __ldg(input_row + i) : float_to_value<ValueT>(params.value_fill);
+        if constexpr (SV) {
+            // The window is the answer, but not yet in the requested order:
+            // index order is ascending, `sorted_value` wants value descending.
+            // Hand the whole window to the ordered emit as the selection.
+            for (uint32_t i = tid; i < length; i += kThreads) selected[i] = i;
+            __syncthreads();
+            emit_ordered<ValueT, OutIdxT, RV, SV>(
+                arena, selected, input_row, out_index_row, out_value_row, params,
+                length, topk, idx_offset);
+        } else {
+            // Index order is already what `sorted_index` asks for, and the
+            // other modes leave the order unspecified.
+            for (uint32_t i = tid; i < topk; i += kThreads) {
+                const bool valid = i < length;
+                out_index_row[i] =
+                    valid ? (OutIdxT)((int64_t)i + idx_offset) : (OutIdxT)params.idx_fill;
+                if (RV) {
+                    out_value_row[i] =
+                        valid ? __ldg(input_row + i) : float_to_value<ValueT>(params.value_fill);
+                }
             }
         }
         return;
@@ -432,41 +497,9 @@ __global__ __launch_bounds__(kThreads) void topk_kernel(RowParams params) {
         return;
     }
     if constexpr (SI || SV) {
-
-    // Ordered output: platform-sort 64-bit packed keys with a bitonic network.
-    // The low 12 bits carry the slot, so ties keep a deterministic order and a
-    // value-index pair can be recovered exactly (cmp always < vocab).
-    //   SI: index ascending  -> (index << 12) | slot
-    //   SV: value descending -> ((~key) << 12) | slot
-    uint64_t *sort_buf = arena.sort_buf;
-    uint32_t n_pad = 1;
-    while (n_pad < topk) n_pad <<= 1;
-    for (uint32_t i = tid; i < n_pad; i += kThreads) {
-        uint64_t pack = ~0ull;  // pads sort last and are never emitted
-        if (i < n_out) {
-            const uint32_t src = selected[i];
-            const uint64_t cmp = SV
-                ? (uint64_t)(~key_of<ValueT>(__ldg(input_row + src)))
-                : (uint64_t)src;
-            pack = (cmp << 12) | (uint64_t)i;
-        }
-        sort_buf[i] = pack;
-    }
-    __syncthreads();
-    bitonic_sort_u64(sort_buf, (int)n_pad);
-    __syncthreads();
-
-    for (uint32_t i = tid; i < topk; i += kThreads) {
-        const bool valid = i < n_out;
-        const uint32_t slot = (uint32_t)(sort_buf[i] & 0xFFFu);
-        const uint32_t src = valid ? selected[slot] : 0u;
-        out_index_row[i] =
-            valid ? (OutIdxT)((int64_t)src + idx_offset) : (OutIdxT)params.idx_fill;
-        if (RV) {
-            out_value_row[i] = valid ? __ldg(input_row + src)
-                                     : float_to_value<ValueT>(params.value_fill);
-        }
-    }
+        emit_ordered<ValueT, OutIdxT, RV, SV>(
+            arena, selected, input_row, out_index_row, out_value_row, params,
+            n_out, topk, idx_offset);
     }
 }
 

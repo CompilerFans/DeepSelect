@@ -293,7 +293,8 @@ def do_stress_test(
             #   同类引号嵌套（Python >= 3.12 才允许）。本机是 3.10，那种写法是
             #   SyntaxError，而 `kernelkit/__init__.py` 会 `from . import stress`，
             #   于是整个官方套件连 import 都进不去。仅把内层引号换成单引号，
-            #   语义逐字节不变（同一字典的同一键）。这是本目录相对上游唯一的一处改动。
+            #   语义逐字节不变（同一字典的同一键）。本文件相对上游只有这一处改动
+            #   （`tests/` 下另一处 MACA 改动在 kernelkit/platform.py）。
             print(f"{colors['RED_BG']}Glitching disabled\n{colors['CLEAR']}")
 
         nxt_testcase_idx = 0

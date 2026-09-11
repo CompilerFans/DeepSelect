@@ -240,10 +240,24 @@ strides, tie-heavy inputs, the NaN contract, and the contract rejections. Each
 case is compared against `torch.topk` run in a separate process (see the module
 docstring for why).
 
-Upstream's [`tests/test.py`](tests/test.py) is not runnable on a Python 3.10
-interpreter (its `tests/kernelkit/stress.py` uses PEP 701 f-strings, which
-Python 3.12 introduced); the MACA suite above re-derives the coverage that
-applies here rather than depending on it.
+Upstream's [`tests/test.py`](tests/test.py) runs here too, over a slice of its
+own table. The harness needed two changes under `tests/kernelkit/` to get that
+far: `platform.py` asks torch whether it can see a device instead of grepping
+`lspci` (a MACA part does not enumerate as an NVIDIA 3D controller, so every
+MACA host was reported CPU-only and `bench()` refused to run), and the one
+PEP 701 f-string at `stress.py:292` (Python 3.12 syntax; this tree builds
+against 3.10) is rewritten with the same meaning. Those two edits plus the new
+`check_maca.py` are the whole delta under `tests/`.
+
+The table itself is 105,138 cases and takes hours, so
+[`scripts/official_slice.py`](scripts/official_slice.py) drives a seeded uniform
+sample of 200 of them through the official `run_testcase` checks, unchanged
+(capped at `batch_size * vocab_size <= 2**28`, which bounds the reference
+`torch.topk` without dropping a shape family):
+
+```bash
+PYTHONPATH=. python scripts/official_slice.py     # 200/200 passed
+```
 
 ## Citation
 

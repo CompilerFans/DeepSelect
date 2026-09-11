@@ -448,6 +448,20 @@ CASES = [
       end_len=[7, 511, 512, 513, 8192, 4000], idx_fill=-2000000 + 8192),
     C("end-shortcut-eq", "window", 4, 4096, 512, FP32, I32, end_len=512),
     C("end-shortcut-lt", "window", 4, 4096, 512, FP32, I32, end_len=511),
+    # The window being the whole answer and the row having to come back in
+    # value order are independent: whichever exit produces the answer still
+    # owes the caller `sorted_value`.  These four are that intersection -- a
+    # window that ends on/under `topk`, taken with and without `end`, on both
+    # dtypes (upstream's suite caught this on a `vocab < topk` shape, which is
+    # the no-`end` case here).
+    C("sv-shortcut-eq", "window", 4, 4096, 512, FP32, I32, end_len=512,
+      sorted_value=True),
+    C("sv-shortcut-lt", "window", 4, 4096, 512, FP32, I64, end_len=511,
+      sorted_value=True),
+    C("sv-vocab-under-k", "window", 4, 300, 512, FP32, I32,
+      sorted_value=True),
+    C("sv-vocab-under-k-bf16", "window", 4, 200, 512, BF16, I32,
+      sorted_value=True),
     C("end-minimal-refine", "window", 4, 4096, 512, FP32, I32, end_len=513),
     C("end-zero", "window", 4, 2048, 512, FP32, I64, end_len=0),
     C("offset", "window", 4, 4096, 512, BF16, I32,
