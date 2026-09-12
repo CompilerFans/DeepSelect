@@ -57,6 +57,38 @@ class Distribution(abc.ABC):
             torch.bfloat16: torch.uint16,
             torch.float: torch.uint32
         }[dtype]
+
+    def as_uint(self, data: torch.Tensor, uint_dtype: torch.dtype) -> torch.Tensor:
+        """`data.to(uint_dtype)`, spelled so it works on a CUDA device.
+
+        [MACA] `torch.randint(...).to(torch.uint16)` raises
+        `NotImplementedError: "copy_" not implemented for 'UInt16'` when the
+        source is a CUDA tensor -- the cast is dispatched through a device
+        `copy_`, and this torch build has no UInt16/UInt32 copy kernel.  With
+        `torch.set_default_device("cuda")` in force (which every suite here
+        requires; see README "Testing") that is *every* `randint` in these
+        distributions, so the harness could not generate a single case.
+
+        Doing the cast on the CPU and moving the result is the same integer
+        conversion bit for bit: the host->device move is supported even though
+        a device-side cast is not.
+        """
+        return data.cpu().to(uint_dtype).to(data.device)
+
+    def put_uint_bits(self, result: torch.Tensor, data: torch.Tensor) -> None:
+        """`result.view(uint).copy_(data)` where both are the same uint dtype.
+
+        [MACA] `copy_` is unimplemented for UInt16/UInt32 on this torch build --
+        the *destination* is what it objects to, so moving the cast to the CPU
+        above is not enough; this write still has to happen.  Copying through
+        the equal-width signed view is the same 16/32 bits and a supported
+        kernel, which is the whole workaround: `view` is free and bit-preserving
+        in both directions.
+        """
+        assert result.dtype.itemsize == data.dtype.itemsize
+        signed = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}[
+            data.dtype.itemsize]
+        result.view(signed).copy_(data.view(signed))
         
     def generate(self, result: torch.Tensor):
         """
@@ -102,8 +134,8 @@ class UniformUIntDistribution(Distribution):
 
     def generate(self, result: torch.Tensor):
         uint_dtype = self.dtype2uint_dtype(result.dtype)
-        data = torch.randint(self.lower, self.upper, result.shape, dtype=torch.long).to(uint_dtype)
-        result.view(uint_dtype).copy_(data)
+        data = self.as_uint(torch.randint(self.lower, self.upper, result.shape, dtype=torch.long), uint_dtype)
+        self.put_uint_bits(result, data)
 
 
 class UintDistributionWithHotspotAndSpecifiedPivot(Distribution):
@@ -173,16 +205,16 @@ class UintDistributionWithHotspotAndSpecifiedPivot(Distribution):
             num_smaller_values = vocab_size - acc_freq - num_pivots - num_larger_values
             assert num_larger_values >= 0
             assert num_smaller_values >= 0
-            put_values(num_larger_values, torch.randint(larger_values_bound[0], larger_values_bound[1]+1, (batch_size, num_larger_values), dtype=torch.long).to(uint_dtype))
-            put_values(num_smaller_values, torch.randint(smaller_values_bound[0], smaller_values_bound[1]+1, (batch_size, num_smaller_values), dtype=torch.long).to(uint_dtype))
+            put_values(num_larger_values, self.as_uint(torch.randint(larger_values_bound[0], larger_values_bound[1]+1, (batch_size, num_larger_values), dtype=torch.long), uint_dtype))
+            put_values(num_smaller_values, self.as_uint(torch.randint(smaller_values_bound[0], smaller_values_bound[1]+1, (batch_size, num_smaller_values), dtype=torch.long), uint_dtype))
             put_values(num_pivots, self.pivot)
 
         else:
             num_remaining_elems = vocab_size - acc_freq
             num_positive_values = random.randint(0, num_remaining_elems)
             num_negative_values = num_remaining_elems - num_positive_values
-            put_values(num_positive_values, torch.randint(fp_cfg.positive_0_as_int, fp_cfg.positive_inf_as_int+1+(1 if self.allow_nan else 0), (batch_size, num_positive_values), dtype=torch.long).to(uint_dtype))
-            put_values(num_negative_values, torch.randint(fp_cfg.negative_0_as_int, fp_cfg.negative_inf_as_int+1+(1 if self.allow_nan else 0), (batch_size, num_negative_values), dtype=torch.long).to(uint_dtype))
+            put_values(num_positive_values, self.as_uint(torch.randint(fp_cfg.positive_0_as_int, fp_cfg.positive_inf_as_int+1+(1 if self.allow_nan else 0), (batch_size, num_positive_values), dtype=torch.long), uint_dtype))
+            put_values(num_negative_values, self.as_uint(torch.randint(fp_cfg.negative_0_as_int, fp_cfg.negative_inf_as_int+1+(1 if self.allow_nan else 0), (batch_size, num_negative_values), dtype=torch.long), uint_dtype))
 
         assert acc_freq == vocab_size
 
