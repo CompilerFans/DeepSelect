@@ -47,6 +47,26 @@ def _xcore1600_sources():
     return sources
 
 
+def _tvm_ffi_root():
+    """Where `tvm_ffi` keeps its headers and shared library.
+
+    Returns `(package_root, lib_subdir)`.  The package is a build-time
+    requirement and a run-time one: the extension does not carry a PyInit, so
+    `deep_select/_binding.py` loads it through `tvm_ffi.load_module`, and that
+    import must succeed for the artifact to be usable at all.
+    """
+    import tvm_ffi
+
+    root = os.path.dirname(os.path.abspath(tvm_ffi.__file__))
+    for sub in ("lib", os.path.join("lib64")):
+        if os.path.isdir(os.path.join(root, sub)):
+            return root, sub
+    raise RuntimeError(
+        f"tvm_ffi at {root} has no lib/ or lib64/; the extension links "
+        f"libtvm_ffi.so and cannot be built without it"
+    )
+
+
 def _maca_root() -> str:
     return os.environ.get("MACA_HOME") or os.environ.get("MACA_PATH") or "/opt/maca"
 
@@ -127,6 +147,12 @@ def build_for_maca():
 
     maca_root = _maca_root()
     this_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # The tvm-ffi headers and `libtvm_ffi.so` ship inside the `tvm_ffi` python
+    # package, so asking that package is more reliable than guessing a prefix.
+    # `lib_subdir` is platform-dependent (`lib` here); it is resolved rather
+    # than assumed because the rpath below has to point at it.
+    tvm_ffi_root, lib_subdir = _tvm_ffi_root()
     targets = resolve_targets(os.environ.get("CUCC_TARGETS"))
 
     # A config's shared memory footprint is valid for exactly one architecture,
@@ -165,6 +191,11 @@ def build_for_maca():
 
     include_dirs = [
         os.path.join(this_dir, "csrc"),
+        # `csrc/ffi/` -- the tvm-ffi edge (tensor/error/check helpers).  Both
+        # kernel trees include it as `"../ffi/..."` from `csrc/xcoreN/`, and
+        # `csrc/xcore1600/dispatch_utils.h` as `"ffi_..."`, so the directory
+        # itself is on the path.
+        os.path.join(this_dir, "csrc", "ffi"),
         # The ported kernel's own headers are included unqualified
         # (`#include "config.h"`), which keeps them independent of where this
         # directory sits.
@@ -226,11 +257,18 @@ def build_for_maca():
         else:
             sources = _xcore1600_sources()
             which = "the ported kernel"
-        ext_modules.append(
-            CUDAExtension(
+        ext = CUDAExtension(
+                # The tvm-ffi artifact has no `PyInit` and is NOT an
+                # importable python module -- it is loaded through
+                # `tvm_ffi.load_module` (deep_select/_binding.py).  Keeping it
+                # inside the package directory is the official tvm-ffi layout;
+                # `no_python_abi_suffix` stops setuptools from stamping a
+                # cpython-310 tag on something the import system never sees,
+                # which is also one fewer place the artifact is tied to a
+                # python version.
                 name=f"deep_select.deep_select_xcore{family}",
+                no_python_abi_suffix=True,
                 sources=sources,
-                include_dirs=include_dirs,
                 # Every source is a `.cu`, so the `nvcc` list is the only one
                 # torch ever reads; the key is torch's name for "the device
                 # source list", and its contents are mxcc's dialect because
@@ -238,12 +276,35 @@ def build_for_maca():
                 extra_compile_args={
                     "nvcc": compile_args(target),
                 },
+                # tvm-ffi headers and the runtime they bind against.  The
+                # library dir is needed at link time; the rpath below covers
+                # load time.
+                # torch's own include paths, the MACA catalogue, and the
+                # tvm-ffi headers the binding edge needs.
+                include_dirs=include_dirs + [os.path.join(tvm_ffi_root, "include")],
+                library_dirs=[os.path.join(tvm_ffi_root, "lib")],
+                libraries=["tvm_ffi"],
                 extra_link_args=[
                     f"-L{maca_root}/lib",
                     f"-Wl,-rpath,{maca_root}/lib",
+                    # `libtvm_ffi.so` lives in the tvm_ffi python package, so
+                    # the loader resolves it through that package's path rather
+                    # than through LD_LIBRARY_PATH.
+                    f"-Wl,-rpath,{os.path.join(tvm_ffi_root, lib_subdir)}",
                 ],
             )
-        )
+        # `CUDAExtension`'s constructor auto-appends c10/torch/torch_cuda to
+        # `libraries`; strip them so the artifact carries no torch DT_NEEDED
+        # entry.  This is the whole point of the migration: the pybind11 build
+        # linked libtorch/libc10, which made the wheel fragile across host
+        # torch versions (the c10_cuda_check_implementation trap) and made the
+        # .so unusable without torch importable.
+        ext.libraries = [
+            lib for lib in ext.libraries
+            if lib.lower() not in ("c10", "torch", "torch_cpu", "torch_python",
+                                   "c10_cuda", "torch_cuda")
+        ]
+        ext_modules.append(ext)
         print(f"deep_select: building xcore{family} "
               f"({capacity_kib} KiB shared memory) for {target}: {which}")
 

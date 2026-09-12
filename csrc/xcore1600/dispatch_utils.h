@@ -1,10 +1,20 @@
 /*
  * Adapted from
  * https://github.com/pytorch/pytorch/blob/v2.0.1/aten/src/ATen/Dispatch.h
+ *
+ * 2026 - Modified for DeepSelect: torch-free.  The switches read DLPack dtypes
+ * through `ffi::same_dtype` rather than `torch::ScalarType` comparisons, and
+ * their failure arms go through `DS_HOST_UNREACHABLE` rather than
+ * `TORCH_CHECK`.  The arms are unreachable from `api.cu` today -- the entry
+ * checks every dtype before dispatching -- but they stay spelled out so a new
+ * call site cannot silently fall off the end.
  */
 #pragma once
 
-#include <torch/extension.h>
+#include "ffi_error.h"
+#include "ffi_tensor.h"
+
+#include <cstdint>
 
 #define BOOL_SWITCH(COND, CONST_NAME, ...)      \
   [&] {                                         \
@@ -17,50 +27,47 @@
     }                                           \
   }()
 
-#define INTEGER_TYPE_SWITCH(type, INDEX_TYPE, ...)   \
-  [&] {                                              \
-    if (type == torch::kLong) {                      \
-      using INDEX_TYPE = int64_t;                    \
-      return __VA_ARGS__();                          \
-    } else if(type == torch::kInt32) {               \
-      using INDEX_TYPE = int32_t;                    \
-      return __VA_ARGS__();                          \
-    } else {                                         \
-      TORCH_CHECK(                                   \
-        false, "Unsupported integer dtype: ", type);                 \
-    }                                                \
+#define INTEGER_TYPE_SWITCH(tensor, INDEX_TYPE, ...)                    \
+  [&] {                                                                 \
+    if (::deep_select::ffi::same_dtype((tensor).dtype(),                \
+                                       ::deep_select::ffi::kInt64)) {   \
+      using INDEX_TYPE = int64_t;                                       \
+      return __VA_ARGS__();                                             \
+    } else if (::deep_select::ffi::same_dtype(                          \
+                   (tensor).dtype(), ::deep_select::ffi::kInt32)) {     \
+      using INDEX_TYPE = int32_t;                                       \
+      return __VA_ARGS__();                                             \
+    } else {                                                            \
+      DS_HOST_UNREACHABLE("Unsupported integer dtype for `" #tensor     \
+                          "` (must be int32 or int64)");                \
+    }                                                                   \
   }()
 
-#define FLOATING_TYPE_SWITCH(type, FP_TYPE, ...)        \
-  [&] {                                                 \
-    if (type == at::ScalarType::Float) {                \
-      using FP_TYPE = float;                            \
-      return __VA_ARGS__();                             \
-    } else if (type == at::ScalarType::BFloat16) {      \
-      using FP_TYPE = maca_bfloat16;                      \
-      return __VA_ARGS__();                             \
-    } else {                                            \
-      TORCH_CHECK(                                      \
-        false, "Unsupported floating point dtype: ", type);                    \
-    }                                                   \
+#define FLOATING_TYPE_SWITCH(tensor, FP_TYPE, ...)                      \
+  [&] {                                                                 \
+    if (::deep_select::ffi::is_float32(tensor)) {                       \
+      using FP_TYPE = float;                                            \
+      return __VA_ARGS__();                                             \
+    } else if (::deep_select::ffi::is_bfloat16(tensor)) {               \
+      using FP_TYPE = maca_bfloat16;                                    \
+      return __VA_ARGS__();                                             \
+    } else {                                                            \
+      DS_HOST_UNREACHABLE("Unsupported floating point dtype for `"      \
+                          #tensor "` (must be float32 or bfloat16)");   \
+    }                                                                   \
   }()
 
-#define CLUSTER_SIZE_SWITCH(cluster_size, ...)                   \
-  [&] {                                                          \
-    if (cluster_size == 1) {                                     \
-      constexpr static int CLUSTER_SIZE = 1;                     \
-      return __VA_ARGS__();                                      \
-    } else if (cluster_size == 2) {                              \
-      constexpr static int CLUSTER_SIZE = 2;                     \
-      return __VA_ARGS__();                                      \
-    } else if (cluster_size == 4) {                              \
-      constexpr static int CLUSTER_SIZE = 4;                     \
-      return __VA_ARGS__();                                      \
-    } else if (cluster_size == 8) {                              \
-      constexpr static int CLUSTER_SIZE = 8;                     \
-      return __VA_ARGS__();                                      \
-    } else {                                                     \
-      TORCH_CHECK(                                               \
-        false, "Unsupported cluster_size");                      \
-    }                                                            \
+// Kept although nothing reaches it: the cluster variant is deleted on MACA
+// (no cluster launch, no distributed shared memory).  A dispatch arm that
+// still selects on `cluster_size` would find this, rather than a compile
+// error about an undefined macro.
+#define CLUSTER_SIZE_SWITCH(cluster_size, ...)  \
+  [&] {                                         \
+    if (cluster_size == 1) {                    \
+      constexpr static int CLUSTER_SIZE = 1;    \
+      return __VA_ARGS__();                     \
+    } else {                                    \
+      DS_HOST_UNREACHABLE("Unsupported cluster_size: MACA has no cluster "  \
+                          "launch; the cluster variant was deleted");       \
+    }                                           \
   }()

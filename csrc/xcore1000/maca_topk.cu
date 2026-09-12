@@ -761,136 +761,172 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
 
 }  // namespace deep_select_maca
 
-// ── torch extension entry points ────────────────────────────────────────────
-#include <ATen/cuda/CUDAContext.h>
-#include <torch/extension.h>
+// ── the tvm-ffi entry points ────────────────────────────────────────────────
+//
+// Torch-free: this TU no longer includes <torch/extension.h> or
+// <ATen/cuda/CUDAContext.h>, so the extension carries no torch DT_NEEDED
+// entry and its behavior is not tied to the host's torch build.  The contract
+// checks that used to be `TORCH_CHECK` are `DS_HOST_CHECK`, the tensors are
+// `tvm::ffi::TensorView`, and the stream comes from the FFI environment.
+#include "../ffi/ffi_error.h"
+#include "../ffi/ffi_tensor.h"
 
-std::pair<uint32_t, uint32_t> get_alignment_requirement() {
+#include <tvm/ffi/extra/c_env_api.h>
+
+#include <utility>
+#include <vector>
+
+namespace deep_select {
+
+using namespace deep_select_maca;
+namespace dsf = deep_select::ffi;
+
+tvm::ffi::Array<int64_t> get_alignment_requirement() {
     return {INPUT_STRIDE_ALIGNMENT_REQUIREMENT,
             OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT};
 }
 
-void topk(torch::Tensor &input, int topk, c10::optional<torch::Tensor> &begin,
-          c10::optional<torch::Tensor> &end, bool sorted_value,
-          bool sorted_index, c10::optional<torch::Tensor> &output_value,
-          torch::Tensor &output_index,
-          c10::optional<torch::Tensor> &output_idx_offset,
-          int idx_oob_fill_value, float value_oob_fill_value,
+void topk(const tvm::ffi::TensorView &input, int64_t topk,
+          const tvm::ffi::Optional<tvm::ffi::TensorView> &end,
+          bool sorted_value, bool sorted_index,
+          const tvm::ffi::Optional<tvm::ffi::TensorView> &output_value,
+          const tvm::ffi::TensorView &output_index,
+          const tvm::ffi::Optional<tvm::ffi::TensorView> &output_idx_offset,
+          int64_t idx_oob_fill_value, double value_oob_fill_value,
           bool return_value, bool abort_when_nan_found) {
-    using namespace deep_select_maca;
+    DS_HOST_CHECK(input.ndim() == 2, "input must be 2-D, got ", input.ndim());
+    const int64_t batches = dsf::size(input, 0);
+    const int64_t vocab_size = dsf::size(input, 1);
+    const bool float32 = dsf::is_float32(input);
+    const bool bfloat16 = dsf::is_bfloat16(input);
 
-    const int64_t batches = input.size(0);
-    const int64_t vocab_size = input.size(1);
-    const at::ScalarType value_t = input.scalar_type();
-
-    TORCH_CHECK(topk > 0, "topk must > 0");
-    TORCH_CHECK(topk <= kMaxTopK, "topk must be <= ", kMaxTopK);
-    TORCH_CHECK(!(sorted_value && !return_value),
-                "`return_value` must be enabled when `sorted_value` is True");
-    TORCH_CHECK(!(sorted_value && sorted_index),
-                "`sorted_value` and `sorted_index` cannot be used at the same time");
-    TORCH_CHECK(!begin.has_value(), "`begin` is not supported currently");
-    TORCH_CHECK(value_t == at::kFloat || value_t == at::kBFloat16,
-                "input dtype must be float32 or bfloat16");
-    TORCH_CHECK(output_index.scalar_type() == at::kInt ||
-                    output_index.scalar_type() == at::kLong,
-                "output_index dtype must be int32 or int64");
-    TORCH_CHECK(input.stride(1) == 1, "input.stride(1) must be 1");
-    TORCH_CHECK(input.stride(0) * input.element_size() %
-                        (int64_t)INPUT_STRIDE_ALIGNMENT_REQUIREMENT ==
-                    0,
-                "input.stride(0) must be a multiple of ",
-                INPUT_STRIDE_ALIGNMENT_REQUIREMENT, " bytes");
+    DS_HOST_CHECK(topk > 0, "topk must > 0");
+    DS_HOST_CHECK(topk <= (int64_t)kMaxTopK, "topk must be <= ", kMaxTopK);
+    DS_HOST_CHECK(!(sorted_value && !return_value),
+                  "`return_value` must be enabled when `sorted_value` is True");
+    DS_HOST_CHECK(!(sorted_value && sorted_index),
+                  "`sorted_value` and `sorted_index` cannot be used at the same time");
+    DS_HOST_CHECK(float32 || bfloat16,
+                  "input dtype must be float32 or bfloat16");
+    DS_HOST_CHECK(dsf::is_index_type(output_index),
+                  "output_index dtype must be int32 or int64");
+    DS_HOST_CHECK(dsf::stride(input, 1) == 1, "input.stride(1) must be 1");
+    DS_HOST_CHECK(dsf::stride(input, 0) * (int64_t)dsf::element_size(input) %
+                          (int64_t)INPUT_STRIDE_ALIGNMENT_REQUIREMENT == 0,
+                  "input.stride(0) must be a multiple of ",
+                  INPUT_STRIDE_ALIGNMENT_REQUIREMENT, " bytes");
 
     // Every output row is addressed as `row * stride(0) + column`, so a
     // last-dimension stride other than 1 (or a row that is too short) writes
     // outside the columns the caller owns.  Upstream rejects both
     // (api.cu KU_CHECK_LAST_DIM_CONTIGUOUS / KU_CHECK_SHAPE) -- without the
     // check the result is silently scrambled, so refuse instead.
-    auto check_out_tensor = [&](const char what[], const torch::Tensor &t) {
-        TORCH_CHECK(t.device() == input.device(),
-                    what, " must be on the same device as `input`");
-        TORCH_CHECK(t.stride(1) == 1, what, ".stride(1) must be 1");
-        TORCH_CHECK(t.size(0) == batches && t.size(1) >= topk,
-                    what, " must be at least (batch_size, topk) = (",
-                    batches, ", ", topk, ")");
+    auto check_out_tensor = [&](const char what[],
+                                const tvm::ffi::TensorView &t) {
+        DS_HOST_CHECK(t.device().device_id == input.device().device_id,
+                      what, " must be on the same device as `input`");
+        DS_HOST_CHECK(dsf::stride(t, 1) == 1, what, ".stride(1) must be 1");
+        DS_HOST_CHECK(dsf::size(t, 0) == batches && dsf::size(t, 1) >= topk,
+                      what, " must be at least (batch_size, topk) = (",
+                      batches, ", ", topk, ")");
     };
     check_out_tensor("output_index", output_index);
     if (return_value) {
-        TORCH_CHECK(output_value.has_value(),
-                    "`output_value` must not be `None` when `return_value` is True");
-        TORCH_CHECK(output_value->scalar_type() == value_t,
-                    "output_value dtype must match input dtype");
-        check_out_tensor("output_value", *output_value);
+        DS_HOST_CHECK(output_value.has_value(),
+                      "`output_value` must not be `None` when `return_value` is True");
+        const tvm::ffi::TensorView &ov = output_value.value();
+        DS_HOST_CHECK(dsf::same_dtype(ov.dtype(), input.dtype()),
+                      "output_value dtype must match input dtype");
+        check_out_tensor("output_value", ov);
     }
     // The per-row tables are read as `table[row]`, so `stride(0)` must be 1 and
     // the tensor must be on the device (a wrong-device pointer faults on read).
-    auto check_row_table = [&](const char what[], const torch::Tensor &t) {
-        TORCH_CHECK(t.device() == input.device(),
-                    what, " must be on the same device as `input`");
-        TORCH_CHECK(t.numel() == batches && t.stride(0) == 1,
-                    what, " must be a contiguous tensor of `batch_size` entries");
+    auto check_row_table = [&](const char what[],
+                               const tvm::ffi::TensorView &t) {
+        DS_HOST_CHECK(t.device().device_id == input.device().device_id,
+                      what, " must be on the same device as `input`");
+        DS_HOST_CHECK(t.ndim() == 1 && dsf::size(t, 0) == batches &&
+                          dsf::stride(t, 0) == 1,
+                      what, " must be a contiguous tensor of `batch_size` entries");
     };
-    if (end.has_value()) check_row_table("end", *end);
+    if (end.has_value()) check_row_table("end", end.value());
     if (output_idx_offset.has_value()) {
-        check_row_table("output_idx_offset", *output_idx_offset);
+        check_row_table("output_idx_offset", output_idx_offset.value());
     }
 
+    const tvm::ffi::TensorView &ov =
+        return_value ? output_value.value() : output_index;
+
     RowParams p{};
-    p.input = input.data_ptr();
-    p.output_value = return_value ? output_value->data_ptr() : nullptr;
-    p.output_index = output_index.data_ptr();
-    p.end_ptr = end.has_value() ? end->data_ptr<int32_t>() : nullptr;
-    p.idx_offset_ptr =
-        output_idx_offset.has_value() ? output_idx_offset->data_ptr<int32_t>()
-                                      : nullptr;
-    // The kernel offsets rows in *bytes*; `Tensor::stride` counts elements.
-    p.stride_input_batch = (uint64_t)input.stride(0) * input.element_size();
+    p.input = dsf::const_data_ptr(input);
+    p.output_value = return_value ? dsf::data_ptr(ov) : nullptr;
+    p.output_index = dsf::data_ptr(output_index);
+    p.end_ptr = end.has_value() ? dsf::data_ptr<int32_t>(end.value()) : nullptr;
+    p.idx_offset_ptr = output_idx_offset.has_value()
+                           ? dsf::data_ptr<int32_t>(output_idx_offset.value())
+                           : nullptr;
+    // The kernel offsets rows in *bytes*; `stride` counts elements.
+    p.stride_input_batch = (uint64_t)dsf::stride(input, 0) * dsf::element_size(input);
     p.stride_output_value_batch =
-        return_value ? (uint64_t)output_value->stride(0) * output_value->element_size() : 0;
+        return_value ? (uint64_t)dsf::stride(ov, 0) * dsf::element_size(ov) : 0;
     p.stride_output_index_batch =
-        (uint64_t)output_index.stride(0) * output_index.element_size();
+        (uint64_t)dsf::stride(output_index, 0) * dsf::element_size(output_index);
     p.vocab_size = (uint32_t)vocab_size;
     p.topk = (uint32_t)topk;
-    p.idx_fill = idx_oob_fill_value;
-    p.value_fill = value_oob_fill_value;
+    p.idx_fill = (int32_t)idx_oob_fill_value;
+    p.value_fill = (float)value_oob_fill_value;
     p.abort_on_nan = abort_when_nan_found;
 
-    const int value_dtype = (value_t == at::kFloat) ? 0 : 1;
-    const int index_dtype = (output_index.scalar_type() == at::kInt) ? 0 : 1;
-    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    const int value_dtype = float32 ? 0 : 1;
+    const int index_dtype = dsf::same_dtype(output_index.dtype(), dsf::kInt32) ? 0 : 1;
+    // The FFI environment holds torch's current stream while the python
+    // facade is inside `tvm_ffi.use_torch_stream()` (deep_select/_binding.py).
+    // Outside it TVMFFIEnvGetStream reports the null handle, which is the
+    // legacy default stream -- the same thing the torch build launched on
+    // when no stream was set, so this is not a behavior change.
+    const cudaStream_t stream = (cudaStream_t)TVMFFIEnvGetStream(
+        (int32_t)dsf::device_type(input), dsf::device_index(input));
 
     // The chunked split wants the row lengths as a table and a candidate
-    // workspace; both are sized here, where the gate can be asked before the
-    // launch.  A shape outside the gate pays neither.
-    torch::Tensor lengths_holder, workspace_holder;
+    // workspace.  The lengths table is built HERE rather than by the caller:
+    // it is an internal detail of the split's stage 1 (the whole row, which is
+    // what `end` absent already means), it is at most `batch_size` int32s, and
+    // keeping it here leaves the public entry a pure DLTensor boundary.
+    //
+    // The workspace is also ours: raw cudaMalloc rather than a torch tensor,
+    // because a torch tensor here is exactly the coupling this migration
+    // removes.  It is a synchronous allocation on the calling thread, so it is
+    // ordered before the launches on any stream.
+    int32_t *lengths = nullptr;
     void *workspace = nullptr;
     size_t workspace_bytes = 0;
     if (value_dtype == 1 &&
-        deep_select_maca::detail::chunked_bf16_applies(p, (uint32_t)batches)) {
+        detail::chunked_bf16_applies(p, (uint32_t)batches)) {
         if (!end.has_value()) {
-            // `end` absent means the whole row, which is exactly the table the
-            // split's stage-1 reads per row.
-            lengths_holder = torch::full({input.size(0)}, vocab_size,
-                                         input.options().dtype(at::kInt));
-            p.end_ptr = lengths_holder.data_ptr<int32_t>();
+            DS_CUDA_RUNTIME_CHECK(
+                cudaMalloc(&lengths, (size_t)batches * sizeof(int32_t)));
+            std::vector<int32_t> host_lengths((size_t)batches, (int32_t)vocab_size);
+            DS_CUDA_RUNTIME_CHECK(cudaMemcpy(lengths, host_lengths.data(),
+                                             (size_t)batches * sizeof(int32_t),
+                                             cudaMemcpyHostToDevice));
+            p.end_ptr = lengths;
         }
-        workspace_bytes = deep_select_maca::detail::chunked_workspace_bytes(
-            (uint32_t)batches, (uint32_t)topk);
-        workspace_holder = torch::empty({(int64_t)workspace_bytes},
-                                        input.options().dtype(at::kByte));
-        workspace = workspace_holder.data_ptr();
+        workspace_bytes = detail::chunked_workspace_bytes((uint32_t)batches,
+                                                          (uint32_t)topk);
+        DS_CUDA_RUNTIME_CHECK(cudaMalloc(&workspace, workspace_bytes));
     }
+
+    struct FreeIfSet {
+        void *p;
+        ~FreeIfSet() { if (p) cudaFree(p); }
+    } free_lengths{(void *)lengths}, free_workspace{workspace};
 
     topk_launch(p, batches, (void *)stream, value_dtype, index_dtype,
                 sorted_index, sorted_value, return_value, workspace,
                 workspace_bytes);
-    cudaError_t err = cudaGetLastError();
-    TORCH_CHECK(err == cudaSuccess, "topk launch failed: ",
-                cudaGetErrorString(err));
+    DS_CUDA_RUNTIME_CHECK(cudaGetLastError());
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("topk", &topk);
-    m.def("get_alignment_requirement", &get_alignment_requirement);
-}
+}  // namespace deep_select
+
+#include "../ffi/ffi_entries.h"

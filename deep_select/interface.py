@@ -1,9 +1,10 @@
 import functools
-import importlib
+import os
 import torch
 
 from typing import Optional, Tuple
 
+from . import _binding
 from ._arch import FAMILY_OF_TARGET, native_target
 
 
@@ -41,20 +42,14 @@ _KERNEL_NAMES = tuple(f"xcore{family}"
 
 @functools.lru_cache(maxsize=None)
 def _backend_for(name: str):
-    """The extension module that implements the kernel `name`.
+    """The loaded tvm-ffi extension that implements the kernel `name`.
 
-    Imported on demand and cached: the module holds a device binary, and a
-    process that never calls `topk` on a kernel should not load one.
+    Loaded on demand and cached (both here and in `_binding`): the module
+    holds a device binary, and a process that never calls `topk` on a kernel
+    should not load one.
     """
     assert name in _KERNEL_NAMES, name
-    try:
-        return importlib.import_module(f".deep_select_{name}", __package__)
-    except ImportError as exc:
-        raise RuntimeError(
-            f"backend {name!r} has not been built; build it with "
-            f"CUCC_TARGETS={name} (setup.py builds one extension per "
-            f"architecture, and only for the architectures it is asked for)"
-        ) from exc
+    return _binding.load(name)
 
 
 # `structs.h`'s INPUT_STRIDE_ALIGNMENT_REQUIREMENT and OUTPUT_STRIDE_ALIGNMENT_
@@ -73,7 +68,11 @@ def get_stride_requirement() -> Tuple[int, int]:
     Returns the stride requirement for input / output tensors, in bytes
     """
     try:
-        return _backend_for(native_target()).get_alignment_requirement()
+        # The FFI entry returns `Array<int64_t>` (a python list); the pybind11
+        # one returned a C++ pair, which pybind converted to a tuple for free.
+        # Normalize here so the rest of this module sees the tuple either way.
+        pair = _backend_for(native_target()).get_alignment_requirement()
+        return (int(pair[0]), int(pair[1]))
     except RuntimeError:
         return _ALIGNMENT_REQUIREMENT_BYTES
 
@@ -184,10 +183,21 @@ def topk(
             abort_when_nan_found=abort_when_nan_found,
         )
     else:
+        # `kernels=[...]` is the public `aoti_torch`-style indirection a caller
+        # may pass to select particular implementations; it is not part of the
+        # contract this operator publishes, and the kernel pick is a property
+        # of the device, so nothing here reads it.
+        #
+        # The tvm-ffi entry takes 12 positional arguments, all DLTensor or
+        # plain scalar: `begin` is rejected by this function above and `hint` is
+        # not supported, so neither crosses the boundary -- the old pybind11
+        # entry passed them as empty optionals and the kernel layer ignored
+        # them.  `output_val` is ``None`` when `return_value` is False, which is
+        # what `Optional<TensorView>` carries.
         backend_args = (
             input,
             topk,
-            begin, end,
+            end,
             sorted, sorted_index,
             output_val, output_idx,
             output_idx_offset,
@@ -199,7 +209,17 @@ def topk(
         # `maca_c` means this device's kernel: which extension that is gets
         # resolved here rather than in the signature, which keeps `torch`
         # usable on a machine with no MACA device at all.
-        _backend_for(native_target()).topk(*backend_args)
+        # `launching()` installs torch's current stream into the FFI
+        # environment for the duration of the call.  The C++ side reads it
+        # through TVMFFIEnvGetStream; without this it would see the null
+        # handle and launch on the legacy default stream.
+        # The env variable is the explicit escape hatch: the workaround is
+        # correct but unusual, so it is named rather than silent.
+        if os.environ.get("DEEP_SELECT_NO_STREAM_GUARD"):
+            _backend_for(native_target()).topk(*backend_args)
+        else:
+            with _binding.launching():
+                _backend_for(native_target()).topk(*backend_args)
         return output_val, output_idx
 
 
