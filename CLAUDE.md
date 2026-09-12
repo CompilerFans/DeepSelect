@@ -73,6 +73,19 @@ CUCC_TARGETS=xcore1600 python setup.py build_ext --inplace             # C600, C
 CUCC_TARGETS=xcore1000,xcore1600 python setup.py build_ext --inplace   # both
 ```
 
+```bash
+./clean.sh                             # remove build artifacts (host clean.sh's default)
+./clean.sh --dry-run                   # list what would go, remove nothing
+```
+
+Removes `build/ dist/ *.egg-info/ __pycache__/` and friends plus loose `*.pyc`
+and every `*.so` in the tree (all build products — there is no vendored binary
+here). It deliberately does **not** touch `$HOME/.deep_gemm`, `~/.triton`,
+`~/.tilelang` or `~/.metax`, unlike the host script: nothing here writes them, so
+that would be deleting another project's cache. `--yes` is accepted and ignored
+(it was this script's first spelling, when the default was to remove nothing).
+`./clean.sh && ./build.sh` is the supported full-rebuild chain.
+
 `CUCC_TARGETS` defaults to `native` (the device the build runs on); same variable and meaning as the host repo's `build.sh`. One extension **per architecture** — `deep_select/deep_select_xcore<N>.cpython-310-x86_64-linux-gnu.so` — because a config's shared-memory footprint is only valid against the architecture it was sized for.
 
 **The stale `.so` must be deleted before rebuilding** — `build.sh` does this for
@@ -312,6 +325,16 @@ PYTHONPATH=/path/to/mcDeepGEMM:. python scripts/official_slice.py --backend deep
 
 - `tests/test.py` builds a correctness table (105,138 cases, hours) and a performance grid, and runs both through the same `run_testcase`. Its checks are the contract's own — index range, uniqueness, `value_i == input[index_i]`, the definitional `min(selected) >= max(unselected)`, the NaN guard, the orderings. **No reference implementation is computed anywhere**, so nothing can drift from the contract it checks. Every perf case is checked first and timed second, so a case that selects wrong is reported as a failure rather than as a time.
 - `scripts/official_slice.py` drives a seeded uniform sample of the same table through the same official `run_testcase`, capped at `batch_size * vocab_size <= 2**28`.
+- `run_test.sh` is the entry point that wraps both arms, records the extension md5 + the `CUDA_VISIBLE_DEVICES` in force + an `mx-smi` snapshot beside each log, and reports a stale extension rather than refusing to run:
+
+  ```bash
+  ./run_test.sh --perf --dtype bf16 -nc # the perf grid, ~1 min on C500
+  ./run_test.sh --test                  # correctness sample, 200/200
+  ./run_test.sh --all                   # both, perf first
+  CUDA_VISIBLE_DEVICES=3 ./run_test.sh --perf   # pick the device with the env
+  ```
+
+  It has **no exclusivity gate** on purpose: `pgrep` cannot see device pinning, and `mx-smi` was measured on this box lying both ways (`--show-process` said "no process found" while a job ran; `--show-all-process` put a process holding 4 GB on device 3 under GPUs 0–2). Pick the device with `CUDA_VISIBLE_DEVICES`, run, and read the recorded md5 before comparing two runs.
 - `--backend` is the one thing the official suite cannot express (its call site passes no `backend=`), so the driver rebinds `deep_select.topk` for the run rather than editing the official file.
 - Two edits under `tests/kernelkit/` are the whole delta from upstream, both required to run on MACA at all: `platform.py` asks torch whether it can see a device instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA controller), and one PEP 701 f-string at `stress.py:292` is rewritten for Python 3.10.
 - Not covered by either arm, recorded rather than papered over: the contract rejections (strided row, wrong dtype, `topk` out of range, undersized output buffer) — the official table asserts on values and has no exception cases — and `begin` / `hint` / caller-allocated `output_idx`, which the official call site always passes as `None`.

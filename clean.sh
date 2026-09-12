@@ -10,20 +10,23 @@
 # own build would otherwise reuse; this clears the tree.
 #
 # Usage:
-#     ./clean.sh               # dry-run by default: print what would go
-#     ./clean.sh --yes         # actually remove it
+#     ./clean.sh               # remove the artifacts (same as the host's)
+#     ./clean.sh --dry-run     # print what would go, remove nothing
 #     ./clean.sh --help
 #
-# ── Why this is a dry run unless --yes ──────────────────────────────────────
+# ── On `--dry-run` being opt-in ─────────────────────────────────────────────
 #
-# A wildcard delete of `*.so` and `build/` is exactly what install.sh's symlink
-# step sits next to, and this tree has been bitten by build-artifact mistakes
-# three separate times in one session: an in-place extension that was silently
-# the *previous* variant, a stale object reused by an incremental build, and a
-# probe tree whose "baseline" binary was a wrong-answer variant.  Deletion is
-# the one step here that cannot be undone by rebuilding, so it prints first and
-# removes on request.  `--yes` makes it scriptable; `clean.sh --yes` in a
-# pipeline behaves like the host's `clean.sh`.
+# The host `clean.sh` deletes with no flag and no prompt, and this one does the
+# same.  A confirmation gate was tried first and removed: it makes the script
+# non-composable in the quietest possible way -- `./clean.sh && ./build.sh`
+# prints nothing alarming, the build succeeds anyway (build.sh does its own
+# `rm`), and the full-rebuild the caller asked for silently did not happen.  A
+# list of paths would not have helped anyway: the artifact mistakes this tree
+# has actually made were wrong *content* at a correct path (an in-place
+# extension that was the previous variant, a stale object reused by an
+# incremental build), which no listing reveals.
+#
+# So the listing is available on request, and the default is what it says.
 #
 # ── What this deliberately does NOT do ──────────────────────────────────────
 #
@@ -49,9 +52,9 @@ cd "$script_dir"
 
 usage() {
     cat >&2 <<'EOF'
-Usage: clean.sh [--yes] [-h|--help]
+Usage: clean.sh [--dry-run] [-h|--help]
 
-  --yes        actually remove the artifacts (default: print what would go)
+  --dry-run    print what would be removed, remove nothing
   -h, --help   this message
 
 Removes: build/ dist/ *.egg-info/ __pycache__/ .pytest_cache/ and friends,
@@ -59,13 +62,24 @@ loose *.pyc /*.pyo, and every *.so in the tree (all of which are build
 products -- checked, there is no vendored binary here).
 Leaves: the installed site-packages copy, and ~/.deep_gemm, ~/.triton,
 ~/.tilelang, ~/.metax (this tree writes none of them).
+
+`--yes` is accepted and ignored: it was this script's first spelling, when the
+default was to remove nothing.  The default is now to remove, so there is
+nothing left for it to answer.
 EOF
 }
 
-dry_run=1
+dry_run=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --yes)     dry_run=0; shift ;;
+        --dry-run) dry_run=1; shift ;;
+        # Redundant now that removing is the default.  Accepted so an invocation
+        # written against the first revision still works, and so it is obvious
+        # in the log that it was seen and ignored rather than mistyped.
+        --yes)     echo "clean.sh: note: --yes is redundant (removing is the" >&2
+                   echo "          default now); ignoring it.  Use --dry-run to" >&2
+                   echo "          preview instead." >&2
+                   shift ;;
         -h|--help) usage; exit 0 ;;
         *)         echo "clean.sh: unknown argument: $1" >&2; usage; exit 2 ;;
     esac
@@ -73,7 +87,7 @@ done
 
 echo "clean.sh: ${script_dir}"
 if [[ "$dry_run" == 1 ]]; then
-    echo "clean.sh: dry run -- nothing will be removed.  Re-run with --yes."
+    echo "clean.sh: dry run -- nothing will be removed."
 fi
 
 # ── directories ─────────────────────────────────────────────────────────────

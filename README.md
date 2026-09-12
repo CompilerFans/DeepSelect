@@ -136,6 +136,20 @@ CUCC_TARGETS=xcore1000,xcore1600 python setup.py build_ext --inplace   # both
 PYTHONPATH=. python scripts/official_slice.py                          # correctness
 ```
 
+The scripts wrap those calls. `build.sh` builds in place, `install.sh` builds a
+wheel and installs it (symlinking the extension back under `deep_select/`, since
+every suite here runs with `PYTHONPATH=.` and would otherwise resolve the repo's
+copy), `clean.sh` removes the build artifacts, and `run_test.sh` runs the suites
+and records what it measured:
+
+```bash
+./build.sh                             # this device
+./install.sh                           # build a wheel and install it
+./clean.sh && ./build.sh               # full rebuild
+./run_test.sh --perf --dtype bf16 -nc  # the performance grid
+./run_test.sh --all                    # performance grid + correctness sample
+```
+
 `CUCC_TARGETS` defaults to `native`, the device the build is running on (the
 same variable and meaning as the host repository's `build.sh`), and each target
 builds the kernel that fits it -- `csrc/xcore1000/` for a 64 KiB part,
