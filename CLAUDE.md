@@ -235,7 +235,7 @@ the real one, which then mis-sizes every `warp_cnt[NUM_WARPS]` array.
 | `__activemask()` | **native — one read of the wave mask** (`__builtin_mxc_read_xmsk`, `:2206`). Free | pass as the mask: correct and adaptive |
 | `__any_sync` / `__all_sync` | **native** — the same `sicmp` fused with a ballot-mask compare (`:2190`, `:2195`) | cheaper than ballot + `__popcll` when you only need the predicate |
 | `__match_any_sync` | **software-emulated — a 32-iteration per-bit loop of `sicmp`** (`:1648`), i.e. 32× the cost of a ballot | **do not use** |
-| `__reduce_add_sync` | **software-emulated — a 6-iteration `bsm_bpermute` loop** (`:200`), and it takes a `uint64_t` mask | prefer a ballot-based reduction; with `0xFFFFFFFF` it sums only the low 32 lanes |
+| `__reduce_add_sync` | **software-emulated — a 6-iteration `bsm_bpermute` loop** (`:200`), and it takes a `uint64_t` mask | prefer a ballot-based reduction; with `0xFFFFFFFF` it sums only the low 32 lanes. **MACA ships two overloads, `(uint64_t mask, …)` and `(unsigned mask, …)`, so an unsuffixed `0xFFFFFFFF` literal is *ambiguous* and will not compile — spell the type (`(uint64_t)0xFFFFFFFFffffffffull`) or use a `uint64_t` variable.** The `unsigned` overload is the 32-lane one |
 | `__popc` | **exists** (`__clang_macac_math.h:1155`), but it is 32-bit: `__builtin_popcount` of a 64-lane mask **truncates the wave in half** | **`__popcll`** (`:1159`) for anything derived from a mask |
 | `__ffsll` / `__lanemask64_lt` | present | MACA's own 64-lane code uses this family (`maca_coalesced_scan.h:104-118`) |
 
