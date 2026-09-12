@@ -10,3 +10,7 @@ compile_commands.json
 .cache
 /dev
 /.clangd
+# run_test.sh logs and receipts.  Local copies of a measurement, not sources:
+# the numbers worth keeping live in docs/C500-radix-perf-ledger.zh.md, which
+# cites the binary md5 they came from.
+/results/
