@@ -44,7 +44,7 @@
 // CUDA-era code in this repo assumed 32, which does not hold on this target.
 //
 // ── coverage: the `v3_cluster` dispatch arm is dropped ──────────────────────
-// The original dispatch (`csrc/api.cpp:128`) sends
+// The original dispatch (`csrc/xcore1600/api.cu`) sends
 //     batch_size <= 6 && vocab_size >= 512K && topk <= 1024
 // bf16 shapes to `topk_select_bf16_cluster`, a cluster-cooperative kernel.
 // MACA has no cluster launch (mcErrorInvalidConfiguration for any cluster
@@ -805,7 +805,7 @@ void topk(torch::Tensor &input, int topk, c10::optional<torch::Tensor> &begin,
     // Every output row is addressed as `row * stride(0) + column`, so a
     // last-dimension stride other than 1 (or a row that is too short) writes
     // outside the columns the caller owns.  Upstream rejects both
-    // (api.cpp KU_CHECK_LAST_DIM_CONTIGUOUS / KU_CHECK_SHAPE) -- without the
+    // (api.cu KU_CHECK_LAST_DIM_CONTIGUOUS / KU_CHECK_SHAPE) -- without the
     // check the result is silently scrambled, so refuse instead.
     auto check_out_tensor = [&](const char what[], const torch::Tensor &t) {
         TORCH_CHECK(t.device() == input.device(),

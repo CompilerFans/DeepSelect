@@ -36,7 +36,7 @@ def _xcore1600_sources():
     lists them in its own `setup.py`: the set is what gets compiled, so it
     should be visible, not globbed.
     """
-    sources = ["csrc/xcore1600/api.cpp"]
+    sources = ["csrc/xcore1600/api.cu"]
     for variant in ("v3", "v3_fp32"):
         directory = os.path.join("csrc", "xcore1600", variant, "instantiations")
         sources += sorted(
@@ -51,11 +51,28 @@ def _maca_root() -> str:
     return os.environ.get("MACA_HOME") or os.environ.get("MACA_PATH") or "/opt/maca"
 
 
-# torch compiles a `.cpp` source with `$cxx`, whose default is `c++` -- and on
-# this platform PATH resolves `c++` to cu-bridge's compiler wrapper, which is
-# not a compiler.  `g++` is not shadowed there, and GCC is the host compiler the
-# MACA toolchain itself uses (`api.cpp` carries a note about `<format>` being
-# absent from GCC 11 for exactly this reason).
+# The host compiler and linker, and not a detail that can be left to the
+# environment: this torch build installs its own `CXX` at import time.  MACA's
+# `torch/utils/cpp_extension.py` carries a patch --
+#
+#     def set_wcuda_gnu_path():                            # ~:62
+#         gnu_path = os.path.join(CUDA_HOME, 'bin', 'gnu')
+#         if os.path.exists(gnu_path):
+#             os.environ['CXX'] = gnu_path
+#     ...
+#     CUDA_HOME = _find_cuda_home() ...
+#     set_wcuda_gnu_path()                                 # ~:286, at import
+#
+# -- and `get_cxx_compiler()` is just `os.environ.get('CXX', 'c++')`.  With the
+# default CUDA_HOME (`_find_cuda_home`'s cu-bridge guard) that path exists, so
+# `CXX` is silently repointed at cu-bridge's `bin/gnu`, a wrapper that execs
+# mxcc.  Reassigning `cpp_extension.CUDA_HOME` below does *not* undo it: the
+# patch already ran at import, against the old value.
+#
+# It matters even though every source here is a `.cu`, because ninja links with
+# `$cxx` (`command = $cxx $in $ldflags -o $out`).  Left alone, the extension is
+# linked by cu-bridge's wrapper; measured, that changes the artifact's md5.
+# Whatever upstream leaves informal, this file fixes explicitly.
 _HOST_CXX = "g++"
 
 
@@ -166,13 +183,12 @@ def build_for_maca():
     those translated away -- the architecture comes from `--offload-arch` here,
     one per extension.
 
-    Host code is not: torch compiles a `.cpp` source with `$cxx`, not `$nvcc`,
-    so `CXX` is set to `g++`.  It has to be named explicitly because PATH puts
-    cu-bridge's `bin` -- which holds a compiler wrapper under the name `c++` --
-    ahead of the system compiler.  `api.cpp` is the one `.cpp` here, and it
-    needs `-DKERUTILS_IS_BUILD_ON_CUDA`: kerutils defines that macro itself for
-    a CUDA compilation (`kerutils/common/common.h`), and a plain host compile
-    is not one.
+    Every source is a `.cu`, so `$nvcc` -- the shim above -- is the only
+    compiler this build invokes: torch routes a `.cpp` source to `$cxx`
+    instead (`cpp_extension._is_cuda_file`), and a second compiler would mean a
+    second flag list, a second kerutils mode macro and a pinned `CXX` to keep
+    working.  `csrc/xcore1600/api.cu` carries the reasoning for why upstream's
+    `api.cu` is spelled that way here.
 
     `--offload-arch` overrides `CUCC_TARGETS` in the environment, so passing it
     explicitly per module is what keeps the modules independent of each
@@ -208,8 +224,9 @@ def build_for_maca():
     # mxcc itself and not cu-bridge's wrapper around it.  torch reads this
     # through the module global, which is why it is assigned rather than passed.
     cpp_extension.CUDA_HOME = _prepare_mxcc_home(maca_root, this_dir)
-    # `api.cpp` goes to the host compiler; see the docstring.  Assigned rather
-    # than passed for the same reason as CUDA_HOME.
+    # Undo the `set_wcuda_gnu_path` patch above, which is what `CXX` holds by
+    # now; ninja links with it even though every source here is a `.cu`.  See
+    # `_HOST_CXX`.
     os.environ["CXX"] = _HOST_CXX
     print(f"deep_select: device compiler is "
           f"{os.path.join(cpp_extension.CUDA_HOME, 'bin', 'nvcc')}, "
@@ -232,7 +249,7 @@ def build_for_maca():
         # directory sits.
         os.path.join(this_dir, "csrc", "xcore1600"),
         # `kerutils/kerutils.cuh` and `kerutils/supplemental/torch_tensors.h`,
-        # which `api.cpp` and the ported kernels include.  Vendored under
+        # which the ported kernels include.  Vendored under
         # `csrc/3rdparty`; upstream's own build gets this path from its
         # `3rdparty/kerutils` layout, so it is spelled out here rather than
         # guessed from the sources.
@@ -291,19 +308,11 @@ def build_for_maca():
                 name=f"deep_select.deep_select_xcore{family}",
                 sources=sources,
                 include_dirs=include_dirs,
+                # Every source is a `.cu`, so the `nvcc` list is the only one
+                # torch ever reads; the key is torch's name for "the device
+                # source list", and its contents are mxcc's dialect because
+                # `bin/nvcc` is the shim above.
                 extra_compile_args={
-                    "cxx": [
-                        "-O3",
-                        "-std=c++17",
-                        "-DNDEBUG",
-                        "-Wno-deprecated-declarations",
-                        # kerutils defines this itself for a CUDA compilation
-                        # (`kerutils/common/common.h`) and errors out without
-                        # it; torch compiles `api.cpp` with the host compiler,
-                        # which is not one.
-                        "-DKERUTILS_IS_BUILD_ON_CUDA",
-                        f"-DDEEP_SELECT_NATIVE_ARCH={family}",
-                    ],
                     "nvcc": compile_args(target),
                 },
                 extra_link_args=[

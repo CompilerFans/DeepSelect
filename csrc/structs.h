@@ -5,7 +5,7 @@
 
 // [MACA] bf16 值类型改用 MACA 原生头（原先是靠 cute 顺带引入 cu-bridge 的
 //   `cuda_bf16.h`）。放在这里是因为它是全仓的"值类型"汇聚点：每个
-//   `cuda_kernels/*/topk_select.h` 都 include 它，于是 api.cpp 与各实例化 TU
+//   `xcore1600/*/topk_select.h` 都 include 它，于是 api.cu 与各实例化 TU
 //   拿到的是同一个 `maca_bfloat16`，`TopkSelectConfig<maca_bfloat16, ...>` 的
 //   模板实体在两侧是同一个符号。
 #include <maca_bfloat16.h>

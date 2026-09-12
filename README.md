@@ -162,7 +162,7 @@ machine's device is involved, so an extension is for the architecture it is
 named after and no other. `-use-fast-math` is passed with FTZ turned back off
 (`-Xclang -fdenormal-fp-math-f32=ieee`): the ranking path is integer-only and
 indifferent either way, and the flag keeps the fill-value conversion exact for a
-denormal `value_oob_fill_value`. `api.cpp` is host code and is compiled by
+denormal `value_oob_fill_value`. `api.cu` is host code.
 `g++`.
 
 `pip install .` does not currently work, for a reason inherited from upstream:

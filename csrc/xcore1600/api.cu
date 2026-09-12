@@ -1,5 +1,26 @@
 // This file contains only the host-side topk() function and pybind11 module.
 // Kernel template instantiations are in separate files for parallel compilation.
+//
+// [MACA] `.cu`, not `.cpp` as upstream names it.  The extension forces the
+//   question: torch routes a `.cpp` source to `$cxx` and a `.cu` source to
+//   `$nvcc` (`cpp_extension._is_cuda_file`), so a `.cpp` here means the host
+//   compiler needs its own flag list, its own kerutils mode macro, and `CXX`
+//   has to be pinned -- a second compiler to keep working.  As a `.cu` this
+//   file reaches mxcc like every other source here: `__MACA__` is then defined
+//   (mxcc defines it for a `.cu`, and only for a `.cu`), which is what
+//   `kerutils/common/common.h` keys `KERUTILS_IS_BUILD_ON_CUDA` on, so the
+//   `-DKERUTILS_IS_BUILD_ON_CUDA` that a host compile needed is gone with it.
+//
+//   `-x maca` is the same switch by another name -- measured: mxcc with
+//   `-x maca` defines `__MACA__` for a `.cpp`, mxcc without it does not.
+//   It is not used here because it cannot reach this file through torch's
+//   build: the flag lives in a per-source-type flag list and `-x` is not a
+//   file type torch knows, whereas the extension is the selector itself.
+//
+//   This file is host code either way -- it has no `__global__` -- so the
+//   device pass mxcc now runs over it emits nothing.  Nothing on the CUDA
+//   side of the torch ABI has moved: the extension still links against the
+//   same `libtorch_cpu`/`libc10` and still exports the same two symbols.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAEvent.h>

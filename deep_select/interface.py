@@ -390,7 +390,7 @@ def topk_torch(
     if topk > 4096:
         raise ValueError(f"topk must be <= 4096, got {topk}")
     # The same contract rejections the kernel path enforces (upstream:
-    # csrc/api.cpp).  They are part of the operator's contract, not of any one
+    # csrc/xcore1600/api.cu).  They are part of the operator's contract, not of any one
     # implementation -- a caller that passes a strided view must get an error
     # rather than a silently different answer just because it chose this
     # backend.

@@ -101,7 +101,11 @@ rm -f deep_select/deep_select_xcore1000*.so \
 Build plumbing worth knowing before editing `setup.py`:
 
 - Device code is compiled by **mxcc directly** (`--offload-arch=xcore<N>`), not through cu-bridge's `cucc` wrapper and not through any `-gencode` derived from the building machine. `setup.py` writes a `CUDA_HOME/bin/nvcc` shim (`_MXCC_NVCC_WRAPPER`) that strips torch's CUDA-dialect flags and execs mxcc. `TORCH_EXTENSION_ENABLE_XC1500_COMPILE` is refused outright — it would put a second `--offload-arch` in one extension.
-- Host code (`csrc/xcore1600/api.cpp`) is compiled by `g++` explicitly: PATH resolves `c++` to cu-bridge's wrapper, which is not a compiler. `-DKERUTILS_IS_BUILD_ON_CUDA` is needed because kerutils defines it itself only for a CUDA compilation.
+- Every source in `csrc/` is a `.cu`, so `$nvcc` -- the shim `setup.py` writes -- is the only compiler the build runs.
+  Host code is still linked by `g++`, and that has to be pinned: MACA's torch calls `set_wcuda_gnu_path()` at import
+  (`torch/utils/cpp_extension.py:62`, called at `:286`) and it sets `CXX` to cu-bridge's `bin/gnu` whenever it exists.
+  ninja links with `$cxx`, so without the override the extension is linked by cu-bridge's wrapper -- measured to change
+  the artifact's md5. `api.cu` is host *code* (no `__global__`), spelled `.cu` so torch routes it to that shim rather than to `$cxx`: mxcc defines `__MACA__` for a `.cu` and only for a `.cu`, and `kerutils/common/common.h` keys `KERUTILS_IS_BUILD_ON_CUDA` on it. Upstream calls the same file `api.cpp`; the extension is the whole difference. A `.cpp` here would need its own flag list, its own `-DKERUTILS_IS_BUILD_ON_CUDA`, and a pinned `CXX`. (`mxcc -x maca` is the identical switch and does define `__MACA__` for a `.cpp`, but it cannot reach the file: torch picks the rule by extension, and `-x` is not a file type it knows.)
 - `-use-fast-math` is passed with FTZ turned back off (`-Xclang -fdenormal-fp-math-f32=ieee`) so the one float conversion (`__float2bfloat16` of `value_oob_fill_value`) stays exact for a denormal fill. The ranking path is integer-only and indifferent.
 - `pip install .` does **not** work, for an inherited upstream reason: `setup.py` stamps the version with `datetime.now()` and a PEP 517 install runs it twice (metadata then wheel); straddling a second boundary yields `Wheel has unexpected file name`. Build isolation adds a second failure (torch absent from pip's isolated env). Use `build_ext --inplace`.
 
@@ -139,11 +143,11 @@ Porting conventions: portable primitives only — `__shfl_down_sync`, `atomicAdd
 
 ### xcore1600 — the ported upstream kernels
 
-`api.cpp` is the host dispatch + pybind11 module; `v3/` (bf16) and `v3_fp32/` (fp32) each hold `topk_select.cuh` + a generated `instantiations/` directory. `common_parts.cuh`, `bit_utils.cuh`, `utils.cuh`, `config.h`, `dispatch_utils.h` are shared.
+`api.cu` is the host dispatch + pybind11 module; `v3/` (bf16) and `v3_fp32/` (fp32) each hold `topk_select.cuh` + a generated `instantiations/` directory. `common_parts.cuh`, `bit_utils.cuh`, `utils.cuh`, `config.h`, `dispatch_utils.h` are shared.
 
 Upstream's algorithm is kept (threshold-and-compact scan in a random block order, one global read per element); only its device-side dependencies were replaced: TMA tensor-map loads → cooperative `ldg`, mbarriers → a single buffer with `__syncthreads`, inline PTX → MACA builtins/plain C++. Config tuples were re-derived for 128 KiB (upstream's are sized for an H100's 227 KiB). `v3_cluster` was **deleted**, not ported — MACA has no cluster launch — and those shapes fall through to the general kernel with no dispatch arm.
 
-**The config table has two halves that must be edited together**: `scripts/generate_instantiations.py` (the table, its arithmetic, and the `check_fits_maca` refusal) and the `TopkSelectConfig<...>` call sites in `csrc/xcore1600/api.cpp`. A mismatch is a **link error**, not a runtime one. Note also that `deep_select/_arch.py` duplicates the host repo's `deep_gemm/utils/arch_config.py` `XcoreFamily` rows (capacity + family spelling) by hand — it cannot import that package, so a change to either belongs in the same review.
+**The config table has two halves that must be edited together**: `scripts/generate_instantiations.py` (the table, its arithmetic, and the `check_fits_maca` refusal) and the `TopkSelectConfig<...>` call sites in `csrc/xcore1600/api.cu`. A mismatch is a **link error**, not a runtime one. Note also that `deep_select/_arch.py` duplicates the host repo's `deep_gemm/utils/arch_config.py` `XcoreFamily` rows (capacity + family spelling) by hand — it cannot import that package, so a change to either belongs in the same review.
 
 Consequences of the port, all deliberate:
 
@@ -409,4 +413,4 @@ Symptom → first look (handover §8): wrong-but-not-much (a few slots, rank off
 
 ## Torch ABI / host compiler notes
 
-`csrc/xcore1600/api.cpp` (host) is compiled by `g++` (GCC 11.4 here), which is why `std::format` is unavailable (libstdc++ has `<format>` only from GCC 13) and the one `TORCH_CHECK` message that needs formatting uses `snprintf` instead. Do not "fix" that back. Anything including `<cuda_runtime_api.h>` must not depend on cu-bridge's compatibility layer for `__nv_bfloat16`: `csrc/structs.h` includes `<maca_bfloat16.h>` so that `api.cpp` and every instantiation TU see the *same* `maca_bfloat16`, and `TopkSelectConfig<maca_bfloat16, ...>`'s template entity is one symbol on both sides.
+`csrc/xcore1600/api.cu` is host code but is compiled by mxcc's host pass (clang 19), so `std::format` *is* available there now that the file is a `.cu`. The one `TORCH_CHECK` message that needs formatting keeps its `snprintf` anyway: it is the ABI-safe spelling at this boundary. Do not "fix" it back. Anything including `<cuda_runtime_api.h>` must not depend on cu-bridge's compatibility layer for `__nv_bfloat16`: `csrc/structs.h` includes `<maca_bfloat16.h>` so that `api.cu` and every instantiation TU see the *same* `maca_bfloat16`, and `TopkSelectConfig<maca_bfloat16, ...>`'s template entity is one symbol on both sides.
