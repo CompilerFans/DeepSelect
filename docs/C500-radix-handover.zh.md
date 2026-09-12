@@ -60,6 +60,12 @@ C500（xcore1000）上走的是**行式 radix 选择**：一行一个 CTA，两�
 | `scripts/official_slice.py` | 官方大表的切片驱动（正确性门） |
 | `tests/test.py` | 官方性能表（每个 perf 用例先查正确性再计时） |
 
+**这条数据流当前的耗时归因在 `C500-radix-profile.zh.md`**（2026-09-12，
+增量消融）。摘要：`b4096-v16384-k512` 满内核 619.6 µs，其中 pass 1 整段
+253.3（其 8 个共享原子/uint4 占 102.5）、emit 的原子串行化 35.7；pass 1 即使
+去掉全部原子也还有 150.8，对 116.7 的单趟下界 = 80% 可达速率。要看"下一步动
+哪里"先读那份文档的 §5。
+
 **哪条路径在生产里活着**：`maca_topk.cu` 只启动两条行内核——
 `radix_topk_row_bf16_b<BLOCK>`（bf16）与 `radix_topk_row_f32`（fp32）。
 `radix_core.cuh` 里的 `radix_topk_row_bf16_k` / `_reg` 这些**不由 maca_topk.cu
@@ -235,25 +241,32 @@ git -C $D push origin main
 
 ---
 
-## 9. 下一步的候选（都没做，按我的判断排序）
+## 9. 下一步的候选（2026-09-12 按**实测**重排，原推测排序已废）
 
-1. **把行趟展开、加大每 CTA 的 MLP**。现在的趟是"依赖链"：`load -> 变换 ->
-   比较 -> 共享原子`，512 线程 × 16 B = 8 KB 在飞。逻辑单趟带宽只到只读墙的
-   28%（`b4096-v16384-k512`：206 GB/s 单趟 → 两趟 413 GB/s vs 1,487）。让每个
-   线程一次发 2~4 个独立的 `uint4` 装载，是最直接的杠杆。
-2. **阈值桶成员的原子计数**。趟 2 里阈值桶每个成员要对 `s_num_input[0]` 做一次
-   **串行化**的 `atomicAdd`，细直方图再压一次。12 位粗层把这个桶从 4,686 降到
-   ~203，这正是本提交收益的大头；再往下就是 **warp 聚合原子**
-   （ballot / match-any）把 32 次压成 1 次。先确认 MACA 有没有 match-any。
-3. **fp32 行**（`radix_topk_row_f32`）。它是另一套代码，溢出时走**多轮整行
-   rescan**（最多 4 轮 × 2 趟 = 8 趟行）。同一个"粗层太粗"的病，但 32 位 key
-   不能像 16 位那样两级定完，要想清楚再动。**改它要重测 fp32 的 cell。**
+排序依据是 `C500-radix-profile.zh.md`（增量消融归因）。两个变化：原第 1 条
+（行趟展开）从第一降到第三，因为 pass 1 的 walk 实测已到单趟可达速率的 80%，
+只剩约 34 µs；原第 2 条（warp 聚合原子）**整条作废**，实测为负。
+
+1. **先归因 pass 2 的尾活段**（最大未知块）。满内核 619.6 − pass 1 253.3 =
+   **366.3 µs** 落在 pass 2 及其后，目前只归因出 emit 原子 35.7。用同样的增量
+   消融逐项拆：第二趟遍历、阈值桶 staging 原子、细直方图、refine 扫描、
+   arena emit。
+2. **pass 1 的寄存器直方图**（102.5 µs 的原子发射成本是唯一有支撑的方向）。
+   `radix_core.cuh:239` 的 `hist_add_bf16_reg` + `hist_reg_to_smem` 已在文件里
+   且**无人调用**——全仓只有定义。它把原子从 8/uint4 降到 4/线程，代价是 8 次
+   `__shfl_sync`。
+3. **行趟展开、加大每 CTA 的 MLP**（原第 1 条）。不是抬 pass 1 的带宽，而是
+   pass 2 的读趟；pass 1 的可见上限只有约 34 µs。
 4. **chunked 路径里的 static-k 行**（`radix_topk_row_bf16_k`，低 batch 长行
-   split/merge）仍是 8 位粗层 + 3,514 槽 arena，没享受 coarse12。它在
-   `rk::launch_topk_bf16_chunked` 里，自己的 smem 自己算。
+   split/merge）仍是 8 位粗层 + 3,514 槽 arena，没享受 coarse12，也没被本轮
+   任何 cell 覆盖。它在 `rk::launch_topk_bf16_chunked` 里，自己的 smem 自己算。
 
 **别做**（已被实验否决，别重复）：
 
+- **`__ballot_sync` / `__match_any_sync` 的分组原子归并**。`P4`（相邻两元素
+  合并成 1 个原子，原子数 ÷4）实测 **619.6 → 657.6 µs，更慢**：省下的冲突不是
+  瓶颈，那 102.5 µs 是每个原子的**发射/吞吐**成本。另外 `__match_any_sync` 在
+  MACA 上是 32 次逐位 `sicmp` 的**软件模拟**，不是硬件指令。
 - 固定加大 arena（24 KB）换溢出：效果被 coarse12 覆盖，还要在 topk ≥ 2048 掉
   occupancy。
 - 把 `kMaxTopK` 那套按最大 k 预留 smem 的写法请回来：occupancy 直接掉到 1。
