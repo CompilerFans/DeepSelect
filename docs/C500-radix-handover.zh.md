@@ -25,13 +25,13 @@
 
 | 项 | 值 |
 |---|---|
-| 分支 | `main`（已推送到 `origin/main`） |
-| HEAD | `3f8dfe7` *Resolve the 16-bit row's coarse level at 12 bits, over the arena* |
-| 已推送 | 是（含 `3f8dfe7`） |
+| 分支 | `main` |
+| 内核 HEAD | `3f8dfe7` *Resolve the 16-bit row's coarse level at 12 bits, over the arena* |
+| 文档 HEAD | 本文件所在提交（profile 记录与其后续修正都已落地） |
 | 工作树 | **干净**（`git -C <DeepSelect> status --porcelain` 为空） |
-| 最近三项改动 | `ea8bcb0` sizing → `4cd740a` overflow → `3f8dfe7` coarse12，全部已落地 |
+| 最近的内核改动 | `ea8bcb0` sizing → `4cd740a` overflow → `3f8dfe7` coarse12，全部已落地 |
 
-**三条改动全部门通过**（2026-09-12）：
+**内核的三条改动全部门通过**（2026-09-12）：
 
 - 官方大表（`official_slice.py --backend maca_c --sample 1000000 --shard i/4`
   ×4 串行）：**82170/82170 passed，0 unsupported，0 failed**（20543+20543+
@@ -41,6 +41,10 @@
 也就是说 §4 的两条门现在是**基线**，不是待办：接手后任何改动都要在这两条门上
 比它更好或持平。§7 那个提交已经落地，`docs/C500-radix-coarse12-commit.txt`
 的内容已永久留在 git 历史里（文件已删）。
+
+**之后只有文档落地，内核一行没动**：`C500-radix-profile.zh.md` 把当前耗时做了
+归因（增量消融），并据此重排了 §9。所以上面那两条门的数值仍然成立（没有源码
+改动），但 **§9 的排序已变**——先读 profile 的 §5。
 
 ---
 
