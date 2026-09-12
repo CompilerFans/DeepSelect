@@ -951,6 +951,25 @@ inline cudaError_t launch_topk_f32_k2048_b1024_c500(
 // FP16 radix topk row
 // ============================================================
 
+// One member of the overflow row's threshold bin: everything strictly above the
+// fine threshold is selected outright, and the ties fill what is left of the
+// window from the top down -- the arena path's rule, applied to a re-walked row
+// instead of a staged candidate list.
+__device__ __forceinline__ void overflow_emit_member(
+    uint32_t idx, uint32_t key, uint32_t high_threshold_bin,
+    uint32_t threshold_bin, uint32_t remain_topk, uint32_t topk, int32_t* output,
+    uint32_t* s_counter, int32_t* s_last_remain)
+{
+    if ((key >> 8) != high_threshold_bin) return;
+    const uint32_t low = key & 0xFF;
+    if (low > threshold_bin) {
+        output[atomicAdd(s_counter, 1u)] = static_cast<int32_t>(idx);
+    } else if (low == threshold_bin && remain_topk != 0) {
+        auto p = atomicAdd(s_last_remain, -1);
+        if (p > 0) output[topk - p] = static_cast<int32_t>(idx);
+    }
+}
+
 template <uint32_t BLOCK_SIZE>
 __device__ __forceinline__ void radix_topk_row_bf16_b(
     const maca_bfloat16* input, int32_t* output, uint32_t length, uint32_t topk)
@@ -1019,11 +1038,13 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                     if (bin > threshold_bin) {
                         output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + i);
                     } else if (bin == threshold_bin) {
+                        // The count is over the bin, the staging is over the
+                        // arena.  Gating both on the arena made the refine's
+                        // histogram partial whenever the bin overflowed, which
+                        // is what the full-row rebuild below used to repair.
                         uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                        if (pos < SMEM_INPUT_SIZE) {
-                            s_input_flat[pos] = idx + i;
-                            atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
-                        }
+                        if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx + i;
+                        atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
                     }
                 }
             }
@@ -1034,10 +1055,8 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
                 } else if (bin == threshold_bin) {
                     uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                    if (pos < SMEM_INPUT_SIZE) {
-                        s_input_flat[pos] = idx;
-                        atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
-                    }
+                    if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
+                    atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
                 }
             }
         } else {
@@ -1048,10 +1067,8 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
                 } else if (bin == threshold_bin) {
                     uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                    if (pos < SMEM_INPUT_SIZE) {
-                        s_input_flat[pos] = idx;
-                        atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
-                    }
+                    if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
+                    atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
                 }
             }
         }
@@ -1060,17 +1077,9 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
 
     {
         const bool overflow = s_num_input[0] > SMEM_INPUT_SIZE;
-        if (overflow) {
-            if (tx < RADIX + 1) s_histogram[tx] = 0;
-            __syncthreads();
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
-                const maca_bfloat16 raw = __ldg(input + idx);
-                const uint32_t key = bf16_to_uint16(raw);
-                if ((key >> 8) == s_high_threshold_bin_id)
-                    atomicAdd(&s_histogram[key & 0xFF], 1u);
-            }
-            __syncthreads();
-        }
+        // No rebuild pass here: the fine histogram above already counted every
+        // member of the threshold bin, staged or not, so the refine below ranks
+        // the bin itself rather than the part of it that fit.
         exclusive_suffix = 0;
         inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
         if (tx < RADIX && inclusive_suffix > remain_topk && exclusive_suffix <= remain_topk) {
@@ -1082,18 +1091,28 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         remain_topk -= s_histogram[threshold_bin + 1];
         if (overflow) {
             const auto high_threshold_bin = s_high_threshold_bin_id;
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
-                const maca_bfloat16 raw = __ldg(input + idx);
-                const uint32_t key = bf16_to_uint16(raw);
-                if ((key >> 8) == high_threshold_bin) {
-                    const uint32_t low = key & 0xFF;
-                    if (low > threshold_bin) {
-                        output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-                    } else if (low == threshold_bin && remain_topk != 0) {
-                        auto p = atomicAdd(&s_last_remain, -1);
-                        if (p > 0) output[topk - p] = static_cast<int32_t>(idx);
-                    }
+            if (input_aligned) {
+                for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
+                    uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
+                    const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
+                    #pragma unroll
+                    for (int i = 0; i < 8; i++)
+                        overflow_emit_member(idx + i, bf16_to_uint16(h[i]),
+                                             high_threshold_bin, threshold_bin,
+                                             remain_topk, topk, output,
+                                             &s_counter, &s_last_remain);
                 }
+                for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
+                    overflow_emit_member(idx, bf16_to_uint16(__ldg(input + idx)),
+                                         high_threshold_bin, threshold_bin,
+                                         remain_topk, topk, output, &s_counter,
+                                         &s_last_remain);
+            } else {
+                for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
+                    overflow_emit_member(idx, bf16_to_uint16(__ldg(input + idx)),
+                                         high_threshold_bin, threshold_bin,
+                                         remain_topk, topk, output, &s_counter,
+                                         &s_last_remain);
             }
             __syncthreads(); return;
         }
