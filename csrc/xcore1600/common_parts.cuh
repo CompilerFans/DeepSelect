@@ -733,8 +733,14 @@ public:
         uint32_t num_global_segs = ku::ceil_div(end_vocab_idx, (uint32_t)NUM_ELEMS_PER_SEG);
         CUTE_UNROLL
         for (uint32_t s = 0; s < SEGS_PER_WARP; ++s) {
-            // `warp_idx * SEGS_PER_WARP + s` 与消费端的 `linear_segment_start + warp_idx` 一致：
-            // 消费端按 `seg % NUM_WARPS` 取模，见 scan_segs。
+            // This 64-lane warp's s-th segment of the round.  On the 32-lane
+            // original a CTA had NUM_SEGS_PER_ROUND warps and each took one
+            // segment; a 64-lane CTA has half as many, so each takes
+            // SEGS_PER_WARP and the round is still covered exactly once.  The
+            // loader and the consumer agree because the consumer derives its
+            // segment from `linear_segment_start + warp_idx` and advances by
+            // `NUM_SEGS_PER_ROUND` per round -- i.e. it visits exactly the
+            // `warp_idx + s * NUM_WARPS` family this loop writes.
             uint32_t local_seg_idx = warp_idx + s * NUM_WARPS;
 
             if (local_seg_idx < NUM_TAIL_SEGS_THIS_ROUND) {
@@ -1337,6 +1343,18 @@ public:
         __syncthreads();
     
 
+        // [MACA] The main loop consumes ONE segment per round per warp, so with
+        // 64-lane waves a round only covers NUM_WARPS of the NUM_SEGS_PER_ROUND
+        // segments that were loaded.  `linear_segment_start` is therefore an
+        // absolute linear visit index for this thread's first segment of the
+        // scan, and `advance_perm_state` below moves it forward by one SEGMENT
+        // per round (not by a whole round of them) -- otherwise segments
+        // NUM_WARPS..NUM_SEGS_PER_ROUND-1 of every round are loaded and never
+        // looked at, i.e. 4 of every 8 on a 256-thread tuple.
+        //
+        // The linear visit index also has to stay `% perm_len` inside
+        // `get_permuted_seg_idx`; `advance_perm_state` wraps it mod perm_len,
+        // which `linear_segment_start` must already respect to start with.
         uint32_t linear_segment_start =
             local_start_seg_idx
             + num_init_rounds * NUM_SEGS_PER_ROUND
