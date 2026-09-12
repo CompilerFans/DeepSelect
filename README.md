@@ -20,7 +20,8 @@ what a top-K kernel's staging buffers are sized against:
 
 Which one a device runs is a property of the device, not a choice: `setup.py`
 builds one extension per architecture, and `deep_select.topk` loads the one its
-device has.
+device has. (A 128 KiB part currently builds `csrc/xcore1000/` as well; see the
+note under `csrc/xcore1600/` below.)
 
 `csrc/xcore1000/maca_topk.cu` reimplements the operator -- the same public
 contract, the same `deep_select.interface.topk` signature -- with portable
@@ -34,12 +35,25 @@ buffer with `__syncthreads`, inline PTX MACA builtins. Its config tuples are
 re-derived for 128 KiB, since upstream's are sized for an H100's 227 KiB.
 `v3_cluster` was deleted rather than ported: MACA has no cluster launch.
 
+> **A 128 KiB part does not currently build this tree by default.** The port
+> selects wrong on a MACA C600U -- an `arange` row of 0..511 with `topk=8`
+> returns indices like `[448..455]` where the answer is `[511..504]`, and
+> differently on every run; the official slice scored 4/200. Until the audit in
+> CLAUDE.md's "Known holes" is done, `deep_select/_arch.py` routes the 128 KiB
+> families to `csrc/xcore1000/maca_topk.cu` as well, which passes 200/200 on a
+> C600U. `DEEP_SELECT_128KIB_KERNEL=xcore1600` builds the port anyway, for
+> working on it. The extension is still named `deep_select_xcore<N>`, so
+> nothing outside the build can tell which tree backed it. Everything below in
+> this section describes `csrc/xcore1600/` as it stands, port bugs included.
+
 Consequences:
 
 - `topk` above 1024 is served by `maca_topk.cu` only. The ported kernel's tuples
   cover `max_topk` 512 and 1024 -- a 4096 tuple cannot fit 128 KiB, since its
   survivor-pairs and extra-pairs regions alone come to exactly 128 KiB -- so a
-  C600 / C600U rejects `topk` in `(1024, 4096]`.
+  C600 / C600U rejects `topk` in `(1024, 4096]` *when the port is what serves
+  it*. With the default routing above, a C600U serves those shapes from
+  `maca_topk.cu` like every other part.
 - The `vocab_size < 2^23` restriction is enforced by the ported kernel, as
   upstream; it comes from the fp32-simulated census there. It is not enforced by
   `maca_topk.cu`, which ranks integer keys (verified for `float32` at

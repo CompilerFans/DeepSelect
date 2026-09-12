@@ -142,7 +142,9 @@ The kernel tree is split **by per-SM shared memory**, because that is what a top
 | tree | parts | kernel |
 | --- | --- | --- |
 | `csrc/xcore1000/` | C500 (64 KiB/SM) | `maca_topk.cu`, hand-written for MACA |
-| `csrc/xcore1600/` | C600, C600U (128 KiB/SM) | the upstream kernels, ported |
+| `csrc/xcore1600/` | C600, C600U (128 KiB/SM) | the upstream kernels, ported — **currently not built by default** |
+
+**A 128 KiB family builds `csrc/xcore1000/` by default right now**, because `csrc/xcore1600/` selects wrong on a C600U (see Known holes). `deep_select/_arch.py`'s `DEEP_SELECT_128KIB_KERNEL` chooses the source tree — `xcore1000` (default) or `xcore1600` for working the 32-lane audit — and it never changes the extension's name, so `backend="maca_c"` cannot see which one backed it. Delete the override once the port passes `scripts/official_slice.py` on a C600U.
 
 `csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel), `TopkSelectArgs` — and the per-SM capacity constant `NATIVE_SHARED_MEMORY_PER_SM_BYTES`, selected by `-DDEEP_SELECT_NATIVE_ARCH` (set by `setup.py` from the same `CUCC_TARGETS` entry as `--offload-arch`). Both kernels reject a config that cannot fit that capacity **at compile time**, so upstream's 227 KiB-sized tuples cannot ride into a 64 KiB build and fail at launch instead.
 
@@ -167,6 +169,8 @@ Porting conventions: portable primitives only — `__shfl_down_sync`, `atomicAdd
 
 ### xcore1600 — the ported upstream kernels
 
+**This tree does not currently pass on a C600U and is not built by default** — see Known holes for the measurement, the reproduction, and the 32-lane suspect list. Everything below describes it as written; treat it as unvalidated until the audit is done and re-run `scripts/official_slice.py --backend maca_c` on a C600U with `DEEP_SELECT_128KIB_KERNEL=xcore1600`.
+
 `api.cu` is the host dispatch + pybind11 module; `v3/` (bf16) and `v3_fp32/` (fp32) each hold `topk_select.cuh` + a generated `instantiations/` directory. `common_parts.cuh`, `bit_utils.cuh`, `utils.cuh`, `config.h`, `dispatch_utils.h` are shared.
 
 Upstream's algorithm is kept (threshold-and-compact scan in a random block order, one global read per element); only its device-side dependencies were replaced: TMA tensor-map loads → cooperative `ldg`, mbarriers → a single buffer with `__syncthreads`, inline PTX → MACA builtins/plain C++. Config tuples were re-derived for 128 KiB (upstream's are sized for an H100's 227 KiB). `v3_cluster` was **deleted**, not ported — MACA has no cluster launch — and those shapes fall through to the general kernel with no dispatch arm.
@@ -175,7 +179,7 @@ Upstream's algorithm is kept (threshold-and-compact scan in a random block order
 
 Consequences of the port, all deliberate:
 
-- `topk` in `(1024, 4096]` is **rejected** by the ported kernel: a `max_topk = 4096` tuple is not merely tight on 128 KiB, it is impossible — `surviving_topk_pairs` alone is `2 * 4096 * 8 = 65536` B and the extra-pairs region at least `(4096 + 4096) * 8 = 65536` B. On C600/C600U those shapes are served by `maca_topk.cu`, not rejected by the operator.
+- `topk` in `(1024, 4096]` is **rejected** by the ported kernel: a `max_topk = 4096` tuple is not merely tight on 128 KiB, it is impossible — `surviving_topk_pairs` alone is `2 * 4096 * 8 = 65536` B and the extra-pairs region at least `(4096 + 4096) * 8 = 65536` B. With the default routing a C600/C600U serves those shapes from `maca_topk.cu`, so the operator does not reject them.
 - `vocab_size < 2^23` is enforced by the ported kernel only (the fp32-simulated census). `maca_topk.cu` has no such limit; it ranks integer keys.
 - `sorted_value` for bf16 is accepted by `maca_topk.cu` (same ordering key, so order and value/index pairing both hold) and rejected by the ported kernel, as upstream, and by `backend="torch"`.
 
@@ -378,7 +382,7 @@ PYTHONPATH=/path/to/mcDeepGEMM:. python scripts/official_slice.py --backend deep
 
   It has **no exclusivity gate** on purpose: `pgrep` cannot see device pinning, and `mx-smi` was measured on this box lying both ways (`--show-process` said "no process found" while a job ran; `--show-all-process` put a process holding 4 GB on device 3 under GPUs 0–2). Pick the device with `CUDA_VISIBLE_DEVICES`, run, and read the recorded md5 before comparing two runs.
 - `--backend` is the one thing the official suite cannot express (its call site passes no `backend=`), so the driver rebinds `deep_select.topk` for the run rather than editing the official file.
-- Two edits under `tests/kernelkit/` are the whole delta from upstream, both required to run on MACA at all: `platform.py` asks torch whether it can see a device instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA controller), and one PEP 701 f-string at `stress.py:292` is rewritten for Python 3.10.
+- Two edits under `tests/kernelkit/` are the whole delta from upstream there, both required to run on MACA at all: `platform.py` asks torch whether it can see a device instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA controller), and one PEP 701 f-string at `stress.py:292` is rewritten for Python 3.10. `tests/lib.py` carries two more of the same kind, about this torch's missing UInt kernels: `torch.randint(...).to(torch.uint16)` and `result.view(uint).copy_(...)` both raise `NotImplementedError: "copy_" not implemented for 'UInt16'` under `torch.set_default_device("cuda")`, which with the default device set is *every* `randint` in the distributions — the harness could not generate a case at all. `Distribution.as_uint` casts on the CPU and moves the result; `Distribution.put_uint_bits` writes through the equal-width **signed** view. Both are bit-exact; neither changes what a case contains.
 - Not covered by either arm, recorded rather than papered over: the contract rejections (strided row, wrong dtype, `topk` out of range, undersized output buffer) — the official table asserts on values and has no exception cases — and `begin` / `hint` / caller-allocated `output_idx`, which the official call site always passes as `None`.
 
 ### Full-table correctness gate (C500, ~17.5 min)
@@ -407,9 +411,9 @@ Beyond the host repo's general rules (state the principle and the magnitude; kee
 
 - A one-line imperative title stating the **principle**, not "optimized X".
 - Why: the old approach's cost, with measured numbers.
-- A before→after table over the representative cells, in **both currencies** — µs **and** GB/s, with the trip count and the % of the read-only wall. Logical GB/s is `B × V × 2 B ÷ kernel time`; the wall is a measured **1,487 GB/s streaming read** on C500 (1,344 GB/s mixed) — do not back it out of the kernel.
+- A before→after table over the representative cells, in **both currencies** — µs **and** GB/s, with the trip count and the % of the read-only wall. Logical GB/s is `B × V × 2 B ÷ kernel time`; the wall is a measured **1,487 GB/s streaming read** on C500 (1,344 GB/s mixed) — do not back it out of the kernel. **The wall is per-part; measure it for the part you are on.** On C600U it is **1,545 GB/s**, measured with a purpose-written `uint4` grid-stride read kernel (`/tmp/readwall.cu` in the session that took it — a torch reduction measures 274 GB/s on the same device and is *not* the wall): 224 blocks → 1,545, 448 → 1,532, 896 → 1,523, 1792 → 1,401. The two numbers being close is a coincidence of these two parts, not a constant.
 - A **roofline verdict** for the affected cell: if it is not bandwidth-bound, say what it *is* bound on (currently: per-CTA dependency chain — `load → key transform → compare → shared atomic` — and serialized shared atomics).
-- The gate results (`95/95` perf + `82170/82170` correctness).
+- The gate results. Both arms: `95/95` perf (`./run_test.sh --perf`, ~100 s) **and** a correctness arm — `82170/82170` for the full-table 4-shard run on C500 (`~17.5 min`), or `200/200` for the seeded sample (`./run_test.sh --test`, ~63 s on C600U) when the change is being iterated rather than landed. Say which one you ran.
 - An architecture-boundary statement: changes confined to `csrc/xcore1000/` leave xcore1600 byte-identical, so **no C600U validation is owed**. Say so explicitly when true. (Byte-identical is still the right claim — but as of this writing xcore1600 is *not itself validated*, so "no C600U validation is owed" is an argument about the byte-identity of the artifact, not a claim that xcore1600 works. See Known holes.)
 
 These cells frequently have **no compute roofline** — the kernel does a few comparisons and one histogram increment per element and has no FLOP — so "both currencies" lands as logical-GB/s × trips versus the read wall plus a per-CTA limiting factor.
@@ -475,7 +479,10 @@ it removes the seeding that made an earlier reading of this look deterministic w
 ## Known holes (recorded, not hidden)
 
 - **`csrc/xcore1600/` selects wrong on a C600U. This is measured, not suspected, and it is the first thing to
-  fix.** On a `MetaX C600-U` (reports `sm89` → family 1600, so `backend="maca_c"` resolves *here*, not to `maca_topk.cu`):
+  fix.** It is *contained* for now — a 128 KiB family builds `csrc/xcore1000/` by default
+  (`DEEP_SELECT_128KIB_KERNEL`, see Kernel architecture above), which passes 200/200 on a C600U. Setting that variable
+  to `xcore1600` puts the broken kernel back, which is how the audit is done.
+  On a `MetaX C600-U` (reports `sm89` → family 1600, so `backend="maca_c"` resolved *here*, not to `maca_topk.cu`):
   a monotonic row of `0..511` with `topk=8` returns indices like `[448..455]` where the answer is `[511..504]`, and
   **the wrong answer varies run to run**: eight consecutive invocations of the identical command on identical input
   produced **eight distinct** index sets, all wrong, each a different mix of indices scavenged from the middle of the row.
@@ -483,10 +490,9 @@ it removes the seeding that made an earlier reading of this look deterministic w
   is plainly racy.) A random row returns `1.5e+37` for a row whose true max is `3.3`; `min(selected) >= max(unselected)`
   fails; indices are unique but not the top ones. On other shapes it traps (`[topk_select] NaN detected` on input
   containing **no** NaN — confirmed `isnan(x).sum() == 0`) or raises `device-side assert`. Measured on the official slice:
-  **4/200 passed** (`--backend maca_c`) against 93/200 for `--backend torch` (**whose 107 failures are a separate,
-  pre-existing harness/dtype issue** — `tests/lib.py:105`'s `torch.randint(...).to(uint_dtype)` hits
-  `"copy_" not implemented for 'UInt16'/'UInt32'` under `torch.set_default_device("cuda")`; do not read those as kernel
-  failures).
+  **4/200 passed** (`--backend maca_c`) against 93/200 for `--backend torch` at the time. **Both numbers are gone now**:
+  the 107 `torch` failures were the `tests/lib.py` UInt `copy_` bug (fixed in `ce68c25`), and the 196 `maca_c` failures
+  were this hole — with the routing above, `--backend maca_c` is **200/200** and so is `--backend torch`.
   **It is not a build regression.** Both artifacts are racy, and the old one is *more* so — the pre-cu-bridge build (old
   shim, with a `gnu` symlink patched in so it builds at all) gave **7 distinct** wrong sets in 8 runs, the cu-bridge build
   **8 of 8**. The two `.so` md5s differ, so this is same-source-same-behavior under a toolchain change, not a regression.
@@ -498,6 +504,11 @@ it removes the seeding that made an earlier reading of this look deterministic w
   `:1440`/`:1469` (`__reduce_add_sync(0xFFFFFFFF, …)`), `v3/topk_select.cuh:54` (`threadIdx.x % 32`), and the `0xFFFFFFFF`
   mask in `utils.cuh:7-12`, whose own comment says the mask's validity rests on "**前提是 MACA 的 warp 宽度确为 32**" —
   which it is not. On a 64-lane wave `0xFFFFFFFF` names the low half, so every one of those under-counts silently.
+  **It is worse than "wrong": it does not run.** With `DEEP_SELECT_128KIB_KERNEL=xcore1600` built and *correct* inputs
+  (`torch.set_default_device("cuda")` set, per the environment traps below), three cells — `b4096-v1024-k512`,
+  `b4096-v16384-k512`, `b512-v262144-k512`, all bf16 — all die with `device-side assert` before a single timing is
+  taken. So this tree cannot be benchmarked against the rerouted one cell for cell; there is no before to put beside the
+  after.
 - `backend="deep_gemm"`'s host kernel collects the members of the threshold *coarse* bin (half-precision ordered key `>> 6`) before refining, and the chunked kernel silently drops members past its staging capacity. A row with more than 4096 values in one such bucket gets a top-k of an arbitrary subset, varying run to run. Filed as a strict `xfail` in the host repo: `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`. **`maca_c` has no such hole** — but note the xcore1600 hole above is a `maca_c` hole, so this sentence is about the `deep_gemm` backend only.
 - The `radix_topk_row_bf16_k` static-k row used by the chunked path still runs the 8-bit coarse level and the 3,514-slot arena; it has not received coarse12.
 - The fp32 row is a separate codebase path whose overflow handling is multi-round full-row rescan (up to 8 trips). Same "coarse level too coarse" disease, different cure — a 32-bit key cannot be resolved in two levels the way a 16-bit one can. Retesting fp32 cells is mandatory when touching it.
