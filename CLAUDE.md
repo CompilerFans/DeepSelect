@@ -205,9 +205,16 @@ skill (and `maca-kernel-dev-and-opt` for the wider workflow) rather than guessin
 ICMP_NE) & mask`: one comparison covering all 64 lanes, then a bitwise AND. So
 `__ballot_sync(0xFFFFFFFF, 1)` returns `0x00000000ffffffff`, `__reduce_add_sync(
 0xFFFFFFFF, 1)` returns **32** (not 64), and `__shfl_up_sync(0xFFFFFFFF, v, 1)`
-lets lane 32 see only itself. Every mask-based collective follows this rule, and
+gives lane 32 **its own value back**. The rule is uniform across ballot,
+reduce, any/all *and* the shuffles — a lane outside the mask reads itself — and
 a kernel that runs work on lanes 32..63 while masking them out is silently
-wrong — measured: the port's own 32-lane scan is wrong on **32 of 64 lanes**.
+wrong. Measured: the port's own 32-lane scan is wrong on **32 of 64 lanes**.
+
+**Probe a shuffle by encoding the source lane in the value** (`v[lane] = 1000 +
+lane`). A distinctive value on one lane cannot distinguish "excluded by the
+mask" from "included, but that lane's own value happens to be what you would
+expect" — an earlier probe here did exactly that and read the opposite rule off
+the same hardware.
 
 **Wave width is 64, so every mask is 64-bit.** The guide's comparison builtins
 (`uicmp`/`sicmp`/`fcmp`) are documented as "返回 warp 内 64-bit 比较结果掩码".

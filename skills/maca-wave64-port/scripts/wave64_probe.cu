@@ -14,21 +14,40 @@
 // --------------------------------------------------------------------
 //     warpSize                        = 64
 //     __lane_id()                     = threadIdx.x % 64
-//     __activemask()                  = 0xffffffffffffffff  (full wave)
+//     __activemask()                  = full wave when converged
 //     __ballot_sync(0xFFFFFFFF, 1)    = 0x00000000ffffffff  (low half only!)
 //     __ballot_sync(0xF...F, 1)       = 0xffffffffffffffff
 //     __popc(ballot)                  = counts only the low 32 bits
 //     __reduce_add_sync(0xFFFFFFFF, 1)= 32        (not 64)
 //     __reduce_add_sync(full, 1)      = 64
-//     __shfl_up_sync(0xFFFFFFFF, ...)  lane 32 cannot see lane 31
 //     __any_sync(0xFFFFFFFF, ...)      ignores lanes 32..63
+//     __shfl_up_sync(0xFFFFFFFF, ...)  lane 32 gets its OWN value back
 //
-// The load-bearing detail: `__ballot_sync(mask, pred)` lowers to
-// `__builtin_mxc_sicmp(pred, 0, ICMP_NE) & mask` -- ONE comparison covering the
-// whole 64-lane wave, then a bitwise AND with the mask.  So a 32-bit mask is
-// not "group by 32"; it is "throw away lanes 32..63".  `__reduce_add_sync`,
-// `__any_sync` and `__shfl_*_sync` follow the same rule: a lane outside the
-// mask gets its own value back.
+// The rule is uniform: EVERY one of them honors the mask.  `__ballot_sync(mask,
+// pred)` lowers to `__builtin_mxc_sicmp(pred, 0, ICMP_NE) & mask` -- ONE
+// comparison covering the whole 64-lane wave, then a bitwise AND.  A lane
+// outside the mask reads its own value back, for the shuffles as much as for
+// ballot/reduce/any:
+//
+//     lane 32, __shfl_up_sync(0xFFFFFFFF,       v, 1)  -> own value (lane 31 is
+//                                                         not in the mask)
+//     lane 32, __shfl_up_sync(0xFFFFFFFFFFFFFFFF, v, 1) -> lane 31's value
+//     lane 63, __shfl_up_sync(0xFFFFFFFFFFFFFFFF, v, 1) -> lane 62's value
+//                                                          (the wave is 64 wide)
+//
+// So a 32-bit mask means "throw away lanes 32..63" everywhere -- not "group the
+// wave by 32".  Grouping is separate and opt-in: pass `width` explicitly
+// (`__shfl_up_sync(full, v, d, /*width=*/32)`).
+//
+// READ THIS BEFORE TRUSTING A SHUFFLE PROBE: `v[lane] = 1000 + lane` is the only
+// form that can be read unambiguously -- a result of 999+lane means "read
+// lane-1" and 1000+lane means "kept my own".  An earlier version of this file
+// used a distinctive value on lane 31 only, and then could not tell "excluded by
+// the mask" from "included, but reading a lane whose value happens to be its own
+// id" -- and drew the opposite conclusion from the same hardware.
+// NB the srcLane-in-value form below is the only reliable way to read this off
+// a measurement.  Recording "what SHFL_DN_32[31] returned" tells you nothing,
+// because the value you are looking at is the one lane 31 already had.
 //
 // BUILD AND RUN
 // -------------
@@ -62,7 +81,8 @@ __global__ void k_identity(int *warp_size, int *lane_id, unsigned long long *act
 __global__ void k_collectives(unsigned long long *ballot32, unsigned long long *ballot64,
                               unsigned *red32, unsigned *red64,
                               unsigned *any32, unsigned *any64,
-                              int *shfl32) {
+                              int *shfl32, int *shfl64, int *shflw32,
+                              int *shfldn32) {
     const unsigned tx = threadIdx.x;
 
     const unsigned votes = (tx == 0) || (tx == 32) || (tx == 40);
@@ -78,7 +98,14 @@ __global__ void k_collectives(unsigned long long *ballot32, unsigned long long *
     any32[tx] = __any_sync(0xFFFFFFFFu, tx == 40) ? 1u : 0u;
     any64[tx] = __any_sync(0xFFFFFFFFFFFFFFFFull, tx == 40) ? 1u : 0u;
 
-    shfl32[tx] = __shfl_up_sync(0xFFFFFFFFu, (int)(tx == 31 ? 777 : tx), 1);
+    // Encode the SOURCE lane in the value: v[lane] = 1000 + lane.  Then a
+    // result of 999+lane means "read lane-1" (the wave-wide answer), and a
+    // result of 1000+lane means "kept my own" (excluded by the mask).
+    const int v = 1000 + (int)tx;
+    shfl32[tx] = __shfl_up_sync(0xFFFFFFFFu, v, 1);                  // low-half mask
+    shfl64[tx] = __shfl_up_sync(0xFFFFFFFFFFFFFFFFull, v, 1);        // full mask
+    shflw32[tx] = __shfl_up_sync(0xFFFFFFFFFFFFFFFFull, v, 1, 32);   // explicit width=32
+    shfldn32[tx] = __shfl_down_sync(0xFFFFFFFFu, v, 1);               // low-half mask
 }
 
 // ── 3. does the port's own scan helper survive a 64-lane wave? ──────────────
@@ -113,7 +140,8 @@ __global__ void k_scan(int *as_port, int *as_fixed, int *expected) {
 }
 
 int main() {
-    int *warp_size, *lane_id, *shfl32, *as_port, *as_fixed, *expected;
+    int *warp_size, *lane_id, *shfl32, *shfl64, *shflw32, *shfldn32;
+    int *as_port, *as_fixed, *expected;
     unsigned long long *active, *ballot32, *ballot64;
     unsigned *red32, *red64, *any32, *any64;
 
@@ -127,12 +155,16 @@ int main() {
     cudaMalloc(&any32, 64 * sizeof(unsigned));
     cudaMalloc(&any64, 64 * sizeof(unsigned));
     cudaMalloc(&shfl32, 64 * sizeof(int));
+    cudaMalloc(&shfl64, 64 * sizeof(int));
+    cudaMalloc(&shflw32, 64 * sizeof(int));
+    cudaMalloc(&shfldn32, 64 * sizeof(int));
     cudaMalloc(&as_port, 64 * sizeof(int));
     cudaMalloc(&as_fixed, 64 * sizeof(int));
     cudaMalloc(&expected, 64 * sizeof(int));
 
     k_identity<<<1, 64>>>(warp_size, lane_id, active);
-    k_collectives<<<1, 64>>>(ballot32, ballot64, red32, red64, any32, any64, shfl32);
+    k_collectives<<<1, 64>>>(ballot32, ballot64, red32, red64, any32, any64,
+                             shfl32, shfl64, shflw32, shfldn32);
     k_scan<<<1, 64>>>(as_port, as_fixed, expected);
 
     const cudaError_t e = cudaDeviceSynchronize();
@@ -141,7 +173,7 @@ int main() {
         return 1;
     }
 
-    int ws, hl[64], hs[64], hp[64], hf[64], he[64];
+    int ws, hl[64], hs[64], hs64[64], hsw32[64], hsd[64], hp[64], hf[64], he[64];
     unsigned long long ha;
     unsigned long long hb32[64], hb64[64];
     unsigned hr32[64], hr64[64], hy32[64], hy64[64];
@@ -156,6 +188,9 @@ int main() {
     cudaMemcpy(hy32, any32, sizeof(hy32), cudaMemcpyDeviceToHost);
     cudaMemcpy(hy64, any64, sizeof(hy64), cudaMemcpyDeviceToHost);
     cudaMemcpy(hs, shfl32, sizeof(hs), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hs64, shfl64, sizeof(hs64), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hsw32, shflw32, sizeof(hsw32), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hsd, shfldn32, sizeof(hsd), cudaMemcpyDeviceToHost);
     cudaMemcpy(hp, as_port, sizeof(hp), cudaMemcpyDeviceToHost);
     cudaMemcpy(hf, as_fixed, sizeof(hf), cudaMemcpyDeviceToHost);
     cudaMemcpy(he, expected, sizeof(he), cudaMemcpyDeviceToHost);
@@ -184,9 +219,20 @@ int main() {
     printf("     ^ 0 everywhere = lane 40 is outside the mask\n");
     printf("  any(tx==40, full)        : lane0=%u lane32=%u lane40=%u\n",
            hy64[0], hy64[32], hy64[40]);
-    printf("  shfl_up(0xFFFFFFFF,1)@31 : %d   (777 = read lane 31, 31 = kept own)\n",
-           hs[31]);
-    printf("  shfl_up(0xFFFFFFFF,1)@32 : %d\n", hs[32]);
+    printf("\n== shuffles (v[lane] = 1000 + lane; a result of 999+d means "
+           "\"read lane d-1\")\n");
+    printf("  %-32s %8s %8s %8s\n", "call", "lane 32", "lane 31", "lane 63");
+    printf("  %-32s %8d %8d %8d\n", "up, mask 0xFFFFFFFF",
+           hs[32], hs[31], hs[63]);
+    printf("  %-32s %8d %8d %8d\n", "up, full mask",
+           hs64[32], hs64[31], hs64[63]);
+    printf("  %-32s %8d %8d %8d\n", "up, full mask, width=32",
+           hsw32[32], hsw32[31], hsw32[63]);
+    printf("  %-32s %8d %8d %8d\n", "down, mask 0xFFFFFFFF",
+           hsd[32], hsd[31], hsd[63]);
+    printf("  the mask IS honored: up@32 is 1032 (own) with the low-half mask\n"
+           "  and 1031 (lane 31) with the full one; up@63 = 1062 on both, which\n"
+           "  is itself the measurement that the wave is 64 wide, not 32.\n");
 
     printf("\n== the port's own scan (inclusive prefix sum of 1) ==\n");
     printf("  lane        :");

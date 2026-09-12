@@ -37,19 +37,26 @@ on the part you are actually targeting.
 | `warpSize` | **64** |
 | `__lane_id()` | `threadIdx.x % 64` |
 | `__activemask()` | full wave when converged (see §5) |
-| `__ballot_sync(0xFFFFFFFF, pred)` | **`__builtin_mxc_sicmp(pred,0,ICMP_NE) & mask`** — one 64-lane compare, then AND |
+| `__ballot_sync(0xFFFFFFFF, pred)` | **`__builtin_mxc_sicmp(pred,0,ICMP_NE) & mask`** — one 64-lane compare, then AND. Mask honored |
 | `__ballot_sync(0xFFFFFFFF, 1)` | `0x00000000ffffffff` — lanes 32..63 gone |
 | `__popc(ballot)` | counts only the low 32 bits → **`__popcll`** |
-| `__reduce_add_sync(0xFFFFFFFF, 1)` | **32**, not 64 |
-| `__shfl_up_sync(0xFFFFFFFF, …)` | lane 32 cannot see lane 31 |
-| `__any_sync(0xFFFFFFFF, …)` | lanes 32..63 ignored |
+| `__reduce_add_sync(0xFFFFFFFF, 1)` | **32**, not 64. Mask honored |
+| `__any_sync(0xFFFFFFFF, …)` | lanes 32..63 ignored. Mask honored |
+| `__shfl_up/down_sync(0xFFFFFFFF, …)` | mask **honored**: lane 32 gets its **own** value back, because lane 31 is outside the mask. Lane 63 with a full mask still reads lane 62 — the wave is 64 wide |
 
-**The load-bearing fact:** a 32-bit mask is not "group the wave into 32-lane
-groups". It is "**throw away lanes 32..63**". Every mask-based collective —
-ballot, reduce, any/all, shuffle — implements that rule, and a lane outside the
-mask simply gets its own value back. A kernel that runs its half of the work on
-lanes 32..63 while masking them out of every cross-lane operation computes a
-confident, silent, wrong answer.
+**One rule, uniformly: a lane outside the mask reads its own value back.** So a
+32-bit mask means "**throw away lanes 32..63**" — not "group the wave by 32".
+Grouping is a separate, opt-in thing: pass the `width` argument
+(`__shfl_up_sync(full, v, d, /*width=*/32)`).
+
+**Read a shuffle probe only if the source lane is encoded in the value.**
+`v[lane] = 1000 + lane` makes the result unambiguous (999+d = "read lane d-1",
+1000+d = "kept my own"). An earlier version of the probe here put a
+distinctive value on lane 31 alone and concluded, from the same hardware, that
+the mask was *ignored* — it could not distinguish "excluded by the mask" from
+"included, but reading a lane whose value is its own id". That conclusion was
+wrong and is corrected below; do not reproduce the probe shape that produced
+it.
 
 ## 2. The audit
 
@@ -59,9 +66,10 @@ how to tell a real 32-lane assumption from an innocent `% 32`.
 
 The four shapes that matter:
 
-1. **A 32-bit mask on a collective.** `__ballot_sync(0xFFFFFFFF, …)`,
-   `__reduce_*_sync(0xFFFFFFFF, …)`, `__any_sync`/`__all_sync`,
-   `__shfl_*_sync(0xFFFFFFFF, …)`. Every one becomes a 64-bit mask.
+1. **A 32-bit mask on a collective.** `__ballot_sync`, `__reduce_*_sync`,
+   `__any_sync`/`__all_sync`, `__shfl_*_sync`. Each becomes a 64-bit mask, and
+   each changes behavior when it does — including the shuffles, where lane 32
+   currently reads itself.
 2. **A lane index derived with `% 32`.** `lane_idx` must be `threadIdx.x % 64`,
    or `__lane_id()`.
 3. **A warp count derived with `/ 32`.** `NUM_WARPS` must be
@@ -70,8 +78,9 @@ The four shapes that matter:
    the wrong slot, and `lane_idx < NUM_WARPS` predicates admit the wrong lanes.
    **`kerutils`'s `canonical_warp_idx_sync()` is `threadIdx.x / 32u`** and is
    part of this — a port that calls it inherits the bug from a vendored header.
-4. **A scan/prefix width.** `for (i = 1; i <= 16; i <<= 1)` is a 32-lane scan;
-   `i <= 32` is a 64-lane one. The guard `if (lane_idx >= i)` comes along.
+4. **A scan/prefix width, in the loop bound *and* the guard.** Both
+   `for (i = 1; i <= 16; i <<= 1)` and `if (lane_idx + i < 32)` are 32-lane;
+   a 64-lane scan is `i <= 32` with `< 64`, and each needs fixing on its own.
 
 Do not stop at the masks. In a real port the masks are the *symptom*; the
 structural quantities (2) and (3) are what make whole data structures the wrong
@@ -96,16 +105,48 @@ static constexpr uint32_t kWarpSize = 32;
 for a CUDA target, and — more usefully — it makes the assumption visible at
 every use site instead of hiding it in a constant.
 
-For a warp-scope reduction, MACA's own builtin is cheaper than the CUB/`__shfl`
-spelling and does not carry the 32-lane wrappers:
+### CUB works — but the builtin is cheaper, and `readlane` is not a substitute
 
-```cpp
-// 64-lane step-down gather; the hardware index is byte-addressed, hence <<2
-int n = __builtin_mxc_bsm_bpermute(((lane + delta) & 63) << 2, val);
-```
+Three ways to replace a 32-lane scan, all measured on a 64-lane wave
+(`/tmp/cubvs.cu` in the session that took it; wrong-lanes out of 64):
 
-See the repository's `CLAUDE.md`, "MACA warp intrinsics", for the measured
-instruction counts that justify this and for the rest of the builtin catalogue.
+| approach | correct? | cost |
+| --- | --- | --- |
+| `cub::WarpScan<T>` / `WarpReduce<T>` (needs an explicit `TempStorage`) | **yes, 0/64** | 66 / 69 device insns |
+| `__builtin_mxc_bsm_bpermute` butterfly, written here | **yes, 0/64** | **54 / 42** |
+| `__builtin_mxc_readlane(x, src)` | — | **does not generalize**: every `src` returned the caller's own value |
+
+MACA's CUB gets the width right (`CUB_LOG_WARP_THREADS` is 6 → 64, and the
+specializations use `0xffffffffffffffffull` masks, `LaneId()` = `__lane_id()`,
+and `__shfl_up/down_sync(…, LOGICAL_WARP_THREADS)`). So `cub::WarpScan`,
+`cub::WarpReduce`, `cub::WarpExchange`, `cub::BlockRadixSort` and friends are a
+**legitimate and correct** answer — with two caveats:
+
+1. **It is ~1.3–1.6× the instruction count** of the same operation written with
+   `bsm_bpermute`, because CUB's shuffles go through the `__shfl_*_sync`
+   wrappers' per-call index arithmetic. For a warp-scope primitive in a hot
+   loop, write the butterfly:
+
+   ```cpp
+   // 64-lane step-down gather; the hardware index is byte-addressed, hence <<2
+   int n = __builtin_mxc_bsm_bpermute(((lane + delta) & 63) << 2, val);
+   ```
+
+   `bpermute` wraps modulo 64, so a butterfly that would read below lane 0 (or
+   above 63) must mask the contribution itself — `if (lane >= d) x += n`.
+
+2. **This CUB generation requires explicit temp storage** —
+   `cub::WarpScan<T> ws(temp_storage)`, not a default constructor. A one-liner
+   `cub::WarpScan<T> ws;` will not compile.
+
+**Do not reach for `__builtin_mxc_readlane` to replace a shuffle.** It reads one
+lane's value by a mode selected from a 16-entry table (`0x150`..`0x15f`, i.e. a
+16-lane row), and in this probe every source lane returned the caller's own
+value. A per-lane gather is `bsm_bpermute`; a broadcast is
+`__builtin_mxc_readfirstlane`.
+
+See the repository's `CLAUDE.md`, "MACA warp intrinsics", for the rest of the
+builtin catalogue and the measured instruction counts behind this.
 
 ## 4. Fix order and verification
 
@@ -142,10 +183,11 @@ print(deep_select.topk(x, k)[1][0].tolist())
 - **`__match_any_sync` is software-emulated** (a 32-iteration per-bit loop) and
   is not a shortcut past any of this; reach for `__ballot_sync` + `__popcll`
   instead.
-- **`__shfl_up_sync(0xFFFFFFFF, …)` behaves correctly *within* the low half.**
-  A scan that only ever runs on lanes 0..31 of a 64-lane wave can be right by
-  accident. That is why the probe reports a per-lane verdict rather than a
-  single pass/fail.
+- **A scan can be wrong in the loop bound and the guard independently.** Fixing
+  the bound (`i <= 16` → `i <= 32`) without the guard (`lane_idx + i < 32` →
+  `< 64`), or the reverse, leaves it wrong in a *different* way. Fix both, then
+  re-measure per lane — a scan that is right on lanes 0..31 and wrong above is
+  the signature of having fixed only one.
 - **`cub::BlockRadixSort` / MACA's CUB** get the width right
   (`CUB_LOG_WARP_THREADS` is 6, i.e. 64), so a block-scope primitive built on
   CUB is not automatically suspect — but `cub::WarpReduce` inherits the
@@ -169,7 +211,7 @@ specific to this bug class and belong in the record:
 
 ## 7. Worked example: `csrc/xcore1600/` in this repository
 
-The trees this skill was written against. **Not fixed yet** — this is the
+The tree this skill was written against. **Not fixed yet** — this is the
 measurement and the diagnosis, recorded so the fix starts from evidence.
 
 Symptom, on a MetaX C600-U (reports `sm89` → family 1600):
@@ -185,22 +227,72 @@ returns `1.5e+37` for a row whose true max is `3.3`. On the official slice:
 4/200. Other shapes trap (`[topk_select] NaN detected` on input with no NaN) or
 raise `device-side assert`.
 
-Diagnosis, with the probe: `k_scan`'s verdict is the whole story — the port's
-`utils.cuh` scan is wrong on 32 of 64 lanes. The port's site inventory:
+### 7.1 The three masks do not behave the same
+
+Measured per-primitive (`__ballot_sync`, `__reduce_add_sync`, `__any_sync`,
+`__shfl_up/down_sync`) on MACA 3.8.1.3. The rule is the same for all of them —
+**a lane outside the mask reads its own value back** — and that includes the
+shuffles, which is the one worth checking rather than assuming:
+
+| primitive | is the mask honored? |
+| --- | --- |
+| `__ballot_sync` | **yes** — `sicmp(pred,0,NE) & mask`; lanes outside the mask read 0 |
+| `__reduce_*_sync` | **yes** — the inner loop is gated on `mask & (1 << lane)`, and a lane outside gets its own value back. `__reduce_add_sync(0xFFFFFFFF, 1)` = **32** |
+| `__any_sync` / `__all_sync` | **yes** |
+| `__shfl_up_sync` / `__shfl_down_sync` | **NO** — the implementation (`__clang_maca_device_functions.h:712`) never reads `mask`; it clamps only against `width`, defaulting to `warpSize` = **64** |
+
+The shuffle row is the trap. A 32-bit mask on a shuffle is *cosmetic* at the
+default width, so widening it changes nothing — the 32-ness lives in the
+**guard**, not the mask:
+
+```
+__shfl_up_sync(0xFFFFFFFF, v, 1)   lane 32 -> 777   (reads lane 31: wave-wide)
+__shfl_up_sync(0xFFFFFFFF, v, 1)   lane 63 -> 62    (wave-wide)
+__shfl_up_sync(full mask, v, 1)    lane 63 -> 62    (same)
+__shfl_up_sync(full, v, 1, /*width=*/32)  lane 32 -> 32  (grouped, opt-in)
+```
+
+So `utils.cuh`'s scan is wrong for **three independent reasons**, and a fix
+that addresses fewer than all three leaves it wrong:
+
+1. the mask `0xFFFFFFFFu` excludes lanes 32..63, so they gather from themselves;
+2. the loop bound `i <= 16` is a 5-step Hillis-Steele, correct for 32 lanes;
+   64 needs `i <= 32`;
+3. the guard `lane_idx + i < 32` (suffix scan) discards everything above lane 31.
+
+### 7.2 Site inventory
 
 | site | current | why it is wrong |
 | --- | --- | --- |
-| `utils.cuh:17-24` scan | `i <= 16`, mask `0xFFFFFFFFu`, guard `lane_idx >= i` | a 32-lane scan; lanes 32..63 restart |
-| `utils.cuh:34-43` suffix scan | `lane_idx + i < 32`, 32-bit mask | same, mirrored |
-| `common_parts.cuh:121` | `NUM_WARPS = NUM_THREADS / 32` | **doubles**; mis-sizes every `warp_cnt[NUM_WARPS]` and mis-indexes `warp_idx` |
-| `common_parts.cuh:488/496/497/784/791/1432/1440/1469` | `__reduce_add_sync(0xFFFFFFFF, …)` | sums the low half only |
-| `common_parts.cuh:1463` | `__ballot_sync(0xFFFFFFFF, …)`, `1u << lane_idx` | mask drops the high half; the shift is 32-bit |
-| `common_parts.cuh:536` | `static_assert(NUM_RECONSTRUCT_BUCKETS == 32 * 8)`, `:538` `bucket_ptr = bucket_counter + lane_idx * 8`, `:566` `reconstruct_pivot_bucket = lane_idx * 8 + j` | the histogram-to-lane mapping is a 32-lane layout. `NUM_RECONSTRUCT_BUCKETS` is `1 << NUM_RECONSTRUCT_RADIX_BITS` (`:385`), i.e. it comes from the radix config, **not** from the lane count — so the fix is to shrink the per-lane slice (64 lanes × 4 buckets), not to grow the structure. Do not just edit the constant |
-| `common_parts.cuh:684` | `for (c = lane_idx; c < n; c += 32u)` | stride is the wave width; the trip count changes too |
-| `v3/topk_select.cuh:54`, `v3_fp32/topk_select.cuh:90` | `threadIdx.x % 32` | lane index |
-| `kerutils/.../device/cuda/common.h:89` | `canonical_warp_idx_sync() = threadIdx.x / 32u` | inherited from a vendored header |
+| `utils.cuh:20`, `:37` | `for (i = 1; i <= 16; i <<= 1)` | a 5-step scan is 32-lane; 64 needs `i <= 32` |
+| `utils.cuh:39` | `if (lane_idx + i < 32)` | guard discards data the shuffle actually delivered |
+| `utils.cuh:21`, `:38` | `__shfl_*(0xFFFFFFFFu, …)` | lane 32+ reads its own value instead of its neighbour; the mask is why |
+| `utils.cuh:7-15` | the comment | states the **false premise** ("ballot/reduce/shfl group by 32, so a 32-written scan is correct"), then contradicts itself two lines later. Delete it, do not preserve it |
+| `common_parts.cuh:312` | `NUM_WARPS = NUM_THREADS / 32` | **doubles** — feeds `:421` |
+| `common_parts.cuh:421` | `static_assert(NUM_SEGS_PER_ROUND == NUM_WARPS)`, `:697` `local_seg_idx = warp_idx`, `:696` `SEGS_PER_WARP == 1` | **the reachable uninitialized read.** `NUM_SEGS_PER_ROUND = elements_per_round / 512 = NUM_THREADS*16/512`, which is `NUM_THREADS/32` — right for 32-lane warps, **twice the real warp count** for 64. On a 256-thread config that is 8 segments per round and 4 real warps, so segments 4..7 are never loaded and the consumer reads uninitialized shared memory. Also makes `is_warp_active` (`v3/topk_select.cuh:92`, `v3_fp32:481`) and the permuted position arithmetic wrong by the same factor |
+| `common_parts.cuh:121`, `:122` | `NUM_WARPS = NUM_THREADS / 32`, `static_assert(NUM_THREADS % 32 == 0)` | same `/32`; the assert encodes the wrong width |
+| `common_parts.cuh:225` | `if (warp_idx < NUM_WARPS/2)` | with the doubled count this is true for **every** real warp, so the `else` branch that loads `input_values` never runs — `sorted_value` sorts an unloaded buffer |
+| `common_parts.cuh:488/496/497/581/784/791/1432/1440/1469` | `__reduce_add_sync(0xFFFFFFFF, …)`, `__reduce_or_sync(0xFFFFFFFFu, …)` | mask honored → sums the low half only |
+| `common_parts.cuh:1463` | `__ballot_sync(0xFFFFFFFF, …)`, `(1u << lane_idx) - 1u` | two defects: the mask drops the high half, and the 32-bit shift is UB for `lane_idx >= 32` |
+| `common_parts.cuh:1464` | `__popc(bit)` | 32-bit; applied to a 64-lane ballot it truncates silently → `__popcll` |
+| `common_parts.cuh:684` | `for (c = lane_idx; c < num_chunks; c += 32u)` | **decide, do not edit.** Chunks per segment is 64 (bf16) / 128 (fp32), so the stride must become 64 — but today the loop only covers chunks 0..31 idempotently (two aliasing lanes copy each chunk), which is why it is not the crash site |
+| `common_parts.cuh:536`, `:538`, `:566` | `static_assert(NUM_RECONSTRUCT_BUCKETS == 32*8)`, `bucket_counter + lane_idx * 8`, `lane_idx * 8 + j` | the histogram-to-lane mapping is 32-lane-shaped. `NUM_RECONSTRUCT_BUCKETS` is `1 << NUM_RECONSTRUCT_RADIX_BITS` (`:385`) — it comes from the radix config, **not** the lane count, so the fix is 4 buckets per lane over 64 lanes, not a bigger structure |
+| `common_parts.cuh:448`, `:490/786/1434` exchange | `warp_cnt[NUM_WARPS]`, `lane_idx < NUM_WARPS` | sized and indexed by the doubled count; the "lane i holds warp i's total" convention is 32-lane. With 64 lanes the totals arrive in both halves, so the exchange has to be re-derived, not resized |
+| `v3/topk_select.cuh:53-54`, `v3_fp32/topk_select.cuh:89-90` | `canonical_warp_idx_sync()` + `threadIdx.x % 32` | the lane index; and see the next row |
+| `kerutils/.../device/cuda/common.h:89` | `return threadIdx.x / 32u;` | **outside `csrc/xcore1600/` but in the compiled path** (`common_parts.cuh:4` includes it). Returns a warp index twice the hardware's, so `warp_idx` and `lane_idx` name different groupings and no consistent relabeling of one alone can work |
 
-The immediate containment is `deep_select/_arch.py`'s
-`DEEP_SELECT_128KIB_KERNEL`, which routes a 128 KiB part to the hand-written
-64-lane kernel instead (`xcore1000`), and passes the slice 200/200. Set it to
-`xcore1600` to work this tree, and re-run the slice when done.
+### 7.3 Not to be "fixed"
+
+`bit_utils.cuh:43/149` (`>> 31`, `0x80000000u`) are the fp32 sign bit;
+`common_parts.cuh:1397/1459` `static_assert(NUM_ELEMS_PER_THREAD_PER_ROUND < 32)`
+is a per-**thread** element count with a per-thread `hit_mask`, not a lane mask;
+`:88` `NUM_BYTES_TO_STORE == 32` is a store width; `:306`/`:1081`/`:1476` and
+`v3_fp32:79` are pair packing; `__syncthreads_or` is block-wide with no mask.
+`cub::BlockRadixSort` is **width-correct** on MACA (CUB's `WARP_THREADS` is 64
+and it uses `0xffffffffffffffffull` masks) — slow, but not part of this bug.
+
+### 7.4 Containment
+
+`deep_select/_arch.py`'s `DEEP_SELECT_128KIB_KERNEL` routes a 128 KiB part to
+the hand-written 64-lane kernel instead (`xcore1000`), which passes the slice
+200/200. Set it to `xcore1600` to work this tree, and re-run the slice when done.
