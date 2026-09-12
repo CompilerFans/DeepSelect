@@ -2,23 +2,34 @@
 
 #include <cstdint>
 
-// [MACA] 原来这两个球内扫描是内联 PTX（shfl.sync.up/down.b32 + 谓词加）。
-//   MACA 汇编器不认 PTX，改用等价的 __shfl_*_sync 内建（已探针实测可用）：
-//     * shfl.sync.up.b32 ... 0, 0xffffffff —— 段界 0、全掩码，源 lane 越界时
-//       谓词为假、目标值不变 ⇒ 等价于 `if (lane_idx >= i) x += t`
-//     * shfl.sync.down.b32 ... 31, 0xffffffff —— 段界 31，越界谓词为假 ⇒
-//       等价于 `if (lane_idx + i < 32) x += t`
-//   上游全文按 32 线程/warp 假设（lane_idx = threadIdx.x % 32、ballot 用 32 位掩码），
-//   这里的掩码同样取 0xFFFFFFFF。**前提是 MACA 的 warp 宽度确为 32** ——
-//   若硬件实际是 64 路波前，球内扫描的语义会变，需按 64 重写。本机实测：
-//   C500 的波前是 64 lane，但 ballot/reduce/shfl 按 32 lane 分组，所以按 32
-//   写的扫描语义成立。
+// ── the wave ────────────────────────────────────────────────────────────────
+//
+// MACA's wave is 64 lanes.  This tree was ported from CUDA assuming 32 and ran
+// wrong *silently* as a result, so the width lives in one place and every site
+// that depends on it says so.
+//
+// History, because the old comment here was the origin of the bug: it asserted
+// that "C500's wave is 64 lanes, but ballot/reduce/shfl group by 32, so a scan
+// written for 32 has correct semantics".  Measured (`skills/maca-wave64-port/
+// scripts/wave64_probe.sh`), the opposite holds: every mask-based collective
+// honors its mask, and `0xFFFFFFFF` names physical lanes 0..31 of the wave and
+// nothing else.  A "logical group of 32" has no encoding on this hardware at
+// all -- see `skills/maca-wave64-port/SKILL.md` §3.
+#define MACA_WARP_SIZE 64u
+// Spell the type: MACA ships `__reduce_*_sync(uint64_t, ...)` AND
+// `__reduce_*_sync(unsigned, ...)`, so an unsuffixed literal is ambiguous and
+// fails to compile.  `unsigned long long` is a distinct type from `uint64_t`
+// (`unsigned long`) on this platform, hence the cast.
+#define MACA_FULL_MASK ((uint64_t)0xFFFFFFFFFFFFFFFFull)
+
+// Every site is written against these so the CUDA-era 32 is nowhere left.
+// `static_assert` in the kernels pins the launch config against them.
 template<typename T>
 __device__ __forceinline__ T warp_level_inclusive_prefix_sum(T x, uint32_t lane_idx) {
     static_assert(sizeof(T) == 4);
     #pragma unroll
-    for (uint32_t i = 1; i <= 16; i <<= 1) {
-        uint32_t t = __shfl_up_sync(0xFFFFFFFFu, (uint32_t)x, i);
+    for (uint32_t i = 1; i <= MACA_WARP_SIZE / 2; i <<= 1) {
+        uint32_t t = __shfl_up_sync(MACA_FULL_MASK, (uint32_t)x, i);
         if (lane_idx >= i) x += (T)t;
     }
     return x;
@@ -34,9 +45,9 @@ template<typename T>
 __device__ __forceinline__ T warp_level_inclusive_suffix_sum(T x, uint32_t lane_idx) {
     static_assert(sizeof(T) == 4);
     #pragma unroll
-    for (uint32_t i = 1; i <= 16; i <<= 1) {
-        uint32_t t = __shfl_down_sync(0xFFFFFFFFu, (uint32_t)x, i);
-        if (lane_idx + i < 32) x += (T)t;
+    for (uint32_t i = 1; i <= MACA_WARP_SIZE / 2; i <<= 1) {
+        uint32_t t = __shfl_down_sync(MACA_FULL_MASK, (uint32_t)x, i);
+        if (lane_idx + i < MACA_WARP_SIZE) x += (T)t;
     }
     return x;
 }

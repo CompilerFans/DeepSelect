@@ -50,8 +50,12 @@ public:
         extern __shared__ CUTE_ALIGNAS(1024) char wksp_buf[];
         SharedMemoryPlan &smem = *reinterpret_cast<SharedMemoryPlan*>(wksp_buf);
 
-        uint32_t warp_idx = ku::canonical_warp_idx_sync();
-        uint32_t lane_idx = threadIdx.x % 32;
+        // [MACA] 64-lane waves.  `canonical_warp_idx_sync()` is `threadIdx.x / 32u`
+        // in the vendored kerutils header, and `% 32` aliases lanes 32..63 onto
+        // 0..31 -- together they put the block's work on half-warp groups that
+        // no cross-lane primitive can address.  See utils.cuh.
+        uint32_t warp_idx = threadIdx.x / MACA_WARP_SIZE;
+        uint32_t lane_idx = threadIdx.x % MACA_WARP_SIZE;
 
         if (end_vocab_idx <= args.topk) {
             EpilogueT::template topk_select_epilogue<true>(

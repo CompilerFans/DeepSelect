@@ -118,8 +118,8 @@ struct EpilogueRunner {
     static_assert(cute::is_same_v<OutIdxT, int32_t> || cute::is_same_v<OutIdxT, int64_t>);
     using UIntValueT = cute::conditional_t<cute::is_same_v<ValueT, float>, uint32_t, uint16_t>;
 
-    static constexpr uint32_t NUM_WARPS = NUM_THREADS / 32;
-    static_assert(NUM_THREADS % 32 == 0);
+    static constexpr uint32_t NUM_WARPS = NUM_THREADS / MACA_WARP_SIZE;
+    static_assert(NUM_THREADS % MACA_WARP_SIZE == 0);
     static_assert(NUM_WARPS % 2 == 0);
 
     static constexpr uint32_t NUM_VALUES_PER_LOAD_STORE = NUM_BYTES_PER_GMEM_STORE / sizeof(ValueT);
@@ -309,7 +309,11 @@ public:
     
     static constexpr uint32_t TARGET_OCCUPANCY = Config::target_occupancy;
     static constexpr uint32_t NUM_THREADS = Config::num_threads;
-    static constexpr uint32_t NUM_WARPS = NUM_THREADS / 32;
+    // [MACA] 64-lane waves: this was `/ 32`, which silently doubled every
+    // warp-indexed structure below (`warp_cnt[NUM_WARPS]`, the segment-per-warp
+    // map at :421, the lane-prefix exchange).  See utils.cuh and
+    // skills/maca-wave64-port/SKILL.md §3.
+    static constexpr uint32_t NUM_WARPS = NUM_THREADS / MACA_WARP_SIZE;
     static constexpr uint32_t MAX_TOPK = Config::max_topk;
     static_assert(NUM_THREADS == 256 || NUM_THREADS == 512);
 
@@ -418,9 +422,18 @@ public:
     static_assert(NUM_ELEMS_PER_TMA_ROW == (1u << SWIZZLE_SHIFT) * NUM_ELEMS_PER_128b);
     static_assert(NUM_TMA_ROWS_PER_SEG % (1u << SWIZZLE_SHIFT) == 0);
 
-    static_assert(NUM_SEGS_PER_ROUND == NUM_WARPS);
+    // [MACA] 这不是可自由推导的量：`NUM_SEGS_PER_ROUND` 来自 ABI
+    // (`elements_per_round == NUM_THREADS * 16`, scripts/generate_instantiations.py:109)，
+    // 而 `NUM_WARPS` 是波前宽度导出的 —— 64 lane 下二者不再相等，见 load_round_for_round
+    // 的 SEGS_PER_WARP 与 max(1, ...) 处理。
+    static_assert(NUM_SEGS_PER_ROUND >= NUM_WARPS);
+    static_assert(NUM_SEGS_PER_ROUND % NUM_WARPS == 0);
     static_assert(NUM_SEGS_PER_ROUND >= NUM_TAIL_SEGS);
-    static_assert(NUM_ELEMS_PER_SEG % (Config::elements_per_round/NUM_WARPS) == 0);
+    // [MACA] 上游这条断言用的是「每 warp 的轮内元素数」（elements_per_round /
+    // NUM_WARPS），在 32-lane 下 NUM_WARPS == NUM_SEGS_PER_ROUND 时它就是 NUM_ELEMS_PER_SEG，
+    // 恒真。64-lane 下 NUM_WARPS 减半、该表达式变成 1024 > 512，断言不再表达
+    // 「段是轮内一单位」这件事 —— 真正要保证的是**段整除轮**，即下面这条。
+    static_assert(NUM_ELEMS_PER_ROUND % NUM_ELEMS_PER_SEG == 0);
     
     // [MACA] 原为 TMA 张量映射：
     //   struct TmaParams { CUtensorMap tensor_map; };
@@ -485,7 +498,7 @@ public:
     EqGtPrefix compute_equal_quota_and_prefix(uint32_t cnt_gt, uint32_t cnt_eq, uint32_t topk, uint32_t warp_idx, uint32_t lane_idx, uint32_t *warp_cnt) {
         static_assert(NUM_WARPS <= 32);
         uint32_t cnt_packed = (cnt_gt << 16) | cnt_eq;
-        uint32_t warp_total_packed = __reduce_add_sync(0xFFFFFFFF, cnt_packed);
+        uint32_t warp_total_packed = __reduce_add_sync(MACA_FULL_MASK, cnt_packed);
         if (lane_idx == 0) {
             warp_cnt[warp_idx] = warp_total_packed;
         }
@@ -493,8 +506,8 @@ public:
         
         uint32_t off_lane_packed = warp_level_exclusive_prefix_sum(cnt_packed, lane_idx);
         uint32_t stored_warp_packed = lane_idx < NUM_WARPS ? warp_cnt[lane_idx] : 0u;
-        uint32_t off_warp_packed = __reduce_add_sync(0xFFFFFFFF, lane_idx < warp_idx ? stored_warp_packed : 0u);
-        uint32_t total_packed = __reduce_add_sync(0xFFFFFFFF, stored_warp_packed);
+        uint32_t off_warp_packed = __reduce_add_sync(MACA_FULL_MASK, lane_idx < warp_idx ? stored_warp_packed : 0u);
+        uint32_t total_packed = __reduce_add_sync(MACA_FULL_MASK, stored_warp_packed);
         uint32_t num_total_ge = total_packed >> 16;
         uint32_t num_total_eq_quota = topk - num_total_ge;
         uint32_t off_packed = off_warp_packed + off_lane_packed;
@@ -532,53 +545,61 @@ public:
     static __device__ __forceinline__
     bool find_pivot_in_histogram(SharedMemoryPlanBase &smem, const uint32_t *bucket_counter, uint32_t topk, uint32_t lane_idx) {
         bool should_select_whole_bucket = false;
-        // Each lane loads 8 counters
-        static_assert(NUM_RECONSTRUCT_BUCKETS == 32 * 8);
-        uint32_t counts[8];
-        const uint32_t *bucket_ptr = bucket_counter + lane_idx * 8;
+        // [MACA] 64-lane waves.  This mapping was "each of 32 lanes owns 8 of the
+        // 256 buckets": `bucket_ptr = bucket_counter + lane_idx * 8` with
+        // `lane_idx` 0..31.  `NUM_RECONSTRUCT_BUCKETS` is `1 << NUM_RECONSTRUCT_
+        // RADIX_BITS` -- it comes from the radix config, NOT the lane count -- so
+        // the fix is fewer buckets per lane, not a bigger histogram.  Widening
+        // `lane_idx` to 0..63 while keeping *8 walked `lane_idx * 8` to 504 on a
+        // 260-slot array: a shared-memory read past the end (trap 0x4).
+        static_assert(NUM_RECONSTRUCT_BUCKETS % MACA_WARP_SIZE == 0);
+        constexpr uint32_t COUNTS_PER_LANE = NUM_RECONSTRUCT_BUCKETS / MACA_WARP_SIZE;
+        static_assert(COUNTS_PER_LANE * sizeof(uint32_t) == 16);   // one 128b smem load
+        uint32_t counts[COUNTS_PER_LANE];
+        const uint32_t *bucket_ptr = bucket_counter + lane_idx * COUNTS_PER_LANE;
         ld_shared<4>(counts, bucket_ptr);
-        ld_shared<4>(counts + 4, bucket_ptr + 4);
 
         uint32_t local_sum = 0;
         CUTE_UNROLL
-        for (uint32_t j = 0; j < 8; ++j)
+        for (uint32_t j = 0; j < COUNTS_PER_LANE; ++j)
             local_sum += counts[j];
 
         // Get the inclusive suffix sum of the histogram
-        uint32_t suffix_count[9];
-        suffix_count[8] = warp_level_exclusive_suffix_sum(local_sum, lane_idx);
+        uint32_t suffix_count[COUNTS_PER_LANE + 1];
+        suffix_count[COUNTS_PER_LANE] = warp_level_exclusive_suffix_sum(local_sum, lane_idx);
         CUTE_UNROLL
-        for (int32_t j = 7; j >= 0; --j)
+        for (int32_t j = COUNTS_PER_LANE - 1; j >= 0; --j)
             suffix_count[j] = suffix_count[j + 1] + counts[j];
 
-        if (suffix_count[8] < topk && topk <= suffix_count[0]) {
+        if (suffix_count[COUNTS_PER_LANE] < topk && topk <= suffix_count[0]) {
             uint32_t j = 0;
             CUTE_UNROLL
-            for (uint32_t k = 1; k < 8; ++k)
+            for (uint32_t k = 1; k < COUNTS_PER_LANE; ++k)
                 j += (uint32_t)(suffix_count[k] >= topk);
-            
-            // A depth-3 SEL tree picking suffix_count[j+1] by the bits of j
+
+            // A depth-2 SEL tree picking suffix_count[j+1] by the bits of j
+            // (j in 0..3).  Kept as SEL rather than `suffix_count[j + 1]`: the
+            // array is a local, and a dynamic index would spill it to local
+            // memory -- the reason upstream wrote the tree in the first place.
             // j is the bucket that contains the top-k element
-            uint32_t b0 = (j & 1) ? suffix_count[2] : suffix_count[1], b1 = (j & 1) ? suffix_count[4] : suffix_count[3];
-            uint32_t b2 = (j & 1) ? suffix_count[6] : suffix_count[5], b3 = (j & 1) ? suffix_count[8] : suffix_count[7];
-            b0 = (j & 2) ? b1 : b0;  b2 = (j & 2) ? b3 : b2;
-            uint32_t suffix_count_j_plus_1 = (j & 4) ? b2 : b0;   // = s[j+1]
-            smem.reconstruct_pivot_bucket = lane_idx * 8 + j;
+            uint32_t b0 = (j & 1) ? suffix_count[2] : suffix_count[1];
+            uint32_t b1 = (j & 1) ? suffix_count[4] : suffix_count[3];
+            uint32_t suffix_count_j_plus_1 = (j & 2) ? b1 : b0;   // = s[j+1]
+            smem.reconstruct_pivot_bucket = lane_idx * COUNTS_PER_LANE + j;
             smem.reconstruct_num_should_select = topk - suffix_count_j_plus_1;
 
             if constexpr (CHECK_IF_SHOULD_SELECT_WHOLE_BUCKET) {
                 // topk == suffix_count[j] means the whole pivot bucket is selected
-                uint32_t d0 = (j & 1) ? suffix_count[1] : suffix_count[0], d1 = (j & 1) ? suffix_count[3] : suffix_count[2];
-                uint32_t d2 = (j & 1) ? suffix_count[5] : suffix_count[4], d3 = (j & 1) ? suffix_count[7] : suffix_count[6];
-                d0 = (j & 2) ? d1 : d0;  d2 = (j & 2) ? d3 : d2;
-                uint32_t suffix_count_j = (j & 4) ? d2 : d0;    // = suffix_count[j]
+                uint32_t d0 = (j & 1) ? suffix_count[1] : suffix_count[0];
+                uint32_t d1 = (j & 1) ? suffix_count[3] : suffix_count[2];
+                uint32_t suffix_count_j = (j & 2) ? d1 : d0;    // = suffix_count[j]
                 should_select_whole_bucket = (topk == suffix_count_j);
             }
         }
 
         if constexpr (CHECK_IF_SHOULD_SELECT_WHOLE_BUCKET) {
             // The owning lane holds the result; reduce so all lanes in the warp see the same answer.
-            return __reduce_or_sync(0xFFFFFFFFu, should_select_whole_bucket);
+            return __reduce_or_sync(MACA_FULL_MASK, should_select_whole_bucket);
         }
         return false;
     }
@@ -647,8 +668,14 @@ public:
 
         static_assert(IS_INIT || !HAVE_TAIL);
         static_assert(NUM_SEGS_PER_ROUND % NUM_WARPS == 0);
+        static_assert(NUM_SEGS_PER_ROUND >= NUM_WARPS);
         static_assert(NUM_SEGS_PER_ROUND >= NUM_TAIL_SEGS);
+        // [MACA] 64-lane waves halve NUM_WARPS, so each warp takes more than one
+        // segment per round.  It must -- if the load side skipped the extra
+        // segments the consumer would read uninitialized shared memory.
         constexpr uint32_t SEGS_PER_WARP = NUM_SEGS_PER_ROUND / NUM_WARPS;
+        static_assert(SEGS_PER_WARP >= 1);
+        static_assert(NUM_SEGS_PER_ROUND % NUM_WARPS == 0);
 
         ValueT *dst_base;
         if constexpr (IS_INIT) {
@@ -681,7 +708,12 @@ public:
             // TMA 会对越界元素补零、`mask` 又不支持部分搬运，所以这里自己界定边界：
             // 尾段通常只装到 end_vocab_idx 为止，最后一块可能不满 16B。
             uint32_t num_chunks = min(NUM_CHUNKS_PER_SEG, ku::ceil_div(num_valid_elems, CHUNK_ELEMS));
-            for (uint32_t c = lane_idx; c < num_chunks; c += 32u) {
+            // [MACA] stride = the wave width.  This was `+= 32u`, which covered only
+            // the first 32 of NUM_CHUNKS_PER_SEG (64 for bf16) chunks -- each chunk
+            // was copied twice by two aliasing lanes and the tail never at all, an
+            // idempotent copy that hid itself until `lane_idx` became a true 64-lane
+            // index, at which point the same loop would have skipped chunks.
+            for (uint32_t c = lane_idx; c < num_chunks; c += MACA_WARP_SIZE) {
                 uint32_t dst_off = sw_b128(dst_unit_base + c) * NUM_ELEMS_PER_128b - dst_origin_elems;
                 __builtin_mxc_ldg_b128_bsm(dst_base + dst_off,
                                            (void *)(gmem_seg + c * CHUNK_ELEMS),
@@ -689,34 +721,42 @@ public:
             }
         };
 
-        // 本轮各 warp 负责本地段 `warp_idx`（NUM_SEGS_PER_ROUND == NUM_WARPS，故一人一段）。
+        // 本轮各 warp 负责本地段 [warp_idx * SEGS_PER_WARP, ...) 开区间，共 SEGS_PER_WARP 段。
+        // **消费端每次只处理一段（`linear_segment_start + warp_idx`），所以装载必须逐段配平**：
+        // 原来 `SEGS_PER_WARP == 1` 时二者是同一段，64-lane 波前把 NUM_WARPS 减半后不再成立，
+        // 消费端会按 `warp_idx` 去读 `warp_idx + s*NUM_WARPS` 之外那些段 —— 那些段现在由本
+        // 循环装载（少装一段就是读未初始化的共享内存，静默错）。
         // 本轮的本地段分两区：前 NUM_TAIL_SEGS_THIS_ROUND 段整块预留给尾段（只有 init 轮带尾段），
         // 其余按置换序装载。预留段中不含有效元素的位置不写，由 fill_padded_tail_segments 填 PLACEHOLDER。
         constexpr uint32_t NUM_TAIL_SEGS_THIS_ROUND = HAVE_TAIL ? NUM_TAIL_SEGS : 0;
-        static_assert(SEGS_PER_WARP == 1);
-        uint32_t local_seg_idx = warp_idx;
+        uint32_t num_tail_segs = ku::ceil_div(end_vocab_idx - num_perm_elems, (uint32_t)NUM_ELEMS_PER_SEG);
+        uint32_t num_global_segs = ku::ceil_div(end_vocab_idx, (uint32_t)NUM_ELEMS_PER_SEG);
+        CUTE_UNROLL
+        for (uint32_t s = 0; s < SEGS_PER_WARP; ++s) {
+            // `warp_idx * SEGS_PER_WARP + s` 与消费端的 `linear_segment_start + warp_idx` 一致：
+            // 消费端按 `seg % NUM_WARPS` 取模，见 scan_segs。
+            uint32_t local_seg_idx = warp_idx + s * NUM_WARPS;
 
-        if (local_seg_idx < NUM_TAIL_SEGS_THIS_ROUND) {
-            uint32_t num_tail_segs = ku::ceil_div(end_vocab_idx - num_perm_elems, (uint32_t)NUM_ELEMS_PER_SEG);
-            if (local_seg_idx < num_tail_segs) {
-                uint32_t seg_elem_base = (num_perm_segs + local_seg_idx) * NUM_ELEMS_PER_SEG;
-                copy_one_seg(local_seg_idx, num_perm_segs + local_seg_idx, end_vocab_idx - seg_elem_base);
+            if (local_seg_idx < NUM_TAIL_SEGS_THIS_ROUND) {
+                if (local_seg_idx < num_tail_segs) {
+                    uint32_t seg_elem_base = (num_perm_segs + local_seg_idx) * NUM_ELEMS_PER_SEG;
+                    copy_one_seg(local_seg_idx, num_perm_segs + local_seg_idx, end_vocab_idx - seg_elem_base);
+                }
+            } else if (IS_INIT && num_perm_segs == 0) {
+                // 不置换时按序整段搬入（尾段即全部数据，没有置换区，故不减 NUM_TAIL_SEGS）
+                uint32_t global_seg_idx = round_idx * NUM_SEGS_PER_ROUND + local_seg_idx;
+                if (global_seg_idx < num_global_segs) {
+                    uint32_t seg_elem_base = global_seg_idx * NUM_ELEMS_PER_SEG;
+                    copy_one_seg(local_seg_idx, global_seg_idx, end_vocab_idx - seg_elem_base);
+                }
+            } else {
+                // 置换区线性位置 = 全局起点 + 本轮起点 + 本地段号 - 尾段占位。
+                // 必须与消费端 scan_segs 里 `linear_segment_start` 的推导逐项一致。
+                uint32_t linear_pos = local_start_seg_idx + round_idx * NUM_SEGS_PER_ROUND
+                                    + local_seg_idx - NUM_TAIL_SEGS;
+                // 置换段按构造全部落在 end_vocab_idx 以下，必为整段
+                copy_one_seg(local_seg_idx, get_permuted_seg_idx(linear_pos, perm_len, perm_mul), NUM_ELEMS_PER_SEG);
             }
-        } else if (IS_INIT && num_perm_segs == 0) {
-            // 不置换时按序整段搬入（尾段即全部数据，没有置换区，故不减 NUM_TAIL_SEGS）
-            uint32_t num_global_segs = ku::ceil_div(end_vocab_idx, (uint32_t)NUM_ELEMS_PER_SEG);
-            uint32_t global_seg_idx = round_idx * NUM_SEGS_PER_ROUND + local_seg_idx;
-            if (global_seg_idx < num_global_segs) {
-                uint32_t seg_elem_base = global_seg_idx * NUM_ELEMS_PER_SEG;
-                copy_one_seg(local_seg_idx, global_seg_idx, end_vocab_idx - seg_elem_base);
-            }
-        } else {
-            // 置换区线性位置 = 全局起点 + 本轮起点 + 本地段号 - 尾段占位。
-            // 必须与消费端 scan_segs 里 `linear_segment_start` 的推导逐项一致。
-            uint32_t linear_pos = local_start_seg_idx + round_idx * NUM_SEGS_PER_ROUND
-                                + local_seg_idx - NUM_TAIL_SEGS;
-            // 置换段按构造全部落在 end_vocab_idx 以下，必为整段
-            copy_one_seg(local_seg_idx, get_permuted_seg_idx(linear_pos, perm_len, perm_mul), NUM_ELEMS_PER_SEG);
         }
     }
 
@@ -781,14 +821,14 @@ public:
                 // TODO Performance can be optimized by using wider reads (pay attn to alignment issues!)
                 my_cnt += window_scatter_delta[i];
             }
-            uint32_t warp_total = __reduce_add_sync(0xFFFFFFFF, my_cnt);
+            uint32_t warp_total = __reduce_add_sync(MACA_FULL_MASK, my_cnt);
             if (lane_idx == 0) {
                 smem.warp_cnt[warp_idx] = warp_total;
             }
             __syncthreads();
 
             static_assert(NUM_WARPS <= 32);
-            uint32_t cur_prefix_sum = __reduce_add_sync(0xFFFFFFFF, lane_idx < warp_idx ? smem.warp_cnt[lane_idx] : 0u) + warp_level_exclusive_prefix_sum(my_cnt, lane_idx);
+            uint32_t cur_prefix_sum = __reduce_add_sync(MACA_FULL_MASK, lane_idx < warp_idx ? smem.warp_cnt[lane_idx] : 0u) + warp_level_exclusive_prefix_sum(my_cnt, lane_idx);
             for (uint32_t i = w_lo; i < w_hi; ++i) {
                 uint32_t cnt = window_scatter_delta[i];
                 window_scatter_delta[i] = cur_prefix_sum;
@@ -1429,7 +1469,7 @@ public:
             }
             uint32_t num_new_incomers = __popc(hit_mask);
 
-            uint32_t warp_total_hits = __reduce_add_sync(0xFFFFFFFF, num_new_incomers);
+            uint32_t warp_total_hits = __reduce_add_sync(MACA_FULL_MASK, num_new_incomers);
             if (lane_idx == 0) {
                 smem.warp_cnt[warp_idx] = warp_total_hits;
             }
@@ -1437,7 +1477,7 @@ public:
             
             static_assert(NUM_WARPS <= 32);
             uint32_t stored_warp_hits = lane_idx < NUM_WARPS ? smem.warp_cnt[lane_idx] : 0u;
-            uint32_t num_total_hits_in_this_round = __reduce_add_sync(0xFFFFFFFF, stored_warp_hits);
+            uint32_t num_total_hits_in_this_round = __reduce_add_sync(MACA_FULL_MASK, stored_warp_hits);
             
             uint32_t seg_elem_base = current_permuted_segment * NUM_ELEMS_PER_SEG + offset_in_segment;
 
@@ -1460,13 +1500,18 @@ public:
             uint32_t lane_prefix = 0;
             CUTE_UNROLL
             for (uint32_t k = 0; k < 5; ++k) {
-                uint32_t bit = __ballot_sync(0xFFFFFFFF, (num_new_incomers >> k) & 1u) & ((1u << lane_idx) - 1u);
-                lane_prefix += (uint32_t)__popc(bit) << k;
+                // [MACA] 64-bit from end to end: the ballot is 64 lanes wide, so the
+                // prefix mask and its population count have to be too.  A 32-bit
+                // `1u << lane_idx` is UB above lane 31, and `__popc` truncates the
+                // wave in half silently.
+                unsigned long long bit = __ballot_sync(MACA_FULL_MASK, (num_new_incomers >> k) & 1u)
+                                       & ((1ull << lane_idx) - 1ull);
+                lane_prefix += (uint32_t)__popcll(bit) << k;
             }
 
             uint32_t dst_slot = 
                 num_incomers +
-                __reduce_add_sync(0xFFFFFFFF, lane_idx < warp_idx ? stored_warp_hits : 0u) +
+                __reduce_add_sync(MACA_FULL_MASK, lane_idx < warp_idx ? stored_warp_hits : 0u) +
                 lane_prefix;
 
             if (is_warp_active && warp_total_hits != 0) {
