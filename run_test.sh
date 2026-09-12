@@ -51,11 +51,12 @@
 #     holding 4 GB on device 3 as running on GPUs 0, 1 and 2.  It is recorded
 #     for forensics, exactly as run_bench.sh records it, not trusted to decide.
 #
-# The measured cost of getting this wrong is real and is why the md5 matters: a
-# 620 us cell in this tree read 619.6 us and 644-651 us in two runs whose
-# extension md5 was identical (40a2c663b88a).  ~4% of that is the box, not the
-# kernel, and the only way to tell the two apart afterwards is the recorded md5
-# plus the recorded mx-smi.
+# The md5 is recorded because this tree's `.so` is gitignored, so "what did I
+# measure" is not implied by the source.  That is not hypothetical: a 620 us cell
+# here read 619.6 us in one run and 644-651 us in another, and the extension md5
+# was identical (40a2c663b88a) -- the difference turned out to be a *different
+# `TestParam`* (`return_value=False` in the official grid, `True` in the ad-hoc
+# harness), not the box.  The record is what made that findable.
 #
 # A stale extension is reported loudly but does not stop the run: the arm is
 # often being used to check correctness of a source tree whose build you just
@@ -114,7 +115,8 @@ results_dir="${DS_RESULTS_DIR:-results}"
 allow_build=0
 list_only=0
 dtype=""
-declare -a arm_args=()
+declare -a perf_args=()      # --dtype, -nc/-rf: tests/test.py knows these
+declare -a test_args=()      # --sample, --shard, --backend: official_slice.py does
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -122,23 +124,37 @@ while [[ $# -gt 0 ]]; do
         --test)             arm="${arm:+$arm,}test"; shift ;;
         --all)              arm="perf,test"; shift ;;
         --dtype)            [[ $# -ge 2 ]] || { echo "run_test.sh: --dtype needs a value" >&2; exit 2; }
-                            dtype="$2"; arm_args+=("--dtype" "$2"); shift 2 ;;
-        --dtype=*)          dtype="${1#*=}"; arm_args+=("$1"); shift ;;
+                            dtype="$2"; perf_args+=("--dtype" "$2"); shift 2 ;;
+        --dtype=*)          dtype="${1#*=}"; perf_args+=("$1"); shift ;;
         --sample|--shard|--backend)
                             [[ $# -ge 2 ]] || { echo "run_test.sh: $1 needs a value" >&2; exit 2; }
-                            arm_args+=("$1" "$2"); shift 2 ;;
-        --sample=*|--shard=*|--backend=*) arm_args+=("$1"); shift ;;
+                            test_args+=("$1" "$2"); shift 2 ;;
+        --sample=*|--shard=*|--backend=*) test_args+=("$1"); shift ;;
         --results)          [[ $# -ge 2 ]] || { echo "run_test.sh: --results needs a value" >&2; exit 2; }
                             results_dir="$2"; shift 2 ;;
         --results=*)        results_dir="${1#*=}"; shift ;;
-        -nc|--no-cooldown|-rf|--run-to-finish) arm_args+=("$1"); shift ;;
+        # tests/test.py knows these (they come from lib.stick_unit_test_args);
+        # official_slice.py does not, so they must not reach the test arm.
+        -nc|--no-cooldown|-rf|--run-to-finish) perf_args+=("$1"); shift ;;
         --allow-build)      allow_build=1; shift ;;
         --list)             list_only=1; shift ;;
         # Kept so a script or a habit written against the earlier revision does
         # not die on an unknown flag.  Both are no-ops now: there is no gate.
         --force|--strict)   shift ;;
         -h|--help)          usage; exit 0 ;;
-        --)                 shift; arm_args+=("$@"); break ;;
+        --)                 shift
+                            # After `--`, split on what the flag is: the two
+                            # arms do not share a CLI, and forwarding the union
+                            # to both was a bug (official_slice.py exits 2 on
+                            # `--dtype`, which the default `--all` would hit).
+                            while [[ $# -gt 0 ]]; do
+                                case "$1" in
+                                    --dtype|--dtype=*) perf_args+=("$1"); shift ;;
+                                    -nc|--no-cooldown|-rf|--run-to-finish) perf_args+=("$1"); shift ;;
+                                    *) test_args+=("$1"); shift ;;
+                                esac
+                            done
+                            break ;;
         *)                  echo "run_test.sh: unknown argument: $1" >&2
                             echo "  (pass arm-specific flags after --)" >&2
                             usage; exit 2 ;;
@@ -204,7 +220,8 @@ if [[ "$list_only" == "1" ]]; then
     echo "run_test.sh: md5         = $md5"
     echo "run_test.sh: devices     = $devices"
     echo "run_test.sh: dtype       = ${dtype:-(all)}"
-    echo "run_test.sh: arm args    = ${arm_args[*]:-(none)}"
+    echo "run_test.sh: perf args   = ${perf_args[*]:-(none)}"
+    echo "run_test.sh: test args   = ${test_args[*]:-(none)}"
     echo "run_test.sh: receipt     = ${receipt}.txt"
     exit 0
 fi
@@ -252,10 +269,10 @@ for a in "${arms[@]}"; do
     case "$a" in
         perf)
             # Upstream's own invocation, unchanged.
-            run_one perf tests/test.py --perf-only "${arm_args[@]+"${arm_args[@]}"}" || rc=1
+            run_one perf tests/test.py --perf-only "${perf_args[@]+"${perf_args[@]}"}" || rc=1
             ;;
         test)
-            run_one test scripts/official_slice.py "${arm_args[@]+"${arm_args[@]}"}" || rc=1
+            run_one test scripts/official_slice.py "${test_args[@]+"${test_args[@]}"}" || rc=1
             ;;
         *) echo "run_test.sh: unknown arm '$a'" >&2; exit 2 ;;
     esac
