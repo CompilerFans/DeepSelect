@@ -26,20 +26,21 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `main`（已推送到 `origin/main`） |
-| HEAD | `4cd740a` *Rank the threshold bin, not the part of it that fit the arena* |
-| 已推送 | 是 |
-| 工作树 | **2 个文件有未提交改动**（见下） |
-| 未提交内容 | `csrc/xcore1000/radix_core.cuh`、`csrc/xcore1000/maca_topk.cu` = **12 位粗层改造（coarse12）** |
+| HEAD | `3f8dfe7` *Resolve the 16-bit row's coarse level at 12 bits, over the arena* |
+| 已推送 | 是（含 `3f8dfe7`） |
+| 工作树 | **干净**（`git -C <DeepSelect> status --porcelain` 为空） |
+| 最近三项改动 | `ea8bcb0` sizing → `4cd740a` overflow → `3f8dfe7` coarse12，全部已落地 |
 
-`coarse12` 是本次会话最后一项优化，本地验证进度：
+**三条改动全部门通过**（2026-09-12）：
 
-- ✅ 3000 例官方切片全过
-- ✅ 全表 shard 0/4：20543/20543 passed
-- ⏳ shard 1..3 + 官方 perf 全表：**交接时仍在跑**（见 §4 命令，重跑一遍即可，
-  不要相信一个没跑完的状态）
+- 官方大表（`official_slice.py --backend maca_c --sample 1000000 --shard i/4`
+  ×4 串行）：**82170/82170 passed，0 unsupported，0 failed**（20543+20543+
+  20542+20542，每 shard ~340 s）
+- 官方性能表（`tests/test.py --perf-only`）：**All 95 cases passed**
 
-**所以第一步就是把 §4 的两条门跑完**；过了就按 §7 的形状提交这个改动（commit
-message 草稿在 §7）。没过就按 §8 的排障顺序查。
+也就是说 §4 的两条门现在是**基线**，不是待办：接手后任何改动都要在这两条门上
+比它更好或持平。§7 那个提交已经落地，`docs/C500-radix-coarse12-commit.txt`
+的内容已永久留在 git 历史里（文件已删）。
 
 ---
 
@@ -182,7 +183,7 @@ PYTHONPATH=$PWD python tests/test.py --perf-only    # 95 个用例，先验后�
 |---|---|---|
 | `ea8bcb0` | staging 缓冲按 `topk` 定尺而非 `kMaxTopK`（occupancy 1→2） | 2535.8 → 1588.3 µs |
 | `4cd740a` | refine 的直方图按"桶"计数，不再被 arena 夹住；删掉整行 rebuild，emit 趟向量化 | 1588.3 → 1034.3 µs |
-| 未提交 | 粗层 8 → 12 位（直方图 alias 在 arena 上） | 1034.3 → **650.7 µs** |
+| `3f8dfe7` | 粗层 8 → 12 位（直方图 alias 在 arena 上） | 1034.3 → **650.7 µs** |
 
 累计（起点是 `ea8bcb0` 之前那份二进制）：该格 **2533.9 → 650.7 µs（3.89x）**，
 `b4096-v262144-k512` **22815.5 → 6471.5 µs（3.53x）**。对 torch 现在是
@@ -190,26 +191,25 @@ PYTHONPATH=$PWD python tests/test.py --perf-only    # 95 个用例，先验后�
 
 ---
 
-## 7. 提交 coarse12 的形状
+## 7. 提交的形状（照 `3f8dfe7` / `4cd740a` 抄）
 
-commit message 草稿在 **`docs/C500-radix-coarse12-commit.txt`**（原先在 `/tmp`，
-已拷进仓库防止被清；提交落地后删掉即可，内容会留在 git 历史里）。
-它的结构是仓库的既定形状，照着写：
+每一条性能/数据流改动的 commit message 都是这个骨架，缺任一项不算记录：
 
-- 标题一行祈使句，说清原理；
-- 为什么（老做法的代价，带实测数字）；
-- before→after 表（7 个 cell，µs + GB/s 双币种），并注明这两个数各是什么口径；
-- **roofline 判定**：这格是不是带宽受限（答案通常不是——逻辑单趟 GB/s 乘趟数
-  对 1,487 GB/s 只读墙的占比）；
+- 标题一行祈使句，说清**原理**（不是"优化了 X"）；
+- 为什么：老做法的代价，带实测数字；
+- before→after 表（7 个代表 cell，µs + GB/s 双币种），并注明两个数各是什么口径、
+  两侧二进制分别来自哪棵树；
+- **roofline 判定**：这格是不是带宽受限——逻辑单趟 GB/s 乘趟数，对 1,487 GB/s
+  只读墙的占比；不是的话写清绑定在什么上；
 - 门的结果（95/95 + 82170/82170）；
-- 架构边界声明（只动 `csrc/xcore1000/`，xcore1600 逐字节不变 ⇒ 不欠 C600U 验证）。
+- 架构边界声明（只动 `csrc/xcore1000/` ⇒ xcore1600 逐字节不变 ⇒ 不欠 C600U 验证）。
 
-交互顺序：
+落地顺序：
 
 ```bash
 D=/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect
-git -C $D status --porcelain          # 只应看到那 2 个 .cuh/.cu
-git -C $D commit -a -F /tmp/commit_msg2.txt
+git -C $D status --porcelain          # 确认只有你想提交的文件
+git -C $D commit -a -F /path/to/msg   # 或先 git -C $D add <paths> 再 commit
 git -C $D push origin main
 ```
 

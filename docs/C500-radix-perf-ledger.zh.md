@@ -91,7 +91,7 @@ refine 排的是截断子集，必须再整行重扫一趟来修。解开这个�
 分相（同格，instrumented build，cycles/row）：总计 80,144 → 48,396；rebuild 趟
 20,690 → 287；emit 趟 24,870 → 12,998；非溢出路径 548.6 µs 不变。
 
-### 2.3 coarse12（未提交）— 粗层 8 位 → 12 位，直方图 alias 在 arena 上
+### 2.3 `3f8dfe7` — coarse12：粗层 8 位 → 12 位，直方图 alias 在 arena 上
 
 原理：bf16 key 是 16 位，粗层只用 8 位 ⇒ 阈值字节可能装下几千个元素（上表：
 4,686）。保留 12 位 ⇒ 剩 4 位，**正好是 key 的余下全部**，两级合起来把 key
@@ -158,8 +158,8 @@ CPU 侧建模（12 位粗桶规模）：全部七格 **超过 arena 的行数 = 
 
 | 门 | 命令 | 结果 |
 |---|---|---|
-| 官方大表（正确性） | `scripts/official_slice.py --backend maca_c --sample 1000000 --shard i/4` ×4 串行 | `ea8bcb0`：82170/82170，0 unsupported，0 failed，17.5 min；`4cd740a`：82170/82170；coarse12：见交接手册（交接时仍在跑） |
-| 官方性能表 | `tests/test.py --perf-only` | `ea8bcb0`：All 95 passed，73 timed，min 1.060x / median 2.110x / max 12.270x，无一格 < 1.0x；`4cd740a`：All 95 passed |
+| 官方大表（正确性） | `scripts/official_slice.py --backend maca_c --sample 1000000 --shard i/4` ×4 串行 | `ea8bcb0`：82170/82170，0 unsupported，0 failed，17.5 min；`4cd740a`：82170/82170；**`3f8dfe7`：82170/82170**（20543+20543+20542+20542，每 shard ~340 s） |
+| 官方性能表 | `tests/test.py --perf-only` | `ea8bcb0`：All 95 passed，73 timed，min 1.060x / median 2.110x / max 12.270x，无一格 < 1.0x；`4cd740a`：All 95 passed；**`3f8dfe7`：All 95 passed** |
 
 **架构边界**：三次改动都只在 `csrc/xcore1000/` 内，xcore1600（C600/C600U）的源
 与 config 逐字节不变，因此不欠 C600U 验证。（本题不涉及 FP8，参见仓库的 FP8
