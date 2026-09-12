@@ -1,0 +1,87 @@
+【待提交的 commit message】用于工作树里未提交的 coarse12 改动（csrc/xcore1000/radix_core.cuh + maca_topk.cu）。
+提交落地后本文件即可删除（内容会永久留在 git 历史里）。
+用法： git -C /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect commit -a -F docs/C500-radix-coarse12-commit.txt
+========================================================================
+
+Resolve the 16-bit row's coarse level at 12 bits, over the arena
+
+A bf16 key is 16 bits and the coarse level kept 8 of them, so the threshold
+byte could hold thousands of members -- 4,686 of a 16,384-element row on the
+perf table's own generator -- all of them ties the refine had to rank through
+the candidate arena.  This is deepgemm's coarse12 layout applied to a 16-bit
+key: keep 12 bits coarse, which leaves 4, i.e. exactly the rest of the key, so
+two levels decide a key completely and the refine never ranks past the fine
+ties.  The measured effect on the table's data is that the widest threshold bin
+falls from 4,686 members to 203, under the arena at every cell, so the overflow
+path stops being taken at all.
+
+  - pass 1 builds a 4,096-bin histogram over `key >> 4` instead of a 256-bin one
+    over `key >> 8`.  The bins live in the arena's own 16 KB: the histogram is
+    dead before the arena is written, so one region carries both (deepgemm
+    aliases these two the same way).  The dynamic request at k=512 goes 16,104
+    -> 18,432 B, i.e. static+dynamic 18,432 -> 20,760, still under the 32 KB a
+    second CTA needs; at topk >= 4096 both are past it already, so no k loses
+    occupancy.
+  - the scan still walks 256 bins: the 4,096 fold down to one bin per high byte
+    first, and thread 0 then narrows inside the byte the scan lands on.  The
+    fold is a plain 16-way sum, so the existing 256-wide warp scan is reused
+    unchanged for both levels.
+  - pass 2 emits `key >> 4` above the threshold and stages `key >> 4` equal to
+    it, counting the low 4 bits; the refine ranks those 16 fine bins, and the
+    arena emit reads `key & 0xF`.
+
+  One rule in the narrow is worth naming because getting it wrong is silent:
+  the sub-bin is the one where `count(above it) + its own count` crosses
+  `remain_topk` -- the window -- and NOT the remainder left after the byte above
+  has been counted.  Testing the remainder fires a sub-bin early whenever the
+  byte has slack, which leaves the window short; the refine then finds no bin to
+  land on and reads whatever the shared variable held.  It cost a memory
+  violation and 379 of 512 wrong slots on b1-v4096-k512 before the dump showed
+  the kernel choosing bin 0xBFA where the truth was 0xBF9.  The landing state is
+  now initialized as well, so an unlandable crossing leaves a defined bin.
+
+Measured on C500, one process, `kk.bench` at the table's own num_runs, L2
+flushed, per-cell fixed seeds, both binaries built from the trees being compared
+(`4cd740a` = this commit's parent).  bf16 inputs, `indices_type` int32, times
+are the `topk_kernel_radix` kernel time:
+
+  cell                       before -> after          GB/s          vs torch
+  b4096-v1024-k512             239.7 ->   229.3 us   35.0 ->  36.6   1.67x
+  b4096-v16384-k512           1034.3 ->   650.7 us  129.8 -> 206.3   3.09x
+  b4096-v16384-k1024          1089.6 ->   704.9 us  123.2 -> 190.4   2.87x
+  b4096-v65536-k512           2863.7 ->  2203.0 us  187.5 -> 243.7   3.53x
+  b512-v262144-k512           1689.2 ->   833.8 us  158.9 -> 321.9   4.54x
+  b256-v1048576-k512          3821.0 ->  1724.1 us  140.5 -> 311.4   4.06x
+  b4096-v262144-k512         13280.0 ->  6471.5 us  161.7 -> 331.8   4.54x
+
+  every cell moves, fastest 2.22x slowest 1.05x; the two cells that the previous
+  commit could not reach (v1024, v65536) move here too, because the win is no
+  longer only about not overflowing -- the staged and refined set shrinks ~16x
+  whether or not the row used to overflow.
+
+Both currencies, per the standing rule.  GB/s is over the logical row set
+(B x V x 2 B / time).  No compute roofline applies: the kernel's arithmetic is a
+compare and a histogram increment per element, no FLOPs.  The bandwidth roofline
+is C500's measured 1,487 GB/s streaming-read wall; with the row read twice, the
+fastest moved cell sits at 206 x 2 = 413 GB/s, 28% of it, against 17% before.
+So the cell is still not DRAM-bound, and what is left is per-CTA: 512 threads x
+16 B is 8 KB in flight, and the row walks are dependent chains of load ->
+transform -> compare -> shared atomic.  The counters are the other half of it --
+the threshold bin's members each take a serialized `atomicAdd` on one staging
+counter plus one on the fine histogram, and the 16x smaller bin is most of why
+this commit moves the cells it does.
+
+Cumulative across the three commits of this campaign (ea8bcb0 sizing, 4cd740a
+overflow, this one), against the pre-campaign binary: v16384-k512 2,533.9 ->
+650.7 us (3.89x), v262144-b4096 22,815.5 -> 6,471.5 us (3.53x), v1048576-b256
+6,547.2 -> 1,724.1 us (3.80x).
+
+Gates: official grid `tests/test.py --perf-only` -- all 95 cases passed (each
+case checks correctness before it times).  Full official table
+`scripts/official_slice.py --backend maca_c --sample 1000000 --shard i/4` --
+82170/82170 passed, 0 unsupported, 0 failed.
+
+Only `csrc/xcore1000/` is touched, and only the 16-bit row inside it; the fp32
+row keeps its own rescan entry and the static-k / register row variants keep the
+8-bit level and their 3,514-slot arena, so xcore1600 (C600/C600U) sources and
+config are byte-identical and no C600U validation is owed.
