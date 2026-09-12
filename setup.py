@@ -51,110 +51,34 @@ def _maca_root() -> str:
     return os.environ.get("MACA_HOME") or os.environ.get("MACA_PATH") or "/opt/maca"
 
 
-# The host compiler and linker, and not a detail that can be left to the
-# environment: this torch build installs its own `CXX` at import time.  MACA's
-# `torch/utils/cpp_extension.py` carries a patch --
+# The device compiler is cu-bridge's `cucc`, and this file does not reimplement
+# it.  `torch.utils.cpp_extension` on MACA is written *against* cu-bridge:
+# `_find_cuda_home` lands on `${MACA_PATH}/tools/cu-bridge`, and `_join_cuda_home`
+# drives the device compiler as `$CUDA_HOME/bin/nvcc`, falling back to `bin/cucc`
+# when that does not exist -- which is this install's case.  `cucc` is then the
+# whole CUDA-dialect adapter, and it does four things this tree depends on:
 #
-#     def set_wcuda_gnu_path():                            # ~:62
-#         gnu_path = os.path.join(CUDA_HOME, 'bin', 'gnu')
-#         if os.path.exists(gnu_path):
-#             os.environ['CXX'] = gnu_path
-#     ...
-#     CUDA_HOME = _find_cuda_home() ...
-#     set_wcuda_gnu_path()                                 # ~:286, at import
+#     -imacros __macro_mxcc.h   the header that turns mxcc's `__MACACC__` into
+#                               `__CUDACC__`/`__NVCC__`, which torch's own c10
+#                               headers and `kerutils/common/common.h` both
+#                               branch on;
+#     -gencode=... ->           mxcc does not take torch's `-gencode`; cucc
+#       -DNV_ARCH_A100             substitutes the `__CUDA_ARCH__` and arch
+#       -Xdevice -D__CUDA_ARCH__=  define for it;
+#     -lcudart -> -lmcruntime   torch links a device extension against cudart,
+#                               which MACA spells `libmcruntime.so`;
+#     -I ${MACA_PATH}/include/  the MACA library include catalogue.
+#       {mcr,mcblas,...}
 #
-# -- and `get_cxx_compiler()` is just `os.environ.get('CXX', 'c++')`.  With the
-# default CUDA_HOME (`_find_cuda_home`'s cu-bridge guard) that path exists, so
-# `CXX` is silently repointed at cu-bridge's `bin/gnu`, a wrapper that execs
-# mxcc.  Reassigning `cpp_extension.CUDA_HOME` below does *not* undo it: the
-# patch already ran at import, against the old value.
-#
-# It matters even though every source here is a `.cu`, because ninja links with
-# `$cxx` (`command = $cxx $in $ldflags -o $out`).  Left alone, the extension is
-# linked by cu-bridge's wrapper; measured, that changes the artifact's md5.
-# Whatever upstream leaves informal, this file fixes explicitly.
-_HOST_CXX = "g++"
-
-
-# torch's CUDAExtension drives its device compiler as `$CUDA_HOME/bin/nvcc`, in
-# CUDA's flag dialect.  On MACA that path is cu-bridge's `cucc` -- a shell
-# wrapper that translates the flags and then runs mxcc (`cucc`:989-996, :1133).
-# This hands torch that same shape backed by mxcc directly, so the compiler is
-# the one named on the tin and the translation is written down here instead of
-# being inferred from a shell script.
-#
-# Only torch's own flags need translating: what this repository passes in
-# `extra_compile_args` (below) is written in mxcc's dialect already, and every
-# flag not named here reaches mxcc unchanged -- so an unsupported one is
-# reported by mxcc with its name rather than silently dropped here.
-_MXCC_NVCC_WRAPPER = """#!/bin/bash
-set -e
-mxcc="%(mxcc)s"
-args=()
-dep_file=""
-want_dep=0
-while [ $# -gt 0 ]; do
-  case "$1" in
-    # torch's dependency plumbing, in nvcc's spelling; mxcc takes clang's.
-    --generate-dependencies-with-compile) want_dep=1 ;;
-    --dependency-output) shift; dep_file="$1" ;;
-    # `-gencode=arch=compute_XY,code=sm_XY`, derived by torch from the visible
-    # device or from TORCH_CUDA_ARCH_LIST.  mxcc rejects it outright, and the
-    # architecture that matters here is `--offload-arch`, which setup.py passes
-    # per extension.  Dropping it also makes the build independent of which
-    # device happens to be visible while building: one extension, one arch.
-    -gencode=*) ;;
-    # In torch's COMMON_NVCC_FLAGS.  clang relaxes constexpr by default and has
-    # no such option.
-    --expt-relaxed-constexpr) ;;
-    # torch routes host flags through nvcc for its host compiler.  The only one
-    # it passes is `-fPIC`, which setup.py passes directly instead.
-    --compiler-options) shift ;;
-    *) args+=("$1") ;;
-  esac
-  shift
-done
-[ "$want_dep" = 1 ] && args+=("-MMD")
-[ -n "$dep_file" ] && args+=("-MF" "$dep_file")
-# cu-bridge's compatibility header, which cucc adds to every invocation.  mxcc
-# defines `__MACACC__` and this turns it into `__CUDACC__`/`__NVCC__` -- the
-# macros torch's c10 and the rest of the CUDA-facing headers branch on.  Without
-# it `c10::Half` declares no conversion to `__half` while `Half-inl.h` still
-# takes its MACA branch (`__MACA_ARCH__`), and the device pass fails to compile.
-# cucc passes it as `-imacros`, which mxcc's own argument parser rejects;
-# `-include` does the same thing for a header that only defines macros.  It is
-# found through the cu-bridge include dir, which setup.py puts on the path.
-args+=("-include" "__macro_mxcc.h")
-exec "$mxcc" "${args[@]}"
-"""
-
-
-def _prepare_mxcc_home(maca_root: str, this_dir: str) -> str:
-    """Write the wrapper and return a `CUDA_HOME` pointing at it.
-
-    Also the one piece of library plumbing torch expects of a CUDA_HOME: it
-    links a device extension against `-lcudart`, searched in `$CUDA_HOME/lib64`.
-    MACA's CUDA runtime is `libmcruntime.so`, and the name `libcudart.so` is a
-    link to it -- which is how the vendor's own CUDA_DIR ships it, and why the
-    linked extension records `libmcruntime.so` (the runtime it really runs on)
-    rather than a cudart it would never load.
-    """
-    home = os.path.join(this_dir, "build", "maca_cuda_home")
-    os.makedirs(os.path.join(home, "bin"), exist_ok=True)
-    os.makedirs(os.path.join(home, "include"), exist_ok=True)
-    nvcc = os.path.join(home, "bin", "nvcc")
-    with open(nvcc, "w", encoding="utf-8") as f:
-        f.write(_MXCC_NVCC_WRAPPER % {
-            "mxcc": os.path.join(maca_root, "mxgpu_llvm", "bin", "mxcc"),
-        })
-    os.chmod(nvcc, 0o755)
-
-    lib64 = os.path.join(home, "lib64")
-    os.makedirs(lib64, exist_ok=True)
-    cudart = os.path.join(lib64, "libcudart.so")
-    if not os.path.lexists(cudart):      # lexists: a stale broken link counts
-        os.symlink(os.path.join(maca_root, "lib", "libmcruntime.so"), cudart)
-    return home
+# Every flag it does not recognize it forwards unchanged to mxcc
+# (`-forward-unknown-to-compiler`, in its `conf*.json` adder), which is how the
+# mxcc-dialect flags in `compile_args` below reach the compiler.  An earlier
+# revision of this file wrote its own `nvcc` shim over mxcc instead and pointed
+# `CUDA_HOME` at it; that shim replicated the first two of those four jobs and
+# silently dropped the rest, including `bin/gnu` -- which torch's MACA build
+# asks this same `CUDA_HOME` for unconditionally (`get_wcuda_gnu_path`, called
+# from `build_extensions`, and the only return value of `get_cxx_compiler`).
+# Delegating to cu-bridge removes the class of bug rather than the instance.
 
 
 def build_for_maca():
@@ -174,27 +98,26 @@ def build_for_maca():
     `native`), the same variable and meaning as the host repository's
     `build.sh`.
 
-    Device code is compiled by `mxcc` (MACA's nvcc equivalent) directly.  torch
-    finds its device compiler at `$CUDA_HOME/bin/nvcc`, so `CUDA_HOME` is
-    pointed at a directory written for this build holding one script under that
-    name (`_prepare_mxcc_home`); the script translates the few CUDA-dialect
-    flags torch injects and hands the rest to mxcc.  The `-gencode
-    arch=compute_XY,code=sm_XY` torch derives from the visible device is among
-    those translated away -- the architecture comes from `--offload-arch` here,
-    one per extension.
+    Device code is compiled by `mxcc`, reached through cu-bridge's `cucc`: torch
+    drives its device compiler as `$CUDA_HOME/bin/nvcc`, `_join_cuda_home`
+    substitutes `bin/cucc` when that is absent, and on this install it is.  That
+    is why this file does *not* reassign `cpp_extension.CUDA_HOME` -- the
+    default cu-bridge home is what torch's MACA build expects, and it is also
+    what `get_cxx_compiler()` (ninja's `$cxx`) and `get_wcuda_gnu_path()` read.
+    See the cu-bridge note above.
 
-    Every source is a `.cu`, so `$nvcc` -- the shim above -- is the only
-    compiler this build invokes: torch routes a `.cpp` source to `$cxx`
-    instead (`cpp_extension._is_cuda_file`), and a second compiler would mean a
-    second flag list, a second kerutils mode macro and a pinned `CXX` to keep
-    working.  `csrc/xcore1600/api.cu` carries the reasoning for why upstream's
-    `api.cu` is spelled that way here.
+    Every source is a `.cu`, so the device compiler is the only compiler this
+    build invokes: torch routes a `.cpp` source to `$cxx` instead
+    (`cpp_extension._is_cuda_file`), and a second compiler would mean a second
+    flag list and a second kerutils mode macro.  `csrc/xcore1600/api.cu` carries
+    the reasoning for why upstream's `api.cu` is spelled that way here.
 
-    `--offload-arch` overrides `CUCC_TARGETS` in the environment, so passing it
-    explicitly per module is what keeps the modules independent of each
-    other's builds -- and that independence is the point: a tuple that cannot
-    fit the architecture being built is a compile error, which only works if a
-    compilation targets exactly one architecture.
+    `-offload-arch` is passed per extension, and cu-bridge honours an explicit
+    one rather than substituting its own (`gnu`:1080, `found_offload_arch`) --
+    so a build stays independent of which device happens to be visible, which
+    is the point: a tuple that cannot fit the architecture being built is a
+    compile error, and that only works if a compilation targets exactly one
+    architecture.
     """
     import torch.utils.cpp_extension as cpp_extension
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
@@ -220,17 +143,15 @@ def build_for_maca():
             "architectures to build via CUCC_TARGETS instead."
         )
 
-    # Hand torch a CUDA_HOME whose `bin/nvcc` is mxcc, so the device compiler is
-    # mxcc itself and not cu-bridge's wrapper around it.  torch reads this
-    # through the module global, which is why it is assigned rather than passed.
-    cpp_extension.CUDA_HOME = _prepare_mxcc_home(maca_root, this_dir)
-    # Undo the `set_wcuda_gnu_path` patch above, which is what `CXX` holds by
-    # now; ninja links with it even though every source here is a `.cu`.  See
-    # `_HOST_CXX`.
-    os.environ["CXX"] = _HOST_CXX
+    # `CUDA_HOME` is deliberately left alone.  torch's MACA build already
+    # resolves `_find_cuda_home()` to `${MACA_PATH}/tools/cu-bridge` (its guess
+    # #4), and that is the home this whole toolchain is wired for: `bin/cucc` is
+    # the device compiler, `bin/gnu` is the host compiler ninja links with, and
+    # `-lcudart` is translated to `-lmcruntime` on the way through.  Reassigning
+    # it is what broke the build before.  See the cu-bridge note above.
     print(f"deep_select: device compiler is "
-          f"{os.path.join(cpp_extension.CUDA_HOME, 'bin', 'nvcc')}, "
-          f"host compiler is {_HOST_CXX}")
+          f"{os.path.join(cpp_extension.CUDA_HOME, 'bin', 'cucc')}, "
+          f"host compiler is {cpp_extension.get_cxx_compiler()}")
 
     # cucc appends this catalogue to every invocation (`cucc`:989ff and its
     # conf), so it is part of the flags the kernels were developed against even
@@ -260,16 +181,18 @@ def build_for_maca():
     ] + [os.path.join(maca_root, "include", d) for d in maca_library_includes]
 
     def compile_args(target):
-        # In mxcc's dialect, because these go to mxcc: the wrapper above only
-        # translates what torch injects, and adds "-" to nothing else.
+        # In mxcc's dialect.  cucc forwards what it does not recognize, so
+        # these reach mxcc unchanged.
         args = [
             "-O3",
             "-std=c++20",
             "-DNDEBUG",
             "-Wno-deprecated-declarations",
-            # torch passes `-fPIC` to the host compiler and, for device code,
-            # as `--compiler-options '-fPIC'` -- which the wrapper drops along
-            # with the rest of torch's host flags, so it is named here.
+            # torch injects this as the host flag `-fPIC` on the `cxx` side and
+            # as `--compiler-options '-fPIC'` on the device side; for device
+            # code cucc rewrites the latter to `-Xcompiler -fPIC`, which mxcc
+            # accepts (verified).  Named here anyway so the device pass is not
+            # relying on that rewrite -- the cost is one duplicate flag.
             "-fPIC",
             "-use-fast-math",
             # `-use-fast-math` implies FTZ, so it is turned back off here.
@@ -311,7 +234,7 @@ def build_for_maca():
                 # Every source is a `.cu`, so the `nvcc` list is the only one
                 # torch ever reads; the key is torch's name for "the device
                 # source list", and its contents are mxcc's dialect because
-                # `bin/nvcc` is the shim above.
+                # cucc is what `$nvcc` resolves to.
                 extra_compile_args={
                     "nvcc": compile_args(target),
                 },

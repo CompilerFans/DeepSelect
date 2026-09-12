@@ -100,16 +100,40 @@ rm -f deep_select/deep_select_xcore1000*.so \
 
 Build plumbing worth knowing before editing `setup.py`:
 
-- Device code is compiled by **mxcc directly** (`--offload-arch=xcore<N>`), not through cu-bridge's `cucc` wrapper and not through any `-gencode` derived from the building machine. `setup.py` writes a `CUDA_HOME/bin/nvcc` shim (`_MXCC_NVCC_WRAPPER`) that strips torch's CUDA-dialect flags and execs mxcc. `TORCH_EXTENSION_ENABLE_XC1500_COMPILE` is refused outright — it would put a second `--offload-arch` in one extension.
-- Every source in `csrc/` is a `.cu`, so `$nvcc` -- the shim `setup.py` writes -- is the only compiler the build runs.
-  Host code is still linked by `g++`, and that has to be pinned: MACA's torch calls `set_wcuda_gnu_path()` at import
-  (`torch/utils/cpp_extension.py:62`, called at `:286`) and it sets `CXX` to cu-bridge's `bin/gnu` whenever it exists.
-  ninja links with `$cxx`, so without the override the extension is linked by cu-bridge's wrapper -- measured to change
-  the artifact's md5. `api.cu` is host *code* (no `__global__`), spelled `.cu` so torch routes it to that shim rather than to `$cxx`: mxcc defines `__MACA__` for a `.cu` and only for a `.cu`, and `kerutils/common/common.h` keys `KERUTILS_IS_BUILD_ON_CUDA` on it. Upstream calls the same file `api.cpp`; the extension is the whole difference. A `.cpp` here would need its own flag list, its own `-DKERUTILS_IS_BUILD_ON_CUDA`, and a pinned `CXX`. (`mxcc -x maca` is the identical switch and does define `__MACA__` for a `.cpp`, but it cannot reach the file: torch picks the rule by extension, and `-x` is not a file type it knows.)
+- Device code is compiled by **mxcc, reached through cu-bridge's `cucc`** (`--offload-arch=xcore<N>`). `setup.py` does
+  **not** write a shim, and does **not** reassign `cpp_extension.CUDA_HOME`. `torch.utils.cpp_extension` on MACA is
+  written *against* cu-bridge: `_find_cuda_home()` lands on `${MACA_PATH}/tools/cu-bridge` (its guess #4), and
+  `_join_cuda_home` drives the device compiler as `$CUDA_HOME/bin/nvcc`, falling back to `bin/cucc` when that is absent —
+  which is this install's case. `cucc` is then the whole CUDA-dialect adapter: `-imacros __macro_mxcc.h` (turns mxcc's
+  `__MACACC__` into `__CUDACC__`/`__NVCC__`, which torch's c10 headers and `kerutils/common/common.h` both branch on),
+  `-gencode=...` → `-DNV_ARCH_A100 -Xdevice -D__CUDA_ARCH__=800`, `-lcudart` → `-lmcruntime`, plus the MACA library `-I`
+  catalogue. Everything it does not recognize it forwards unchanged to mxcc (`-forward-unknown-to-compiler`), which is how
+  the mxcc-dialect flags in `compile_args` reach the compiler. `TORCH_EXTENSION_ENABLE_XC1500_COMPILE` is refused outright
+  — it would put a second `--offload-arch` in one extension.
+- **Do not reimplement cu-bridge.** An earlier revision of `setup.py` wrote its own `bin/nvcc` wrapper over mxcc and pointed
+  `CUDA_HOME` at it. It replicated the header and the `-gencode` translation, and silently dropped the rest — including
+  `bin/gnu`, which torch asks *this same `CUDA_HOME`* for unconditionally (`get_wcuda_gnu_path()`, called from
+  `build_extensions` at `cpp_extension.py:1225`) and which is the **only** return value of `get_cxx_compiler()` under
+  `USE_MACA`. Every build died with `no cu-bridge gnu found`, and the file's `os.environ["CXX"] = "g++"` line was dead
+  code: ninja's `$cxx` was cu-bridge's `gnu` either way. The lesson is the shape of the bug, not the instance — a
+  synthesized `CUDA_HOME` is a contract with torch's MACA patch, and it is not written down anywhere.
+  **If a CUDA_HOME must be synthesized, `bin/gnu` is not optional.** (Recovered with `git reset --mixed`-free edits;
+  the fix is commit-sized and the fallback is `./build.sh` from a clean `build/`.)
+- Every source in `csrc/` is a `.cu`, so the device compiler is the only compiler the build runs for sources.
+  `api.cu` is host *code* (no `__global__`), spelled `.cu` so torch routes it to the device rule rather than to `$cxx`:
+  mxcc defines `__MACA__` for a `.cu` and only for a `.cu`, and `kerutils/common/common.h` keys `KERUTILS_IS_BUILD_ON_CUDA`
+  on it. Upstream calls the same file `api.cpp`; the extension is the whole difference. A `.cpp` here would need its own
+  flag list, its own `-DKERUTILS_IS_BUILD_ON_CUDA`, and a pinned `CXX`. (`mxcc -x maca` is the identical switch and does
+  define `__MACA__` for a `.cpp`, but it cannot reach the file: torch picks the rule by extension, and `-x` is not a file
+  type it knows.)
 - `-use-fast-math` is passed with FTZ turned back off (`-Xclang -fdenormal-fp-math-f32=ieee`) so the one float conversion (`__float2bfloat16` of `value_oob_fill_value`) stays exact for a denormal fill. The ranking path is integer-only and indifferent.
 - `pip install .` does **not** work, for an inherited upstream reason: `setup.py` stamps the version with `datetime.now()` and a PEP 517 install runs it twice (metadata then wheel); straddling a second boundary yields `Wheel has unexpected file name`. Build isolation adds a second failure (torch absent from pip's isolated env). Use `build_ext --inplace`.
+- `install.sh` reads the built wheel through `python -m zipfile -l`, **not `unzip`**: `unzip` is absent on this host and the
+  check failed closed on a wheel that was fine.
 
-MACA toolkit root is `$MACA_HOME` or `$MACA_PATH` or `/opt/maca` (symlink, currently `maca-3.7.0`).
+MACA toolkit root is `$MACA_HOME` or `$MACA_PATH` or `/opt/maca` (a symlink; it pointed at `maca-3.5.3.17` while
+`MACA_PATH` named `maca-sdk-3.8.1.3/opt/maca-3.8.1` — the env var is the authoritative one here, and the two are
+different SDK generations on this box).
 
 ## Kernel architecture
 
@@ -386,9 +410,37 @@ Beyond the host repo's general rules (state the principle and the magnitude; kee
 - A before→after table over the representative cells, in **both currencies** — µs **and** GB/s, with the trip count and the % of the read-only wall. Logical GB/s is `B × V × 2 B ÷ kernel time`; the wall is a measured **1,487 GB/s streaming read** on C500 (1,344 GB/s mixed) — do not back it out of the kernel.
 - A **roofline verdict** for the affected cell: if it is not bandwidth-bound, say what it *is* bound on (currently: per-CTA dependency chain — `load → key transform → compare → shared atomic` — and serialized shared atomics).
 - The gate results (`95/95` perf + `82170/82170` correctness).
-- An architecture-boundary statement: changes confined to `csrc/xcore1000/` leave xcore1600 byte-identical, so **no C600U validation is owed**. Say so explicitly when true.
+- An architecture-boundary statement: changes confined to `csrc/xcore1000/` leave xcore1600 byte-identical, so **no C600U validation is owed**. Say so explicitly when true. (Byte-identical is still the right claim — but as of this writing xcore1600 is *not itself validated*, so "no C600U validation is owed" is an argument about the byte-identity of the artifact, not a claim that xcore1600 works. See Known holes.)
 
 These cells frequently have **no compute roofline** — the kernel does a few comparisons and one histogram increment per element and has no FLOP — so "both currencies" lands as logical-GB/s × trips versus the read wall plus a per-CTA limiting factor.
+
+## Build-change discipline
+
+The build has one failure mode worth a rule, because it cost a day and the bug was one missing file:
+
+**A synthesized `CUDA_HOME` is a contract with torch's MACA patch, and that contract is not written down anywhere.**
+A build change here is verified by *building both targets and running them*, never by reasoning about which flags
+reached the compiler. Concretely:
+
+1. `rm -rf build && ./build.sh` for every target — `build_ext --inplace` compares timestamps and will silently reuse a
+   stale object directory, so an incremental "it built" proves nothing about a toolchain change.
+2. The device compiler and the host linker are **printed by `setup.py`** (`deep_select: device compiler is …`). Read
+   those two lines; do not assume.
+3. `readelf -d` the extension and read the NEEDED list — it is the receipt for which libraries the toolchain actually
+   pulled in. The expected set on this install is `libmcruntime.so` (the MACA CUDA runtime, reached because cucc
+   translates torch's `-lcudart`), plus `libToolsExt_cu.so` / `libruntime_cu.so` / `libmcToolsExt.so` /
+   `libmaca_mathlib_host.so` / `libmccompiler.so`, which come from cucc's link-time `adder` in `conf.json`. Those are
+   cucc working, not artifacts to strip. A `libcudart.so` here would mean the translation did *not* happen.
+4. `./install.sh` end to end (it is a different code path from `build.sh` — wheel, pip, symlink).
+5. When reproducing a baseline for comparison, **patch the baseline until it builds.** An old tree that does not build is
+   not evidence about behavior; state in the commit that the `gnu` symlink was added to make it build, and that the md5s
+   differ.
+
+When a build change is suspected of changing *behavior* (not just the artifact), the falsifying test is a fixed,
+exactly-representable input — `arange`-derived, so the expected indices can be written down — not a random one, and the
+comparison must be run **several times**: a racy kernel's single run agrees with anything. Here both the old-shim and the
+cu-bridge artifacts were wrong on every run and wrong differently on each, which is what established that the toolchain
+change neither introduced nor repaired the defect.
 
 Land it as:
 
@@ -401,13 +453,52 @@ git -C $D push origin main
 
 Never a bare `git commit -a` (see repo identity, top).
 
-**Debugging mis-ranked output**: the fastest localizer is to write the kernel's threshold triple `{wide_threshold, above, fine_threshold, remain, num_staged, last_remain}` into `output[topk-8+tx]` on `blockIdx.x == 0 && tx < 8` and compare it against the same row computed with torch on CPU. That is how the `0xBFA` vs true `0xBFC`-class bug was found in one step. Clean it up afterwards — `rg RKPROBE` must be 0.
+**Debugging mis-ranked output**: the fastest localizer is to write the kernel's threshold triple `{wide_threshold, above, fine_threshold, remain, num_staged, last_remain}` into `output[topk-8+tx]` on `blockIdx.x == 0 && tx < 8` and compare it against the same row computed with torch on CPU. That is how the `0xBFA` vs true `0xBFC`-class bug was found in one step. Clean it up afterwards — `rg RKPROBE` must be 0. (This probe is written for `maca_topk.cu`'s threshold triple; `csrc/xcore1600/` has a different dataflow and no equivalent variables.)
 
-Symptom → first look (handover §8): wrong-but-not-much (a few slots, rank off by a few) → the threshold's subtraction convention (the `above + c > remain_topk` rule); `Memory Violation(0x4)` / `ATU Fault` → first the probe's missing `set_default_device`, then an out-of-range threshold leaving a shared variable uninitialized; one cell slow while others unchanged → occupancy, check `static + dynamic` against 32,768; source changed with no behavior change → a stale `.so`; compile-time `undeclared identifier` → constant/helper ordering in `radix_core.cuh`.
+Symptom → first look (handover §8): wrong-but-not-much (a few slots, rank off by a few) → the threshold's subtraction convention (the `above + c > remain_topk` rule); `Memory Violation(0x4)` / `ATU Fault` → first the probe's missing `set_default_device`, then an out-of-range threshold leaving a shared variable uninitialized; one cell slow while others unchanged → occupancy, check `static + dynamic` against 32,768; source changed with no behavior change → a stale `.so`; compile-time `undeclared identifier` → constant/helper ordering in `radix_core.cuh`; **wrong indices that change run to run → a lane-width bug** (a 32-bit mask or `/ 32` on a 64-lane wave in `csrc/xcore1600/`), not a threshold-convention one — a fixed offset is the threshold, a varying one is a race.
+
+Reproduce the xcore1600 hole with no seed and no harness, so the expected answer is written down rather than computed:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python -c "
+import torch, deep_select
+b, v, k = 2, 512, 8
+x = torch.arange(v, device='cuda', dtype=torch.float32).unsqueeze(0).repeat(b, 1).to(torch.bfloat16)
+_, ii = deep_select.topk(x, k)
+print(ii[0].tolist())   # want [511,510,509,508,507,506,505,504]
+"
+```
+
+`arange` matters twice over: the values are exactly representable in bf16 (so the expected indices *are* `range`), and
+it removes the seeding that made an earlier reading of this look deterministic when it is not. Run it a few times.
 
 ## Known holes (recorded, not hidden)
 
-- `backend="deep_gemm"`'s host kernel collects the members of the threshold *coarse* bin (half-precision ordered key `>> 6`) before refining, and the chunked kernel silently drops members past its staging capacity. A row with more than 4096 values in one such bucket gets a top-k of an arbitrary subset, varying run to run. Filed as a strict `xfail` in the host repo: `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`. **`maca_c` has no such hole.**
+- **`csrc/xcore1600/` selects wrong on a C600U. This is measured, not suspected, and it is the first thing to
+  fix.** On a `MetaX C600-U` (reports `sm89` → family 1600, so `backend="maca_c"` resolves *here*, not to `maca_topk.cu`):
+  a monotonic row of `0..511` with `topk=8` returns indices like `[448..455]` where the answer is `[511..504]`, and
+  **the wrong answer varies run to run**: eight consecutive invocations of the identical command on identical input
+  produced **eight distinct** index sets, all wrong, each a different mix of indices scavenged from the middle of the row.
+  (An earlier reading of this as "deterministic" was an artefact of seeding; an `arange` input needs no seed, and then it
+  is plainly racy.) A random row returns `1.5e+37` for a row whose true max is `3.3`; `min(selected) >= max(unselected)`
+  fails; indices are unique but not the top ones. On other shapes it traps (`[topk_select] NaN detected` on input
+  containing **no** NaN — confirmed `isnan(x).sum() == 0`) or raises `device-side assert`. Measured on the official slice:
+  **4/200 passed** (`--backend maca_c`) against 93/200 for `--backend torch` (**whose 107 failures are a separate,
+  pre-existing harness/dtype issue** — `tests/lib.py:105`'s `torch.randint(...).to(uint_dtype)` hits
+  `"copy_" not implemented for 'UInt16'/'UInt32'` under `torch.set_default_device("cuda")`; do not read those as kernel
+  failures).
+  **It is not a build regression.** Both artifacts are racy, and the old one is *more* so — the pre-cu-bridge build (old
+  shim, with a `gnu` symlink patched in so it builds at all) gave **7 distinct** wrong sets in 8 runs, the cu-bridge build
+  **8 of 8**. The two `.so` md5s differ, so this is same-source-same-behavior under a toolchain change, not a regression.
+  The port was only ever validated by compilation — the README says so, and CLAUDE.md's own "Beware reading upstream's
+  CUDA-era code as a model" note predicted exactly this. Run-to-run variance is itself the tell: a lane-width bug in an
+  under-counted reduction is a race, not a fixed offset.
+  **Prime suspect, already documented:** the port carries CUDA's 32-lane model on a 64-lane wave. `common_parts.cuh:121`
+  (`NUM_WARPS = NUM_THREADS / 32`), `:1463` (`__ballot_sync(0xFFFFFFFF, …)`), `:488`/`:496`/`:497`/`:784`/`:791`/`:1432`/
+  `:1440`/`:1469` (`__reduce_add_sync(0xFFFFFFFF, …)`), `v3/topk_select.cuh:54` (`threadIdx.x % 32`), and the `0xFFFFFFFF`
+  mask in `utils.cuh:7-12`, whose own comment says the mask's validity rests on "**前提是 MACA 的 warp 宽度确为 32**" —
+  which it is not. On a 64-lane wave `0xFFFFFFFF` names the low half, so every one of those under-counts silently.
+- `backend="deep_gemm"`'s host kernel collects the members of the threshold *coarse* bin (half-precision ordered key `>> 6`) before refining, and the chunked kernel silently drops members past its staging capacity. A row with more than 4096 values in one such bucket gets a top-k of an arbitrary subset, varying run to run. Filed as a strict `xfail` in the host repo: `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`. **`maca_c` has no such hole** — but note the xcore1600 hole above is a `maca_c` hole, so this sentence is about the `deep_gemm` backend only.
 - The `radix_topk_row_bf16_k` static-k row used by the chunked path still runs the 8-bit coarse level and the 3,514-slot arena; it has not received coarse12.
 - The fp32 row is a separate codebase path whose overflow handling is multi-round full-row rescan (up to 8 trips). Same "coarse level too coarse" disease, different cure — a 32-bit key cannot be resolved in two levels the way a 16-bit one can. Retesting fp32 cells is mandatory when touching it.
 

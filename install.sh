@@ -191,10 +191,14 @@ echo "install.sh: built $(basename "$wheel")"
 
 # Verify the targets got in before installing anything.  A wheel built for one
 # architecture and deployed to another fails at import, not here.
+#
+# Read through python's own `zipfile`, not `unzip`: the latter is not installed
+# on every MACA host (it is absent on the one this was measured on), while
+# python is already required by everything above.
 missing=0
 for line in "${resolved[@]}"; do
     read -r target _family _kibs _tree <<<"$line"
-    if unzip -l "$wheel" | grep -q "deep_select/deep_select_${target}"; then
+    if python -m zipfile -l "$wheel" | grep -q "deep_select/deep_select_${target}"; then
         echo "install.sh: OK  wheel contains $target"
     else
         echo "install.sh: ERROR wheel has no extension for $target" >&2

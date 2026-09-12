@@ -156,14 +156,22 @@ builds the kernel that fits it -- `csrc/xcore1000/` for a 64 KiB part,
 `csrc/xcore1600/` for a 128 KiB one -- producing
 `deep_select/deep_select_xcore<N>*.so`.
 
-Device code is compiled by `mxcc` directly, with `--offload-arch=xcore<N>`;
-neither cu-bridge's `cucc` wrapper nor a `-gencode` derived from the building
-machine's device is involved, so an extension is for the architecture it is
-named after and no other. `-use-fast-math` is passed with FTZ turned back off
+Device code is compiled by `mxcc`, reached through **cu-bridge's `cucc`**, with
+`--offload-arch=xcore<N>` passed per extension, so an extension is for the
+architecture it is named after and no other. `setup.py` does not reassign
+torch's `CUDA_HOME`: `torch.utils.cpp_extension`'s MACA build already resolves
+it to `${MACA_PATH}/tools/cu-bridge`, `_join_cuda_home` substitutes `bin/cucc`
+for the absent `bin/nvcc`, and cucc is the whole CUDA-dialect adapter (the
+`__macro_mxcc.h` compatibility header, torch's `-gencode` →
+`-D__CUDA_ARCH__`, `-lcudart` → `-lmcruntime`, the MACA library include
+catalogue). `-gencode` derived from the building machine's device is not
+involved, so one extension is one architecture.
+
+`-use-fast-math` is passed with FTZ turned back off
 (`-Xclang -fdenormal-fp-math-f32=ieee`): the ranking path is integer-only and
 indifferent either way, and the flag keeps the fill-value conversion exact for a
-denormal `value_oob_fill_value`. `api.cu` is host code.
-`g++`.
+denormal `value_oob_fill_value`. `api.cu` is host code, spelled `.cu` so torch
+routes it to the device rule rather than to `$cxx`.
 
 `pip install .` does not currently work, for a reason inherited from upstream:
 `setup.py` stamps the version with `datetime.now()` (upstream `setup.py:204`,
