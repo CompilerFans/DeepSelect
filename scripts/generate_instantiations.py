@@ -8,7 +8,8 @@ Usage:
     For example,
         python3 scripts/generate_instantiations.py csrc/xcore1600/v3/instantiations
         python3 scripts/generate_instantiations.py csrc/xcore1600/v3_fp32/instantiations
-        # [MACA] 原还有 v3_cluster/instantiations；该变体已随 cluster/TMA 一并删除。
+        # [MACA] There was also a v3_cluster/instantiations; the variant is
+        #   gone with cluster and TMA.
 
     The script will:
     1. Create .cu files in the target directory, one per config
@@ -229,9 +230,10 @@ def main(instantiation_dir: str):
                 for max_topk, (num_threads, occ, b, b2, tma) in tuple_by_max_topk.items():
                     configs.append(TopkSelectConfigs("float", out_idx_t, sv, si, rv, max_topk, num_threads, occ, b, b2, tma))
         generate_instantiations(instantiation_dir, "topk_select_fp32", configs)
-    # [MACA] 原有一个 `csrc/cuda_kernels/v3_cluster/instantiations` 分支
-    #   （bf16 + mk1024 + 16-CTA cluster，`topk_select_bf16_cluster`）。
-    #   MACA 无 cluster 也无 TMA，该目录与变体已整体删除，分支一并移除。
+    # [MACA] Upstream also had a `csrc/cuda_kernels/v3_cluster/instantiations`
+    #   branch (bf16 + mk1024 + a 16-CTA cluster, `topk_select_bf16_cluster`).
+    #   MACA has no cluster and no TMA, so that directory and its variant were
+    #   deleted wholesale and the branch with them.
     else:
         raise ValueError(f"Invalid `instantiation_dir: {instantiation_dir}")
 

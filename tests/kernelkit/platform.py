@@ -35,6 +35,63 @@ def get_current_platform() -> Platform:
     return Platform.CUDA if torch.cuda.is_available() else Platform.CPU_ONLY
 
 
+# [MACA] The architecture checks below.  `get_current_platform` used to grep
+# `lspci` for an NVIDIA signature; it now asks torch, which is the port's one
+# edit to that function (the reasoning is on it).  These predicates are what a
+# caller that wants to *name* the architecture should use instead of reaching
+# for `Platform`: the enum answers "can I launch here", and a MACA host and an
+# NVIDIA host are both `CUDA` to it, which is correct for `requires_platform`
+# and useless for anything that has to branch on the hardware.
+#
+# The key is the same one the port uses everywhere else -- the sm pair the
+# device reports, which is what `deep_select/_arch.py::FAMILY_OF_SM` and the
+# C++ side's `DeviceCapability::from_mc_arch` both key on.  A device *name* is
+# deliberately not used: the parts spell themselves inconsistently across SDK
+# generations (`MetaX C600U`, `MetaX C600-UL`, ...), which is exactly the
+# reason `_arch.py` keeps a family base as the stable key and treats the
+# spellings as aliases.
+#
+# This table mirrors `deep_select/_arch.py::FAMILY_OF_SM`, and the two are kept
+# in sync by hand: `tests/` is the suite and `deep_select/` is the installed
+# package, so this file does not import it (a test helper importing the package
+# under test would also make `setup.py`'s own `import tests.kernelkit` circular
+# on a tree where the extension is not built yet).  A change to either belongs
+# in the same review.
+#
+# An unrecognized sm answers 0 rather than guessing a family -- the same rule
+# `family_of_target` applies to an unknown compiler target, which raises there
+# because a build has to stop; a test helper that only classifies should not.
+MACA_FAMILY_OF_SM = {
+    80: 1000,       # C500
+    86: 1500,       # C600
+    87: 1600,       # C600U / C600-UL, newest SDK
+    88: 1600,       # C600U / C600-UL
+    89: 1600,       # C600U / C600-UL, legacy SDK
+}
+
+
+def device_arch() -> int:
+    """The current device's sm number, e.g. 89, or 0 when there is no device."""
+    if not torch.cuda.is_available():
+        return 0
+    major, minor = torch.cuda.get_device_capability()
+    return major * 10 + minor
+
+
+def maca_family() -> int:
+    """The xcore family base of the current device (1000/1500/1600), or 0.
+
+    0 means either "no device" or "an sm this table does not know" -- use
+    `is_maca_device` when the two cases need telling apart.
+    """
+    return MACA_FAMILY_OF_SM.get(device_arch(), 0)
+
+
+def is_maca_device() -> bool:
+    """Whether the current device is a MACA part this suite knows how to name."""
+    return maca_family() != 0
+
+
 def assert_current_platform(target_platform: Platform | list[Platform]):
     """
     Assert that the current platform matches the expected platform(s).

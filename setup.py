@@ -318,6 +318,80 @@ def build_for_maca():
     return (ext_modules, BuildExtension.with_options(use_ninja=True))
 
 
+# --- stack-frame check (the MACA counterpart of upstream's spill gate) ------
+#
+# Upstream's `setup.py` runs `SpillCheckBuildExtension`: after the build, every
+# extension is scanned with `cuobjdump -res-usage` and the build *fails* on a
+# kernel that spills (`stack > 8 or local > 0`).  There is no `cuobjdump` on a
+# MACA install, so the reference artifact check cannot run here; mxcc's own
+# `--resource-usage` stands in for it, through
+# `tests.kernelkit.build.check_maca_stack_frame`.
+#
+# It is not wired into `build_ext` by default, and that is a measurement rather
+# than a preference: `--resource-usage` recompiles the translation unit it is
+# asked about, which is ~60 s for `maca_topk.cu` (one TU, 78 device functions)
+# and tens of minutes for one xcore1600 instantiation -- and xcore1600 builds
+# 52 of them.  So it is opt-in, over a named subset of sources:
+#
+#     DEEP_SELECT_MACA_STACK_CHECK=1 ./build.sh
+#     DEEP_SELECT_MACA_STACK_CHECK=csrc/xcore1000/maca_topk.cu ./build.sh
+#     DEEP_SELECT_MACA_STACK_BASELINE=64 DEEP_SELECT_MACA_STACK_CHECK=1 ./build.sh
+#
+# The baseline is in bytes and must be set per toolchain: with this one, 50 of
+# the 78 devices in `maca_topk.cu` floor at 48 (the other 28 report 0) -- so a
+# baseline of 47 reports every one of them and a baseline of 49 reports none,
+# which makes 48 the only value that separates "the toolchain's floor" from an
+# actual spill.  Upstream's `stack_baseline=8` does not carry over: it predates
+# a toolchain whose floor is nonzero.  A kernel over the baseline fails the
+# build, as upstream's does.
+DEFAULT_MACA_STACK_BASELINE = 48
+
+
+def _maca_stack_check(ext_modules, maca_root):
+    """Scan the sources behind a built extension, if the caller asked for it.
+
+    The sources are taken from the extensions themselves, so the check follows
+    whatever was actually built rather than a list repeated here.
+    """
+    want = os.environ.get("DEEP_SELECT_MACA_STACK_CHECK")
+    if not want or want.lower() in ("0", "no", "false"):
+        return
+
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from tests.kernelkit.build import check_maca_stack_frame
+
+    selected = [] if want.lower() in ("1", "yes", "true") \
+        else [s.strip() for s in want.split(",")]
+    baseline = int(os.environ.get("DEEP_SELECT_MACA_STACK_BASELINE",
+                                  DEFAULT_MACA_STACK_BASELINE))
+    mxcc = os.path.join(maca_root, "mxgpu_llvm", "bin", "mxcc")
+
+    root = os.getcwd()
+    bad = 0
+    for ext in ext_modules:
+        # The device-side flags the build already resolved for this extension,
+        # so the check compiles the way the build did rather than a second,
+        # hand-maintained copy of the same list.  Torch's own include paths are
+        # *not* in there -- `build_for_maca` gives them to `CUDAExtension`,
+        # which merges them in later -- so the checker adds them itself.
+        args = list(ext.extra_compile_args["nvcc"])
+        for src in ext.sources:
+            if selected:
+                rel = os.path.relpath(src, root).replace(os.sep, "/")
+                if not any(rel.endswith(s) or s.endswith(rel) for s in selected):
+                    continue
+            hits = check_maca_stack_frame(src, baseline, mxcc, args, quiet=False)
+            bad += len(hits)
+    if bad:
+        raise RuntimeError(
+            f"{bad} MACA kernel(s) exceed the stack baseline of {baseline} B. "
+            f"Spilling degrades these kernels; raise "
+            f"DEEP_SELECT_MACA_STACK_BASELINE only if the reading is expected, "
+            f"and unset DEEP_SELECT_MACA_STACK_CHECK to skip the check.")
+
+
 try:
     cmd = ["git", "rev-parse", "--short", "HEAD"]
     git_rev = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("ascii").rstrip()
@@ -329,6 +403,11 @@ except Exception:
 datetime_rev = datetime.now().strftime("%Y%m%d.%H%M%S")
 
 ext_modules, build_ext = build_for_maca()
+
+# Before the build, not after: `--resource-usage` compiles the source itself,
+# so there is nothing to gain by waiting for the wheel.  Sources are listed
+# relative to this file, which is therefore the root to resolve against.
+_maca_stack_check(ext_modules, _maca_root())
 
 setup(
     name="deep_select",
