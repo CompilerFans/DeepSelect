@@ -155,16 +155,18 @@ a compile error.
 
 | intrinsic | status on MACA | use |
 | --- | --- | --- |
-| `__ballot_sync(unsigned long long mask, int pred)` | **native — one `sicmp`** (`:2202`). 64-bit overload only | the correct primitive |
+| `__ballot_sync(unsigned long long mask, int pred)` | **native — literally `__builtin_mxc_sicmp(pred,0,ICMP_NE) & mask`** (`:2202`). 64-bit overload only | the correct primitive |
 | `__activemask()` | **native — one read of the wave mask** (`__builtin_mxc_read_xmsk`, `:2206`). Free | pass as the mask: correct and adaptive |
+| `__any_sync` / `__all_sync` | **native** — the same `sicmp` fused with a ballot-mask compare (`:2190`, `:2195`) | cheaper than ballot + `__popcll` when you only need the predicate |
 | `__match_any_sync` | **software-emulated — a 32-iteration per-bit loop of `sicmp`** (`:1648`), i.e. 32× the cost of a ballot | **do not use** |
 | `__reduce_add_sync` | **software-emulated — a 6-iteration `bsm_bpermute` loop** (`:200`), and it takes a `uint64_t` mask | prefer a ballot-based reduction; with `0xFFFFFFFF` it sums only the low 32 lanes |
-| `__popc` | **does not exist on MACA** | `__popcll` (64-bit) |
+| `__popc` | **exists** (`__clang_macac_math.h:1155`), but it is 32-bit: `__builtin_popcount` of a 64-lane mask **truncates the wave in half** | **`__popcll`** (`:1159`) for anything derived from a mask |
 | `__ffsll` / `__lanemask64_lt` | present | MACA's own 64-lane code uses this family (`maca_coalesced_scan.h:104-118`) |
 
 **The rule that follows from the `__match_any_sync` row: do not reach for
 warp-aggregated atomics via match-any.** A per-member `atomicAdd` is usually
-cheaper than 32 mask ops per call, and match-any buys nothing that a
+cheaper than 32 mask ops per call — and 265 device instructions is what those
+32 mask ops actually cost, measured below — and match-any buys nothing that a
 `__ballot_sync` + `__popcll` + prefix does not. Measured support for this
 direction in `docs/C500-radix-profile.zh.md` §5: a variant that *reduced* atomic
 conflicts by 4× came out **38 µs slower**, so the atomics' cost here is
@@ -179,6 +181,86 @@ const unsigned     cnt        = (unsigned)__popcll(m);     // NOT __popc
 const int          first      = __ffsll((long long)m) - 1; // -1 when empty
 ```
 
+### Reach for the MACA builtin, not the CUDA-era spelling
+
+This is an instruction-selection rule, and the emulation is not free. Measured
+from the emitted device assembly — `mxcc -aop -S -maca-device-only <file>.cu`,
+with this repo's own `compile_args` from `setup.py`, on `xcore1000` — counting
+real device instructions in a minimal kernel around each call:
+
+| call | how MACA lowers it | insns |
+| --- | --- | --- |
+| `__ballot_sync(live, pred)` | **native**: one `cmp_gt_i32` + one `sand_b64` | **14** (whole kernel) |
+| `__match_any_sync(mask, v)` | 32 iterations of `sicmp` + `sand_b64`/`sxor_b64`/`sadd_co_i32` | **265** |
+| `__reduce_add_sync(mask, v)` | 6 iterations of `sm_bperm_b32` plus ~30 insns of mask/index math | **206** |
+| `__shfl_down_sync(…)` ×5, a 5-step warp scan | 5× {`__lane_id()` + index math + `sm_bperm_b32`} | **71** |
+| `__builtin_mxc_bsm_bpermute` ×5, the same scan | 5× `sm_bperm_b32`, only the arithmetic you wrote | **44** |
+
+The last two rows are the ones to internalize: **each emits the same 6
+`sm_bperm_b32`** — the shuffle instruction is identical, five in the source loop
+plus one elsewhere in the function — so the 27-instruction difference is
+*entirely* the wrapper's per-call `__lane_id()` and
+`(self & (width-1)) + delta >= width` arithmetic, which the compiler does
+**not** hoist out of the loop. Read a `__shfl_*_sync` as "one native shuffle
+wrapped in ~5 instructions of index math", never as one instruction.
+
+To re-measure rather than take these on faith: `mxcc -aop -S -maca-device-only
+f.cu -o f.s`, with the same flags `setup.py`'s `compile_args` sets. `-aop` is
+what makes the listing emit at all — the clang spelling `-S` alone is rejected —
+and it prints `'-aop' is internal, only for DEBUG usage.` on stderr while still
+producing the file, so filter that line or ignore a non-zero-looking rc. Count
+real instructions between a function's label and its `endk`, skipping the
+metadata blocks. `~/.claude/skills/maca-kernel-doctor`'s companion script,
+`~/maca_kernel_doctor/maca_kernel_doctor.py`, wraps the same thing (`--asm`,
+`--save-temps`) alongside the register/occupancy checks, and is the better entry
+point if you want a diagnosis rather than a listing.
+
+So, when a builtin *is* the operation, call it:
+
+```cpp
+// 64-lane step-down gather — the shfl_down_sync wrapper, minus its index math
+int n = __builtin_mxc_bsm_bpermute(((lane + delta) & 63) << 2, val);
+// NOTE the <<2: the hardware index is byte-addressed (dest[n] = data[index[n]/4 % 64])
+
+__builtin_mxc_mov_shfl(val, mode, row_mask, bank_mask, bc);   // 16-lane row ops
+__builtin_mxc_update_shfl(old, src, mode, row_mask, bank_mask, bc);
+__builtin_mxc_readfirstlane(v);   // uniform broadcast, no shared memory
+__builtin_mxc_readlane(v, lane);  __builtin_mxc_writelane(v, lane, old);
+unsigned long long m = __builtin_mxc_sicmp(a, b, MACA_ICMP_SLT);
+// ubfe / sbfe / alignbit / mad_wide_i32 / pk_fma_f32 / ldg_*_predicator /
+// ldg_*_bsm + barrier_and_wait{1,2,4} — see the guide, §12 has worked patterns
+```
+
+`bsm_bpermute` is the general 64-lane primitive under all of it; `mov_shfl` /
+`update_shfl` are the 16-lane row operations (mirror, row shift, row rotate,
+row broadcast) that a full permute can express but not cheaply. There is no
+reduce instruction to call: no `__builtin_mxc_*` gives a warp reduction (the
+guide has no reduce entry), and the `__reduce_*_sync` family is emulated on top
+of the shuffle. So a reduction is a `bsm_bpermute` butterfly you write yourself
+— 42 insns for the 6-step 64-lane sum above, versus 206 for
+`__reduce_add_sync`.
+
+**CUB is ported and works here, but it is not a shortcut past this.**
+`/opt/maca/include/cub/warp/warp_reduce.cuh`'s `cub::WarpReduce` inherits exactly
+the emulated `__shfl_down_sync`
+(`cub/warp/specializations/warp_reduce_shfl.cuh:147`), so it measured the same
+71 instructions as the hand-written `__shfl_down_sync` scan —
+against 42 for the same reduction with the tree's own
+`__builtin_mxc_bsm_bpermute` butterfly. Use CUB for what it is good at (the
+block-wide primitives — `common_parts.cuh` already builds on
+`cub::BlockRadixSort`); for a warp-scope reduce in a hot loop, write the
+butterfly. MACA's CUB does at least get the width right: `CUB_LOG_WARP_THREADS`
+is hardcoded to **6** (`cub/util_arch.cuh:91-99`), i.e. 64, so the `0xffffffff`
+masks upstream's ported kernels carry are the CUDA-era texture, not a CUB
+requirement.
+
+Budget for the mask-math too: `__popc` **does** exist (`__clang_macac_math.h:
+1155`) but is `__builtin_popcount`, 32-bit — applying it to a 64-lane ballot
+truncates the wave in half and under-counts silently. Nothing raises. The
+coalesced-group headers under `mxgpu_llvm/lib/clang/19/include/`
+(`maca_coalesced_scan.h`, `maca_partition.h`, `maca_cooperative_groups.h`) are
+the model, and they use **`__popcll`** (`maca_coalesced_scan.h:104`, `:119`).
+
 **Beware reading upstream's CUDA-era code as a model.** `csrc/xcore1600/` (the
 ported upstream kernels) is full of `__ballot_sync(0xFFFFFFFF, …)`,
 `__reduce_add_sync(0xFFFFFFFF, …)`, `__shfl_sync(0xFFFFFFFF, …)` and
@@ -192,6 +274,20 @@ than as precedent, and write new cross-lane code in the 64-lane form above.
 follow: `kWarpSize = 64` under `__MACACC__` (`:187`), with `#ifdef` pairs like
 `__shfl_down_sync(0xFFFFFFFFFFFFFFFFULL, …)` / `0xFFFFFFFF` for the CUDA build.
 When you add a mask here, add it to the 64-lane arm.
+
+One caveat on that file as a *primitive-selection* model: three of its
+cross-lane sites are the wrapper form — `:255` in `hist_add_bf16_reg` (dead
+code), and `:339`/`:358` inside `run_cumsum_warp`, which the shipping
+`radix_topk_row_bf16_b` calls **twice per row** (`:1064`, `:1159`), i.e. once per
+pass. Those two are the 71-vs-44 case above, six shuffle steps each. They are
+not where the time is — ~96 shuffle ops per CTA against pass 1's one shared
+atomic *per element* (16,384 of them on the profiled row, the measured 102.5 µs)
+— so converting them is cleanup, not a lever; do it for consistency when you
+next touch the function, not as an optimization campaign. Do not "fix" them
+blind, either: the `owner` index handling around the `hist_add_bf16_reg`
+shuffle (`:253-259`) is load-bearing for the bin ownership, and the
+`0xFFFFFFFFFFFFFFFFULL` / `0xFFFFFFFF` `#ifdef` pair is what makes the file
+build for both compilers.
 
 ## NaN contract
 

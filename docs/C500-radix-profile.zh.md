@@ -241,8 +241,48 @@ for (uint32_t i = tx; i < num; i += BLOCK_SIZE)
 | `__ballot_sync(unsigned long long mask, int pred)` | **原生，1 条指令** | `__builtin_mxc_sicmp(pred,0,ICMP_NE) & mask`（`:2202`）。**只有 64 位重载** |
 | `__match_any_sync(mask, value)` | **软件模拟** | 32 次逐位 `sicmp` 循环（`:1648`）。别用 |
 | `__activemask()` | **原生，1 条指令** | `__builtin_mxc_read_xmsk()`（`:2206`），64 位。拿它当 mask 免费 |
-| `__popc` | **不存在** | 用 `__popcll`（64 位） |
+| `__any_sync` / `__all_sync` | **原生** | 同一条 `sicmp` 再与 ballot mask 比较（`:2190`、`:2195`） |
+| `__popc` | **存在但是 32 位** | `__clang_macac_math.h:1155`，即 `__builtin_popcount`。**拿它算 64 lane 的 mask 会把 wave 截一半**，且不报错。用 `__popcll`（`:1159`） |
 | `__ffsll` / `__lanemask64_lt` | 有 | MACA 自己的 64 lane 代码用这一组，见 `maca_coalesced_scan.h:104-118` |
+
+### 6.1 指令数：别用 CUDA 时代的写法（`-aop -S` 实测）
+
+`mxcc -aop -S -maca-device-only f.cu -o f.s`（`-aop` 才出清单；它会在 stderr
+打一行 `'-aop' is internal, only for DEBUG usage.` 但文件照出），按本仓
+`setup.py` 的 `compile_args` 原样传参，数函数 label 到 `endk` 之间的真指令：
+
+| 调用 | MACA 怎么落地 | 指令数 |
+|---|---|---|
+| `__ballot_sync(live, pred)` | **原生**：一条 `cmp_gt_i32` + 一条 `sand_b64` | **14**（整个 kernel） |
+| `__match_any_sync(mask, v)` | 32 轮 `sicmp` + `sand_b64`/`sxor_b64`/`sadd_co_i32` | **265** |
+| `__reduce_add_sync(mask, v)` | 6 轮 `sm_bperm_b32`，另加约 30 条 mask/索引运算 | **206** |
+| `__shfl_down_sync` ×5（五步 warp scan） | 每次 {`__lane_id()` + 索引运算 + `sm_bperm_b32`} | **71** |
+| `__builtin_mxc_bsm_bpermute` ×5（同一个 scan） | 5 条 `sm_bperm_b32`，只剩自己写的算术 | **44** |
+
+后两行是关键：**两者都出 6 条 `sm_bperm_b32`**（循环里 5 条 + 函数别处 1 条）——
+shuffle 指令本身一模一样，那 27 条差值**全是** wrapper 每次调用重算的
+`__lane_id()` 和 `(self & (width-1)) + delta >= width`，而编译器**不会**把它
+提到循环外。所以 `__shfl_*_sync` 要读成"一条原生 shuffle + 约 5 条索引运算"，
+不是一条指令。
+
+想用它，就直接写 builtin：`__builtin_mxc_bsm_bpermute(index << 2, data)`
+（注意 `<<2`，硬件索引按字节寻址）、`mov_shfl` / `update_shfl`（16 lane
+行内）、`readfirstlane` / `readlane` / `writelane`、`sicmp` / `uicmp` 等。
+**没有 reduce builtin**（指南通篇无归约条目）：归约就是自己用 `bsm_bpermute`
+搭蝴蝶（上面六步 64 lane 求和 42 条 vs `__reduce_add_sync` 206 条）。
+
+CUB 在本平台可用（`/opt/maca/include/cub`），但**不是绕过这一条的捷径**：
+`cub::WarpReduce` 走的就是被模拟的 `__shfl_down_sync`
+（`cub/warp/specializations/warp_reduce_shfl.cuh:147`），实测同样是 71 条。
+用处是块级原语 —— `csrc/xcore1600/common_parts.cuh` 已经在用
+`cub::BlockRadixSort`。MACA 的 CUB 至少宽度是对的：`CUB_LOG_WARP_THREADS`
+硬编码成 **6**（`cub/util_arch.cuh:91-99`），即 64。
+
+本仓现状：`csrc/xcore1000/radix_core.cuh` 的 3 处（`:255` 死代码
+`hist_add_bf16_reg`，`:339`/`:358` 在 `run_cumsum_warp` 里、被生产路径
+`radix_topk_row_bf16_b` **每行调用两次**）是 wrapper 写法。但它们**不是热区**：
+每 CTA 约 96 条 shuffle 操作，对比 pass 1 的**每元素一次**共享原子
+（profile 行上 16,384 次，即实测的 102.5 µs）。改它们是收尾清洁，不是优化杠杆。
 
 **wave 宽度是 64**（`radix_core.cuh:187`，`kWarpSize`）。所以 mask 必须写
 `0xFFFFFFFFFFFFFFFFULL` 或 `__activemask()`，**不能写 `0xFFFFFFFFu`**：32 位
@@ -294,3 +334,9 @@ PYTHONPATH=$P python t1.py
 
 本轮**没有改动主仓任何文件**（`git status --porcelain` 全程为空），xcore1600
 逐字节不变，因此不欠 C600U 验证。本记录只提交文档。
+
+§6.1 的指令数是**编译产物**的读数，不是运行读数：用 `mxcc -aop -S` 数出来的
+静态指令条数只说明"这个写法落地成了多少条指令"，不等于端到端时间。核心里
+那 3 处 wrapper 写法（§6.1 末段）正因如此才写成"收尾清洁、不是杠杆"——
+它们的量级（每 CTA 约 96 条）相对实测的 102.5 µs 共享原子不构成优化项，
+本轮也没有为它们做任何计时。
