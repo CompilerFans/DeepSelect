@@ -86,7 +86,56 @@ Do not stop at the masks. In a real port the masks are the *symptom*; the
 structural quantities (2) and (3) are what make whole data structures the wrong
 size, and they are the ones a "just widen the mask" fix leaves broken.
 
-## 3. The reference implementation is in this repository
+## 3. The mask is a dead end — widen the model, not the literal
+
+It is tempting, once the mask is identified, to think the port's *design* is
+fine and only the literal is wrong: `NUM_WARPS = NUM_THREADS / 32`,
+`lane_idx = threadIdx.x % 32` and `canonical_warp_idx_sync() = threadIdx.x / 32`
+all agree with "logical groups of 32 lanes", so maybe each group just needs its
+own mask.
+
+**It does not work, and not because of a bug — because the scheme has no
+representation on this hardware.** Logical group `g` owns physical lanes
+`32g..32g+31`, and a lane mask is 64 bits wide. It can name the first two such
+windows and nothing above them; from group 2 up the mask is not merely wrong, it
+is inexpressible (and the shift is UB). Measured, with `x = lane+1` per logical
+lane and a wanted in-group sum of 528, "wrong" counting lanes that did not get
+528:
+
+| block | logical groups | mask `0xFFFFFFFF` | group mask `0xFFFFFFFF << 32g` |
+| --- | --- | --- | --- |
+| 64 | 2 | 32/64 wrong | **0/64 wrong** |
+| 128 | 4 | 64/128 wrong | 64/128 wrong |
+| 256 | 8 | 128/256 wrong | 192/256 wrong |
+| 512 | 16 | 256/512 wrong | 448/512 wrong |
+
+The group mask is *perfect at 64 threads and progressively worse above it* —
+the tell that the scheme is the problem, not the constant.
+
+`__activemask()` is not the escape either: it is the **physical** wave mask, so
+it is `0xffffffffffffffff` at every block size and makes a logical-group
+reduction *more* wrong, not less (128/128 at 128 threads). Use it only where you
+genuinely want the whole converged physical wave.
+
+**What this means for the fix.** A warp-scope operation can only reach lanes
+that share a physical wave, so a design that wants groups of 32 cannot be
+implemented with warp-scope primitives on a 64-lane wave — it needs either a
+physical 64-lane model or shared-memory exchange instead of cross-lane ops. The
+port is written as if cross-lane ops reach a 32-lane group; they do not. So:
+
+```cpp
+static constexpr uint32_t kWarpSize = 64;        // was 32
+lane_idx  = threadIdx.x % kWarpSize;             // was % 32
+NUM_WARPS = NUM_THREADS / kWarpSize;             // was / 32
+mask      = 0xFFFFFFFFFFFFFFFFull;               // was 0xFFFFFFFF
+```
+
+and *then* re-derive the handful of places that assumed 32 items per lane
+(§2, item 4, and the audit checklist's judgment list). Widening the masks
+without widening `lane_idx`/`NUM_WARPS` is the worst of both: the masks now
+reach lanes the rest of the code believes are in another group.
+
+## 4. The reference implementation is in this repository
 
 `csrc/xcore1000/radix_core.cuh` is a MACA kernel written for a 64-lane wave
 from the start, and it is the model to copy:
@@ -148,7 +197,7 @@ value. A per-lane gather is `bsm_bpermute`; a broadcast is
 See the repository's `CLAUDE.md`, "MACA warp intrinsics", for the rest of the
 builtin catalogue and the measured instruction counts behind this.
 
-## 4. Fix order and verification
+## 5. Fix order and verification
 
 1. **Make it not wrong before making it fast.** Convert every site from §2 in
    one pass; a partial conversion stays silent-wrong and is harder to localize
@@ -174,7 +223,7 @@ print(deep_select.topk(x, k)[1][0].tolist())
 "
 ```
 
-## 5. Traps that look like wave-64 bugs and are not
+## 6. Traps that look like wave-64 bugs and are not
 
 - **`__activemask()` is convergence-dependent.** Reading it while only part of
   the wave has arrived gives a partial mask — that is the primitive working as
@@ -195,7 +244,7 @@ print(deep_select.topk(x, k)[1][0].tolist())
 - **A `% 32` on a count is not a lane index.** Distinguish them: the audit
   checklist has the disambiguation.
 
-## 6. Recording the result
+## 7. Recording the result
 
 A wave-64 fix is a behavior change, so the repository's performance/behavior
 discipline applies (`CLAUDE.md`, "Performance-change discipline"): state the
@@ -209,7 +258,7 @@ specific to this bug class and belong in the record:
   broke it"** — usually a fixed input run several times, and if a baseline is
   being compared, note that the baseline had to be patched to build at all.
 
-## 7. Worked example: `csrc/xcore1600/` in this repository
+## 8. Worked example: `csrc/xcore1600/` in this repository
 
 The tree this skill was written against. **Not fixed yet** — this is the
 measurement and the diagnosis, recorded so the fix starts from evidence.
@@ -227,7 +276,7 @@ returns `1.5e+37` for a row whose true max is `3.3`. On the official slice:
 4/200. Other shapes trap (`[topk_select] NaN detected` on input with no NaN) or
 raise `device-side assert`.
 
-### 7.1 The three masks do not behave the same
+### 8.1 The three masks do not behave the same
 
 Measured per-primitive (`__ballot_sync`, `__reduce_add_sync`, `__any_sync`,
 `__shfl_up/down_sync`) on MACA 3.8.1.3. The rule is the same for all of them —
@@ -260,7 +309,7 @@ that addresses fewer than all three leaves it wrong:
    64 needs `i <= 32`;
 3. the guard `lane_idx + i < 32` (suffix scan) discards everything above lane 31.
 
-### 7.2 Site inventory
+### 8.2 Site inventory
 
 | site | current | why it is wrong |
 | --- | --- | --- |
@@ -281,7 +330,7 @@ that addresses fewer than all three leaves it wrong:
 | `v3/topk_select.cuh:53-54`, `v3_fp32/topk_select.cuh:89-90` | `canonical_warp_idx_sync()` + `threadIdx.x % 32` | the lane index; and see the next row |
 | `kerutils/.../device/cuda/common.h:89` | `return threadIdx.x / 32u;` | **outside `csrc/xcore1600/` but in the compiled path** (`common_parts.cuh:4` includes it). Returns a warp index twice the hardware's, so `warp_idx` and `lane_idx` name different groupings and no consistent relabeling of one alone can work |
 
-### 7.3 Not to be "fixed"
+### 8.3 Not to be "fixed"
 
 `bit_utils.cuh:43/149` (`>> 31`, `0x80000000u`) are the fp32 sign bit;
 `common_parts.cuh:1397/1459` `static_assert(NUM_ELEMS_PER_THREAD_PER_ROUND < 32)`
@@ -291,7 +340,7 @@ is a per-**thread** element count with a per-thread `hit_mask`, not a lane mask;
 `cub::BlockRadixSort` is **width-correct** on MACA (CUB's `WARP_THREADS` is 64
 and it uses `0xffffffffffffffffull` masks) — slow, but not part of this bug.
 
-### 7.4 Containment
+### 8.4 Containment
 
 `deep_select/_arch.py`'s `DEEP_SELECT_128KIB_KERNEL` routes a 128 KiB part to
 the hand-written 64-lane kernel instead (`xcore1000`), which passes the slice
