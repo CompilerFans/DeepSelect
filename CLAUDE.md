@@ -138,6 +138,61 @@ Consequences of the port, all deliberate:
 - `vocab_size < 2^23` is enforced by the ported kernel only (the fp32-simulated census). `maca_topk.cu` has no such limit; it ranks integer keys.
 - `sorted_value` for bf16 is accepted by `maca_topk.cu` (same ordering key, so order and value/index pairing both hold) and rejected by the ported kernel, as upstream, and by `backend="torch"`.
 
+## MACA warp intrinsics — the wave is 64 lanes
+
+Get these right before writing any cross-lane code; every one of them is a
+silent-wrong-answer trap rather than a compile error. Facts below are read from
+the toolchain's own headers (`$MACA_PATH/mxgpu_llvm/lib/clang/19/include/
+__clang_maca_device_functions.h`) and the official builtin guide
+(OG-26013-000-F5_V01, shipped with the `maca-mxcc-builtins` skill). Follow that
+skill (and `maca-kernel-dev-and-opt` for the wider workflow) rather than guessing.
+
+**Wave width is 64, so every mask is 64-bit.** The guide's comparison builtins
+(`uicmp`/`sicmp`/`fcmp`) are documented as "返回 warp 内 64-bit 比较结果掩码".
+A `0xFFFFFFFF` mask is not a shorthand for "all lanes" here — it names the low
+half of the wave only, and the result is a silently half-counted operation, not
+a compile error.
+
+| intrinsic | status on MACA | use |
+| --- | --- | --- |
+| `__ballot_sync(unsigned long long mask, int pred)` | **native — one `sicmp`** (`:2202`). 64-bit overload only | the correct primitive |
+| `__activemask()` | **native — one read of the wave mask** (`__builtin_mxc_read_xmsk`, `:2206`). Free | pass as the mask: correct and adaptive |
+| `__match_any_sync` | **software-emulated — a 32-iteration per-bit loop of `sicmp`** (`:1648`), i.e. 32× the cost of a ballot | **do not use** |
+| `__reduce_add_sync` | **software-emulated — a 6-iteration `bsm_bpermute` loop** (`:200`), and it takes a `uint64_t` mask | prefer a ballot-based reduction; with `0xFFFFFFFF` it sums only the low 32 lanes |
+| `__popc` | **does not exist on MACA** | `__popcll` (64-bit) |
+| `__ffsll` / `__lanemask64_lt` | present | MACA's own 64-lane code uses this family (`maca_coalesced_scan.h:104-118`) |
+
+**The rule that follows from the `__match_any_sync` row: do not reach for
+warp-aggregated atomics via match-any.** A per-member `atomicAdd` is usually
+cheaper than 32 mask ops per call, and match-any buys nothing that a
+`__ballot_sync` + `__popcll` + prefix does not. Measured support for this
+direction in `docs/C500-radix-profile.zh.md` §5: a variant that *reduced* atomic
+conflicts by 4× came out **38 µs slower**, so the atomics' cost here is
+per-atomic issue, not contention.
+
+Correct 64-lane idioms:
+
+```cpp
+const unsigned long long live = __activemask();            // 64-bit, one insn
+const unsigned long long m    = __ballot_sync(live, pred); // NOT 0xFFFFFFFFu
+const unsigned     cnt        = (unsigned)__popcll(m);     // NOT __popc
+const int          first      = __ffsll((long long)m) - 1; // -1 when empty
+```
+
+**Beware reading upstream's CUDA-era code as a model.** `csrc/xcore1600/` (the
+ported upstream kernels) is full of `__ballot_sync(0xFFFFFFFF, …)`,
+`__reduce_add_sync(0xFFFFFFFF, …)`, `__shfl_sync(0xFFFFFFFF, …)` and
+`threadIdx.x % 32` — with `NUM_WARPS = NUM_THREADS / 32`, i.e. CUDA's 32-lane
+model (e.g. `common_parts.cuh:1463`, `v3_fp32/topk_select.cuh:90`). Those sites
+are the port's texture, not a pattern to copy, and whether any of them is
+reachable on a 64-lane wave needs its own audit — treat them as suspect rather
+than as precedent, and write new cross-lane code in the 64-lane form above.
+
+`csrc/xcore1000/radix_core.cuh` already does this correctly and is the model to
+follow: `kWarpSize = 64` under `__MACACC__` (`:187`), with `#ifdef` pairs like
+`__shfl_down_sync(0xFFFFFFFFFFFFFFFFULL, …)` / `0xFFFFFFFF` for the CUDA build.
+When you add a mask here, add it to the 64-lane arm.
+
 ## NaN contract
 
 The check is **always on**. It is a raw **bit-pattern** test (exponent all-ones with non-zero payload — every NaN encoding, either sign, quiet or signaling), *not* a comparison against a sentinel key: the order-preserving encode maps the two signed NaNs to opposite ends of the key space, so comparing keys catches only the single fp32 encoding `0x7FFFFFFF`. `v != v` is not usable — the build enables `--use_fast_math`. Rows whose visible length is `<= topk` are never NaN-checked.
