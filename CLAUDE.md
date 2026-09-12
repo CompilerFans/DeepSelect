@@ -185,18 +185,49 @@ Consequences of the port, all deliberate:
 
 ## MACA warp intrinsics — the wave is 64 lanes
 
+**Before auditing or porting any kernel that does cross-lane work, run
+`skills/maca-wave64-port/scripts/run_probe.sh`.** It compiles a probe through
+the same device compiler the build uses and prints what MACA's collectives
+actually do on the part in front of you — the semantics below, measured, not
+read off a header. The skill at `skills/maca-wave64-port/` carries the full
+audit procedure and its checklist.
+
 Get these right before writing any cross-lane code; every one of them is a
 silent-wrong-answer trap rather than a compile error. Facts below are read from
 the toolchain's own headers (`$MACA_PATH/mxgpu_llvm/lib/clang/19/include/
 __clang_maca_device_functions.h`) and the official builtin guide
-(OG-26013-000-F5_V01, shipped with the `maca-mxcc-builtins` skill). Follow that
+(OG-26013-000-F5_V01, shipped with the `maca-mxcc-builtins` skill), and
+**confirmed by measurement** on MACA 3.8.1.3 / C600-U (2026-09-12). Follow that
 skill (and `maca-kernel-dev-and-opt` for the wider workflow) rather than guessing.
+
+**A 32-bit mask does not mean "group the wave by 32" — it means "discard lanes
+32..63".** `__ballot_sync(mask, pred)` lowers to `__builtin_mxc_sicmp(pred, 0,
+ICMP_NE) & mask`: one comparison covering all 64 lanes, then a bitwise AND. So
+`__ballot_sync(0xFFFFFFFF, 1)` returns `0x00000000ffffffff`, `__reduce_add_sync(
+0xFFFFFFFF, 1)` returns **32** (not 64), and `__shfl_up_sync(0xFFFFFFFF, v, 1)`
+lets lane 32 see only itself. Every mask-based collective follows this rule, and
+a kernel that runs work on lanes 32..63 while masking them out is silently
+wrong — measured: the port's own 32-lane scan is wrong on **32 of 64 lanes**.
 
 **Wave width is 64, so every mask is 64-bit.** The guide's comparison builtins
 (`uicmp`/`sicmp`/`fcmp`) are documented as "返回 warp 内 64-bit 比较结果掩码".
 A `0xFFFFFFFF` mask is not a shorthand for "all lanes" here — it names the low
 half of the wave only, and the result is a silently half-counted operation, not
 a compile error.
+
+**Every "_sync" collective's masking rule is the same, and it is measured:**
+
+| collective | with `0xFFFFFFFF` on a 64-lane wave |
+| --- | --- |
+| `__ballot_sync(0xFFFFFFFF, 1)` | `0x00000000ffffffff` — lanes 32..63 are not in the mask, so they are not counted |
+| `__reduce_add_sync(0xFFFFFFFF, 1)` | **32** — sums the low half only; lanes outside the mask get their own value back |
+| `__any_sync` / `__all_sync(0xFFFFFFFF, …)` | same rule; a predicate true only on lane 40 reads **false** everywhere |
+| `__shfl_up/down_sync(0xFFFFFFFF, v, 1)` | lane 32 reads **itself**, not lane 31 |
+
+`kerutils`'s `canonical_warp_idx_sync()` (`csrc/3rdparty/kerutils/include/
+kerutils/device/cuda/common.h:89`) is `threadIdx.x / 32u` and belongs to this
+family: a port that calls it for `warp_idx` gets a warp index twice as large as
+the real one, which then mis-sizes every `warp_cnt[NUM_WARPS]` array.
 
 | intrinsic | status on MACA | use |
 | --- | --- | --- |
