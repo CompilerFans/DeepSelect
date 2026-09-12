@@ -553,4 +553,40 @@ it removes the seeding that made an earlier reading of this look deterministic w
 
 ## Torch ABI / host compiler notes
 
-`csrc/xcore1600/api.cu` is host code but is compiled by mxcc's host pass (clang 19), so `std::format` *is* available there now that the file is a `.cu`. The one `TORCH_CHECK` message that needs formatting keeps its `snprintf` anyway: it is the ABI-safe spelling at this boundary. Do not "fix" it back. Anything including `<cuda_runtime_api.h>` must not depend on cu-bridge's compatibility layer for `__nv_bfloat16`: `csrc/structs.h` includes `<maca_bfloat16.h>` so that `api.cu` and every instantiation TU see the *same* `maca_bfloat16`, and `TopkSelectConfig<maca_bfloat16, ...>`'s template entity is one symbol on both sides.
+**The extensions do not link torch.** They are built at the Apache TVM FFI ABI
+(`csrc/ffi/`), loaded with `tvm_ffi.load_module` from `deep_select/_binding.py`,
+and export two `__tvm_ffi_*` symbols each. The gate is mechanical and is the
+reason the migration happened:
+
+```bash
+readelf -d deep_select/deep_select_xcore1000*.so | grep -iE 'libtorch|libc10'   # empty
+nm -D     deep_select/deep_select_xcore1000*.so | grep -icE 'c10|torch|at::'    # 0
+nm -D     deep_select/deep_select_xcore1000*.so | grep -c  '__tvm_ffi_'         # 2
+```
+
+The pybind11 build linked six torch libraries, which tied the extension to the
+host's torch build (`c10_cuda_check_implementation`) and to a cpython tag its
+real interface never used. Neither applies now.
+
+What a caller still needs is stated rather than implied: **torch at the call
+site** (tensors cross as DLPack, but a `torch.Tensor` is what has the
+`__dlpack__` protocol, and output buffers are allocated with `torch.empty`),
+and **`tvm_ffi` to load the artifact at all**. `deep_select/interface.py`
+imports torch for its own checks and its `backend="torch"` reference arm -- that
+is the harness layer, unchanged, not the ABI.
+
+**A kernel launch must run inside `_binding.launching()`.** The C++ side reads
+its stream from `TVMFFIEnvGetStream`, which reports the null handle unless
+something installs torch's current stream; the null handle is the legacy default
+stream, which does not synchronize with torch's non-blocking side streams. The
+one call site is wrapped; `DEEP_SELECT_NO_STREAM_GUARD=1` is the explicit
+escape hatch for bisecting it.
+
+**Two things did not decouple and are not claimed to have:**
+`no_python_abi_suffix=True` does not take effect through torch's
+`BuildExtension`, so the artifact filenames still carry `cpython-310`; and
+`get_alignment_requirement` returns `Array<int64_t>` rather than the pybind
+build's `std::pair` (tvm-ffi cannot carry `std::pair`), which
+`interface.py` normalizes to a tuple.
+
+`csrc/xcore1600/api.cu` is host code but is compiled by mxcc's host pass (clang 19), so `std::format` *is* available there now that the file is a `.cu`. The one check message that needs formatting keeps its `snprintf` anyway: it is the ABI-safe spelling at this boundary (and `<format>` needs GCC 13's libstdc++; the host is GCC 11.4). Do not "fix" it back. Anything including `<cuda_runtime_api.h>` must not depend on cu-bridge's compatibility layer for `__nv_bfloat16`: `csrc/structs.h` includes `<maca_bfloat16.h>` so that `api.cu` and every instantiation TU see the *same* `maca_bfloat16`, and `TopkSelectConfig<maca_bfloat16, ...>`'s template entity is one symbol on both sides.
