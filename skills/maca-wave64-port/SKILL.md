@@ -166,3 +166,41 @@ specific to this bug class and belong in the record:
 - **The falsifying test that separates "was already wrong" from "this change
   broke it"** — usually a fixed input run several times, and if a baseline is
   being compared, note that the baseline had to be patched to build at all.
+
+## 7. Worked example: `csrc/xcore1600/` in this repository
+
+The trees this skill was written against. **Not fixed yet** — this is the
+measurement and the diagnosis, recorded so the fix starts from evidence.
+
+Symptom, on a MetaX C600-U (reports `sm89` → family 1600):
+
+```
+b=2, v=512, k=8, input = arange(0..511) in bf16
+want [511, 510, 509, 508, 507, 506, 505, 504]
+got  [448, 449, 450, 451, 452, 453, 454, 455]   <- and different every run
+```
+
+Eight consecutive runs gave eight distinct wrong index sets. A random row
+returns `1.5e+37` for a row whose true max is `3.3`. On the official slice:
+4/200. Other shapes trap (`[topk_select] NaN detected` on input with no NaN) or
+raise `device-side assert`.
+
+Diagnosis, with the probe: `k_scan`'s verdict is the whole story — the port's
+`utils.cuh` scan is wrong on 32 of 64 lanes. The port's site inventory:
+
+| site | current | why it is wrong |
+| --- | --- | --- |
+| `utils.cuh:17-24` scan | `i <= 16`, mask `0xFFFFFFFFu`, guard `lane_idx >= i` | a 32-lane scan; lanes 32..63 restart |
+| `utils.cuh:34-43` suffix scan | `lane_idx + i < 32`, 32-bit mask | same, mirrored |
+| `common_parts.cuh:121` | `NUM_WARPS = NUM_THREADS / 32` | **doubles**; mis-sizes every `warp_cnt[NUM_WARPS]` and mis-indexes `warp_idx` |
+| `common_parts.cuh:488/496/497/784/791/1432/1440/1469` | `__reduce_add_sync(0xFFFFFFFF, …)` | sums the low half only |
+| `common_parts.cuh:1463` | `__ballot_sync(0xFFFFFFFF, …)`, `1u << lane_idx` | mask drops the high half; the shift is 32-bit |
+| `common_parts.cuh:536` | `static_assert(NUM_RECONSTRUCT_BUCKETS == 32 * 8)`, `:538` `bucket_ptr = bucket_counter + lane_idx * 8`, `:566` `reconstruct_pivot_bucket = lane_idx * 8 + j` | the histogram-to-lane mapping is a 32-lane layout. `NUM_RECONSTRUCT_BUCKETS` is `1 << NUM_RECONSTRUCT_RADIX_BITS` (`:385`), i.e. it comes from the radix config, **not** from the lane count — so the fix is to shrink the per-lane slice (64 lanes × 4 buckets), not to grow the structure. Do not just edit the constant |
+| `common_parts.cuh:684` | `for (c = lane_idx; c < n; c += 32u)` | stride is the wave width; the trip count changes too |
+| `v3/topk_select.cuh:54`, `v3_fp32/topk_select.cuh:90` | `threadIdx.x % 32` | lane index |
+| `kerutils/.../device/cuda/common.h:89` | `canonical_warp_idx_sync() = threadIdx.x / 32u` | inherited from a vendored header |
+
+The immediate containment is `deep_select/_arch.py`'s
+`DEEP_SELECT_128KIB_KERNEL`, which routes a 128 KiB part to the hand-written
+64-lane kernel instead (`xcore1000`), and passes the slice 200/200. Set it to
+`xcore1600` to work this tree, and re-run the slice when done.
