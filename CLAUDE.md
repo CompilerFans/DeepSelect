@@ -289,18 +289,32 @@ follow: `kWarpSize = 64` under `__MACACC__` (`:187`), with `#ifdef` pairs like
 When you add a mask here, add it to the 64-lane arm.
 
 One caveat on that file as a *primitive-selection* model: three of its
-cross-lane sites are the wrapper form — `:255` in `hist_add_bf16_reg` (dead
-code), and `:339`/`:358` inside `run_cumsum_warp`, which the shipping
-`radix_topk_row_bf16_b` calls **twice per row** (`:1064`, `:1159`), i.e. once per
-pass. Those two are the 71-vs-44 case above, six shuffle steps each. They are
-not where the time is — ~96 shuffle ops per CTA against pass 1's one shared
-atomic *per element* (16,384 of them on the profiled row, the measured 102.5 µs)
-— so converting them is cleanup, not a lever; do it for consistency when you
-next touch the function, not as an optimization campaign. Do not "fix" them
-blind, either: the `owner` index handling around the `hist_add_bf16_reg`
-shuffle (`:253-259`) is load-bearing for the bin ownership, and the
-`0xFFFFFFFFFFFFFFFFULL` / `0xFFFFFFFF` `#ifdef` pair is what makes the file
-build for both compilers.
+cross-lane sites are the wrapper form — `:255` in `hist_add_bf16_reg`, and
+`:339`/`:358` inside `run_cumsum_warp`, which the shipping `radix_topk_row_bf16_b`
+calls **twice per row** (`:1064`, `:1159`), i.e. once per pass. Those two are the
+71-vs-44 case above, six shuffle steps each. They are not where the time is —
+~96 shuffle ops per CTA against pass 1's one shared atomic *per element* (16,384
+of them on the profiled row, the measured 102.5 µs) — so converting them is
+cleanup, not a lever.
+
+**`hist_add_bf16_reg` / `hist_reg_to_smem` (`:239`, `:269`) are dead, and they
+do not work — do not wire them up.** They read as "a register histogram we could
+switch on to kill pass 1's atomics", and the handover twice proposed exactly
+that. They are actually a *per-element shuffle transport*, not a histogram: each
+of the 8 elements does one `__shfl_sync`, and each shuffle lets only **one** lane
+(the bin's owner) increment one register, so a warp records 1 element per
+element. The ceiling is therefore `lane == owner`'s hit rate, 1/64 — and
+`recv_bin % kBinsPerThread` is not the owner's own slot either (it only lines up
+when the bin happens to be `owner*4 + recv_bin%4`; `local` is computed and never
+used). Simulated at 64 lanes / 4 bins per thread with element values spread over
+0..255 *and* crowded into 16, both give the same answer: **1.5% of elements
+recorded**. A correct version is a thing to write, not a thing to enable — see
+the handover §9 lever 2 for the shape (`r_hist[16]` per thread, since `s_wide`'s
+bin is `key >> 4` and 4 bits is exactly `kCoarse12SubBins` per thread).
+
+Also worth not "fixing" blind: the `owner` index handling at `:253-259` and the
+`0xFFFFFFFFFFFFFFFFULL` / `0xFFFFFFFF` `#ifdef` pair, which is what makes the
+file build for both compilers.
 
 ## NaN contract
 

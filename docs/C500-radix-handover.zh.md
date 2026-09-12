@@ -256,10 +256,25 @@ git -C $D push origin main
    **366.3 µs** 落在 pass 2 及其后，目前只归因出 emit 原子 35.7。用同样的增量
    消融逐项拆：第二趟遍历、阈值桶 staging 原子、细直方图、refine 扫描、
    arena emit。
-2. **pass 1 的寄存器直方图**（102.5 µs 的原子发射成本是唯一有支撑的方向）。
-   `radix_core.cuh:239` 的 `hist_add_bf16_reg` + `hist_reg_to_smem` 已在文件里
-   且**无人调用**——全仓只有定义。它把原子从 8/uint4 降到 4/线程，代价是 8 次
-   `__shfl_sync`。
+2. **pass 1 的原子发射（102.5 µs）——但 lever 2 那条"现成的寄存器直方图"是
+   假的，不能照抄。** 真值 102.5 µs 仍然成立，是内核里最大的已识别单项；可
+   `radix_core.cuh:239` 的 `hist_add_bf16_reg` **不是**一个可用的替代实现。
+   它是**逐元素的传输，不是直方图**：每个元素做 8 次 shuffle，每次 shuffle
+   只让**一个 lane**（那个 bin 的 owner）自增一个寄存器，于是一个 warp 处理一个
+   元素只记 1 个数；而且 `recv_bin % kBinsPerThread` 不是 owner 自己的槽位
+   （只有 `owner` 等于该 bin 的 owner 时才恰好对上），另外 `local` 算了没用、
+   累加的是 `recv_bin`。模拟（64 lane / 4 bins per thread，元素值覆盖 0..255
+   或只挤在 16 个值上，两种都一样）：**只记到 1.5% 的元素**，真内核
+   `lane == owner` 的 1/64 就是它的上界。
+
+   所以这一条要重写成**新写一个 register-then-flush 的直方图**，而不是启用现成
+   代码：每线程私有 `r_hist[16]`（16 个细 bin，`s_wide` 的 bin 就是 key >> 4，
+   索引 = (key >> 4) & 15），在寄存器里累加，结尾一次性 flush 到 `s_wide`。
+   代价从"每元素 1 个共享原子"变成"每线程 256 个元素 1 个"，即 8,192 → 32 个
+   原子/CTA；但引入一条每元素依赖链（`r_hist[slot]++`），`P4` 的教训
+   （合并原子的冲突不划算）提示风险在这里是**依赖**而不是冲突。必须先量。
+   102.5 µs 里有多少是"每元素一条共享原子"，有多少是 pass 1 的 walk，**分开测**。
+
 3. **行趟展开、加大每 CTA 的 MLP**（原第 1 条）。不是抬 pass 1 的带宽，而是
    pass 2 的读趟；pass 1 的可见上限只有约 34 µs。
 4. **chunked 路径里的 static-k 行**（`radix_topk_row_bf16_k`，低 batch 长行
