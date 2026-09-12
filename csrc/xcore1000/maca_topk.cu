@@ -259,8 +259,16 @@ static __device__ __forceinline__ void emit_ordered(
 constexpr size_t kRadixArenaBytes =
     (size_t)rk::kSmemInputSize * sizeof(uint32_t);
 
+// The 16-bit row's 12-bit level lays its histogram over the arena, so its lead
+// region is the histogram's 16 KB rather than the arena's 14,056 B.  At k=512
+// the request goes 16,104 -> 18,432 B and static+dynamic 18,432 -> 20,760,
+// still under the 32 KB a second CTA needs; at topk >= 4096 both regimes are
+// past it already, so no k loses occupancy to this.
+constexpr size_t kCoarse12HistBytes =
+    (size_t)rk::kCoarse12ArenaEntries * sizeof(uint32_t);
+
 static __device__ __forceinline__ void radix_layout(
-    uint8_t *base, uint32_t topk, bool sorted, uint32_t *&selected,
+    uint8_t *base, uint32_t topk, bool sorted, bool wide, uint32_t *&selected,
     uint64_t *&sort_buf) {
     uint32_t n_pad = 1;
     if (sorted) {
@@ -268,9 +276,10 @@ static __device__ __forceinline__ void radix_layout(
     }
     const size_t sort_bytes =
         sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
+    const size_t arena_bytes = wide ? kCoarse12HistBytes : kRadixArenaBytes;
     sort_buf = reinterpret_cast<uint64_t *>(base);
     selected = reinterpret_cast<uint32_t *>(
-        base + (sort_bytes > kRadixArenaBytes ? sort_bytes : kRadixArenaBytes));
+        base + (sort_bytes > arena_bytes ? sort_bytes : arena_bytes));
 }
 
 // Both row entries cover every key length and every k up to `rk::kMaxTopK`, and
@@ -388,7 +397,8 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
     extern __shared__ uint8_t arena_raw[];
     uint32_t *selected;
     uint64_t *sort_buf;
-    radix_layout(arena_raw, params.topk, SI || SV, selected, sort_buf);
+    radix_layout(arena_raw, params.topk, SI || SV,
+                 std::is_same<ValueT, maca_bfloat16>::value, selected, sort_buf);
 
     if (tid == 0) {
         row_offset =
@@ -517,14 +527,15 @@ constexpr size_t kSmemBudgetBytes =
 // occupancy the launch gets: the static shared state plus the arena plus this
 // buffer has to stay under half of `smemPerSM` for a second CTA to be resident
 // (32 KB static+dynamic per CTA on C500's 64 KB SM).
-inline size_t radix_smem_bytes(uint32_t topk, bool sorted) {
+inline size_t radix_smem_bytes(uint32_t topk, bool sorted, bool wide) {
     uint32_t n_pad = 1;
     if (sorted) {
         while (n_pad < topk) n_pad <<= 1;
     }
     const size_t sort_bytes =
         sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
-    const size_t lead = sort_bytes > kRadixArenaBytes ? sort_bytes : kRadixArenaBytes;
+    const size_t arena_bytes = wide ? kCoarse12HistBytes : kRadixArenaBytes;
+    const size_t lead = sort_bytes > arena_bytes ? sort_bytes : arena_bytes;
     return lead + sizeof(uint32_t) * topk;
 }
 
@@ -629,8 +640,9 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
                         cudaStream_t stream, bool sorted_index,
                         bool sorted_value, bool return_value, int block,
                         bool preselected = false) {
-    const size_t smem =
-        radix_smem_bytes(params.topk, sorted_index || sorted_value);
+    const size_t smem = radix_smem_bytes(
+        params.topk, sorted_index || sorted_value,
+        std::is_same<ValueT, maca_bfloat16>::value);
     auto run = [&](auto si, auto sv, auto rv) {
         constexpr bool SI = decltype(si)::value;
         constexpr bool SV = decltype(sv)::value;

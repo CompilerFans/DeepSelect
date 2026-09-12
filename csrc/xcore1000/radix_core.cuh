@@ -206,6 +206,35 @@ constexpr uint32_t kSmemStaticBytes = 2 * (kRadix + 32) * sizeof(uint32_t)
 static_assert(kSMEM >= kSmemStaticBytes, "KSMEM_BYTES is smaller than static shared state");
 constexpr uint32_t kSmemInputSize = (kSMEM - kSmemStaticBytes) / sizeof(int32_t);
 
+// The 16-bit row resolves its coarse level at 12 bits rather than 8, over the
+// same 16 KB the 8-bit level used for its candidate arena: the histogram is
+// dead by the time the arena is written, so one region carries both.  The 12
+// bits leave 4, which is exactly the rest of a bf16 key, so the two levels
+// together determine the key and the refine never ranks beyond the fine ties.
+// Measured on the perf table's own generator: at 8 bits the threshold bin holds
+// 4,686 of a 16,384-element row (over the 3,514-slot arena, so every row
+// overflows and pays a third row walk); at 12 bits the widest is 516.
+constexpr uint32_t kKeyBits = 16;
+constexpr uint32_t kCoarse12Bits = 12;
+constexpr uint32_t kCoarse12Shift = kKeyBits - kCoarse12Bits;      // 4
+constexpr uint32_t kCoarse12Bins = 1u << kCoarse12Bits;            // 4096
+constexpr uint32_t kCoarse12SubBins = 1u << kCoarse12Shift;        // 16, one per high byte
+constexpr uint32_t kCoarse12HistBytes = kCoarse12Bins * sizeof(uint32_t);
+constexpr uint32_t kCoarse12ArenaEntries = kCoarse12HistBytes / sizeof(uint32_t);
+static_assert(kCoarse12ArenaEntries * sizeof(uint32_t) >= (size_t)kSmemInputSize * sizeof(uint32_t),
+              "the 16-bit arena must not be smaller than the region it aliases");
+
+// 12 位粗层：一次 uint4 搬 8 个元素，每个元素一个原子加。
+__device__ __forceinline__ void hist_add_bf16_wide(
+    uint32_t* s_wide, const maca_bfloat16* input, uint32_t idx)
+{
+    uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
+    const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
+    #pragma unroll
+    for (int i = 0; i < 8; i++)
+        atomicAdd(&s_wide[bf16_to_uint16(h[i]) >> kCoarse12Shift], 1u);
+}
+
 // FP16: 寄存器直方图 + warp shuffle
 __device__ __forceinline__ void hist_add_bf16_reg(
     uint32_t* r_hist,  // 每线程持有 kBinsPerThread 个 bin
@@ -960,8 +989,8 @@ __device__ __forceinline__ void overflow_emit_member(
     uint32_t threshold_bin, uint32_t remain_topk, uint32_t topk, int32_t* output,
     uint32_t* s_counter, int32_t* s_last_remain)
 {
-    if ((key >> 8) != high_threshold_bin) return;
-    const uint32_t low = key & 0xFF;
+    if ((key >> kCoarse12Shift) != high_threshold_bin) return;
+    const uint32_t low = key & (kCoarse12SubBins - 1u);
     if (low > threshold_bin) {
         output[atomicAdd(s_counter, 1u)] = static_cast<int32_t>(idx);
     } else if (low == threshold_bin && remain_topk != 0) {
@@ -975,22 +1004,26 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     const maca_bfloat16* input, int32_t* output, uint32_t length, uint32_t topk)
 {
     constexpr uint32_t RADIX = kRadix;
-    constexpr uint32_t SMEM_INPUT_SIZE = kSmemInputSize;
+    constexpr uint32_t SMEM_INPUT_SIZE = kCoarse12ArenaEntries;
 
     __shared__ uint32_t s_histogram_buf[2][RADIX + 32];
     __shared__ uint32_t s_counter;
     __shared__ uint32_t s_threshold_bin_id;
     __shared__ uint32_t s_high_threshold_bin_id;
     __shared__ uint32_t s_num_input[2];
+    __shared__ uint32_t s_wide_above;
     __shared__ int32_t s_last_remain;
     extern __shared__ uint32_t s_input_flat[];
-    // FP16 needs only one candidate index buffer; overflow falls back to a full rescan.
+    // The coarse histogram is laid over the candidate arena: `s_input_flat`
+    // holds the 4,096 bins until the narrow is done, and the staging writes
+    // only start after the barrier that follows it.
+    uint32_t* const s_wide = s_input_flat;
 
     const uint32_t tx = threadIdx.x;
     uint32_t remain_topk = topk;
     auto& s_histogram = s_histogram_buf[0];
 
-    if (tx < RADIX + 1) s_histogram[tx] = 0;
+    for (uint32_t b = tx; b < kCoarse12Bins; b += BLOCK_SIZE) s_wide[b] = 0;
     __syncthreads();
 
     // C500 has an intermittent race in the mixed vector-plus-tail path for
@@ -999,28 +1032,70 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     uint32_t vec_len = length / 8 * 8;
     if (input_aligned) {
         for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8)
-            hist_add_bf16_aligned(s_histogram, input, idx);
+            hist_add_bf16_wide(s_wide, input, idx);
         for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
-            atomicAdd(&s_histogram[bf16_to_uint8(__ldg(input + idx))], 1u);
+            atomicAdd(&s_wide[bf16_to_uint16(__ldg(input + idx)) >> kCoarse12Shift], 1u);
     } else {
         for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
-            atomicAdd(&s_histogram[bf16_to_uint8(__ldg(input + idx))], 1u);
+            atomicAdd(&s_wide[bf16_to_uint16(__ldg(input + idx)) >> kCoarse12Shift], 1u);
     }
     __syncthreads();
+
+    // Fold 4,096 -> 256, one bin per high byte, so the scan stays the same
+    // 256-wide warp scan the 8-bit level used; thread 0 then narrows inside the
+    // byte the scan lands on.  This is the last read of the coarse histogram.
+    if (tx < RADIX) {
+        uint32_t c = 0;
+        #pragma unroll
+        for (uint32_t s = 0; s < kCoarse12SubBins; s++)
+            c += s_wide[(tx << kCoarse12Shift) + s];
+        s_histogram[tx] = c;
+    } else if (tx == RADIX) {
+        s_histogram[RADIX] = 0;
+        // The refine's landing state, initialized here so that a crossing the
+        // scan cannot find leaves a defined bin behind rather than whatever the
+        // previous launch on this SM left in shared memory.
+        s_threshold_bin_id = 0;
+        s_last_remain = 0;
+    }
+    __syncthreads();
+
     uint32_t exclusive_suffix = 0;
     uint32_t inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
 
     if (tx < RADIX && inclusive_suffix > remain_topk && exclusive_suffix <= remain_topk) {
-        s_threshold_bin_id = tx; s_high_threshold_bin_id = tx; s_num_input[0] = 0; s_counter = 0;
+        s_high_threshold_bin_id = tx; s_num_input[0] = 0; s_counter = 0;
+    }
+    __syncthreads();
+
+    // The scan named a high byte; the 12-bit threshold is the sub-bin inside it
+    // where the count crosses `remain_topk`.  `above` ends as the count of keys
+    // strictly above that threshold, which is what the emit owes the window.
+    if (tx == 0) {
+        const uint32_t high = s_high_threshold_bin_id;
+        uint32_t above = s_histogram[high + 1];
+        uint32_t sub = 0;
+        for (int s = (int)kCoarse12SubBins - 1; s >= 0; --s) {
+            const uint32_t c = s_wide[(high << kCoarse12Shift) + (uint32_t)s];
+            // The bin has to carry what the window still wants, and the test is
+            // against the window `remain_topk` itself -- not against what is
+            // left once the byte above has been counted.  Testing the remainder
+            // fires a sub-bin early whenever the byte has slack, which leaves
+            // the window short and the refine with no bin to land on.
+            if (above + c > remain_topk) { sub = (uint32_t)s; break; }
+            above += c;
+        }
+        s_high_threshold_bin_id = (high << kCoarse12Shift) | sub;
+        s_wide_above = above;
     }
     __syncthreads();
 
     {
-        const auto threshold_bin = s_threshold_bin_id;
-        remain_topk -= s_histogram[threshold_bin + 1];
+        const auto threshold_bin = s_high_threshold_bin_id;
+        remain_topk -= s_wide_above;
         if (remain_topk == 0) {
             for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
-                if (bf16_to_uint8(__ldg(input + idx)) > threshold_bin)
+                if ((bf16_to_uint16(__ldg(input + idx)) >> kCoarse12Shift) > threshold_bin)
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             __syncthreads(); return;
         }
@@ -1034,7 +1109,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                 #pragma unroll
                 for (int i = 0; i < 8; i++) {
                     maca_bfloat16 raw = h[i];
-                    uint32_t bin = bf16_to_uint8(raw);
+                    uint32_t bin = bf16_to_uint16(raw) >> kCoarse12Shift;
                     if (bin > threshold_bin) {
                         output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + i);
                     } else if (bin == threshold_bin) {
@@ -1044,31 +1119,31 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                         // is what the full-row rebuild below used to repair.
                         uint32_t pos = atomicAdd(&s_num_input[0], 1u);
                         if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx + i;
-                        atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
+                        atomicAdd(&s_histogram[bf16_to_uint16(raw) & (kCoarse12SubBins - 1u)], 1u);
                     }
                 }
             }
             for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE) {
                 maca_bfloat16 raw = __ldg(input + idx);
-                uint32_t bin = bf16_to_uint8(raw);
+                uint32_t bin = bf16_to_uint16(raw) >> kCoarse12Shift;
                 if (bin > threshold_bin) {
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
                 } else if (bin == threshold_bin) {
                     uint32_t pos = atomicAdd(&s_num_input[0], 1u);
                     if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
-                    atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
+                    atomicAdd(&s_histogram[bf16_to_uint16(raw) & (kCoarse12SubBins - 1u)], 1u);
                 }
             }
         } else {
             for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
                 maca_bfloat16 raw = __ldg(input + idx);
-                uint32_t bin = bf16_to_uint8(raw);
+                uint32_t bin = bf16_to_uint16(raw) >> kCoarse12Shift;
                 if (bin > threshold_bin) {
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
                 } else if (bin == threshold_bin) {
                     uint32_t pos = atomicAdd(&s_num_input[0], 1u);
                     if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
-                    atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
+                    atomicAdd(&s_histogram[bf16_to_uint16(raw) & (kCoarse12SubBins - 1u)], 1u);
                 }
             }
         }
@@ -1120,7 +1195,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         if (remain_topk == 0) {
             for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
                 auto idx = s_input_flat[i];
-                if ((bf16_to_uint16(__ldg(input + idx)) & 0xFF) > threshold_bin)
+                if ((bf16_to_uint16(__ldg(input + idx)) & (kCoarse12SubBins - 1u)) > threshold_bin)
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             }
             __syncthreads(); return;
@@ -1128,7 +1203,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         __syncthreads();
         for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
             auto idx = s_input_flat[i];
-            uint32_t bin = bf16_to_uint16(__ldg(input + idx)) & 0xFF;
+            uint32_t bin = bf16_to_uint16(__ldg(input + idx)) & (kCoarse12SubBins - 1u);
             if (bin > threshold_bin) {
                 output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             } else if (bin == threshold_bin) {
