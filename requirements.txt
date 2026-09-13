@@ -1,5 +1,14 @@
 # DeepSelect run-time and build-time dependencies.
 #
+# This file is an ADDITION, not a transcription: upstream
+# (`deepseek-ai/DeepSelect`) declares no dependencies at all -- there is no
+# requirements.txt on `upstream/main`, and its `setup.py` carries no
+# `install_requires`.  So there is no upstream list to agree with, and what
+# follows describes THIS tree as it is vendored (a submodule of mcDeepGEMM,
+# branch `dev_tvm_ffi`).  That is why `deep_gemm` below is called a cycle
+# rather than an omission, and why `tilelang` / `mctlassEx` are named as the
+# host repository's rather than ours.
+#
 # Note the import name is not the distribution name for every one of these:
 # `import tvm_ffi` is the distribution `apache-tvm-ffi` (there is no `tvm_ffi`
 # distribution), and the same is true of the host repository's own edge.  Pin
@@ -47,8 +56,16 @@ torch>=2.1.0
 # module scope (the profiler-range marker kernel is `@triton.jit`), so
 # `import kernelkit` -- and therefore `tests/test.py`, `tests/lib.py` and
 # `scripts/official_slice.py`, all of which import it -- raises ImportError
-# without triton.  Upstream's dependency; the kernels here are hand-written
-# MACA C++, not triton.
+# without triton.  Note that this includes the *correctness* arm, which never
+# times anything: the import is module-scope, so it is collateral.
+#
+# `bench.py` is upstream's, byte for byte (`git diff upstream/main --
+# tests/kernelkit/bench.py` is empty), and the marker is upstream's own
+# scaffolding, not this tree's -- no kernel here is triton.  The deviations
+# this tree carries from upstream inside `tests/` are the "it does not run on
+# MACA otherwise" set (platform.py, stress.py, lib.py -- the ledger is in
+# CLAUDE.md); this is not one of them, so it is listed rather than patched
+# away.
 triton
 
 # `numpy` is used in exactly one place, `tests/kernelkit/utils.py`'s
@@ -85,3 +102,6 @@ ninja
 #
 # `tilelang` / `mctlassEx`: the host repository's dependencies, not this one's.
 # No file in this tree imports either.
+#
+# `pytest`: there is no pytest suite here and no conftest.py -- unlike the host
+# repository.  The suite is upstream's, driven by its own `__main__`.
