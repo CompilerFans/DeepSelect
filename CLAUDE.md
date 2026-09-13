@@ -386,6 +386,122 @@ Also worth not "fixing" blind: the `owner` index handling at `:253-259` and the
 `0xFFFFFFFFFFFFFFFFULL` / `0xFFFFFFFF` `#ifdef` pair, which is what makes the
 file build for both compilers.
 
+## Resource audit — registers, spill, shared memory
+
+**Before any performance work on a kernel, audit its resources — and run the
+audit before the experiment, not after.** Three questions, all answerable
+offline on this machine, and the first two decide whether an optimization can
+work at all. The cost is one device compile; the cost of skipping it is an
+experiment that was never measurable.
+
+### 1. Registers and spill — `--resource-usage`
+
+`mxcc --resource-usage` prints one `maca info:` block per device function:
+
+```
+Function properties for  <mangled name>
+  <N> bytes stack frame
+Used  <N> MTregisters, <N> STregisters, <N> bytes shared mem
+staticMaxWarps/PEU : <N>
+```
+
+`tests/kernelkit/build.py`'s `check_maca_stack_frame` parses this;
+`DEEP_SELECT_MACA_STACK_CHECK` / `DEEP_SELECT_MACA_STACK_BASELINE` is the gate
+(Build section). Two facts to read it with:
+
+- **The stack frame is the whole spill signal.** `local > 0` in the CUDA
+  original has no separate counterpart here — what would be local memory is
+  counted in the stack frame.
+- **48 bytes is the floor on this toolchain, not a spill.** 50 of
+  `maca_topk.cu`'s 78 devices report exactly 48; the other 28 report 0. A
+  `--stack-baseline` of 48 therefore reports the floor and flags a real spill.
+
+Measured 2026-09-14 on `maca_topk.cu` (xcore1000, the build's own flags): the
+launched device functions report a **48-byte stack frame, no spill**, with
+**`topk_kernel_radix<…,512,…>` at 44 MT / up to 78 STregisters** and
+**`topk_kernel_radix<…,1024,…>` at 46 MT / up to 78 ST**. The `topk_bf16_*_kernel_*`
+family (the runtime/static-k/chunked arms) is lighter — 24 MT / 42-52 ST — and
+those are only reached by the chunked path (below).
+
+### 2. Occupancy — `~/maca_kernel_doctor`
+
+`~/maca_kernel_doctor/maca_kernel_doctor.py` (the companion of the
+`maca-kernel-doctor` skill) wraps the same compile and adds the occupancy model
+in `lib/occupancy.py`, which is a pure-Python reimplementation of
+`mcOccupancyMaxActiveBlocksPerMultiprocessor`. Run it as:
+
+```bash
+~/maca_kernel_doctor/maca_kernel_doctor.py \
+  --compile "mxcc <the build's own compile_args> -c <src> -o /tmp/k.o" \
+  --kernel "*<pattern>*" --blocksize <N> --no-color
+```
+
+**It needs `tvm_ffi`'s and Python's include dirs added**, because `maca_topk.cu`
+now includes `csrc/ffi/ffi_checks.h` — append
+`-I$(python -c "import tvm_ffi,os;print(os.path.dirname(tvm_ffi.__file__))")/include`
+and `-I$(python -c "import sysconfig;print(sysconfig.get_paths()['include'])")`.
+Without them the compile dies on `'tvm/ffi/error.h' file not found`, which reads
+like a doctor bug and is not one.
+
+**The trap that matters: `--resource-usage` reports *static* shared memory
+only.** The row kernel's arena comes from `radix_smem_bytes()` and is attached
+with `cudaFuncSetAttribute`, so the compiler prints **2596 bytes** where the
+kernel actually holds far more. Passing 2596 to the occupancy model returns
+"100%, limiter=waves" — a wrong answer that looks like a clean bill of health.
+Compute the real figure and add it by hand:
+
+```
+smem = radix_smem_bytes(topk, sorted, wide) + <static 2596>
+bf16 wide path, topk=512 : 16384 + 2048 + 2596 = 21028 B
+bf16 wide path, topk=1024: 16384 + 4096 + 2596 = 23076 B
+```
+
+With the correct number the model answers **75% at topk=512 and 50% at
+topk=1024, limiter=shared_memory** on C500's 64 KiB/AP. Registers and waves are
+not the limiter — so a register-pressure optimization on this kernel buys
+nothing, and that is worth knowing before writing one.
+
+### 3. Wave quantization against the batch — the actual binding constraint
+
+C500: **104 AP × 2048 threads = 212,992 thread-slots**. The row kernel is one
+CTA per row, so **batch size alone decides the wave count**:
+
+| batch | CTA-waves @512 | thread-fill @512 | CTA-waves @1024 | thread-fill @1024 |
+| --- | --- | --- | --- | --- |
+| 104 | 1 | 25% | 1 | 50% |
+| 208 | 2 | 50% | 2 | 100% |
+| 256 | 3 | 61% | 3 | 123% |
+| 512 | 5 | 123% | 5 | 246% |
+| 4096 | 40 | 984% | 40 | 1969% |
+
+**At 512 threads the first CTA-wave uses only a quarter of the machine**, and
+the measured dependency is the reciprocal: `b4096-v1024-k512` runs at **34.9
+GB/s** while `b4096-v16384-k512` (16× the row length, identical row count) runs
+at **84.5 GB/s** — same batch, same total DRAM per row, 2.4× the throughput.
+The short-row cell is latency-bound at 25% thread-fill; the long-row cell has
+enough independent work per thread to hide it.
+
+The `maca-kernel-profiling` and `maca-kernel-optimization` skills are the
+follow-through once the audit says which limit you are actually on.
+
+### 4. Choosing an intrinsic — the `maca-mxcc-builtins` skill
+
+When an audit says a kernel is bound on a specific *instruction class*, pick the
+intrinsic from the `maca-mxcc-builtins` skill rather than from the CUDA-era
+spelling — it carries the official guide (OG-26013-000-F5_V01) with per-builtin
+signatures and arch gates, plus the measured instruction counts that say what
+each wrapper actually costs. The rules already distilled here (64-lane masks,
+`__popcll` not `__popc`, `bsm_bpermute` over `__shfl_*_sync`, no
+`__match_any_sync`) are that skill's conclusions; go back to it for anything new
+rather than extrapolating from them.
+
+**But read the profile before reaching for it.** The instruction-selection
+table above was measured on a *minimal* kernel around each call. In situ the
+verdict can invert: `docs/C500-radix-profile.zh.md` records that a variant
+which *cut* atomic conflicts 4× came out **38 µs slower**, because the cost was
+per-atomic issue, not contention. An intrinsic that is cheaper in isolation is
+not thereby cheaper in the kernel.
+
 ## NaN contract
 
 The check is **always on**. It is a raw **bit-pattern** test (exponent all-ones with non-zero payload — every NaN encoding, either sign, quiet or signaling), *not* a comparison against a sentinel key: the order-preserving encode maps the two signed NaNs to opposite ends of the key space, so comparing keys catches only the single fp32 encoding `0x7FFFFFFF`. `v != v` is not usable — the build enables `--use_fast_math`. Rows whose visible length is `<= topk` are never NaN-checked.
