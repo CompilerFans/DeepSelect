@@ -1,0 +1,87 @@
+# DeepSelect run-time and build-time dependencies.
+#
+# Note the import name is not the distribution name for every one of these:
+# `import tvm_ffi` is the distribution `apache-tvm-ffi` (there is no `tvm_ffi`
+# distribution), and the same is true of the host repository's own edge.  Pin
+# what a resolver wants, not what `import` says.
+#
+# This file does NOT list the MACA toolkit (`$MACA_PATH`, default `/opt/maca`)
+# or the MACA-compatible PyTorch build.  Both are external to anything pip can
+# install -- they come with the SDK install -- and the extension links
+# `libmcruntime` out of that toolkit.  A machine without them cannot build this
+# tree regardless of what is listed below.
+
+# ---- run time -------------------------------------------------------------
+# tvm_ffi is the loader.  The extensions are built at the Apache TVM FFI ABI
+# and export `__tvm_ffi_*` symbols with no `PyInit`, so they cannot be imported
+# as python modules at all -- `deep_select/_binding.py` loads them with
+# `tvm_ffi.load_module`, and `tvm_ffi.use_torch_stream()` is what installs
+# torch's current stream for `TVMFFIEnvGetStream`.  Without it, `import
+# deep_select` succeeds but `backend="maca_c"` cannot find a kernel.
+#
+# The floor is `0.1.2` because that is tilelang's own declared range for this
+# package (`apache-tvm-ffi>=0.1.2,~=0.1.0`); `~=0.1.0` keeps the compatible-
+# release window to the 0.1 line.  The API surface this tree uses is narrow --
+# `load_module`, `use_torch_stream` -- but pinning to the range the rest of the
+# stack already agrees on costs nothing.
+apache-tvm-ffi>=0.1.2,~=0.1.0
+
+# torch is required at the call site, not by the extension.  Tensors cross the
+# ABI as DLPack and output buffers are allocated with `torch.empty`, so a
+# `torch.Tensor` is what has to be on the outside of the boundary even though
+# the extension no longer links libtorch/libc10.  Bare `import deep_select`
+# touches torch immediately (`deep_select/interface.py`), so it is not optional
+# for any use of this package.
+#
+# The floor matches the host repository's own `install_requires`.  The real
+# constraint is narrower and not expressible here: it must be the
+# MACA-compatible PyTorch for the toolkit on the machine, and a wheel built
+# against one torch major/minor must be loaded by that same one.
+torch>=2.1.0
+
+# ---- tests ----------------------------------------------------------------
+# Not needed to run `deep_select.topk`; needed by the suites under `tests/` and
+# `scripts/`, which is how this tree is validated.
+#
+# `tests/kernelkit/__init__.py` imports `bench`, and `bench` imports triton at
+# module scope (the profiler-range marker kernel is `@triton.jit`), so
+# `import kernelkit` -- and therefore `tests/test.py`, `tests/lib.py` and
+# `scripts/official_slice.py`, all of which import it -- raises ImportError
+# without triton.  Upstream's dependency; the kernels here are hand-written
+# MACA C++, not triton.
+triton
+
+# `numpy` is used in exactly one place, `tests/kernelkit/utils.py`'s
+# `set_random_seed`, and imported lazily inside the function.  It is not
+# transitively guaranteed on a torch-only install, so it is listed rather than
+# assumed.
+numpy
+
+# ---- build only -----------------------------------------------------------
+# `build.sh` and `setup.py` are setuptools-driven, with torch's
+# `BuildExtension.with_options(use_ninja=True)` as the backend.  Neither has a
+# version floor this tree depends on, so none is stated.
+#
+# `ninja` is a fallback, not a hard requirement: torch warns and drops to the
+# slow distutils backend when `is_ninja_available()` is false.  It is listed
+# because the fallback is a build this tree has never been tested on.
+setuptools
+ninja
+
+# `install.sh` builds a wheel, and `bdist_wheel` moved into setuptools -- there
+# is no separate `wheel` requirement any more.  It is NOT listed for that
+# reason; add it only if an old setuptools on the target needs it.
+
+# ---- NOT listed, and why --------------------------------------------------
+# `deep_gemm` (the host repository's package): a SOFT dependency, reached only
+# by `backend="deep_gemm"`, imported lazily inside a cached accessor in
+# `deep_select/interface.py`.  This repository is vendored as a submodule of
+# that same host, so requiring it here would be a cycle.  `backend="maca_c"`
+# -- the default -- never touches it.
+#
+# `ray`: `tests/kernelkit/stress.py` guards its import with try/except and
+# defines a pass-through stub when absent, so the stress suite degrades rather
+# than failing.  Listing it would make a test-only extra mandatory.
+#
+# `tilelang` / `mctlassEx`: the host repository's dependencies, not this one's.
+# No file in this tree imports either.
