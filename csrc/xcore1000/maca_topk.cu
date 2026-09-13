@@ -73,6 +73,8 @@
 #include <type_traits>
 #include <cstdlib>
 #include <cstdio>
+#include <mutex>
+#include <vector>
 
 #include "structs.h"
 // The ported C500 dataflow (see the provenance banner in that file).  It is
@@ -781,6 +783,65 @@ namespace deep_select {
 using namespace deep_select_maca;
 namespace dsf = deep_select::ffi;
 
+// ── the chunked path's scratch, held across calls ───────────────────────────
+//
+// `cudaMalloc`/`cudaFree` on this runtime are ~70-100 us per *pair* at the size
+// class the candidate workspace lands in, and -- measured, not assumed -- the
+// cost is **non-monotonic in size**, so a 12 MB allocation is nearly free while
+// 300 KB is the worst case (`docs/C500-to-parity-plan.zh.md` item 0,
+// `malloc_sweep.cu`).  The split needs this workspace plus a row-length table on
+// every call, so paying a fresh pair each time put a ~265 us host floor in front
+// of a ~96 us kernel at b6-v262144-k512 -- `e2e = max(host, device)`.
+//
+// So they are cached process-wide and **grown only**.  Growing rather than
+// keying by shape is the whole design: a caller that alternates between two
+// batches would realloc on every switch under a shape-keyed cache, which is the
+// cost this exists to remove; a high-water-mark buffer never does.
+//
+// Three properties make reuse safe rather than merely fast:
+//
+//   * `chunked_workspace(base, batches, topk)` derives the layout by walking
+//     forward from `base` by the *geometry of this call*, not by the capacity,
+//     so a buffer larger than this call needs is correct by construction.
+//   * the split's own kernels write every slot they read back -- stage 1 fills
+//     each candidate slot it is asked for, and `nan_flags` is memset per call --
+//     so nothing is inherited from the previous call.
+//   * the lengths table is only skipped when `(batches, vocab_size)` -- both
+//     arguments of this call -- already match the pair the table was last filled
+//     for.  The table's content is `[vocab_size] * batches`, a pure function of
+//     that pair, so the pair *is* the content; see `lengths_epoch` at the fill.
+//
+// The high-water mark is bounded by the gate that admits the split
+// (`chunked_bf16_applies`: batches <= 64, topk <= 1024), i.e. ~6.3 MB for the
+// workspace and 256 B for the table, held for the life of the process.  That is
+// the trade: a bounded, one-time footprint in exchange for removing a per-call
+// host cost that is larger than the kernel it fronts.
+//
+// One design point, since the natural instinct is to keep the `cudaFree` and
+// tolerate the pair: free-then-malloc of the same size *should* be cheap (that
+// is what an allocator does).  Measured on this runtime it is not -- 307,224 B
+// costs 69.9 us/pair with the free included and 100.3 us/pair interleaved with
+// device work, while the *same* loop over 12,582,912 B costs 1.2 us.  Freeing
+// would therefore give back most of the win, so the buffer is held.
+struct ChunkedScratch {
+    std::mutex mu;
+    void *workspace = nullptr;
+    size_t workspace_bytes = 0;
+    int32_t *lengths = nullptr;
+    size_t lengths_count = 0;
+    // The `(batches, vocab_size)` the device table was last **filled** for.
+    // `kNoEpoch` means "unknown, must refill"; it is not a fabricated `(0, 0)`,
+    // which a call with `batches == 0` would match and then skip the fill on.
+    static constexpr int64_t kNoEpoch = -1;
+    int64_t lengths_epoch_batches = kNoEpoch;
+    int64_t lengths_epoch_vocab = kNoEpoch;
+};
+
+ChunkedScratch &chunked_scratch() {
+    static ChunkedScratch s;
+    return s;
+}
+
 tvm::ffi::Array<int64_t> get_alignment_requirement() {
     return {INPUT_STRIDE_ALIGNMENT_REQUIREMENT,
             OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT};
@@ -897,29 +958,104 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // because a torch tensor here is exactly the coupling this migration
     // removes.  It is a synchronous allocation on the calling thread, so it is
     // ordered before the launches on any stream.
+    // The workspace is also ours: raw cudaMalloc rather than a torch tensor,
+    // because a torch tensor here is exactly the coupling this migration
+    // removes.  It is cached across calls rather than freed at the end -- see
+    // `ChunkedScratch` for why the allocation, not the kernel, was the floor.
+    // `DEEP_SELECT_NO_SCRATCH_CACHE=1` restores the free-per-call behavior, which
+    // is what makes the claim measurable as an A/B rather than argued.
+    static const bool kCacheScratch = [] {
+        const char *v = std::getenv("DEEP_SELECT_NO_SCRATCH_CACHE");
+        return !(v != nullptr && v[0] == '1' && v[1] == '\0');
+    }();
+
+    // The cache is process-wide while the kernels here have no thread-safety
+    // contract of their own, so the scratch carries its own lock rather than
+    // assuming the caller serializes.  Held across the launches, because the
+    // buffers are not done being read when this function returns.
+    struct ScratchGuard {
+        std::mutex *m;
+        explicit ScratchGuard(std::mutex *mu) : m(mu) { if (m) m->lock(); }
+        ~ScratchGuard() { if (m) m->unlock(); }
+    };
+    ChunkedScratch &scratch = chunked_scratch();
+    ScratchGuard scratch_guard(kCacheScratch ? &scratch.mu : nullptr);
+    bool scratch_borrowed = false;
+
     int32_t *lengths = nullptr;
     void *workspace = nullptr;
     size_t workspace_bytes = 0;
     if (value_dtype == 1 &&
         detail::chunked_bf16_applies(p, (uint32_t)batches)) {
-        if (!end.has_value()) {
-            DS_CUDA_RUNTIME_CHECK(
-                cudaMalloc(&lengths, (size_t)batches * sizeof(int32_t)));
-            std::vector<int32_t> host_lengths((size_t)batches, (int32_t)vocab_size);
-            DS_CUDA_RUNTIME_CHECK(cudaMemcpy(lengths, host_lengths.data(),
-                                             (size_t)batches * sizeof(int32_t),
-                                             cudaMemcpyHostToDevice));
-            p.end_ptr = lengths;
+        const size_t need_lengths = (size_t)batches * sizeof(int32_t);
+        const size_t need_workspace =
+            detail::chunked_workspace_bytes((uint32_t)batches, (uint32_t)topk);
+
+        if (!kCacheScratch) {
+            if (!end.has_value()) {
+                DS_CUDA_RUNTIME_CHECK(cudaMalloc(&lengths, need_lengths));
+                std::vector<int32_t> host_lengths((size_t)batches,
+                                                  (int32_t)vocab_size);
+                DS_CUDA_RUNTIME_CHECK(cudaMemcpy(lengths, host_lengths.data(),
+                                                 need_lengths,
+                                                 cudaMemcpyHostToDevice));
+                p.end_ptr = lengths;
+            }
+            DS_CUDA_RUNTIME_CHECK(cudaMalloc(&workspace, need_workspace));
+            workspace_bytes = need_workspace;
+        } else {
+            // Grow-only.  A `cudaFree` here would be correct but would give back
+            // exactly the cost this buffer exists to avoid, so the peak is held.
+            if (need_workspace > scratch.workspace_bytes) {
+                void *grown = nullptr;
+                DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need_workspace));
+                if (scratch.workspace) DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.workspace));
+                scratch.workspace = grown;
+                scratch.workspace_bytes = need_workspace;
+            }
+            if (need_lengths > scratch.lengths_count * sizeof(int32_t)) {
+                int32_t *grown = nullptr;
+                DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need_lengths));
+                if (scratch.lengths) DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.lengths));
+                scratch.lengths = grown;
+                scratch.lengths_count = (size_t)batches;
+                scratch.lengths_epoch_batches = ChunkedScratch::kNoEpoch;
+                scratch.lengths_epoch_vocab = ChunkedScratch::kNoEpoch;
+            }
+            if (!end.has_value()) {
+                // `[vocab_size] * batches` is a pure function of two arguments of
+                // this call, so "is the table already right" is a question about
+                // that pair -- `lengths_epoch` is set only by the fill below, and
+                // clearing it on a resize makes "no epoch" mean "must refill"
+                // rather than a fabricated `(0, 0)`.
+                if (scratch.lengths_epoch_batches != batches ||
+                    scratch.lengths_epoch_vocab != (int64_t)vocab_size) {
+                    std::vector<int32_t> host_lengths((size_t)batches,
+                                                      (int32_t)vocab_size);
+                    DS_CUDA_RUNTIME_CHECK(cudaMemcpy(scratch.lengths,
+                                                     host_lengths.data(),
+                                                     need_lengths,
+                                                     cudaMemcpyHostToDevice));
+                    scratch.lengths_epoch_batches = batches;
+                    scratch.lengths_epoch_vocab = (int64_t)vocab_size;
+                }
+                p.end_ptr = scratch.lengths;
+            }
+            workspace = scratch.workspace;
+            workspace_bytes = need_workspace;
+            scratch_borrowed = true;
         }
-        workspace_bytes = detail::chunked_workspace_bytes((uint32_t)batches,
-                                                          (uint32_t)topk);
-        DS_CUDA_RUNTIME_CHECK(cudaMalloc(&workspace, workspace_bytes));
     }
 
+    // The cached branch hands out the scratch's pointers directly, so the guard
+    // must not free them -- it owns only what this call allocated itself (the
+    // uncached branch, and nothing at all once `DEEP_SELECT_NO_SCRATCH_CACHE` is
+    // off).
     struct FreeIfSet {
         void *p;
         ~FreeIfSet() { if (p) cudaFree(p); }
-    } free_lengths{(void *)lengths}, free_workspace{workspace};
+    } free_lengths{scratch_borrowed ? nullptr : (void *)lengths},
+        free_workspace{scratch_borrowed ? nullptr : workspace};
 
     topk_launch(p, batches, (void *)stream, value_dtype, index_dtype,
                 sorted_index, sorted_value, return_value, workspace,
