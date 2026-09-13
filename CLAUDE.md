@@ -484,6 +484,60 @@ enough independent work per thread to hide it.
 The `maca-kernel-profiling` and `maca-kernel-optimization` skills are the
 follow-through once the audit says which limit you are actually on.
 
+### 5. What the reference implementations say about this kernel
+
+Our C500 tree is a **merge** of two designs, and the reference sources are the
+two halves of it (`csrc/xcore1000/radix_core.cuh`'s provenance banner records
+the port):
+
+- **Upstream DeepSelect** (`docs/DeepSelect-deep-dive.{md,zh.md}`): scan random
+  blocks, filter against a running threshold, compact when the candidate buffer
+  grows past `k + B2`. Its guarantee is **each element read exactly once**, in
+  contiguous blocks; extra space is `O(k + B + B2)`, small enough for shared
+  memory. Expected total elements processed is
+  `E[W] <= (1 + k/B2) · L · H_m`, `L = k+B+B2`; with `B, B2 = Θ(k)` the extra
+  compute is `O(k log(N/k))`. Realized here in `csrc/xcore1600/`.
+- **`dsa_topk`** (`/home/compiler_gfx/dsa_topk`, port commit
+  `61ab380c77b81669718bfb11b95a583b0e661001`): the two-pass radix row —
+  histogram pass, then collect-and-stage into an arena. Realized here in
+  `csrc/xcore1000/radix_core.cuh`. Note `opt/radix_topk.cuh` there is *newer*
+  than the port source and **is not what we carry**; read it as a separate
+  experiment, not as our ancestry.
+
+This kernel had already converged on upstream's key structural ideas, so the
+honest summary is that the references mostly **confirm** it, and the remaining
+suggestions are small:
+
+- **Both read the row twice where upstream reads once.** Our two passes are
+  already at 80% and 89% of single-pass attainable rate, so the headroom in
+  relentless MLP is small; a one-pass form is the structural way to the wall
+  and is a much larger change than it looks (`radix_topk_row_bf16_k` is a
+  different, lighter dataflow than the shipping `_b` row, and its exact
+  coverage has **not** been verified here — check before calling it a drop-in).
+- **`radix_topk_row_bf16_b` already has the `remain_topk == 0` exact-fit exit**
+  (`csrc/xcore1000/radix_core.cuh:1096`) — it returns after the coarse
+  complement, exactly as deep_gemm's `topk_coarse12_impl` does. It is the
+  *overflow* path that lacks the corresponding exit, and
+  **`overflow_emit_member` (`:987`) may write slot 0 twice**: its slots all use
+  `output[atomicAdd(&s_counter, 1u)]`, but `output[0]` is already the coarse
+  complement when `remain_topk == 0`. The condition appears reachable
+  algebraically (`s_high_threshold_bin_id` is the sub-bin index while
+  `threshold_bin` counts the whole bucket, so `high <= threshold_bin` can sit
+  just inside the arena capacity). A seeded probe on `b4096-v1024-k512` (three
+  values of 100.0 with `topk=512`) returned no `-1` sentinel and no duplicate,
+  so **the defect is unconfirmed — do not "fix" it on this evidence**. Test it
+  deliberately with a crafted exact-fill row before touching the code.
+- **Upstream's integer-add → float-add trick** (for `0 <= x,y <= 2^22`,
+  `x+y == __float_as_uint(__uint_as_float(x) + __uint_as_float(y))`, so a
+  denormal float add replaces an integer add and frees the integer pipe) is
+  aimed at upstream's bottleneck, mask generation. Ours is the shared-atomic
+  issue rate — `P4` showed the 102.5 µs is per-atomic issue and not contention
+  — so the trick is worth understanding and **not** obviously transferable.
+- `dsa_topk`'s newer `opt/radix_topk.cuh` runs at `kSMEM = 16 KiB` on MACA
+  against a 1949-line predecessor — the same direction as our
+  `kCoarse12HistBytes`/arena aliasing, and worth reading as prior art for the
+  occupancy-vs-parallelism tradeoff, not as a patch to apply.
+
 ### 4. Choosing an intrinsic — the `maca-mxcc-builtins` skill
 
 When an audit says a kernel is bound on a specific *instruction class*, pick the
