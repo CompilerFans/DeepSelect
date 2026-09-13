@@ -76,9 +76,62 @@
 
 ---
 
-## 3. 方案（按"收益/成本"排序，四条独立）
+## 3. 方案（按"收益/成本"排序，五条独立）
 
-### 条目 1（最便宜，先做）：fp32 的 chunked split —— 直接吃掉 `b6-*` 与 `b256-*`
+### 条目 0（真正最便宜，先做）：把每次调用的 `cudaMalloc` 从热路径上删掉
+
+先看扩展里 CPU 花在哪（`cpuprof.py`，torch.profiler 的 CPU activities，
+自计时，N=20，单位 µs/次调用）：
+
+| b6-v262144 bf16 | b6-v65536 bf16（对照：不走 split） |
+|---|---|
+| `mcFree` **127.8** (40次) | `aten::empty` 8.4 |
+| `mcMalloc` **89.9** (40次) | `mcLaunchKernel` 4.3 |
+| `mcMemcpy` 21.5 | `aten::slice` 2.2 |
+| `mcLaunchKernel` 19.1 (80次) | `mcFuncSetAttribute` 0.6 |
+| `aten::empty` 5.8 | `mcDeviceSynchronize` 4.7 |
+
+对照格的 host 只有约 **15 µs**；split 格是 **265 µs**。差的全部是那 4 次
+malloc/free（每次调用一对 300 KiB 一对 24 B）。
+
+这些 malloc 的代价**与大小无关，而且非单调**（`malloc_sweep.cu`，同一套 MACA
+runtime，无 torch，空闲与内核交错两种状态）：
+
+| 分配大小 | 空闲 runtime | 内核交错 |
+|---|---|---|
+| **307,224 B**（本内核真正的 workspace） | **69.9 µs/对** | **100.3 µs/对** |
+| 12,288 B（长度表为此量级） | 30.2 µs/对 | 34.8 µs/对 |
+| 1,048,576 B | 50.2 µs/对 | 55.2 µs/对 |
+| 12,582,912 B | **1.2 µs/对** | **16.1 µs/对** |
+
+**12 MB 几乎免费，307 KB 要 70–100 µs。** 本内核的 workspace 是
+`batches*kChunkedChunks*topk*(4+2) + batches*topk*4 + batches*4` = **307,224 B**
+@ b6-v262144-k512，**正好落在最坏那一档**。
+
+上一版这一节写的 raw 对照（"12 MB 一对 36 µs"）测错了对象：那是 12 MB +
+**24 B** 两次 malloc 的和，而 24 B 那一档自己就要 30 µs（1.2 + 30.2 ≈ 31 ≈ 36 ✓）。
+上一版据此说"268 µs 里约 230 µs 在别处（torch.empty + FFI + launch）"，
+**是错的**：那三样加起来不足 100 µs（`hostbreak.py`：`launching()` 20.3、
+`torch.empty` 23.6、12 参数 FFI 入口 5.5）。
+
+profiler 的 217.7 µs 与扫描的 ~135 µs（100.3 + 34.8）之间的差额是 profiler 已知的
+eviction 畸变，不是第三处成本 —— 差额集中在 `mcFree`，其事件跨度包含 host 可见的等待。
+
+**所以条目 0 是：扩展自己缓存 workspace 与长度表**（进程内、按
+`(batches, topk)` 只增不减的静态缓冲），**把这两对 malloc 从热路径上删掉**。
+218 µs → 约 0，且：
+
+- 是 host 侧改动，**不碰任何内核**；
+- 不碰 `s_num_input[0]`，没有越界风险；
+- 不碰 lane 宽度，xcore1600 逐字节不变；
+- 对**所有**走 chunked 的格（bf16 今天就已经在走，cudaMalloc 因为
+  `!end.has_value()` 对 bf16 是**无条件**的）立即生效。
+
+**先做这个，再叠 fp32 分支** —— 那时 fp32 的 e2e 也从 564 µs 落到内核地板附近。
+
+---
+
+### 条目 1（次便宜）：fp32 的 chunked split —— 直接吃掉 `b6-*` 与 `b256-*`
 
 **证据**：`b6-v524288-k512` 差 **48.9× 于其自身下界**，`b6-v262144` 差 7.79×。
 这两个格 `floor2/dg = 0.21`、`0.28`，**两趟也远够**。问题纯粹是 6 行的 CTA 数
@@ -99,7 +152,9 @@
 merge 路径同样存在 —— 它是 split 的候选计数，必须保证"计数"与"实际暂存数"相等，
 否则越界。**先看 §5.1 那节的结论再动手。**
 
-**预期**：`b6-*` 从落后 4.5–10× 变为领先；`b256-*` 的 3.5× 落差大部分消失。
+**预期**：`b6-*` 的落差大部分消失；`b256-*` 的 3.5× 落差缩小。
+（初版这里写的是"从落后 4.5–10× 变为领先"—— **已由下面的实测否掉**，
+实测收益是 2.17×/3.97×，追平但**不领先**。）
 
 #### 动手前的实测：split 的算术收益有多大，以及它现在被什么吃掉
 
@@ -122,8 +177,8 @@ bf16 **53.7 µs** / fp32 **144.7 µs** ⇒ **k = 2.69**。
 但能消掉 3–4×。
 
 **split 现在被什么吃掉：不是设备的活，是每次调用 270 µs 的 host 时间。**
-`deep_select.topk` 每次调用都 `cudaMalloc`/`cudaMemcpy`/`cudaFree` 长度表，
-再 `cudaMalloc` 12 MB 候选 workspace，末尾 `cudaFree`（`maca_topk.cu:900-922`）。
+`deep_select.topk` 每次调用都 `cudaMalloc`/`cudaMemcpy`/`cudaFree` 长度表（6×4 B），
+再 `cudaMalloc` **300 KiB** 候选 workspace，末尾 `cudaFree`（`maca_topk.cu:900-922`）。
 分解（`decompose.py`，host 用 `perf_counter` 且在设备空闲时测）：
 
 | cell | host（设备空闲） | device | e2e（设备空闲调用）| 谁在决定 |
@@ -133,20 +188,15 @@ bf16 **53.7 µs** / fp32 **144.7 µs** ⇒ **k = 2.69**。
 | `b512-v262144` bf16 | 87.3 µs | 821.8 µs | 907.7 µs | device |
 
 即 `e2e ≈ max(host, device)` —— 完全重叠，且小 batch 长行这块
-**host 是 2.8× 于设备**。raw MACA 对照（`malloc_cost.cu`：12 MB 的
-`cudaMalloc`+`cudaFree` 一对，空闲 runtime）只有 **36 µs/iter**，所以 268 µs 里
-约 230 µs 在别处 —— 已定位到 `torch.empty` 分配输出 + FFI 边界 + 六次 launch。
-
-**这条改变条目 1 的做法**：只加 fp32 分支，收益是 2.17×/3.97×（内核），
-而 e2e 会停在 ~270 µs 的 host 地板上。**先做 host 侧**：把 workspace 与长度表
-改成**按最大尺寸分配一次、跨调用复用**（按 `(batches, topk)` 缓存），
-再叠 fp32 分支。两者都收敛到同一个 e2e 目标，且 host 侧的改动不碰内核、
-不碰 `s_num_input[0]`、没有 lane 宽度风险。
+**host 是 2.8× 于设备**。那 268 µs 的构成见**条目 0**：几乎全部是每次调用那两对
+`cudaMalloc`。**所以条目 1 必须排在条目 0 后面**：只加 fp32 分支，收益是
+2.17×/3.97×（内核），而 e2e 会停在 ~270 µs 的 host 地板上 —— 内核改了也看不见。
 
 （`ws_cost.py` 早先给出的 "+170 µs host overhead" 是 `e2e − Σkernel` 的**减法**，
-那在 host/device 重叠时不是分解 —— 已由 `decompose.py` 的直接测量取代，
-上述 268/96.6 那对才是结论。`malloc_cost.cu` 的 `mcMalloc 5382 µs` 也是 torch
-profiler 对 malloc 的**斜向**计时（1 次/iter 摊进 10 次迭代），不是单次成本。）
+那在 host/device 重叠时不是分解 —— 已由 `decompose.py` 的直接测量取代。它同时也
+把 workspace 的尺寸写错了：是 **307,224 B** @ b6-v262144-k512，不是 12 MB。
+`ws_cost.py` 里 `mcMalloc 5382 µs` 的读数是 torch profiler 对 malloc 的**斜向**
+计时（1 次/iter 摊进 10 次迭代），同样已废弃。）
 
 ### 条目 2（结构性，主战场）：把 pass 2 改成"只在溢出时重走"
 
