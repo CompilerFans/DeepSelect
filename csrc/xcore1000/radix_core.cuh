@@ -129,6 +129,20 @@ __device__ __forceinline__ uint8_t bf16_to_uint8(maca_bfloat16 x) {
 // 向量化直方图 (smem atomicAdd)
 // ============================================================
 
+// `hist_add_f32`'s call sites walk `input + tx*4`, i.e. one thread takes FOUR
+// CONSECUTIVE float4 per leg.  That is not "four loads in flight": it puts
+// adjacent lanes of each individual load instruction 64 bytes apart, so a
+// 128-byte segment carries 32 useful bytes.  Measured on exactly pass 1's shape
+// (4096 rows x 262144 fp32, 4.295 GB, C500, `/tmp/dsab/kt7.cu`+`kt9.cu`) with
+// the same bytes, the same instruction count and the same atomics:
+//
+//   float4 per leg:  row + tx*4 + q      998.7 GB/s   (60.5% of 1650)
+//   float4 per leg:  row + tx + q*BS    1650.9 GB/s  (100.1% of 1650)
+//
+// and the histogram atomic itself is worth 0.5% at either pattern (kt8).  So
+// the deficit this used to be blamed on ("pass 1 runs at 40% of the wall")
+// is this addressing, and pass 1 is in fact at 63% of ITS OWN pattern's
+// ceiling -- the same 63% pass 2 reaches.  See the plan note section 15.
 __device__ __forceinline__ void hist_add_f32(
     uint32_t* s_histogram, const float* input, uint32_t idx)
 {
