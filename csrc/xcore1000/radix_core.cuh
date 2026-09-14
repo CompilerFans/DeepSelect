@@ -139,6 +139,35 @@ __device__ __forceinline__ void hist_add_f32(
     atomicAdd(&s_histogram[float_to_uint8(v.w)], 1u);
 }
 
+// One element of the fp32 row's second pass.  Both walkers below ask the same
+// question of every element -- `float_to_uint8(raw) > threshold_bin` -- and both
+// are read-bound, so both move four elements per load the way pass 1's
+// `hist_add_f32` does.  Written one element per load, this pass ceilinged at the
+// 4-byte streaming rate (~1244 GB/s, `readwall2.cu`) against the 16-byte
+// 1650 GB/s wall every other pass in this file reaches; more importantly it
+// spent four times as many dependent load stalls per row.
+//
+// The arena write stays capacity-limited while `s_num_input[0]` counts every
+// member of the bin -- that is what makes the overflow test below sound, and
+// the rescan rebuilds the fine histogram it discards, so the clamped
+// histogram add inside the same branch is deliberate, not an oversight.
+__device__ __forceinline__ void stage_f32_lane(
+    float raw, uint32_t idx, uint32_t threshold_bin, int32_t* output,
+    uint32_t* s_counter, uint32_t* s_input_flat, uint32_t* s_num_input0,
+    uint32_t* s_histogram, uint32_t smem_input_size)
+{
+    const uint32_t bin = float_to_uint8(raw);
+    if (bin > threshold_bin) {
+        output[atomicAdd(s_counter, 1u)] = static_cast<int32_t>(idx);
+    } else if (bin == threshold_bin) {
+        const uint32_t pos = atomicAdd(s_num_input0, 1u);
+        if (pos < smem_input_size) {
+            s_input_flat[pos] = idx;
+            atomicAdd(&s_histogram[(float_to_uint32(raw) >> 24) & 0xFFu], 1u);
+        }
+    }
+}
+
 __device__ __forceinline__ bool bf16x8_is_aligned(const maca_bfloat16* input)
 {
     return (reinterpret_cast<uintptr_t>(input) & (sizeof(uint4) - 1)) == 0;
@@ -509,7 +538,14 @@ __device__ __forceinline__ void radix_topk_row_f32(
         const auto threshold_bin = s_threshold_bin_id;
         remain_topk -= s_histogram[threshold_bin + 1];
         if (remain_topk == 0) {
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
+            for (uint32_t idx = tx * 4; idx < vec_len; idx += BLOCK_SIZE * 4) {
+                const float4 v = __ldg(reinterpret_cast<const float4 *>(input + idx));
+                if (float_to_uint8(v.x) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+                if (float_to_uint8(v.y) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + 1);
+                if (float_to_uint8(v.z) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + 2);
+                if (float_to_uint8(v.w) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + 3);
+            }
+            for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
                 if (float_to_uint8(__ldg(input + idx)) > threshold_bin)
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             __syncthreads(); return;
@@ -517,19 +553,21 @@ __device__ __forceinline__ void radix_topk_row_f32(
         __syncthreads();
         if (tx < RADIX + 1) s_histogram[tx] = 0;
         __syncthreads();
-        for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
-            float raw = __ldg(input + idx);
-            uint32_t bin = float_to_uint8(raw);
-            if (bin > threshold_bin) {
-                output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            } else if (bin == threshold_bin) {
-                uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                if (pos < SMEM_INPUT_SIZE) {
-                    s_input_flat[pos] = idx;
-                    atomicAdd(&s_histogram[(float_to_uint32(raw) >> 24) & 0xFF], 1u);
-                }
-            }
+        for (uint32_t idx = tx * 4; idx < vec_len; idx += BLOCK_SIZE * 4) {
+            const float4 v = __ldg(reinterpret_cast<const float4 *>(input + idx));
+            stage_f32_lane(v.x, idx,     threshold_bin, output, &s_counter,
+                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE);
+            stage_f32_lane(v.y, idx + 1, threshold_bin, output, &s_counter,
+                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE);
+            stage_f32_lane(v.z, idx + 2, threshold_bin, output, &s_counter,
+                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE);
+            stage_f32_lane(v.w, idx + 3, threshold_bin, output, &s_counter,
+                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE);
         }
+        for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
+            stage_f32_lane(__ldg(input + idx), idx, threshold_bin, output,
+                           &s_counter, s_input_flat, &s_num_input[0],
+                           s_histogram, SMEM_INPUT_SIZE);
         __syncthreads();
     }
 
