@@ -203,6 +203,40 @@ def run_testcase(p: TestParam):
 
     return is_correct
 
+def performance_cases() -> List[TestParam]:
+    """The official performance grid, `test.py`'s own case list.
+
+    A function rather than an inline literal so that a second entry point
+    (`scripts/perf_snapshot.py`) drives *these* cases rather than a transcription
+    of them: the axes, the dtypes, the index types, the data distribution
+    (`NormalFloatDistribution`) and `num_runs=10` are the measurement's
+    definition, and a copy of the list is a copy that can drift from the gate.
+
+    `seed=-1` is left as-is; each case takes its seed from the same
+    process-global counter the official run uses, so a snapshot's data differs
+    between runs exactly as two official runs do (see the environment traps:
+    seed the cases yourself when you want an A/B).
+    """
+    return [
+        # Lightning Indexer
+        TestParam(b, compressed_seqlen, topk, False, False, False, torch.bfloat16, torch.int32, num_runs=10)
+        for topk in [512, 1024]
+        for b in [
+            6,      # RL rollout
+            256,    # Decoding
+            512,
+            768,
+            4096    # Prefill
+        ]
+        for compressed_seqlen in [256, 1024, 4096, 16384, 65536, 131072, 262144, 524288, 1048576]
+    ] + [
+        # Sampler
+        TestParam(b, vocab_size, 512, True, False, True, torch.float, torch.int64, num_runs=10)
+        for b in [6, 256, 512, 768, 4096]
+        for vocab_size in [129280]
+    ]
+
+
 if __name__ == '__main__':
     torch.set_default_device("cuda")
 
@@ -264,24 +298,7 @@ if __name__ == '__main__':
                                 cur_case = TestParam(b, vocab_size, topk, sv, si, rv, dtype, out_idx_dtype, enable_end_position, enable_output_idx_offset, num_runs=0, idx_oob_fill_value=-2000000+vocab_size, input_distrib=distrib)
                                 correctness_cases.append(cur_case)
 
-    performance_cases = [
-        # Lightning Indexer
-        TestParam(b, compressed_seqlen, topk, False, False, False, torch.bfloat16, torch.int32, num_runs=10)
-        for topk in [512, 1024]
-        for b in [
-            6,      # RL rollout
-            256,    # Decoding
-            512,
-            768,
-            4096    # Prefill
-        ]
-        for compressed_seqlen in [256, 1024, 4096, 16384, 65536, 131072, 262144, 524288, 1048576]
-    ] + [
-        # Sampler
-        TestParam(b, vocab_size, 512, True, False, True, torch.float, torch.int64, num_runs=10)
-        for b in [6, 256, 512, 768, 4096]
-        for vocab_size in [129280]
-    ]
+    performance_cases = performance_cases()
 
     testcases = correctness_cases + performance_cases
 
