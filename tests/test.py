@@ -236,51 +236,12 @@ def run_testcase(p: TestParam):
 
     return is_correct
 
-def performance_cases() -> List[TestParam]:
-    """The official performance grid, `test.py`'s own case list.
+def correctness_cases_() -> List[TestParam]:
+    """The official correctness table, verbatim (was inline in `__main__`).
 
-    A function rather than an inline literal so that a second entry point
-    (`scripts/perf_snapshot.py`) drives *these* cases rather than a transcription
-    of them: the axes, the dtypes, the index types, the data distribution
-    (`NormalFloatDistribution`) and `num_runs=10` are the measurement's
-    definition, and a copy of the list is a copy that can drift from the gate.
-
-    `seed=-1` is left as-is; each case takes its seed from the same
-    process-global counter the official run uses, so a snapshot's data differs
-    between runs exactly as two official runs do (see the environment traps:
-    seed the cases yourself when you want an A/B).
+    A function so a script can prepend host-specific shapes to it -- the same
+    reason `performance_cases` is one.
     """
-    return [
-        # Lightning Indexer
-        TestParam(b, compressed_seqlen, topk, False, False, False, torch.bfloat16, torch.int32, num_runs=10)
-        for topk in [512, 1024]
-        for b in [
-            6,      # RL rollout
-            256,    # Decoding
-            512,
-            768,
-            4096    # Prefill
-        ]
-        for compressed_seqlen in [256, 1024, 4096, 16384, 65536, 131072, 262144, 524288, 1048576]
-    ] + [
-        # Sampler
-        TestParam(b, vocab_size, 512, True, False, True, torch.float, torch.int64, num_runs=10)
-        for b in [6, 256, 512, 768, 4096]
-        for vocab_size in [129280]
-    ]
-
-
-if __name__ == '__main__':
-    torch.set_default_device("cuda")
-
-    parser = argparse.ArgumentParser()
-    lib.stick_unit_test_args(parser)
-    parser.add_argument("--dtype", choices=["fp32", "bf16"], default=None,
-                        help="Only run testcases whose input dtype matches")
-    parser.add_argument("--perf-only", action="store_true",
-                        help="Only run performance testcases (num_runs > 0)")
-    args = parser.parse_args()
-
     valid_sv_si_rv_combinations = [ # sv_si_rv: sorted_value, sorted_index, return_value
         (False, False, False),
         (False, False, True),
@@ -330,8 +291,120 @@ if __name__ == '__main__':
                                 enable_output_idx_offset = b%2 == 1
                                 cur_case = TestParam(b, vocab_size, topk, sv, si, rv, dtype, out_idx_dtype, enable_end_position, enable_output_idx_offset, num_runs=0, idx_oob_fill_value=-2000000+vocab_size, input_distrib=distrib)
                                 correctness_cases.append(cur_case)
+    return correctness_cases
+
+# ── the host repo's selector shapes ─────────────────────────────────────────
+# `deep_gemm/tests/test_indexer_topk_selector.py`'s `SELECTOR_PERF_SHAPES`
+# (= test-topk + sglang + dsa), all `top_k = 2048`, fp32.  Here as data because
+# four consumers need the *same* shapes and one of them is this grid: a grid
+# without them leaves the `deep_gemm` backend `unsupported` on every row, and a
+# column that is `unsupported` everywhere compares nothing.
+#
+# (n_rows, n_cols, seq_len): `seq_len` is the window the host grid declares,
+# which this repository does not synthesize -- it ranks the whole row -- so the
+# two are NOT numerically comparable at the same shape even when `n_cols`
+# matches.  `table_len` equals `n_cols` in every host entry, so it is not a
+# separate axis here.  `csrc/structs.h`'s `kHostSelectorPerfShapes` carries the
+# same table for the C++ side; this is the Python copy.
+HOST_SELECTOR_PERF_SHAPES = (
+    [(b, 66551, 66551) for b in (1, 16, 132, 512)]                    # test-topk
+    + [(b, 131072, s) for b in (1, 132, 256, 4096)                    # sglang
+       for s in (2048, 4096, 16384, 65536)]
+    + [(1, 107520, 107520), (16, 66551, 66551), (132, 107520, 107520),  # dsa
+       (256, 107520, 107520), (4096, 107520, 107520)]
+)
+HOST_SELECTOR_PERF_TOPK = 2048
+
+
+def host_selector_perf_cases() -> List[TestParam]:
+    """`HOST_SELECTOR_PERF_SHAPES` as `TestParam`s: fp32, `top_k=2048`.
+
+    fp32 and 2048 because the host grid is, and because the `deep_gemm` backend
+    serves `topk <= 2048`, fp32 only -- a grid built otherwise has no
+    `deep_gemm` column to compare on these rows.
+    """
+    return [
+        TestParam(b, v, HOST_SELECTOR_PERF_TOPK, False, False, False,
+                  torch.float32, torch.int32, num_runs=10)
+        for b, v, _seq in HOST_SELECTOR_PERF_SHAPES
+    ]
+
+# The host grid's own correctness shapes (`SELECTOR_CORRECTNESS_SHAPES`):
+# (n_rows, n_cols, top_k).  The host declares `seq_lens` / `seq_starts` windows
+# on them; this repository does not synthesize a window, so these rank the whole
+# row -- a valid case for this contract, and deliberately not the host's own
+# semantics.  They are worth running because they are the shapes the host kernel
+# was built around, and they are where a `deep_gemm` column exists at all.
+HOST_SELECTOR_CORRECTNESS_SHAPES = (
+    (16,  257,   31),     # host `chunks` kernel
+    (512, 65536, 2048),   # host `coarse12` kernel
+)
+
+
+def host_selector_correctness_cases() -> List[TestParam]:
+    """`HOST_SELECTOR_CORRECTNESS_SHAPES` as `TestParam`s, fp32."""
+    return [
+        TestParam(b, v, k, False, False, False, torch.float32, torch.int32,
+                  num_runs=0)
+        for b, v, k in HOST_SELECTOR_CORRECTNESS_SHAPES
+    ]
+
+
+def performance_cases() -> List[TestParam]:
+    """The official performance grid, `test.py`'s own case list.
+
+    A function rather than an inline literal so that a second entry point
+    (`scripts/perf_snapshot.py`) drives *these* cases rather than a transcription
+    of them: the axes, the dtypes, the index types, the data distribution
+    (`NormalFloatDistribution`) and `num_runs=10` are the measurement's
+    definition, and a copy of the list is a copy that can drift from the gate.
+
+    `seed=-1` is left as-is; each case takes its seed from the same
+    process-global counter the official run uses, so a snapshot's data differs
+    between runs exactly as two official runs do (see the environment traps:
+    seed the cases yourself when you want an A/B).
+    """
+    return [
+        # Lightning Indexer
+        TestParam(b, compressed_seqlen, topk, False, False, False, torch.bfloat16, torch.int32, num_runs=10)
+        for topk in [512, 1024]
+        for b in [
+            6,      # RL rollout
+            256,    # Decoding
+            512,
+            768,
+            4096    # Prefill
+        ]
+        for compressed_seqlen in [256, 1024, 4096, 16384, 65536, 131072, 262144, 524288, 1048576]
+    ] + [
+        # Sampler
+        TestParam(b, vocab_size, 512, True, False, True, torch.float, torch.int64, num_runs=10)
+        for b in [6, 256, 512, 768, 4096]
+        for vocab_size in [129280]
+    ]
+
+
+if __name__ == '__main__':
+    torch.set_default_device("cuda")
+
+    parser = argparse.ArgumentParser()
+    lib.stick_unit_test_args(parser)
+    parser.add_argument("--dtype", choices=["fp32", "bf16"], default=None,
+                        help="Only run testcases whose input dtype matches")
+    parser.add_argument("--perf-only", action="store_true",
+                        help="Only run performance testcases (num_runs > 0)")
+    parser.add_argument("--host-shapes", action="store_true",
+                        help="Also run the host repo's selector shapes "
+                             "(fp32, top_k=2048): the only rows the deep_gemm "
+                             "backend can answer, so the only rows it can be "
+                             "compared on")
+    args = parser.parse_args()
+
+    correctness_cases = correctness_cases_()
 
     performance_cases = performance_cases()
+    if args.host_shapes:
+        performance_cases = performance_cases + host_selector_perf_cases()
 
     testcases = correctness_cases + performance_cases
 

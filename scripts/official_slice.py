@@ -148,15 +148,24 @@ def main():
         deep_select.topk = _bind_backend(deep_select.topk, args.backend)
 
     random.seed(args.seed)
-    table = cases()
+    # The host repo's own correctness shapes come first and are not sampled:
+    # they are the rows the `deep_gemm` backend has a kernel for, so without
+    # them a `--backend deep_gemm` run is 200 unsupported and nothing is
+    # compared (the same reason `perf_snapshot.py` carries the host perf
+    # shapes).  Bounded by the element budget like every other case.
+    host = [p for p in official.host_selector_correctness_cases()
+            if p.batch_size * p.vocab_size <= ELEM_BUDGET]
+    table = host + cases()
     light = [p for p in table if p.batch_size * p.vocab_size <= ELEM_BUDGET]
-    sample = random.Random(args.seed).sample(light, min(args.sample, len(light)))
+    sample = host + random.Random(args.seed).sample(
+        light, min(args.sample, len(light)))
     if args.shard is not None:
         index, count = (int(part) for part in args.shard.split("/"))
         sample = sample[index::count]
     print(f"official table: {len(table)} cases, {len(light)} within "
-          f"{ELEM_BUDGET} elements; running {len(sample)} sampled with seed "
-          f"{args.seed}"
+          f"{ELEM_BUDGET} elements; running {len(sample)} "
+          f"({len(host)} host-selector + "
+          f"{len(sample) - len(host)} sampled) with seed {args.seed}"
           + (f", shard {args.shard}" if args.shard else ""), flush=True)
 
     passed, failed, skipped = 0, [], 0

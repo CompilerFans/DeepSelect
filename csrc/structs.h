@@ -13,6 +13,63 @@
 static constexpr uint32_t INPUT_STRIDE_ALIGNMENT_REQUIREMENT = 1024; // In number of bytes
 static constexpr uint32_t OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT = 32; // In number of bytes
 
+// ── The host repo's selector perf shapes ────────────────────────────────────
+// Transcribed from `deep_gemm/tests/test_indexer_topk_selector.py`, where they
+// are `SELECTOR_PERF_SHAPES` (= test-topk + sglang + dsa), all `top_k = 2048`,
+// fp32.  They live here rather than only in Python because three consumers need
+// the *same* shapes:
+//
+//   * the perf grid      (`tests/test.py::performance_cases`)  -- see below
+//   * the perf recorder  (`scripts/perf_snapshot.py::deep_gemm_cases`)
+//   * the correctness sample (`scripts/official_slice.py::cases`)
+//
+// and a shape list that exists in three places is a list that will disagree
+// with itself.  This block is the C++ copy; `tests/test.py` carries the same
+// table as data and `deep_gemm/tests/test_indexer_topk_selector.py` is the
+// origin.  Each entry is (n_rows, n_cols, seq_len, table_len); `seq_len` is the
+// window the host grid declares, which this repository does not synthesize --
+// it ranks the whole row -- so the two are not numerically comparable at the
+// same shape even when `n_cols` matches.  `table_len` equals `n_cols` in every
+// host entry, so it is not a separate axis here.
+//
+// `top_k` is 2048 because that is what the host grid measures *and* because the
+// `deep_gemm` backend serves `topk <= 2048` and nothing above it: a grid built
+// with a larger `top_k` would have no `deep_gemm` column to compare against.
+struct HostSelectorShape {
+    uint32_t n_rows;
+    uint32_t n_cols;
+    uint32_t seq_len;
+};
+inline constexpr HostSelectorShape kHostSelectorPerfShapes[] = {
+    {   1,  66551,  66551},   // test-topk-bs1
+    {  16,  66551,  66551},   // test-topk-bs16
+    { 132,  66551,  66551},   // test-topk-bs132
+    { 512,  66551,  66551},   // test-topk-bs512
+    {   1, 131072,   2048},   // sglang-bs1-seq2048
+    {   1, 131072,   4096},   // sglang-bs1-seq4096
+    {   1, 131072,  16384},   // sglang-bs1-seq16384
+    {   1, 131072,  65536},   // sglang-bs1-seq65536
+    { 132, 131072,   2048},   // sglang-bs132-seq2048
+    { 132, 131072,   4096},   // sglang-bs132-seq4096
+    { 132, 131072,  16384},   // sglang-bs132-seq16384
+    { 132, 131072,  65536},   // sglang-bs132-seq65536
+    { 256, 131072,   2048},   // sglang-bs256-seq2048
+    { 256, 131072,   4096},   // sglang-bs256-seq4096
+    { 256, 131072,  16384},   // sglang-bs256-seq16384
+    { 256, 131072,  65536},   // sglang-bs256-seq65536
+    {4096, 131072,   2048},   // sglang-bs4096-seq2048
+    {4096, 131072,   4096},   // sglang-bs4096-seq4096
+    {4096, 131072,  16384},   // sglang-bs4096-seq16384
+    {4096, 131072,  65536},   // sglang-bs4096-seq65536
+    {   1, 107520, 107520},   // dsa-bs1-seq107520
+    {  16,  66551,  66551},   // dsa-bs16-seq66551
+    { 132, 107520, 107520},   // dsa-bs132-seq107520
+    { 256, 107520, 107520},   // dsa-bs256-seq107520
+    {4096, 107520, 107520},   // dsa-bs4096-seq107520
+};
+inline constexpr uint32_t kHostSelectorPerfTopK = 2048;
+
+
 static constexpr uint32_t MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION = 1u << 23;
 static constexpr uint32_t MAX_VOCAB_SIZE = 1u << 23;
 static_assert(MAX_VOCAB_SIZE <= MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION);

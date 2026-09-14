@@ -98,7 +98,8 @@ usage() {
     cat >&2 <<'EOF'
 Usage: run_bench.sh [options]
 
-  --full              also snapshot the host repo's selector grid (~1.8 GB cells)
+  --full              also snapshot the host repo's selector grid (~1.8 GB cells),
+                      and run the same shapes through the official gate
   --quick             snapshot only, and only the maca_c arm
   --arms LIST         comma-separated subset of maca_c,torch,deep_gemm
   --device N          shorthand for CUDA_VISIBLE_DEVICES=N
@@ -106,6 +107,10 @@ Usage: run_bench.sh [options]
   --baseline-dir DIR  repoint the baseline at DIR and exit without measuring
   --no-compare        measure, but do not compare against the baseline
   --compare-only      compare the latest run against the baseline, measure nothing
+  --no-host-shapes    do not add the host repo's selector shapes to the
+                      snapshot (by default they ARE added; the deep_gemm
+                      backend has no cell on the official bf16 grid, so
+                      without them its column is 95 `unsupported` rows)
   --skip-gate         do not run tests/test.py --perf-only (the official grid)
   --results DIR       output root (default perf_data)
   --list              print what would run and exit
@@ -121,6 +126,7 @@ export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi
 
 # ── arguments ───────────────────────────────────────────────────────────────
 full=0
+host_shapes=1
 quick=0
 arms="maca_c,torch,deep_gemm"
 set_baseline=0
@@ -135,6 +141,7 @@ timeout_s="${DS_BENCH_TIMEOUT:-5400}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --full)             full=1; shift ;;
+        --no-host-shapes)   host_shapes=0; shift ;;
         --quick)            quick=1; arms="maca_c"; shift ;;
         --arms)             [[ $# -ge 2 ]] || { echo "run_bench.sh: --arms needs a value" >&2; exit 2; }
                             arms="$2"; shift 2 ;;
@@ -229,7 +236,8 @@ if [[ "$list_only" == "1" ]]; then
     echo "run_bench.sh: md5         = ${md5}"
     echo "run_bench.sh: devices     = ${devices}"
     echo "run_bench.sh: arms        = ${arms}"
-    echo "run_bench.sh: host axes   = $([[ ${full} -eq 1 ]] && echo yes || echo no)"
+    echo "run_bench.sh: host shapes = $([[ ${host_shapes} -eq 1 ]] && echo yes || echo no)  (the host repo's selector grid: 25 perf cells at top_k=2048 fp32, plus the host correctness shapes on the gate; the only cells the deep_gemm backend can answer)"
+    echo "run_bench.sh: grid        = $([[ ${host_shapes} -eq 1 ]] && echo '95 official + 25 host = 120 cells' || echo '95 official cells only')"
     echo "run_bench.sh: official gate = $([[ ${skip_gate} -eq 1 ]] && echo skipped || echo yes)"
     echo "run_bench.sh: out root    = ${chip_dir}/<YYYYmmdd_HHMMSS>"
     echo "run_bench.sh: baseline    = ${chip_dir}/baseline"
@@ -327,7 +335,11 @@ snapshot_failed=0
 # failure" (it can fail on memory, where the gate below would still pass).
 snap_args=(scripts/perf_snapshot.py --arms "${arms}" --out-dir "${results_dir}"
            --tag "${stamp}")
-if [[ ${full} -eq 1 ]]; then snap_args+=(--deep-gemm-axes); fi
+# The host shapes ride in the SNAPSHOT whenever they are on, not only under
+# `--full`: the official grid has no cell any backend but `maca_c` can be
+# compared on, so a snapshot without them writes 190 `unsupported`/duplicate
+# rows and compares nothing about `deep_gemm`.
+if [[ ${host_shapes} -eq 1 ]]; then snap_args+=(--deep-gemm-axes); fi
 if ! run_arm snapshot python "${snap_args[@]}"; then
     snapshot_failed=1
     bench_status=1
@@ -337,14 +349,17 @@ fi
 # `python tests/test.py`, not `./tests/test.py`: upstream's file is not
 # executable, and a bare path there fails with rc=126 before it runs anything
 # (which reads as a bench failure but is a launcher mistake).
+gate_host=()
+if [[ ${host_shapes} -eq 1 ]]; then gate_host+=(--host-shapes); fi
 if [[ ${skip_gate} -eq 0 ]]; then
-    run_arm official python tests/test.py --perf-only -nc || bench_status=1
+    run_arm official python tests/test.py --perf-only -nc "${gate_host[@]}" || bench_status=1
 fi
 
 # arm 3 -- the official grid's fp32 arm (`tests/test.py` filters its own
-# `performance_cases`, which are bf16, so this is the Sampler cells).
+# `performance_cases`, which are bf16, so this is the Sampler cells, plus the
+# host selector shapes when they are on).
 if [[ ${skip_gate} -eq 0 ]]; then
-    run_arm official_fp32 python tests/test.py --perf-only -nc --dtype fp32 || bench_status=1
+    run_arm official_fp32 python tests/test.py --perf-only -nc --dtype fp32 "${gate_host[@]}" || bench_status=1
 fi
 
 {

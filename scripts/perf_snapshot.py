@@ -171,26 +171,29 @@ def _us(seconds: Optional[float]) -> Any:
     return round(seconds * 1e6, 3) if seconds else ""
 # ── cases ───────────────────────────────────────────────────────────────────
 def deep_gemm_cases() -> List[Any]:
-    """The host repo's `SELECTOR_PERF_SHAPES`, `top_k=2048`, fp32.
-    Transcribed from `deep_gemm/tests/test_indexer_topk_selector.py:78-123`.  The
-    only reason it is here is that `deep_gemm` has no cell on the official grid
-    (bf16), so without it the `deep_gemm` column is 95 `unsupported` rows.
-    Its rows are NOT comparable to the official ones even at the same shape: the
-    host repo feeds this grid `torch.randn` while this harness uses
-    `NormalFloatDistribution`, and several of its rows declare a window narrower
-    than `n_cols` that this adapter does not synthesize.  `case_source` marks
-    them, and `note` says which.
+    """The host repo's selector perf shapes, from `tests/test.py`.
+
+    The table lives in `tests/test.py` (`HOST_SELECTOR_PERF_SHAPES`), not here,
+    because the official perf grid drives the *same* shapes via
+    `--host-shapes`: a second copy is a copy that can drift from the gate, and
+    the whole point of these rows is that the `deep_gemm` backend has a cell on
+    them (every official cell is bf16 and `unsupported`).
+
+    `note` marks the rows whose host `seq_len` is narrower than `n_cols`: those
+    are windows in the host grid and whole-row rankings here, so the two are not
+    numerically comparable at the same shape.
     """
-    def p(b, v, note=""):
-        return (note, lib.TestParam(b, v, 2048, False, False, False,
-                                    torch.float32, torch.int32, num_runs=10))
-    out = [p(b, 66551) for b in (1, 16, 132, 512)]
-    for b in (1, 132, 256, 4096):
-        for seq in (2048, 4096, 16384, 65536):
-            out.append(p(b, 131072, f"sglang-bs{b}-seq{seq}: the host grid "
-                                     f"declares a window; this ranks the whole row"))
-    out += [p(b, 107520) for b in (1, 16, 132, 256, 4096)]
-    return out
+    return [(_deep_gemm_note(b, v, seq),
+             lib.TestParam(b, v, official.HOST_SELECTOR_PERF_TOPK, False, False,
+                           False, torch.float32, torch.int32, num_runs=10))
+            for b, v, seq in official.HOST_SELECTOR_PERF_SHAPES]
+
+
+def _deep_gemm_note(b: int, v: int, seq: int) -> str:
+    if seq == v:
+        return ""
+    return (f"sglang-bs{b}-seq{seq}: the host grid declares a window; this "
+            f"ranks the whole row")
 
 
 # `lib.TestParam` has four required fields beyond the shape; a `--cases-file`
