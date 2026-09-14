@@ -45,10 +45,17 @@
 #
 # The arms run in order and the FIRST failing arm stops the run: a comparison
 # against a baseline whose grid was not fully measured is not a comparison.
-# The baseline is only repointed with `--set-baseline`, and only when every arm
-# passed -- the same rule the host repository's `run_bench.sh` uses.  The
-# comparison verdict is always written into the result directory
-# (`compare_result.txt`) before that, so a perf commit can cite it.
+# The comparison verdict is always written into the result directory
+# (`compare_result.txt`) before the baseline moves, so a perf commit can cite
+# it.
+#
+# `--set-baseline` repoints when every ARM passed -- the same rule the host
+# repository's `run_bench.sh` uses (`BENCH_STATUS -eq 0`, not the comparator's
+# exit status).  A comparator verdict of REGRESSED does not block the repoint,
+# because a baseline is a record of what the tree does now; blocking it would
+# leave the tree with no baseline at all after a real, accepted regression.  It
+# is printed loudly instead, so repointing past a regression is a decision
+# someone made rather than something that happened.
 #
 # ── Recording, and what this deliberately does NOT do ──────────────────────
 #
@@ -351,11 +358,24 @@ else
         echo "============================================================================"
         echo "  Performance comparison: ${stamp} vs baseline ${base_name}"
         echo "============================================================================"
+        set +e
         {
             echo "# compare: ${stamp} vs baseline ${base_name}"
             python3 tools/compare_snapshots.py "${out}" \
                 --base "${chip_dir}/baseline" --chip "${chip}" --top 40
-        } 2>&1 | tee "${out}/compare_result.txt" || true
+        } 2>&1 | tee "${out}/compare_result.txt"
+        compare_rc=${PIPESTATUS[0]}
+        set -e
+        if [[ ${compare_rc} -ne 0 ]]; then
+            echo ""
+            echo "run_bench.sh: the comparator reports maca_c BEYOND tolerance or a"
+            echo "              status change against the baseline (rc=${compare_rc})."
+            echo "              Full report: ${out}/compare_result.txt"
+            if [[ ${set_baseline} -eq 1 ]]; then
+                echo "              --set-baseline was given, so the baseline WILL move"
+                echo "              past this.  That is a decision: cite it in the commit."
+            fi
+        fi
     fi
 fi
 
