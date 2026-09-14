@@ -597,7 +597,33 @@ inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk)
 // where the row count is still the problem here.
 constexpr uint32_t kChunkedMaxBatches = 64;
 constexpr uint32_t kChunkedMinVocab = 262144;
-constexpr int kChunkedChunks = 16;
+
+// The chunk count is SM-count-sensitive: a grid of `kBatch * chunks` CTAs
+// leaves `ctas mod SM` SMs idle when it is not a whole number of waves, and the
+// same 16 is a different fraction of a wave on a 104-AP C500, a 28-SM C600 and
+// a 32-SM C600U.  `NATIVE_SM_COUNT` (csrc/structs.h) is the compile-time fact
+// that makes this decidable per build.
+//
+// The rule, stated so it can be argued with: **keep the measured count where it
+// already fills at least half of its last wave, and otherwise round up to the
+// next count that fills a whole number of waves.**  The half-wave floor is what
+// keeps C500 exactly where it was measured -- b6 x 16 = 96 CTAs over 104 APs
+// leaves 96 of the last wave's 104 APs busy (92%), so 16 is kept and no number
+// recorded anywhere moves.  An architecture whose SM count would leave that grid
+// under half a wave gets a count that fills it instead.
+constexpr int wave_filled_chunks(int base_chunks) {
+    constexpr int kBatch = 6;                      // the split's gate is small
+    constexpr int kSms = (int)NATIVE_SM_COUNT;
+    const int ctas = kBatch * base_chunks;
+    const int last_wave = ctas % kSms;
+    if (last_wave == 0 || last_wave * 2 >= kSms) return base_chunks;
+    return ((ctas + kSms - 1) / kSms) * kSms / kBatch;
+}
+
+// [MACA] SM-count-sensitive.  C500's 104 APs are what 16 was measured against
+// (b6 x 16 = 96 CTAs = 92% of the last wave, and the chunk sweep shows 16-32
+// flat there); C600 (28) and C600U (32) round it by `wave_filled_chunks`.
+constexpr int kChunkedChunks = wave_filled_chunks(16);
 
 struct ChunkedWorkspace {
     int32_t *candidate_indices;
@@ -694,12 +720,22 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 //   v524288    144.2   108.3   107.7   104.2
 //
 // Flat from 16 up; 8 is short of CTAs (48).  24 is within noise of 16 and 32
-// trades the two columns off, so the shared value is the pick.
+// trades the two columns off, so the shared value is the pick *on C500*.
+//
+// On a part with a different SM count the same 16 is a different fraction of a
+// wave, so the two splits round *up* to a whole number of waves on whatever
+// architecture the extension was built for (`NATIVE_SM_COUNT`, csrc/structs.h
+// -- 104 on C500, 28 on C600, 32 on C600U, all compile-time).  This is the one
+// place where a number the split is made of is SM-count-sensitive.
 int f32_chunked_chunks() {
     static const int n = [] {
         const char *v = std::getenv("DEEP_SELECT_F32_CHUNKS");
-        const int d = (v != nullptr && v[0] != '\0') ? std::atoi(v) : 16;
-        return (d >= 2 && d <= 256) ? d : 16;
+        if (v != nullptr && v[0] != '\0') {
+            const int d = std::atoi(v);
+            return (d >= 2 && d <= 256) ? d : 16;
+        }
+        // 96 CTAs at b6 (92% of C500's 416) measured best; wave-round it.
+        return wave_filled_chunks(16);
     }();
     return n;
 }

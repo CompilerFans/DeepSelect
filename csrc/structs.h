@@ -55,6 +55,37 @@ static constexpr uint32_t NATIVE_SHARED_MEMORY_PER_SM_BYTES = 128 * 1024;
 memory capacity here and its row to deep_gemm/utils/arch_config.py"
 #endif
 
+// [MACA] SM ("AP") count of the architecture this extension is built for.
+//
+// Compile-time and per target, from the same `DEEP_SELECT_NATIVE_ARCH` as the
+// capacity above -- NOT read from the runtime API, because the quantity is a
+// property of the arch the kernel was compiled for and every decision that
+// uses it (grid sizing, chunk counts) is a compile-time or host-side constant.
+//
+// **This is a reservation, not a convenience.**  A chunked grid is sized in
+// CTAs, and a grid whose CTA count is not a multiple of the SM count leaves
+// `ctas mod SM` SMs idle in its last wave -- the smaller the batch, the larger
+// the fraction.  C500's 104 APs are what the split's chunk count was tuned
+// against (16 chunks at b6 = 96 CTAs = 92% fill); the same 16 on a 32-SM
+// C600U would be 3 full waves (100%), and on a 28-SM C600 3.43 waves (86%).
+//
+// The counts are the AP/SM counts of the parts in each family:
+//   xcore1000  C500      104
+//   xcore1500  C600       28
+//   xcore1600  C600U      32
+// (C600-UL is a C600U part and shares the family's count; if a future part in
+// one of these families reports a different count, this table is where it
+// goes -- and so is the capacity table above, which has the same shape.)
+#if DEEP_SELECT_NATIVE_ARCH == 1000
+static constexpr uint32_t NATIVE_SM_COUNT = 104;
+#elif DEEP_SELECT_NATIVE_ARCH == 1500
+static constexpr uint32_t NATIVE_SM_COUNT = 28;
+#elif DEEP_SELECT_NATIVE_ARCH == 1600
+static constexpr uint32_t NATIVE_SM_COUNT = 32;
+#endif
+static_assert(NATIVE_SM_COUNT > 0, "NATIVE_SM_COUNT must be set per family");
+
+
 struct TopkSelectArgs {
     uint32_t batch_size;
     uint32_t vocab_size;
