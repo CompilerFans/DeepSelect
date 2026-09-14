@@ -1,0 +1,59 @@
+# run_bench.sh    device_dir=MetaX_C500  chip=metax_xcore1000
+# timestamp_utc   2026-09-14T16:38:09Z
+# host            sw-R5300-G6
+# extension       deep_select/deep_select_xcore1000.cpython-310-x86_64-linux-gnu.so
+# extension_md5   d07e79f595b00dfc2683b941a8484a07
+# cuda_visible_devices 3
+# arms            maca_c,torch,deep_gemm
+# STALE           no
+# ---
+# mx-smi
+mx-smi  version: 2.3.1
+
+=================== MetaX System Management Interface Log ===================
+Timestamp                                         : Tue Sep 15 00:38:09 2026
+
+Attached GPUs                                     : 4
++---------------------------------------------------------------------------------+
+| MX-SMI 2.3.1                       Kernel Mode Driver Version: 3.8.23           |
+| MACA Version: 3.7.0.36             BIOS Version: 1.33.4.0                       |
+|------------------+-----------------+---------------------+----------------------|
+| Board       Name | GPU   Persist-M | Bus-id              | GPU-Util      sGPU-M |
+| Pwr:Usage/Cap    | Temp       Perf | Memory-Usage        | GPU-State            |
+|==================+=================+=====================+======================|
+| 0     MetaX C500 | 0           Off | 0000:1b:00.0        | 0%          Disabled |
+| 42W / 350W       | 34C          P0 | 859/65536 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+| 1     MetaX C500 | 1           Off | 0000:21:00.0        | 0%          Disabled |
+| 59W / 350W       | 35C          P9 | 1819/65536 MiB      | Available            |
++------------------+-----------------+---------------------+----------------------+
+| 2     MetaX C500 | 2           Off | 0000:24:00.0        | 0%          Disabled |
+| 46W / 350W       | 35C          P0 | 859/65536 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+| 3     MetaX C500 | 3           Off | 0000:25:00.0        | 0%          Disabled |
+| 42W / 350W       | 35C          P3 | 923/65536 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+
++---------------------------------------------------------------------------------+
+| Process:                                                                        |
+|  GPU                    PID         Process Name                 GPU Memory     |
+|                                                                  Usage(MiB)     |
+|=================================================================================|
+|  1                  3241288         python                       960            |
++---------------------------------------------------------------------------------+
+
+End of Log
+# pgrep -af python
+#   184377 /bin/bash -c source /home/compiler_gfx/.claude/shell-snapshots/snapshot-bash-1789302773950-m6w4t4.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && eval 'CUDA_VISIBLE_DEVICES=3 PYTHONPATH=. timeout 600 python -c " import torch, deep_gemm from deep_gemm.kernels.sparse_mqa.maca_c import NUM_MAX_CAND from deep_gemm.kernels.sparse_mqa.maca_c_paged import paged_metadata_bytes num_q=4 cand = torch.zeros(num_q, 64, dtype=torch.int32, device='"'"'cuda'"'"') for i in range(num_q): cand[i] = torch.arange(64, device='"'"'cuda'"'"') ctx = torch.full((num_q,), 512, dtype=torch.int32, device='"'"'cuda'"'"') bt = torch.zeros(num_q, 16, dtype=torch.int32, device='"'"'cuda'"'"') for i in range(num_q): bt[i] = torch.arange(16, device='"'"'cuda'"'"') m = deep_gemm.get_int8_paged_sparse_mqa_logits_metadata(cand, ctx, bt, 64) print('"'"'paged blob numel'"'"', m.numel(), '"'"'paged_metadata_bytes'"'"', paged_metadata_bytes(num_q)) import deep_gemm.kernels.sparse_mqa.maca_c as mc " 2>&1 | tail -5' < /dev/null && pwd -P >| /tmp/claude-5b86-cwd
+#   184379 timeout 600 python -c  import torch, deep_gemm from deep_gemm.kernels.sparse_mqa.maca_c import NUM_MAX_CAND from deep_gemm.kernels.sparse_mqa.maca_c_paged import paged_metadata_bytes num_q=4 cand = torch.zeros(num_q, 64, dtype=torch.int32, device='cuda') for i in range(num_q): cand[i] = torch.arange(64, device='cuda') ctx = torch.full((num_q,), 512, dtype=torch.int32, device='cuda') bt = torch.zeros(num_q, 16, dtype=torch.int32, device='cuda') for i in range(num_q): bt[i] = torch.arange(16, device='cuda') m = deep_gemm.get_int8_paged_sparse_mqa_logits_metadata(cand, ctx, bt, 64) print('paged blob numel', m.numel(), 'paged_metadata_bytes', paged_metadata_bytes(num_q)) import deep_gemm.kernels.sparse_mqa.maca_c as mc 
+#   184381 python -c  import torch, deep_gemm from deep_gemm.kernels.sparse_mqa.maca_c import NUM_MAX_CAND from deep_gemm.kernels.sparse_mqa.maca_c_paged import paged_metadata_bytes num_q=4 cand = torch.zeros(num_q, 64, dtype=torch.int32, device='cuda') for i in range(num_q): cand[i] = torch.arange(64, device='cuda') ctx = torch.full((num_q,), 512, dtype=torch.int32, device='cuda') bt = torch.zeros(num_q, 16, dtype=torch.int32, device='cuda') for i in range(num_q): bt[i] = torch.arange(16, device='cuda') m = deep_gemm.get_int8_paged_sparse_mqa_logits_metadata(cand, ctx, bt, 64) print('paged blob numel', m.numel(), 'paged_metadata_bytes', paged_metadata_bytes(num_q)) import deep_gemm.kernels.sparse_mqa.maca_c as mc 
+#   184860 /bin/bash -c source /home/compiler_gfx/.claude/shell-snapshots/snapshot-bash-1789302773950-m6w4t4.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && eval 'rm -f /tmp/unit-reds/failed_ids.txt /tmp/unit-reds/failed_tb.txt /tmp/unit-reds/${USER}_ut_full.log 2>/dev/null nohup env PYTHONPATH=/home/compiler_gfx/tilelang/mcDeepGEMM:/tmp/unit-reds CUDA_VISIBLE_DEVICES=0 PYTHONDONTWRITEBYTECODE=1 /home/compiler_gfx/miniconda3/bin/python -u -m pytest deep_gemm/tests/test_unit/ -q -p no:randomly -W ignore -p dgplugin > /tmp/unit-reds/ut_full_unitereds.log 2>&1 & echo "launched pid $!"; sleep 20; rtk ps -o etime= -p $!; tail -c 150 /tmp/unit-reds/ut_full_unitereds.log' < /dev/null && pwd -P >| /tmp/claude-3be9-cwd
+#   184867 /home/compiler_gfx/miniconda3/bin/python -u -m pytest deep_gemm/tests/test_unit/ -q -p no:randomly -W ignore -p dgplugin
+#   3241286 /home/compiler_gfx/miniconda3/bin/python -c from multiprocessing.resource_tracker import main;main(3)
+#   3241288 /home/compiler_gfx/miniconda3/bin/python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=4, pipe_handle=8) --multiprocessing-fork
+#   3480945 python3 /home/compiler_gfx/.claude/plugins/cache/omc/oh-my-claudecode/4.14.0/bridge/gyoshu_bridge.py /run/user/1005/omc/ab562457a8df/bridge.sock
+# run_bench.sh: finished rc=0
+# snapshot_failed 0
+# extension_md5   d07e79f595b00dfc2683b941a8484a07   (deep_select/deep_select_xcore1000.cpython-310-x86_64-linux-gnu.so)
+# cuda_visible_devices 3
+# out             perf_data/MetaX_C500/20260915_003809
