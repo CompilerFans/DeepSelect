@@ -791,11 +791,34 @@ int f32_chunked_chunks(uint32_t batches) {
 //     256    524288      1924.4     1282.2     1.50x
 //
 // and at b256 the split *loses* below 262144 (394 vs 326) while winning above
-// it, which is why there are two tiers rather than one threshold.  Both are
-// placed on the measured side of their knee, not at it.
+// it.  That "loses" half no longer holds, and the reason is the chunk count
+// above: when this floor was measured the split's cost was `chunks` CTAs per
+// row, so at 16 chunks b256-v65536 was 256 * 17 = 4,352 CTAs deep in a
+// chunk-merge the machine had no room to hide.  With the count now a constant 2
+// for every batch above 64, the merge is 3 CTAs per row at every shape, so the
+// cost no longer scales with the gate and the floor is free to drop to the
+// small-batch tier's value.  Measured (kernel time, C500, three alternating
+// rounds, `floor_ab.py`; both sides contract-checked, 16546/16552/16544 vs
+// 18955/18963/18949 us over the eight cells):
+//
+//   cell              floor 262144   floor 65536
+//   b4096-v  65536       3485.1        2738.7      -21.4%
+//   b4096-v 129280       5845.5        4802.4      -17.8%
+//   b  256-v  65536       330.2         217.9      -34.0%   <- was the "loses" cell
+//   b  256-v 129280       534.6         366.4      -31.5%
+//   b  512-v 129280       846.4         684.3      -19.1%
+//   b  768-v  65536       741.5         564.2      -23.9%
+//   b    6-v  65536        66.3          66.4       +0.2%
+//   b 4096-v 262144      7113.1        7110.3       -0.0%
+//   TOTAL               18962.7       16551.4        -12.7%
+//
+// The two neutral cells are the contract: b6 already opened (the tier is `<=`
+// on both) and b4096-v262144 was already served.  Both tiers now sit on the
+// measured side of the same knee, which is the small-batch tier's, and no
+// longer on two different ones.
 constexpr uint32_t kF32ChunkedMinVocabSmallBatch = 65536;
 constexpr uint32_t kF32ChunkedMaxBatchesSmallBatch = 64;
-constexpr uint32_t kF32ChunkedMinVocabLargeBatch = 262144;
+constexpr uint32_t kF32ChunkedMinVocabLargeBatch = 65536;
 constexpr uint32_t kF32ChunkedMaxBatchesLargeBatch = 4096;
 
 // The 16-bit split starts at 16; the fp32 split's chunk count is measured in
