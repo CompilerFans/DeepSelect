@@ -154,11 +154,12 @@ __device__ __forceinline__ void hist_add_f32(
 __device__ __forceinline__ void stage_f32_lane(
     float raw, uint32_t idx, uint32_t threshold_bin, int32_t* output,
     uint32_t* s_counter, uint32_t* s_input_flat, uint32_t* s_num_input0,
-    uint32_t* s_histogram, uint32_t smem_input_size)
+    uint32_t* s_histogram, uint32_t smem_input_size, uint32_t chunk_begin = 0)
 {
     const uint32_t bin = float_to_uint8(raw);
     if (bin > threshold_bin) {
-        output[atomicAdd(s_counter, 1u)] = static_cast<int32_t>(idx);
+        output[atomicAdd(s_counter, 1u)] =
+            static_cast<int32_t>(idx + chunk_begin);
     } else if (bin == threshold_bin) {
         const uint32_t pos = atomicAdd(s_num_input0, 1u);
         if (pos < smem_input_size) {
@@ -409,6 +410,24 @@ __device__ __forceinline__ uint32_t run_cumsum_warp(
 // FP32 radix topk row
 // ============================================================
 
+// The fp32 row's dynamic shared-memory requirement, as seen from a launch site.
+// `radix_topk_row_f32` derives the same number from `kSMEM`; both callers (the
+// row entry and the chunked split's stage kernels) must request exactly this,
+// so it lives here rather than being re-spelled at each `<<<>>>`.
+//
+// The static half is `s_histogram_buf[2][256+32]` plus `s_counter`,
+// `s_threshold_bin_id`, `s_high_threshold_bin_id`, `s_num_input[2]` and
+// `s_last_remain` -- 6 words, not the 4 an earlier expression charged.
+constexpr uint32_t kF32StaticBytes =
+    2 * (kRadix + 32) * sizeof(uint32_t) + 6 * sizeof(uint32_t);
+// Two of these tiles the dynamic region, one for the arena and one for the
+// refine's ping-pong staging; `radix_topk_row_f32` names the halves by
+// multiplying this.
+constexpr uint32_t kF32SmemInputSize =
+    (kSMEM - kF32StaticBytes) / (2 * sizeof(uint32_t));
+constexpr size_t kF32RowSmemBytes =
+    2 * (size_t)kF32SmemInputSize * sizeof(uint32_t);
+
 // [DeepSelect] Overflow resolution for the fp32 row below.
 //
 // The staging pass of `radix_topk_row_f32` keeps only the first
@@ -435,7 +454,7 @@ __device__ __forceinline__ void radix_topk_row_f32_rescan(
     const float* input, int32_t* output, uint32_t length, uint32_t topk,
     uint32_t coarse_bin, uint32_t remain,
     uint32_t (&s_histogram_buf)[2][kRadix + 32], uint32_t& s_counter,
-    int32_t& s_last_remain)
+    int32_t& s_last_remain, uint32_t chunk_begin = 0)
 {
     constexpr uint32_t BLOCK_SIZE = kBlockSize;
     const uint32_t tx = threadIdx.x;
@@ -476,12 +495,14 @@ __device__ __forceinline__ void radix_topk_row_f32_rescan(
             if (filtered && (key & prefix_mask) != prefix_value) continue;
             const uint32_t bin = (key >> shift) & 0xFFu;
             if (bin > pivot) {
-                output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+                output[atomicAdd(&s_counter, 1u)] =
+                    static_cast<int32_t>(idx + chunk_begin);
             } else if (is_last && bin == pivot) {
                 // The whole key is now known: any `remain` of the ties are
                 // equally valid, and the tail slots take exactly that many.
                 const int32_t p = atomicAdd(&s_last_remain, -1);
-                if (p > 0) output[topk - p] = static_cast<int32_t>(idx);
+                if (p > 0)
+                    output[topk - p] = static_cast<int32_t>(idx + chunk_begin);
             }
         }
         __syncthreads();
@@ -491,20 +512,25 @@ __device__ __forceinline__ void radix_topk_row_f32_rescan(
     }
 }
 
+// `chunk_begin` converts a position in *this* call's window to its column in
+// the row.  It is 0 for the row entry, where the two are the same; the chunked
+// fp32 split passes a chunk's column offset and gets the row columns the
+// contract half needs.  It is applied only at the emit, which is the single
+// point where an index becomes an answer -- the arena, the refine and the
+// rescan all work on positions in the window either way.
 __device__ __forceinline__ void radix_topk_row_f32(
-    const float* input, int32_t* output, uint32_t length, uint32_t topk)
+    const float* input, int32_t* output, uint32_t length, uint32_t topk,
+    uint32_t chunk_begin = 0)
 {
     constexpr uint32_t RADIX = 256;
     constexpr uint32_t BLOCK_SIZE = kBlockSize;
 
     // smem 布局：直方图 + 候选索引
-    // 静态变量: s_histogram_buf(2304) + s_counter(4) + s_threshold_bin_id(4)
-    //           + s_num_input(8) + s_last_remain(4) = 2324 bytes
-    // 候选索引: 剩余空间
-    constexpr uint32_t STATIC_BYTES = 2 * (RADIX + 32) * sizeof(uint32_t)
-                                    + sizeof(uint32_t) + sizeof(uint32_t)
-                                    + 2 * sizeof(uint32_t) + sizeof(int32_t);
-    constexpr uint32_t SMEM_INPUT_SIZE = (kSMEM - STATIC_BYTES) / (2 * sizeof(int32_t));
+    // 静态变量: s_histogram_buf(2304) + s_counter/s_threshold_bin_id/
+    //           s_high_threshold_bin_id (12) + s_num_input(8) + s_last_remain(4)
+    // 动态区: arena 与 refine 的 ping-pong 暂存，各一半
+    constexpr uint32_t STATIC_BYTES = kF32StaticBytes;
+    constexpr uint32_t SMEM_INPUT_SIZE = kF32SmemInputSize;
 
     __shared__ uint32_t s_histogram_buf[2][RADIX + 32];
     __shared__ uint32_t s_counter;
@@ -540,14 +566,14 @@ __device__ __forceinline__ void radix_topk_row_f32(
         if (remain_topk == 0) {
             for (uint32_t idx = tx * 4; idx < vec_len; idx += BLOCK_SIZE * 4) {
                 const float4 v = __ldg(reinterpret_cast<const float4 *>(input + idx));
-                if (float_to_uint8(v.x) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-                if (float_to_uint8(v.y) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + 1);
-                if (float_to_uint8(v.z) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + 2);
-                if (float_to_uint8(v.w) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + 3);
+                if (float_to_uint8(v.x) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + chunk_begin);
+                if (float_to_uint8(v.y) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + 1 + chunk_begin);
+                if (float_to_uint8(v.z) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + 2 + chunk_begin);
+                if (float_to_uint8(v.w) > threshold_bin) output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + 3 + chunk_begin);
             }
             for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
                 if (float_to_uint8(__ldg(input + idx)) > threshold_bin)
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + chunk_begin);
             __syncthreads(); return;
         }
         __syncthreads();
@@ -556,18 +582,18 @@ __device__ __forceinline__ void radix_topk_row_f32(
         for (uint32_t idx = tx * 4; idx < vec_len; idx += BLOCK_SIZE * 4) {
             const float4 v = __ldg(reinterpret_cast<const float4 *>(input + idx));
             stage_f32_lane(v.x, idx,     threshold_bin, output, &s_counter,
-                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE);
+                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE, chunk_begin);
             stage_f32_lane(v.y, idx + 1, threshold_bin, output, &s_counter,
-                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE);
+                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE, chunk_begin);
             stage_f32_lane(v.z, idx + 2, threshold_bin, output, &s_counter,
-                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE);
+                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE, chunk_begin);
             stage_f32_lane(v.w, idx + 3, threshold_bin, output, &s_counter,
-                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE);
+                           s_input_flat, &s_num_input[0], s_histogram, SMEM_INPUT_SIZE, chunk_begin);
         }
         for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
             stage_f32_lane(__ldg(input + idx), idx, threshold_bin, output,
                            &s_counter, s_input_flat, &s_num_input[0],
-                           s_histogram, SMEM_INPUT_SIZE);
+                           s_histogram, SMEM_INPUT_SIZE, chunk_begin);
         __syncthreads();
     }
 
@@ -576,7 +602,8 @@ __device__ __forceinline__ void radix_topk_row_f32(
     if (s_num_input[0] > SMEM_INPUT_SIZE) {
         radix_topk_row_f32_rescan(input, output, length, topk,
                                   s_threshold_bin_id, remain_topk,
-                                  s_histogram_buf, s_counter, s_last_remain);
+                                  s_histogram_buf, s_counter, s_last_remain,
+                                  chunk_begin);
         return;
     }
 
@@ -597,7 +624,8 @@ __device__ __forceinline__ void radix_topk_row_f32(
             for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
                 auto idx = s_input_flat[r_off + i];
                 if (((float_to_uint32(__ldg(input + idx)) >> (24 - round * 8)) & 0xFF) > threshold_bin)
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+                    output[atomicAdd(&s_counter, 1u)] =
+                        static_cast<int32_t>(idx + chunk_begin);
             }
             __syncthreads(); break;
         }
@@ -611,11 +639,13 @@ __device__ __forceinline__ void radix_topk_row_f32(
             auto offset = 24 - round * 8;
             auto bin = (float_to_uint32(raw) >> offset) & 0xFF;
             if (bin > threshold_bin) {
-                output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+                output[atomicAdd(&s_counter, 1u)] =
+                    static_cast<int32_t>(idx + chunk_begin);
             } else if (bin == threshold_bin) {
                 if (round == 3) {
                     auto p = atomicAdd(&s_last_remain, -1);
-                    if (p > 0) output[topk - p] = static_cast<int32_t>(idx);
+                    if (p > 0)
+                        output[topk - p] = static_cast<int32_t>(idx + chunk_begin);
                 } else {
                     uint32_t p = atomicAdd(&s_num_input[r_idx ^ 1], 1u);
                     if (p < SMEM_INPUT_SIZE) {
@@ -2210,6 +2240,206 @@ inline cudaError_t launch_topk_bf16_dispatch(
     int B, int L, int topk, cudaStream_t stream)
 {
     return launch_topk_bf16_single_row(scores, lengths, indices, B, L, topk, stream);
+}
+
+// stage 1's answer is a *value*, so the merge can rank `chunks * topk` of them
+// and map positions back.  A slot stage 1 could not fill takes `-inf`, which
+// cannot appear in a real input: `is_nan_value` gates NaNs out before any
+// selection runs, so no element is NaN and -inf is unreachable from the row.
+__global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage1_kernel(
+    const float *scores, const int32_t *lengths, int32_t *cols, float *vals,
+    int64_t score_stride, int topk, int B, int num_chunks, int chunk_size,
+    int candidate_stride)
+{
+    const int global_bid = blockIdx.x;
+    const int bid = global_bid / num_chunks;
+    const int chunk = global_bid - bid * num_chunks;
+    if (bid >= B) return;
+
+    const int32_t length = lengths[bid];
+    const int start = chunk * chunk_size;
+    const int chunk_len = (start < length)
+                              ? min(chunk_size, static_cast<int>(length - start))
+                              : 0;
+    constexpr int BLOCK_SIZE = kBlockSize;
+    int32_t *chunk_cols = cols + bid * candidate_stride + chunk * topk;
+    float *chunk_vals = vals + bid * candidate_stride + chunk * topk;
+    const float *row = scores + (int64_t)bid * score_stride;
+
+    if (chunk_len <= 0) {
+        for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
+            chunk_cols[i] = -1;
+            chunk_vals[i] = -__builtin_huge_valf();
+        }
+        return;
+    }
+
+    if (chunk_len <= topk) {
+        for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
+            if (i < chunk_len) {
+                chunk_cols[i] = start + i;
+                chunk_vals[i] = __ldg(row + start + i);
+            } else {
+                chunk_cols[i] = -1;
+                chunk_vals[i] = -__builtin_huge_valf();
+            }
+        }
+        return;
+    }
+
+    // The row entry, on this chunk's window, answering in row columns.  Its
+    // `-1` sentinel is a column index that cannot be real, so it becomes the
+    // same empty-slot marker the two arms above write.
+    radix_topk_row_f32(row + start, chunk_cols, (uint32_t)chunk_len,
+                       (uint32_t)topk, (uint32_t)start);
+    for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
+        const int32_t col = chunk_cols[i];
+        if (col >= start && col < start + chunk_len) {
+            chunk_vals[i] = __ldg(row + col);
+        } else {
+            chunk_cols[i] = -1;
+            chunk_vals[i] = -__builtin_huge_valf();
+        }
+    }
+}
+
+// The merge.  It ranks the candidate *values* -- so its answer is a position
+// into the candidate arrays, which is what lets `cols` be mapped back -- and
+// rewrites `topk` columns.
+__global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage2_kernel(
+    const float *vals, const int32_t *cols, int32_t *out, int topk, int B,
+    int candidate_stride)
+{
+    const int bid = blockIdx.x;
+    if (bid >= B) return;
+
+    const float *row_vals = vals + bid * candidate_stride;
+    const int32_t *row_cols = cols + bid * candidate_stride;
+    int32_t *row_out = out + (int64_t)bid * topk;
+    constexpr int BLOCK_SIZE = kBlockSize;
+
+    radix_topk_row_f32(row_vals, row_out, (uint32_t)candidate_stride,
+                       (uint32_t)topk);
+    for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
+        const int32_t pos = row_out[i];
+        row_out[i] = (pos >= 0 && pos < candidate_stride) ? row_cols[pos] : -1;
+    }
+}
+
+// ── the fp32 chunked split ──────────────────────────────────────────────────
+//
+// The 16-bit split above ranks each chunk with `radix_topk_row_bf16_k`, whose
+// answer is a *value* and whose `output` is a position inside the chunk, so the
+// merge can rank `chunks * topk` candidate values and map positions back
+// through the candidate arrays.  The fp32 row entry writes *row columns*
+// instead (its `chunk_begin` argument is the chunk's column offset), so the
+// split carries the columns alongside the values:
+//
+//   cols[batches * chunks * topk]  int32  the row columns stage 1 selected
+//   vals[batches * chunks * topk]  float  their values, -inf for an empty slot
+//   out [batches * topk]           int32  the merge's answer, one column each
+//
+// stage 2 ranks `vals` (so its answer is a position into the candidate arrays)
+// and maps that position through `cols`.  Everything else -- the grid, the
+// `-1` sentinel for a slot the merge could not fill, the contract half's
+// `rerank` fallback -- is the 16-bit split's, unchanged.
+constexpr size_t kF32ChunkBlocks = kBlockSize;   // `radix_topk_row_f32`'s width
+// The split's chunk count is the caller's (`deep_select_maca::kChunkedChunks`,
+// currently 16, which is also what `nan_scan_kernel` is launched with).  It is
+// only ever used for *sizing* here -- the kernels take it as an argument -- so
+// this header does not need the caller's constant, just a ceiling to bound
+// `uint32_t` arithmetic with.  64 covers any value the dispatcher could pick.
+constexpr uint32_t kF32MaxTopK = 4096u;
+
+inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
+                                          uint32_t chunks) {
+    const size_t candidates = (size_t)batches * chunks * topk;
+    return candidates * sizeof(int32_t) + candidates * sizeof(float) +
+           (size_t)batches * topk * sizeof(int32_t);
+}
+
+inline int32_t *chunked_f32_cols(void *base, uint32_t batches, uint32_t topk,
+                                 uint32_t chunks) {
+    (void)batches; (void)topk; (void)chunks;
+    return (int32_t *)base;
+}
+
+inline float *chunked_f32_vals(void *base, uint32_t batches, uint32_t topk,
+                              uint32_t chunks) {
+    return (float *)(chunked_f32_cols(base, batches, topk, chunks) +
+                     (size_t)batches * chunks * topk);
+}
+
+inline int32_t *chunked_f32_out(void *base, uint32_t batches, uint32_t topk,
+                                uint32_t chunks) {
+    return (int32_t *)(chunked_f32_vals(base, batches, topk, chunks) +
+                       (size_t)batches * chunks * topk);
+}
+
+// One CTA per (batch, chunk).  The chunk geometry is the 16-bit split's --
+// `raw = ceil(L / chunks)` rounded up to 8 elements -- so the two agree about
+// where a chunk starts, which is what lets `nan_scan_kernel` be shared.
+inline cudaError_t launch_topk_f32_chunks_stage1(
+    const float *scores, const int32_t *lengths, int32_t *cols, float *vals,
+    int B, int L, int topk, int num_chunks, cudaStream_t stream,
+    int64_t score_stride)
+{
+    if (topk > (int)kF32MaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    static bool init = false;
+    if (!init) {
+        cudaError_t err = cudaFuncSetAttribute(
+            topk_f32_chunk_stage1_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
+        if (err != cudaSuccess) return err;
+        init = true;
+    }
+    const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
+    const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
+    const int candidate_stride = num_chunks * topk;
+    topk_f32_chunk_stage1_kernel<<<B * num_chunks, (int)kF32ChunkBlocks, kSMEM,
+                                   stream>>>(
+        scores, lengths, cols, vals, score_stride, topk, B, num_chunks,
+        chunk_size, candidate_stride);
+    return cudaGetLastError();
+}
+
+inline cudaError_t launch_topk_f32_chunks_stage2(
+    const float *vals, const int32_t *cols, int32_t *out,
+    int B, int topk, int num_chunks, cudaStream_t stream)
+{
+    if (topk > (int)kF32MaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    static bool init = false;
+    if (!init) {
+        cudaError_t err = cudaFuncSetAttribute(
+            topk_f32_chunk_stage2_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
+        if (err != cudaSuccess) return err;
+        init = true;
+    }
+    const int candidate_stride = num_chunks * topk;
+    topk_f32_chunk_stage2_kernel<<<B, (int)kF32ChunkBlocks, kSMEM, stream>>>(
+        vals, cols, out, topk, B, candidate_stride);
+    return cudaGetLastError();
+}
+
+// stage 1, then stage 2.  `cols_base` is the start of the candidate arena the
+// split carved out (`chunked_f32_cols`); `out` must have room for `topk`
+// columns per row.  They are separate arguments because the caller keeps its
+// own state (the row-length table, the per-row NaN flags) in front of the
+// arena, so the arena is not at the base of the caller's workspace.
+inline cudaError_t launch_topk_f32_chunked(
+    const float *scores, const int32_t *lengths, void *cols_base, int32_t *out,
+    int B, int L, int topk, int num_chunks, cudaStream_t stream,
+    int64_t score_stride)
+{
+    const uint32_t b = (uint32_t)B, k = (uint32_t)topk, c = (uint32_t)num_chunks;
+    int32_t *cols = chunked_f32_cols(cols_base, b, k, c);
+    float *vals = chunked_f32_vals(cols_base, b, k, c);
+    cudaError_t err = launch_topk_f32_chunks_stage1(
+        scores, lengths, cols, vals, B, L, topk, num_chunks, stream, score_stride);
+    if (err != cudaSuccess) return err;
+    return launch_topk_f32_chunks_stage2(
+        vals, cols, out, B, topk, num_chunks, stream);
 }
 
 }  // namespace rk

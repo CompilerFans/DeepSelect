@@ -558,17 +558,16 @@ inline void set_radix_attr() {
 
 // One launch site for both dataflows of a mode: the row path selects, the
 // chunked path picks up the indices the split left in `params.preselected`.
+// Both dtypes have a split (16-bit above, fp32 below) and the preselected arm
+// is dtype-agnostic -- it reads `preselected` / `nan_flags` and skips
+// selection -- so there is no `if constexpr` narrowing it here.
 template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV>
 inline void launch_radix(const RowParams &params, uint32_t batches,
                          cudaStream_t stream, size_t smem, bool preselected) {
     if (preselected) {
-        // The split is 16-bit only, so no other dtype instantiates this arm
-        // (an fp32 instantiation could not be launched).
-        if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
-            set_radix_attr<ValueT, OutIdxT, BLOCK, SI, RV, SV, true>();
-            topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, true>
-                <<<batches, BLOCK, smem, stream>>>(params);
-        }
+        set_radix_attr<ValueT, OutIdxT, BLOCK, SI, RV, SV, true>();
+        topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, true>
+            <<<batches, BLOCK, smem, stream>>>(params);
     } else {
         set_radix_attr<ValueT, OutIdxT, BLOCK, SI, RV, SV>();
         topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, false>
@@ -679,6 +678,108 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
     }
 }
 
+// ── the fp32 split ──────────────────────────────────────────────────────────
+//
+// Same shape as the 16-bit split below, and deliberately the same gate to
+// start with.  The fp32 row kernel is slower per row than the 16-bit one, so
+// the split probably starts paying at a shorter row than 262144 -- but that is
+// a measurement this change does not have, and the two splits sharing a gate
+// also shares one code path for the scratch and the `end_ptr` route.
+constexpr uint32_t kF32ChunkedMaxBatches = 64;
+constexpr uint32_t kF32ChunkedMinVocab = 262144;
+// The 16-bit split's 16, which is also what `nan_scan_kernel` is launched with,
+// so the two splits agree about the chunk geometry.  Measured on the cells the
+// gate admits (b6, kernel time, C500, CUDA_VISIBLE_DEVICES=3):
+//
+//   chunks        8      16      24      32
+//   v262144     97.8    84.7    83.5    87.7
+//   v524288    144.2   108.3   107.7   104.2
+//
+// Flat from 16 up; 8 is short of CTAs (48).  24 is within noise of 16 and 32
+// trades the two columns off, so the shared value is the pick.
+int f32_chunked_chunks() {
+    static const int n = [] {
+        const char *v = std::getenv("DEEP_SELECT_F32_CHUNKS");
+        const int d = (v != nullptr && v[0] != '\0') ? std::atoi(v) : 16;
+        return (d >= 2 && d <= 256) ? d : 16;
+    }();
+    return n;
+}
+
+// The split is fp32-only (the caller's `value_dtype == 0`) and its merge only
+// compiles the k=512/1024 arms, which is the whole gate.
+inline bool chunked_f32_applies(const RowParams &params, uint32_t batches) {
+    if (batches == 0 || batches > kF32ChunkedMaxBatches) return false;
+    // `end_ptr` absent means the row really is `vocab_size` long, so the cap is
+    // the vocab either way -- and it is the only length the host knows without
+    // a device read.
+    if (params.vocab_size < kF32ChunkedMinVocab) return false;
+    return params.topk == 512 || params.topk == 1024;
+}
+
+inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
+                                          int chunks) {
+    return rk::chunked_f32_workspace_bytes(batches, topk, (uint32_t)chunks) +
+           (size_t)batches * sizeof(int32_t);
+}
+
+struct ChunkedF32Workspace {
+    int32_t *lengths;
+    int32_t *cols;
+    float *vals;
+    int32_t *merged;
+};
+
+inline ChunkedF32Workspace chunked_f32_workspace(void *base, uint32_t batches,
+                                                 uint32_t topk, int chunks) {
+    ChunkedF32Workspace ws{};
+    const size_t candidates = (size_t)batches * chunks * topk;
+    ws.lengths = (int32_t *)base;
+    ws.cols = ws.lengths + batches;
+    ws.vals = (float *)(ws.cols + candidates);
+    ws.merged = (int32_t *)(ws.vals + candidates);
+    return ws;
+}
+
+// Split, merge, then run the row kernel's contract half over the merged
+// answer.  `params` must satisfy `chunked_f32_applies`, workspace included.
+//
+// The row table is passed through as `end_ptr` rather than being consumed here
+// -- the split's own kernels take it as `lengths` -- which is what keeps the
+// dispatch below (`params.end_ptr != nullptr`) meaningful.
+template <typename OutIdxT>
+void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
+                              cudaStream_t stream, bool sorted_index,
+                              bool sorted_value, bool return_value, int block,
+                              void *workspace) {
+    const int chunks = f32_chunked_chunks();
+    const ChunkedF32Workspace ws = chunked_f32_workspace(
+        workspace, batches, params.topk, chunks);
+    // `nan_flags` is the table.  It is memset and then OR-ed per row, so the
+    // length is whichever ran.  `end_ptr` being non-null is the dispatch's
+    // precondition and the dispatcher only reaches here with the scratch's own
+    // all-`vocab_size` table, but clearing first makes the scan independent of
+    // that rather than merely consistent with it.
+    const size_t table_bytes = (size_t)batches * sizeof(int32_t);
+    cudaMemsetAsync(ws.lengths, 0, table_bytes, stream);
+    nan_scan_kernel<float><<<batches * chunks, kScanBlock, 0, stream>>>(
+        params.input, params.end_ptr,
+        (int64_t)(params.stride_input_batch / sizeof(float)),
+        params.vocab_size, (uint32_t)chunks, ws.lengths);
+    const cudaError_t rc = rk::launch_topk_f32_chunked(
+        (const float *)params.input, params.end_ptr, ws.cols, ws.merged,
+        (int)batches, (int)params.vocab_size, (int)params.topk, chunks, stream,
+        // The row stride is in bytes at this layer and in elements there.
+        (int64_t)(params.stride_input_batch / sizeof(float)));
+    RowParams merged = params;
+    const bool preselected = rc == cudaSuccess;
+    merged.preselected = preselected ? ws.merged : nullptr;
+    merged.nan_flags = preselected ? ws.lengths : nullptr;
+    launch_typed_radix<float, OutIdxT>(merged, batches, stream, sorted_index,
+                                       sorted_value, return_value, block,
+                                       preselected);
+}
+
 // Split, merge, then run the row kernel's contract half over the merged
 // answer.  `params` must satisfy `chunked_bf16_applies`, workspace included.
 template <typename OutIdxT>
@@ -737,6 +838,22 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
                 chunked_workspace);
         } else {
             detail::launch_typed_chunked<int64_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
+                chunked_workspace);
+        }
+        return;
+    }
+    if (value_dtype == 0 && chunked_workspace != nullptr &&
+        params.end_ptr != nullptr &&
+        chunked_bytes >= detail::chunked_f32_workspace_bytes(
+                             n, params.topk, detail::f32_chunked_chunks()) &&
+        detail::chunked_f32_applies(params, n)) {
+        if (index_dtype == 0) {
+            detail::launch_typed_f32_chunked<int32_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
+                chunked_workspace);
+        } else {
+            detail::launch_typed_f32_chunked<int64_t>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block,
                 chunked_workspace);
         }
@@ -985,11 +1102,23 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     int32_t *lengths = nullptr;
     void *workspace = nullptr;
     size_t workspace_bytes = 0;
-    if (value_dtype == 1 &&
-        detail::chunked_bf16_applies(p, (uint32_t)batches)) {
+    // One scratch arm per split.  The two differ in dtype and in the workspace
+    // layout they derive from it, so they are separate branches over a shared
+    // allocator/table front half; the fp32 arm takes the same `p.end_ptr` route
+    // (its split requires `end_ptr != nullptr`).
+    const bool bf16_split =
+        value_dtype == 1 && detail::chunked_bf16_applies(p, (uint32_t)batches);
+    const bool f32_split =
+        value_dtype == 0 && detail::chunked_f32_applies(p, (uint32_t)batches);
+    if (bf16_split || f32_split) {
+        const int f32_chunks = detail::f32_chunked_chunks();
         const size_t need_lengths = (size_t)batches * sizeof(int32_t);
         const size_t need_workspace =
-            detail::chunked_workspace_bytes((uint32_t)batches, (uint32_t)topk);
+            f32_split
+                ? detail::chunked_f32_workspace_bytes((uint32_t)batches,
+                                                      (uint32_t)topk, f32_chunks)
+                : detail::chunked_workspace_bytes((uint32_t)batches,
+                                                  (uint32_t)topk);
 
         if (!kCacheScratch) {
             if (!end.has_value()) {
