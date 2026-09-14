@@ -85,6 +85,55 @@ static constexpr uint32_t NATIVE_SM_COUNT = 32;
 #endif
 static_assert(NATIVE_SM_COUNT > 0, "NATIVE_SM_COUNT must be set per family");
 
+// [MACA] Work target for the fp32 chunked split's SMALL-batch arm, per family
+// and per build, from the same `DEEP_SELECT_NATIVE_ARCH` as everything above.
+//
+// The split's small-batch arm exists to fill a machine that a short batch
+// leaves empty: `batches` row CTAs over 104 APs is a fraction of a wave, and
+// the split multiplies the grid by `chunks + 1`.  How many chunks that takes is
+// not a fixed 16 -- it is "enough to fill a couple of waves, and no more",
+// because every extra chunk also adds a merge CTA whose work is a fraction of a
+// row's.  The measured shape of that (C500, `V = 32768`, one binary with only
+// `DEEP_SELECT_F32_CHUNKS` varying, 3 alternating rounds, median):
+//
+//   batches      c=2     c=4     c=8    c=16    c=32    best
+//         6     66.6    58.1    58.6    56.8    66.2    16
+//        16     69.0    59.8    58.0    60.1    77.4     8
+//        24     69.6    62.1    60.6    76.8    86.9     8
+//        32     68.8    61.3    61.3    77.9    93.6    4/8
+//        40     70.8    66.9    79.6    91.6   105.8     4
+//        48     72.9    65.5    83.0    96.2   114.0     4
+//        64     78.6    74.3    89.0   111.5   131.2     4
+//        80     82.7    91.2   104.7   126.9   154.6     2
+//        96     83.7    96.6   112.7   138.9   173.1     2
+//       256    148.9   172.0   220.4   302.5   372.5     2
+//
+// That is `chunks = largest power of two <= K / batches` almost everywhere, so
+// the policy is one constant: **K is how much chunked work one SM should be
+// carrying.**  Fitted over all 24 measured points, K = 256 matches 22 of them
+// and K = 208 is worse (14.7% worst against 3.6%).
+//
+// K = 260 is 2.5 x 104, i.e. the fitted 256 rounded into a form that is
+// obviously a property of the machine rather than a fitted number.  Measured
+// behaviour is identical to K = 256 (same 22 points, same 3.6% worst), and both
+// keep the batches they change strictly inside the small-batch tier --
+// b24..b64, which is where the fixed 16 was wrong by 11..31%.
+//
+// **The C600/C600U rows are a scaled reservation, not a measurement.**  No
+// hardware for those was available, and the ratio K/SM_COUNT is the one thing
+// that is not evidenced here; it is 2.5 on C500.  Scaling it is the only
+// option, and the value is deliberately a separate constant per family so a
+// real measurement replaces one number instead of a formula.
+#if DEEP_SELECT_NATIVE_ARCH == 1000
+static constexpr uint32_t NATIVE_F32_CHUNK_WORK_TARGET = 260;   // measured
+#elif DEEP_SELECT_NATIVE_ARCH == 1500
+static constexpr uint32_t NATIVE_F32_CHUNK_WORK_TARGET = 70;    // scaled, unmeasured
+#elif DEEP_SELECT_NATIVE_ARCH == 1600
+static constexpr uint32_t NATIVE_F32_CHUNK_WORK_TARGET = 80;    // scaled, unmeasured
+#endif
+static_assert(NATIVE_F32_CHUNK_WORK_TARGET > 0,
+              "NATIVE_F32_CHUNK_WORK_TARGET must be set per family");
+
 
 struct TopkSelectArgs {
     uint32_t batch_size;

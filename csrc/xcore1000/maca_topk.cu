@@ -734,7 +734,12 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 // justified marked as such.  Both split geometry functions are pure, so this is
 // computable here rather than assertable.
 //
-// `f32_chunks_small_batch()` = `wave_filled_chunks(16)`:
+// `f32_chunks_small_batch(batches)` used to be the fixed `wave_filled_chunks(16)`
+// and is now `f32_chunks_for(batches)` -- see its definition below, and
+// `NATIVE_F32_CHUNK_WORK_TARGET` in `csrc/structs.h` for the measurement.  What
+// follows is that older rule's SM-count arithmetic, kept because it is why the
+// fixed value was believed to be right, and because the reason it was wrong is
+// the same reason this family of constants exists:
 //
 //   family        SMs  b6x16 % SMs   result   b6x(chunks+1) % SMs
 //   C500          104        96       16        102  (98%)   measured
@@ -742,15 +747,13 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 //   C600U          32        96       16        102  (19%)
 //   C600 (b8)      28        96       16        136  (24%)
 //
-// The rule keys on `kBatch = 6` because 6 is the split's gate, so it answers
-// for b6 -- and at a SM count where 6 does not divide the SM count it lands the
-// MERGE (the +1 CTA per row) off a wave boundary: every one of those rows is a
-// whole extra wave for a merge that is a small fraction of the row's work.
-// The 1B arm keeps its measured value deliberately (rendering b8-v524288 is
-// latency-bound at 3% of the read wall, 34 us against a 99 us chunk sweep), and
-// C600 does land on 16 chunks = 2 wave-fills, which is coherent.  What is NOT
-// measured, on any part but C500, is whether the chunk count is right at the
-// batch the arm actually runs at.
+// That rule keys on `kBatch = 6` because 6 is the split's gate, so it answers
+// for b6 -- and it answers *only* for b6.  At b24 the same 16 chunks is 21%
+// slower than 8, and at b48/b64 it is 27%/31% slower than 4; the old note below
+// ("the small-batch arm keeps the value that was measured on it") was true of
+// b6 and silently extended to a whole tier.  The work-target form removes that
+// extension: it is a function of both quantities the optimum actually depends
+// on, and it reduces to 16 at b6, which is where the measurement was taken.
 //
 // `f32_chunks_large_batch()` = 2 (constant): the chunk count produced
 // `2 * batches` CTAs, and the merge `batches`.  So on a 28-SM C600 the merge is
@@ -782,13 +785,30 @@ namespace {
 //       32        87.7           988.0       15,093          22,154
 //       64       119.4              --       21,985          29,800
 //
-// One direction.  Every cell above prefers FEWER chunks, monotonically, and the
-// b6 optimum (16-32) is the mild exception rather than the rule -- it is flat
-// there because 6 rows need the CTAs, and b6 is the one shape where the split is
-// the only thing reading.  So the batch split is not a fitted curve; it is the
-// small-batch arm keeping the value that was measured on it, and everything
-// above the split's own small-batch ceiling getting the minimum.
-constexpr int f32_chunks_small_batch() { return wave_filled_chunks(16); }
+// One direction *at large*: the long-row cells above all prefer FEWER chunks
+// monotonically, which is why the large-batch arm is a constant 2.  The
+// short-row columns are a **different** curve, and the fixed 16 was wrong on
+// them: `chunks = 16` is not the optimum at every batch, because what the
+// chunks are for is filling the machine, and 16 chunks overshoot badly once
+// `batches * (chunks + 1)` is already past a couple of waves.
+//
+// Measured at `V = 32768`, one binary, only `DEEP_SELECT_F32_CHUNKS` varying,
+// 3 alternating rounds, median (`chunk_boundary.py`; the full table is at
+// `NATIVE_F32_CHUNK_WORK_TARGET`'s definition in `csrc/structs.h`): the optimum
+// is `16, 8, 8, 4/8, 4, 4, 4, 2, 2, ...` for batches `6, 16, 24, 32, 40, 48,
+// 64, 80, 96, ...`.  That is `largest power of two <= K / batches`, with K a
+// property of the machine.  Against the fixed 16 the losses were 21.0% at
+// b24-v65536, 26.9% at b48-v65536 and **31.0% at b64-v65536** -- all on shapes
+// whose gate was already open, so this costs no new path.
+constexpr int f32_chunks_for(uint32_t batches) {
+    const uint32_t b = batches == 0 ? 1u : batches;
+    int c = 2;
+    while (c < 16 && (uint64_t)(c * 2) * b <= NATIVE_F32_CHUNK_WORK_TARGET) c *= 2;
+    return c;
+}
+constexpr int f32_chunks_small_batch(uint32_t batches) {
+    return f32_chunks_for(batches);
+}
 constexpr int f32_chunks_large_batch() { return 2; }
 
 // The batch at which the chunk count stops being a parallelism knob.  It is the
@@ -809,7 +829,7 @@ int f32_chunked_chunks(uint32_t batches) {
         return 0;
     }();
     if (override_n != 0) return override_n;   // A/B knob; does not change default
-    return batches <= kF32ChunksFewBatches ? f32_chunks_small_batch()
+    return batches <= kF32ChunksFewBatches ? f32_chunks_small_batch(batches)
                                            : f32_chunks_large_batch();
 }
 
