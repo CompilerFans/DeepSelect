@@ -139,10 +139,16 @@ __device__ __forceinline__ uint8_t bf16_to_uint8(maca_bfloat16 x) {
 //   float4 per leg:  row + tx*4 + q      998.7 GB/s   (60.5% of 1650)
 //   float4 per leg:  row + tx + q*BS    1650.9 GB/s  (100.1% of 1650)
 //
-// and the histogram atomic itself is worth 0.5% at either pattern (kt8).  So
-// the deficit this used to be blamed on ("pass 1 runs at 40% of the wall")
-// is this addressing, and pass 1 is in fact at 63% of ITS OWN pattern's
-// ceiling -- the same 63% pass 2 reaches.  See the plan note section 15.
+// The pattern is real.  **It is NOT the cause of pass 1's deficit** -- the plan
+// note section 15 records both halves, and reading only the first is the
+// mistake it was written to prevent.  Propagated into the real kernel (pass 1
+// only, the other two `tx*4` walks left alone) the change is worth **-1.4% on
+// pass 1 in isolation** (6,843.3 -> 6,765.2 us) and **-0.7% on the fp32 grid**
+// (43,456 -> 43,146, two alternating rounds).  The microbench walk has no
+// shared-write contention; pass 1 issues one shared-bucket atomic per element
+// and sits at 3 CTAs/SM (2,596 B static + 14,056 B dynamic of 64 KiB), and at
+// that occupancy the coalesced and strided walks are 7% apart, not 65% (kt12).
+// The atomic is the candidate cause, and it is unmeasured.
 __device__ __forceinline__ void hist_add_f32(
     uint32_t* s_histogram, const float* input, uint32_t idx)
 {
@@ -562,8 +568,22 @@ __device__ __forceinline__ void radix_topk_row_f32(
     __syncthreads();
 
     uint32_t vec_len = length / 4 * 4;
-    for (uint32_t idx = tx * 4; idx < vec_len; idx += BLOCK_SIZE * 4)
-        hist_add_f32(s_histogram, input, idx);
+    // Four float4 per lane per leg, but *unit-strided* between the four: the
+    // leg takes `tx, tx+BS, tx+2BS, tx+3BS` (float4 units) rather than
+    // `4tx .. 4tx+3`.  Same bytes, same instruction count -- but each load
+    // instruction's 64 lanes now sit 16 B apart instead of 64 B, which is the
+    // difference between 998.7 and 1650.9 GB/s on pass 1's own shape (measured;
+    // see the note above `hist_add_f32`).
+    uint32_t n4 = vec_len / 4;
+    uint32_t i4 = tx;
+    for (; i4 + 3u * BLOCK_SIZE < n4; i4 += 4u * BLOCK_SIZE) {
+        hist_add_f32(s_histogram, input, (i4 + 0u * BLOCK_SIZE) * 4u);
+        hist_add_f32(s_histogram, input, (i4 + 1u * BLOCK_SIZE) * 4u);
+        hist_add_f32(s_histogram, input, (i4 + 2u * BLOCK_SIZE) * 4u);
+        hist_add_f32(s_histogram, input, (i4 + 3u * BLOCK_SIZE) * 4u);
+    }
+    for (; i4 < n4; i4 += BLOCK_SIZE)
+        hist_add_f32(s_histogram, input, i4 * 4u);
     for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
         atomicAdd(&s_histogram[float_to_uint8(__ldg(input + idx))], 1u);
     __syncthreads();
