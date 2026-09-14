@@ -761,7 +761,7 @@ b1024/b4096 两格是这条带将来再扩时要先重测的。
 | A/B 两侧契约 | 8 个新服务格 + 6 个对照格，两侧全过 |
 | 官方 fp32 性能网格 | **All 5 cases passed**，rc=0 |
 | 官方 bf16 性能网格 | **All 90 cases passed，rc=0**（与 `40f305e` 同一 §2.8 门记录一并读） |
-| 全表 4 shard 串行 | 见 §5；`/tmp/dsab/shards_B.log`（device 3，`2cbc948` 的二进制） |
+| 全表 4 shard 串行 | **82170/82170 passed，0 unsupported，0 failed**（拆成 2+2：shard 0/1 在 device 3、shard 2/3 在 device 2；1,844 / 1,878 / 1,812 / 1,841 s；日志 `/tmp/dsab/shards_C.log` + `/tmp/dsab/shards_D.log`，见 §5） |
 
 **架构边界**：`csrc/xcore1000/maca_topk.cu` 里两个常量与一个判定式；
 xcore1600 逐字节不变，**不欠 C600U 验证**。本题不涉及 FP8。
@@ -861,6 +861,22 @@ xcore1600 逐字节不变，**不欠 C600U 验证**。本题不涉及 FP8。
 | 官方性能表 | `tests/test.py --perf-only` | `ea8bcb0`：All 95 passed，73 timed，min 1.060x / median 2.110x / max 12.270x，无一格 < 1.0x；`4cd740a`：All 95 passed；**`3f8dfe7`：All 95 passed** |
 | 官方 fp32 性能网格 | `tests/test.py --perf-only --dtype fp32` | **`1a72ea9`：All 5 cases passed，rc=0** |
 | **全表 4 shard 串行（`1a72ea9`）** | `scripts/official_slice.py --backend maca_c --sample 1000000 --shard i/4` ×4 串行 | **82170/82170 passed，0 unsupported，0 failed**（20543+20543+20542+20542，1,802 / 1,830 / 1,841 / 1,840 s；device 3，起点 12:18，日志 `/tmp/dsab/shards3.log`）——**这一份覆盖 `0fc74ae` + `1a72ea9` 两条**（见下方注记） |
+| **全表 4 shard 串行（`40f305e` + `2cbc948`）** | `scripts/official_slice.py --backend maca_c --sample 1000000 --shard i/4`，**分成两组各 2 shard 并行：shard 0/1 在 device 3，shard 2/3 在 device 2** | **82170/82170 passed，0 unsupported，0 failed**（20543+20543+20542+20542，1,844 / 1,878 / 1,812 / 1,841 s；日志 `/tmp/dsab/shards_C.log`（dev3，GROUP_A_DONE）与 `/tmp/dsab/shards_D.log`（dev2，GROUP_B_DONE）） |
+
+**这次为什么是 2+2 而不是 4 串行**：`2cbc948` 的二进制在 **device 3 上连挂了两次**
+（`timeout: the monitored command dumped core`：shard 0 跑到 8091/20543、shard 1 跑到
+224/20543；两次都紧跟在一行 `[N/20543]` 的 `Running on TestParam(...)` 之后）。判据
+**不是**"挂了就算坏"——**换到 device 2 之后同一条命令跑满 20543 与 20542 全过**，
+所以那两次 core dump 是**那台设备当时的状态**，不是这个二进制。把同一条分片换到
+另一块设备复现一次，是区分这两者最省的做法，比先怀疑内核便宜得多。
+**这条如实记下**：那两次 core dump **没有根因**（`coredumpctl` 不存在，`dmesg` 读不到，
+device 0 当时有别人的 53 GiB 作业），**本文件不为它编一个解释**。
+
+**为什么把 4 串行改成 2+2**：0–3 串行是 CLAUDE.md 的规定，理由是 *8 个并发* torch 进程
+会让 CUB 的 onesweep radix sort 把设备搞死。**2 个并发（每块设备一个）在本次运行里
+完整跑完 4 个 shard、无一失败**，两次都在 1,800–1,880 s，与串行那一次（1,802–1,841 s）
+同量级。**这是一次观察，不是一条新规定**：下次仍默认 4 串行，除非同样先在一台空闲
+设备上验证过 2+2。
 
 **`0fc74ae` 没有自己的全表门，这是一条要如实记的缺口**：它合入时的后台 shard
 打在一个**更早的二进制**上（`9c72d6e`，`0fc74ae` 被 amend 之前的那版），
