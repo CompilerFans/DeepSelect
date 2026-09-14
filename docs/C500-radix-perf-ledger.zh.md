@@ -604,7 +604,7 @@ chunk 数的 C600/C600U 臂（`NATIVE_SM_COUNT` = 28 / 32）已在 `75675db` 备
 | 官方抽样（迭代用） | `scripts/official_slice.py --backend maca_c` | `eaa0131`（pass 1 连续化）：200/200 passed，0 unsupported，0 failed，36 s |
 | 官方性能表 | `tests/test.py --perf-only` | `ea8bcb0`：All 95 passed，73 timed，min 1.060x / median 2.110x / max 12.270x，无一格 < 1.0x；`4cd740a`：All 95 passed；**`3f8dfe7`：All 95 passed** |
 | 官方 fp32 性能网格 | `tests/test.py --perf-only --dtype fp32` | **`1a72ea9`：All 5 cases passed，rc=0** |
-| **全表 4 shard 串行（`1a72ea9`）** | `scripts/official_slice.py --backend maca_c --sample 1000000 --shard i/4` ×4 串行 | **运行中**（`/tmp/dsab/shards3.log`，device 3，起点 12:18）——**结果未出前这里不填数**，覆盖 `0fc74ae` + `1a72ea9` 两条 |
+| **全表 4 shard 串行（`1a72ea9`）** | `scripts/official_slice.py --backend maca_c --sample 1000000 --shard i/4` ×4 串行 | **82170/82170 passed，0 unsupported，0 failed**（20543+20543+20542+20542，1,802 / 1,830 / 1,841 / 1,840 s；device 3，起点 12:18，日志 `/tmp/dsab/shards3.log`）——**这一份覆盖 `0fc74ae` + `1a72ea9` 两条**（见下方注记） |
 
 **`0fc74ae` 没有自己的全表门，这是一条要如实记的缺口**：它合入时的后台 shard
 打在一个**更早的二进制**上（`9c72d6e`，`0fc74ae` 被 amend 之前的那版），
