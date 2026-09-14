@@ -96,7 +96,9 @@ rm -f deep_select/deep_select_xcore1000*.so \
       build/lib.linux-x86_64-cpython-310/deep_select/deep_select_xcore1000*.so
 ```
 
-`build_ext --inplace` compares timestamps and **silently skips** the copy when the target is newer than `build/lib`. The `.so` lives under `deep_select/` and is gitignored, so it is stale by default. The `.so` md5 is sensitive to source line endings and is usable as a "which source did I actually measure" receipt (same source → same md5).
+`build_ext --inplace` compares timestamps and **silently skips** the copy when the target is newer than `build/lib`. The `.so` lives under `deep_select/` and is gitignored, so it is stale by default. The `.so` md5 is sensitive to source line endings and is usable as a "which source did I actually measure" receipt — **but it is not a content-addressed hash, and a differing md5 is not by itself evidence that the source or the behavior differs.**
+
+**Two identical-source builds do NOT produce identical md5s** (measured 2026-09-14, this host). `./build.sh` twice in a row on an untouched tree gave `0909cc25557dd7f2a12e82110f22b1f2` then `4b29550adb7137d25f0d47b5864db9f3`. `cmp -l` localizes the difference exactly: **6 bytes at `0x3a2af8..0x3a2afd`**, in the middle of a string that reads `…maca_topk-02b752.cpp\0__FRAME_END__…` — mxcc names the intermediate compilation unit with a **random suffix** (`maca_topk-<6 hex>.cpp`), so the embedded debug/line-table string differs per build while the code is byte-identical. The file size is the same. The upshot: cite the md5 as a receipt for *which artifact* you measured, never as evidence that two artifacts are the same or different code; when the difference matters, `cmp -l` the pair first, and if the only differing bytes are that filename string, the binaries are the same build.
 
 Build plumbing worth knowing before editing `setup.py`:
 
