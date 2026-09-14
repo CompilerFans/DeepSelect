@@ -100,6 +100,12 @@ rm -f deep_select/deep_select_xcore1000*.so \
 
 **Two identical-source builds do NOT produce identical md5s** (measured 2026-09-14, this host). `./build.sh` twice in a row on an untouched tree gave `0909cc25557dd7f2a12e82110f22b1f2` then `4b29550adb7137d25f0d47b5864db9f3`. `cmp -l` localizes the difference exactly: **6 bytes at `0x3a2af8..0x3a2afd`**, in the middle of a string that reads `…maca_topk-02b752.cpp\0__FRAME_END__…` — mxcc names the intermediate compilation unit with a **random suffix** (`maca_topk-<6 hex>.cpp`), so the embedded debug/line-table string differs per build while the code is byte-identical. The file size is the same. The upshot: cite the md5 as a receipt for *which artifact* you measured, never as evidence that two artifacts are the same or different code; when the difference matters, `cmp -l` the pair first, and if the only differing bytes are that filename string, the binaries are the same build.
 
+**A comment-only source edit also changes the binary, and it is decidable whether it changed code** (measured 2026-09-14). Adding 36 lines of comment moved 32 more bytes in `.text`; `cmp -l` plus a byte-pattern read says exactly what they are: every one sits on a `be <imm32>` (x86 `mov esi, imm32`) and **every immediate shifted by exactly +36** — i.e. they are embedded source line numbers, not code. So the full 38-byte delta was 32 line numbers + 6 filename-suffix bytes, and the code was identical. When you need to make that claim, do it this way rather than by md5 or by argument:
+- `cmp -l <a> <b> | wc -l` — is it a handful of bytes or a lot?
+- a handful, clustered → disassemble the byte at each offset; if they are all one immediate-operand opcode and all shift by the same constant, they are symbols, not instructions;
+- `nm -S --defined-only <so> | sort` on both, diffed — **if every symbol keeps the same address and size, no function moved**, which is the strongest cheap statement that the build is the same one;
+- if the delta is large or the offsets straddle more than a couple of instructions, the binary genuinely differs — then the falsifying test is a fixed `arange` input run several times (below), never a random one and never one run.
+
 Build plumbing worth knowing before editing `setup.py`:
 
 - Device code is compiled by **mxcc, reached through cu-bridge's `cucc`** (`--offload-arch=xcore<N>`). `setup.py` does

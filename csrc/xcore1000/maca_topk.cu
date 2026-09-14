@@ -727,6 +727,42 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 // architecture the extension was built for (`NATIVE_SM_COUNT`, csrc/structs.h
 // -- 104 on C500, 28 on C600, 32 on C600U, all compile-time).  This is the one
 // place where a number the split is made of is SM-count-sensitive.
+//
+// **The bodies below were measured on C500 ONLY.**  What follows is therefore
+// not a re-sweep on C600/C600U -- it is the arithmetic of the existing
+// measurements carried to 28 and 32 SMs, with the cells where it stops being
+// justified marked as such.  Both split geometry functions are pure, so this is
+// computable here rather than assertable.
+//
+// `f32_chunks_small_batch()` = `wave_filled_chunks(16)`:
+//
+//   family        SMs  b6x16 % SMs   result   b6x(chunks+1) % SMs
+//   C500          104        96       16        102  (98%)   measured
+//   C600           28        84       32        198  (7%)
+//   C600U          32        96       16        102  (19%)
+//   C600 (b8)      28        96       16        136  (24%)
+//
+// The rule keys on `kBatch = 6` because 6 is the split's gate, so it answers
+// for b6 -- and at a SM count where 6 does not divide the SM count it lands the
+// MERGE (the +1 CTA per row) off a wave boundary: every one of those rows is a
+// whole extra wave for a merge that is a small fraction of the row's work.
+// The 1B arm keeps its measured value deliberately (rendering b8-v524288 is
+// latency-bound at 3% of the read wall, 34 us against a 99 us chunk sweep), and
+// C600 does land on 16 chunks = 2 wave-fills, which is coherent.  What is NOT
+// measured, on any part but C500, is whether the chunk count is right at the
+// batch the arm actually runs at.
+//
+// `f32_chunks_large_batch()` = 2 (constant): the chunk count produced
+// `2 * batches` CTAs, and the merge `batches`.  So on a 28-SM C600 the merge is
+// 28 whole waves at b4096/28 = 146.3, and 146 of those 147 waves are merge -- a
+// 2:1 work ratio.  On a 32-SM C600U the same ratio holds at 128 waves + 128.
+// **This is the one place where the C500 measurement does not carry: the C500
+// sweep that picked 2 ran the merge 39 waves deep against 78 chunk waves.**
+// The remedy that the sweep itself points at is to drop the merge's CTA per row
+// (`chunks + 1` -> `chunks`) for the large-batch arm, which the sweep already
+// supports (chunks = 1: 524.7 us on C500, statistically indistinguishable from 2
+// at b256-v262144, and never measured at b4096).  That is a change to the merge
+// kernel's launch, not a constant, so it is not made on this arithmetic alone.
 namespace {
 // The measured chunk counts.  Both are sweeps on C500 with the contract checked
 // at every point and two alternating passes per point (`sweep18.py` for these
