@@ -37,6 +37,16 @@ CAPACITY_BYTES = {
     1600: 128 * 1024,
 }
 
+# Family base -> SM ("AP") count of the parts in it.  The same numbers as
+# `csrc/structs.h`'s `NATIVE_SM_COUNT`, which is where the kernels read them;
+# this copy exists so a host-side report can name the machine without a device
+# call, and the two are kept in sync by hand like the capacity table above.
+SM_COUNT = {
+    1000: 104,   # C500
+    1500: 28,    # C600
+    1600: 32,    # C600U / C600-UL
+}
+
 # The capacity the ported kernel's tuples were re-derived against
 # (`scripts/generate_instantiations.py`, which refuses to emit a tuple whose
 # `occupancy * shared_memory_bytes()` exceeds it).
