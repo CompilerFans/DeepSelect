@@ -58,7 +58,7 @@
 （`launch_topk_f16_chunked`、`recommend_topk_f16_chunks`）**正是 §3.1 要的东西**——
 我们移植了它的 chunked 骨架，但只编译了 bf16 的 merge 分支。
 
-### 2.3 `deep_gemm/kernels/fp32_topk.cu`
+### 2.3 `csrc/kernels/fp32_topk.cu`
 
 **唯一能让"两趟变一趟"的具体实现范本**，且是 fp32（正好是我们最短的那块）。
 它的 `topk_coarse12_impl`：
@@ -251,3 +251,61 @@ CUDA_VISIBLE_DEVICES=2 python3 -u /tmp/dsab/three_way.py
 # ours/floor2 = ours / (2 * B*L*esz / 1149.8e9 * 1e6)
 # floor2/dg   = 2 * B*L*esz / 1149.8e9 * 1e6 / dg_us
 ```
+
+---
+
+## 6. 实现上还差多少（对照 `csrc/kernels/fp32_topk.cu`，2026-09-14 复核）
+
+**先更正一个路径**：本文初版写的是 `deep_gemm/kernels/fp32_topk.cu`，**该文件不存在**。
+真正的源码在宿主仓的 **`csrc/kernels/fp32_topk.cu`**（1434 行），python 入口在
+`deep_gemm/bf16_indexer_dsa.py`。
+
+### 6.1 它实际读几趟
+
+`topk_coarse12_impl`（`:204`）的循环结构：
+
+| 阶段 | 行 | 读的集合 |
+|---|---|---|
+| 粗直方图（12 位） | `:244-254` | **整个窗口** |
+| 暂存 + 细直方图（**同一趟**） | `:332-343` | **整个窗口** |
+| refine 3 轮（**只在候选上**） | `:418-434` | `candidate_indices[]`（≈150 个/行） |
+
+**≈ 2 趟**，与我们的 2 趟**数量相同**。第 3 趟只在溢出时（`num_input[0] > 容量`，
+`:347`）才走，那是罕见边。
+
+**差别不在趟数，在两件事：**
+
+1. **它第 2 趟就是 refine，我们还要再走一趟。** 它的细直方图在第 2 趟里**边暂存边
+   累**（`DEEP_GEMM_COLLECT_COARSE12_VALUE`，`:315-330`），之后 refine 只碰 arena；
+   我们的第 2 趟只做"存进 arena + 累细直方图"，然后 refine 再在 arena 上跑几轮。
+   它的 refine 输入是**候选**，我们的 refine 输入也是候选，但我们的候选是第 2 趟的
+   产物、第 3 趟才用上。
+2. **它的第 2 趟按 `float4` 向量化**（`:335`），我们 pass 2 是**标量**：
+   `radix_topk_row_f32` 的第二个循环（`:520-532`）逐元素 `__ldg(input + idx)`，
+   `float4` 出现次数为 **0**。pass 1 是向量化的（`hist_add_f32`，`:495-497`），
+   **只有 pass 2 退化成标量**。
+
+### 6.2 于是"减少趟数"这个结论**是错的**
+
+`docs/C500-to-parity-plan.zh.md` §3 条目 2 写的是"把 pass 2 改成只在溢出时重走"，
+并推断 `L ≥ 16384` 的格需要"更少趟数"。**按上面的复核，双方都是 2 趟**，所以：
+
+- 差距**不是**趟数的算术，而是 **MLP/向量化/原子发射**的差别；
+- "单趟形态"不是 deep_gemm 现有的形态，而是上游 DeepSelect 文档的 scan/filter/compact
+  （那个才是"每元素只读一次"）。
+
+**这条推断此前没有对着源码复核过就写进了方案。** 更正记录在此。
+
+### 6.3 还要记一笔：`coarse12` 并不能自动避免溢出
+
+它的粗层是 **12 位**（`kCoarse12CoarseBits = 12`，`:32`）—— 和我们的 `kCoarse12Bits`
+一样。**12 位对 32 位 key 只剩 20 位，不像我们的 12 位对 16 位 key 正好用完。**
+所以它**需要** 3 轮 refine，而 ours 的 coarse12 对 bf16 是"两级把 key 定完、
+refine 永不越过细 tie"。两边叫同一个名字，覆盖的语义**不同**。
+
+### 6.4 措辞更正
+
+§3 条目 2 初版写"把 deep_gemm `topk_coarse12_impl` 的形态搬进 `radix_topk_row_f32`"。
+**"pass 1 定位阈值桶后同一趟写补集"这一步我们本来就有**（`:520-532` 的
+`bin > threshold_bin` 分支直接写 `output`）。要借鉴的是**把细直方图也挪进这一趟**，
+以及**把这一趟向量化**。
