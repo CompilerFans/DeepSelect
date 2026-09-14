@@ -685,8 +685,6 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 // the split probably starts paying at a shorter row than 262144 -- but that is
 // a measurement this change does not have, and the two splits sharing a gate
 // also shares one code path for the scratch and the `end_ptr` route.
-constexpr uint32_t kF32ChunkedMaxBatches = 64;
-constexpr uint32_t kF32ChunkedMinVocab = 262144;
 // The 16-bit split's 16, which is also what `nan_scan_kernel` is launched with,
 // so the two splits agree about the chunk geometry.  Measured on the cells the
 // gate admits (b6, kernel time, C500, CUDA_VISIBLE_DEVICES=3):
@@ -706,14 +704,45 @@ int f32_chunked_chunks() {
     return n;
 }
 
+// The batch bound has no single value, because what the split costs is a merge
+// over `batches` CTAs on an otherwise idle machine, and what it saves is the
+// row kernel's per-CTA time.  Both are measurable, and the measured gate has
+// two tiers (kernel time, C500, `maca_arm.py`):
+//
+//   batches   vocab      row us   split us   speedup
+//       6     65536       124.5       64.8     1.92x      <- b6 tier
+//       6    129280       256.1       69.1     3.71x
+//       6    262144       425.8       84.9     5.02x
+//     256     65536       326.1      394.3     0.83x      <- b256 LOSES here
+//     256    262144      1044.3      762.7     1.37x      <- b256 tier opens
+//     256    524288      1924.4     1282.2     1.50x
+//
+// and at b256 the split *loses* below 262144 (394 vs 326) while winning above
+// it, which is why there are two tiers rather than one threshold.  Both are
+// placed on the measured side of their knee, not at it.
+constexpr uint32_t kF32ChunkedMinVocabSmallBatch = 65536;
+constexpr uint32_t kF32ChunkedMaxBatchesSmallBatch = 64;
+constexpr uint32_t kF32ChunkedMinVocabLargeBatch = 262144;
+constexpr uint32_t kF32ChunkedMaxBatchesLargeBatch = 256;
+
+// The 16-bit split starts at 16; the fp32 split's chunk count is measured in
+// `f32_chunked_chunks` below.
+constexpr uint32_t kF32ChunkedMinVocab = kF32ChunkedMinVocabSmallBatch;
+
 // The split is fp32-only (the caller's `value_dtype == 0`) and its merge only
 // compiles the k=512/1024 arms, which is the whole gate.
 inline bool chunked_f32_applies(const RowParams &params, uint32_t batches) {
-    if (batches == 0 || batches > kF32ChunkedMaxBatches) return false;
+    if (batches == 0) return false;
     // `end_ptr` absent means the row really is `vocab_size` long, so the cap is
     // the vocab either way -- and it is the only length the host knows without
     // a device read.
-    if (params.vocab_size < kF32ChunkedMinVocab) return false;
+    const uint32_t v = params.vocab_size;
+    const bool tier =
+        v >= kF32ChunkedMinVocabLargeBatch
+            ? batches <= kF32ChunkedMaxBatchesLargeBatch
+            : (v >= kF32ChunkedMinVocabSmallBatch &&
+               batches <= kF32ChunkedMaxBatchesSmallBatch);
+    if (!tier) return false;
     return params.topk == 512 || params.topk == 1024;
 }
 
