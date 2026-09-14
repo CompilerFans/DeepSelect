@@ -167,9 +167,56 @@ Coarse is 12 bits (`kCoarse12Bits`) leaving 4 fine bits, which is all of a bf16 
 
 Porting conventions: portable primitives only — `__shfl_down_sync`, `atomicAdd`, `__ldg`, `__syncthreads`, `__syncthreads_or`. No inline asm, no TMA, no mbarrier, no cluster. **The wave width is MACA's 64 lanes, not 32** — the CUDA-era code in this tree assumed 32 and does not hold here.
 
+### The fp32 row (`radix_topk_row_f32`) — what has been measured, so it is not re-litigated
+
+The 32-bit row shares the two-pass dataflow and adds a **full-row rescan** when its
+8-bit coarse threshold bin does not fit the arena (see "Overflow" above). Three
+things about it were settled by measurement on 2026-09-14 and are recorded in
+`docs/C500-to-parity-plan.zh.md` §12–§15 and `docs/C500-radix-perf-ledger.zh.md`
+§2.5/§4. Read those before proposing any of the following; each has already been
+tried or explained, and the two retractions are as important as the wins:
+
+- **The coarse level cannot be widened or narrowed.** fp32's high-byte coarse bin
+  is what keeps refine cheap; taking the raw fp32 high byte instead is *order-
+  preserving* (same bin order) but widens the window from 2^13 to 2^23, so every
+  row overflows the arena and takes the 4-round rescan — **4.4× slower**, 200/200
+  still correct. Narrower (12-bit) makes the coarse histogram itself 4,096 bins
+  of per-element atomics. Both directions are closed.
+- **`tx * 4 + q` addressing is an anti-pattern worth 1.65× in a microbench and
+  ~1% in this kernel.** It gives each load instruction a 64-byte lane stride.
+  Coalescing pass 1 was measured at **−0.7% on the fp32 grid** (43,456 → 43,146 µs
+  over 36 cells, two alternating rounds) because the real walk carries one shared
+  bucket atomic per element at **3 CTAs/SM** (2,596 B static + 14,056 B dynamic of
+  64 KiB), where the two patterns are 7% apart, not 65%. Pass 2's two walks and
+  the rescan still carry the pattern deliberately: their coalesced form needs four
+  live `float4` (4 more registers) and the register budget is the real constraint
+  here.
+- **The shared bucket atomic is the remaining candidate for pass 1's deficit,
+  and it is unmeasured.** Every reading that showed it "free" (0.5%) was taken at
+  4 CTAs/SM; the kernel runs at 3. No change should be made on the atomic's
+  account until the 3-CTA/SM-with-atomics cell exists.
+
+Two general traps this cost, both of which this repo has now paid for twice:
+
+1. **A controlled microbench does not transfer to the kernel.** The 1.65× address
+   measurement was right and its ~2× prediction was wrong; §9.2's cost model was
+   back-solved from a delta and wrong. In both cases the missing factor was the
+   per-element shared atomic and the occupancy it implies.
+2. **A subtraction- or isolation-ablation can delete more than it isolates.** A
+   variant that removed a shared atomic also removed the write semantics that
+   went with it (once leaving an uninitialized shared variable and a device
+   memory violation), and a "pass 1 only" variant is only meaningful if the
+   removal leaves the *other* pass's cost unchanged.
+
 ### xcore1600 — the ported upstream kernels
 
 **This tree does not currently pass on a C600U and is not built by default** — see Known holes for the measurement, the reproduction, and the 32-lane suspect list. Everything below describes it as written; treat it as unvalidated until the audit is done and re-run `scripts/official_slice.py --backend maca_c` on a C600U with `DEEP_SELECT_128KIB_KERNEL=xcore1600`.
+
+**A C600U pass is necessary but not sufficient to switch the default back**: the
+128 KiB family currently builds `csrc/xcore1000/` on purpose, so flipping
+`DEFAULT_128KIB_KERNEL` to `xcore1600` also changes which kernel serves C600 and
+C600U production traffic at every shape — that is a routing change, not just an
+audit milestone, and it needs the perf arm too.
 
 `api.cu` is the host dispatch + pybind11 module; `v3/` (bf16) and `v3_fp32/` (fp32) each hold `topk_select.cuh` + a generated `instantiations/` directory. `common_parts.cuh`, `bit_utils.cuh`, `utils.cuh`, `config.h`, `dispatch_utils.h` are shared.
 
