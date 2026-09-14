@@ -872,14 +872,51 @@ int f32_chunked_chunks(uint32_t batches) {
 // on both) and b4096-v262144 was already served.  Both tiers now sit on the
 // measured side of the same knee, which is the small-batch tier's, and no
 // longer on two different ones.
-constexpr uint32_t kF32ChunkedMinVocabSmallBatch = 65536;
-constexpr uint32_t kF32ChunkedMaxBatchesSmallBatch = 64;
-constexpr uint32_t kF32ChunkedMinVocabLargeBatch = 65536;
-constexpr uint32_t kF32ChunkedMaxBatchesLargeBatch = 4096;
-
-// The 16-bit split starts at 16; the fp32 split's chunk count is measured in
-// `f32_chunked_chunks` below.
-constexpr uint32_t kF32ChunkedMinVocab = kF32ChunkedMinVocabSmallBatch;
+//
+// **The band `32768 <= V < 65536` is what that unification newly serves**, and
+// it was measured before being opened (kernel time, C500, round-robin A/B: both
+// arms in every round, order alternated, 5 rounds, median of the paired
+// per-round ratios; `ab_b.py`).  Six controls at `V >= 65536`, which the change
+// cannot reach, hold to |delta| <= 0.3% with per-round spreads <= 1.4% -- that
+// is the run's own noise floor, and it is what makes the rest readable:
+//
+//   cell              head us   cand us   delta    GB/s  h -> c    %1W h -> c
+//   b   6-v 32768        71.6      57.6   -19.6%    22.0 -> 27.3    1.3 -> 1.7
+//   b  32-v 32768        81.3      62.1   -23.5%   103.2 -> 135.1   6.3 -> 8.2
+//   b  64-v 32768        91.0      75.0   -17.8%   184.4 -> 223.7  11.2 -> 13.6
+//   b 256-v 32768       181.8     149.3   -17.1%   369.1 -> 449.5  22.4 -> 27.2
+//   b1024-v 32768       496.3     468.0    -5.6%   540.9 -> 573.6  32.8 -> 34.8
+//   b4096-v 32768      1858.4    1712.2    -7.8%   577.8 -> 627.1  35.0 -> 38.0
+//   b 256-v 49152       255.9     184.9   -27.7%   393.4 -> 544.4  23.8 -> 33.0
+//   b4096-v 49152      2659.8    2200.0   -17.4%   605.5 -> 732.1  36.7 -> 44.4
+//
+// Logical GB/s is `2 * batches * V * 4 / time` (the split's chunk stage reads
+// the row once and the merge reads `2 * topk` candidates), so `%1W` is the
+// distance to the best case, not an occupancy.
+//
+// The magnitude falls as the batch rises, and that is the same curve every
+// other result in this file shows: at b6 the row kernel has 6 CTAs on 104 APs
+// and the split's 6 * 17 = 102 CTAs are a near-perfect wave; at b4096 the row
+// kernel already has 39 waves of its own and the split is buying a shorter
+// dependency chain per row, not a fuller machine.  It never goes negative, so
+// no second knee is opened -- but the b1024/b4096 cells are the ones to
+// re-measure if this band ever grows.
+//
+// ── the two tiers have collapsed into one ───────────────────────────────────
+// There used to be four constants here: a small-batch tier (`V >= 65536`,
+// `batches <= 64`) and a large-batch tier (`V >= 262144` -> later 65536,
+// `batches <= 4096`).  With the large tier's floor at 32768 the small branch is
+// **unreachable** -- it needs `V < 32768` and `V >= 65536` at once -- so the
+// predicate is one condition, and the two constants below are what is left of
+// it.  The tiers are gone rather than kept as documentation because a constant
+// that cannot select anything is a knob a reader will try to turn; the history
+// is the tables above.
+//
+// The measured band used the surviving cap throughout (b256/b1024/b4096 at
+// V=32768 are all `batches <= 4096` cells and all wins), so this spelling is
+// the one the numbers above were taken on, not a wider claim.
+constexpr uint32_t kF32ChunkedMinVocab = 32768;
+constexpr uint32_t kF32ChunkedMaxBatches = 4096;
 
 // The split is fp32-only (the caller's `value_dtype == 0`) and its merge only
 // compiles the k=512/1024 arms, which is the whole gate.
@@ -888,13 +925,8 @@ inline bool chunked_f32_applies(const RowParams &params, uint32_t batches) {
     // `end_ptr` absent means the row really is `vocab_size` long, so the cap is
     // the vocab either way -- and it is the only length the host knows without
     // a device read.
-    const uint32_t v = params.vocab_size;
-    const bool tier =
-        v >= kF32ChunkedMinVocabLargeBatch
-            ? batches <= kF32ChunkedMaxBatchesLargeBatch
-            : (v >= kF32ChunkedMinVocabSmallBatch &&
-               batches <= kF32ChunkedMaxBatchesSmallBatch);
-    if (!tier) return false;
+    if (params.vocab_size < kF32ChunkedMinVocab) return false;
+    if (batches > kF32ChunkedMaxBatches) return false;
     return params.topk == 512 || params.topk == 1024;
 }
 
