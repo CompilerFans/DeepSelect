@@ -519,6 +519,12 @@ chunk 数的 C600/C600U 臂（`NATIVE_SM_COUNT` = 28 / 32）已在 `75675db` 备
 | b256-v1048576-k512 | 6547.2 | 1724.1 | 3.80x | 4.06x |
 | b4096-v262144-k512 | 22815.5 | 6471.5 | 3.53x | 4.54x |
 
+**本表的"现在 µs"列停在 §2.6 之前**：`b4096-v262144-k512` 等 fp32 长行格
+在 `0fc74ae` + `1a72ea9` 之后又快了 13–21%（§2.6 的 before → after 表）。
+**不要**拿两处的数直接替换：§2.6 用的是 `floor_ab.py`（`lib.TestParam` 钉种子、
+`kk.bench` 取 kernel time、交替 3 轮取中位数），本表用的是本文件自己的口径与
+种子，**两者不可互换**。要刷新本表，用同一套口径重跑一遍，不要摘对面表的数。
+
 ---
 
 ## 4. roofline 判定（每格绑定什么）
@@ -661,3 +667,11 @@ cd /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect
 
 **每条 perf 记录都要带**：目标架构、shape、实测前后 µs、前后 GB/s（含趟数与
 对只读墙的百分比）、绑定 roofline 是哪一侧、原理、量级。缺任一项不算记录。
+
+**补录 `0fc74ae` 的那次全表门（本节 2026-09-14 加）**：§5 记了 `0fc74ae`
+从来没有过自己的全表门（合入时在飞的那次打的是 amend 之前的 `9c72d6e`
+二进制）。补跑用 `/tmp/dsab/gate_0fc74ae.sh`——它会 **stash 检查 → checkout
+`0fc74ae` → `./build.sh` → 4 shard 串行 → 切回 main 并还原扩展**，
+日志在 `/tmp/dsab/shards_0fc74ae.log`。**这个脚本只允许在没有别的
+`official_slice.py` 在飞时运行**（它要换 `.so`，在飞的 shard 会静默读到
+换掉之后的二进制），脚本自己会先检查并拒绝。跑完把结果填回 §5。
