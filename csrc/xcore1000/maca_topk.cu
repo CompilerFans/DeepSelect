@@ -727,17 +727,54 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 // architecture the extension was built for (`NATIVE_SM_COUNT`, csrc/structs.h
 // -- 104 on C500, 28 on C600, 32 on C600U, all compile-time).  This is the one
 // place where a number the split is made of is SM-count-sensitive.
-int f32_chunked_chunks() {
-    static const int n = [] {
+namespace {
+// The measured chunk counts.  Both are sweeps on C500 with the contract checked
+// at every point and two alternating passes per point (`sweep18.py` for these
+// calls, `chunk_sweep.py` for the wider grid).  The two regimes disagree, and
+// the disagreement is the whole reason this is a function of the batch:
+//
+//   chunks   b6-v262144   b256-v262144   b4096-v262144   b4096-v524288
+//        1           --           524.7           --              --
+//        2           --           525.2        7,112          13,358
+//        3           --              --        7,476          13,645
+//        4           --           666.9        9,226          13,747
+//        6           --              --        9,645          14,396
+//        8        97.8           680.2        9,850          17,864
+//       12           --           721.9           --              --
+//       16        84.7           760.6       11,316          19,241
+//       24        83.5           898.8           --              --
+//       32        87.7           988.0       15,093          22,154
+//       64       119.4              --       21,985          29,800
+//
+// One direction.  Every cell above prefers FEWER chunks, monotonically, and the
+// b6 optimum (16-32) is the mild exception rather than the rule -- it is flat
+// there because 6 rows need the CTAs, and b6 is the one shape where the split is
+// the only thing reading.  So the batch split is not a fitted curve; it is the
+// small-batch arm keeping the value that was measured on it, and everything
+// above the split's own small-batch ceiling getting the minimum.
+constexpr int f32_chunks_small_batch() { return wave_filled_chunks(16); }
+constexpr int f32_chunks_large_batch() { return 2; }
+
+// The batch at which the chunk count stops being a parallelism knob.  It is the
+// split's own small-batch ceiling (64), which is a property of the gate rather
+// than a fitted value: at 6 rows the machine is empty and chunks are the only
+// CTAs there are; at 256 the grid is 256 * chunks CTAs and 256 final modules
+// already covers C500's 104 APs twice over.
+inline constexpr uint32_t kF32ChunksFewBatches = 64;
+}  // namespace
+
+int f32_chunked_chunks(uint32_t batches) {
+    static const int override_n = [] {
         const char *v = std::getenv("DEEP_SELECT_F32_CHUNKS");
         if (v != nullptr && v[0] != '\0') {
             const int d = std::atoi(v);
-            return (d >= 2 && d <= 256) ? d : 16;
+            return (d >= 2 && d <= 256) ? d : 0;
         }
-        // 96 CTAs at b6 (92% of C500's 416) measured best; wave-round it.
-        return wave_filled_chunks(16);
+        return 0;
     }();
-    return n;
+    if (override_n != 0) return override_n;   // A/B knob; does not change default
+    return batches <= kF32ChunksFewBatches ? f32_chunks_small_batch()
+                                           : f32_chunks_large_batch();
 }
 
 // The batch bound has no single value, because what the split costs is a merge
@@ -759,7 +796,7 @@ int f32_chunked_chunks() {
 constexpr uint32_t kF32ChunkedMinVocabSmallBatch = 65536;
 constexpr uint32_t kF32ChunkedMaxBatchesSmallBatch = 64;
 constexpr uint32_t kF32ChunkedMinVocabLargeBatch = 262144;
-constexpr uint32_t kF32ChunkedMaxBatchesLargeBatch = 256;
+constexpr uint32_t kF32ChunkedMaxBatchesLargeBatch = 4096;
 
 // The 16-bit split starts at 16; the fp32 split's chunk count is measured in
 // `f32_chunked_chunks` below.
@@ -817,7 +854,7 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
                               cudaStream_t stream, bool sorted_index,
                               bool sorted_value, bool return_value, int block,
                               void *workspace) {
-    const int chunks = f32_chunked_chunks();
+    const int chunks = f32_chunked_chunks(batches);
     const ChunkedF32Workspace ws = chunked_f32_workspace(
         workspace, batches, params.topk, chunks);
     // `nan_flags` is the table.  It is memset and then OR-ed per row, so the
@@ -911,7 +948,7 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     if (value_dtype == 0 && chunked_workspace != nullptr &&
         params.end_ptr != nullptr &&
         chunked_bytes >= detail::chunked_f32_workspace_bytes(
-                             n, params.topk, detail::f32_chunked_chunks()) &&
+                             n, params.topk, detail::f32_chunked_chunks(n)) &&
         detail::chunked_f32_applies(params, n)) {
         if (index_dtype == 0) {
             detail::launch_typed_f32_chunked<int32_t>(
@@ -1176,7 +1213,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     const bool f32_split =
         value_dtype == 0 && detail::chunked_f32_applies(p, (uint32_t)batches);
     if (bf16_split || f32_split) {
-        const int f32_chunks = detail::f32_chunked_chunks();
+        const int f32_chunks = detail::f32_chunked_chunks((uint32_t)batches);
         const size_t need_lengths = (size_t)batches * sizeof(int32_t);
         const size_t need_workspace =
             f32_split
