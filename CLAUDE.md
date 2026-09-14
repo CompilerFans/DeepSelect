@@ -663,71 +663,78 @@ done
 ```bash
 CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \
   python3 scripts/perf_snapshot.py                       # the official grid
-  ... --groups official,deep_gemm_grid                   # + the host repo's grid
-  ... --dry-run                                          # expand and print, measure nothing
-  ... --cases-file extra.json                            # add cases without editing code
+  ... --deep-gemm-axes                                   # + the host repo's fp32 grid
+  ... --dry-run                                          # print the plan, measure nothing
+  ... --cases-file extra.json                            # add cases, no code change
+./run_bench.sh [--full] [--quick] [--set-baseline] [--compare-only] [--list]
 ```
 
 Writes `perf_data/<chip>/<YYYYmmdd_HHMMSS>/` — following the host repository's
 `deep_gemm/tests/perf_data/` layout — with `manifest.json` plus
 `deepselect_perf.csv`, **one row per (cell, backend)**. Three backends:
-`maca_c`, `torch`, and `deep_gemm` (the host package, reached through
-`backend="deep_gemm"`). `run_bench.sh` is the orchestrator; it also keeps a
-`baseline` symlink under `perf_data/<chip>/` and compares against it with
+`maca_c`, `torch`, and `deep_gemm`. `run_bench.sh` is the orchestrator; it keeps
+a `baseline` symlink under `perf_data/<chip>/` and compares against it with
 `tools/compare_snapshots.py`.
 
-**The measurement is the harness's, not this tool's.** The `official` case
-group is produced by `tests/test.py::performance_cases()` — not restated — and
-every backend is checked with `test.check_result` / `test.check_call_contract`
-and timed with `test.bench_topk`. `tests/test.py` imports cleanly with no side
-effects, which is what makes that possible; **do not** reintroduce work at
-import time there. Verified against the harness: same binary, same device, the
-snapshot reproduces `tests/test.py --perf-only` cell for cell at a **median
-0.25%, max 1.3%** per cell above 100 µs (total across the grid `+0.01%`). The
-only cells that differ by more than 5% are the two ~6 µs short rows, where the
-absolute difference is ≤ 1.2 µs.
+**The recorder is thin on purpose: the measurement is the harness's.** Every
+piece is `tests/test.py`, called rather than re-implemented — `performance_cases()`
+for the grid, `check_result` / `check_call_contract` for the checks, `bench_topk`
+for the timing rule, `bench_torch_reference` for the reference arm (a bare
+`torch.topk`, which is what the official runner times — **not**
+`backend="torch"`, whose reference implementation pads, masks and converts
+around the same call and launches ~21 kernels where this launches one). The only
+axis this adds is `backend`. Verified: same binary, same device, the snapshot
+reproduces `tests/test.py --perf-only` cell for cell at a **median 0.25%, max
+1.3%** per cell above 100 µs (total across the grid `+0.01%`); the only cells
+above 5% are the two ~6 µs short rows, where the absolute difference is ≤ 1.2 µs.
+Two consequences worth stating:
+
+- `tests/test.py` must import cleanly with no side effects for this to work.
+  **Do not put work at its import time.**
+- `run_bench.sh` drives the official grid with `python tests/test.py`, not
+  `./tests/test.py` — upstream's file is not executable and a bare path dies at
+  rc=126 before running anything.
+
+Facts the CSV records and the traps in reading it:
 
 - **The chip is in the path, the manifest and every row.** A perf record whose
   artifact is not identified is not a record: the manifest carries
   `device_name`, `sm_count`, torch version, *both* repositories' commits, the
-  extension's md5, the case groups and the status counts.
-- **`status` is a column, and it is how an arm declines.** `pass` / `fail` /
+  extension's md5 and the status counts.
+- **`status` is a column, and it is how a backend declines.** `pass` / `fail` /
   `unsupported`. `deep_gemm` is `unsupported` on **all 95** official cells —
   the grid is bf16 and that backend ranks float32 only — and a table that
-  dropped those rows would read as "the two backends agree everywhere" when
-  only the fp32 cells were ever compared. `fail` still carries its time when
-  one could be taken: a case that selects wrong is a defect whatever it runs at.
+  dropped those rows would read as "the two backends agree everywhere" when only
+  the fp32 cells were ever compared. `fail` still carries its time when one
+  could be taken: a case that selects wrong is a defect whatever it runs at.
+  `deep_gemm` numbers only exist at all with `--deep-gemm-axes`.
+- **The kernel-name filter is case-insensitive**, here and in `tests/test.py`.
+  `torch.topk` is spelled two ways and only one has a lowercase `topk`:
+  `at::native::mbtopk::*` (large inputs) and `at::native::gatherTopK_opt`
+  (small ones). Measured on C500, an exact-case filter finds **nothing** for
+  `torch.topk` at b6-v{256,4096}, b256-v1024, b512-v1024 and everything smaller,
+  leaving those cells untimed; case-insensitive finds exactly one kernel on both
+  paths, which is what makes `len == 1` the kernel time rather than an e2e span.
 - **`relative_pct_vs_maca_c` is the comparison**, defined as this repository's
-  own kernel = 100%, so **>100% means that backend is faster than `maca_c`**
-  (it is `maca_c_us / that_us * 100`). It is repeated on every row of a cell,
-  so a row is readable without finding its row-mates.
-- **`bandwidth_pct_of_wall` is NOT a fraction of the kernel's roof.** It is
-  `logical_read_bandwidth(GB/s)` — the input read alone, no output buffers —
-  over the measured streaming-read wall. The official grid reads at a **median
-  287 GB/s logical, 19% of the 1,487 GB/s wall** on C500 (best 375 GB/s, 25%),
-  while the same kernel's pass 1 measures 94.9–97.9% of the wall on a
-  full-length row. Two reasons, both visible in the CSV: **54 of 108 cells are
-  under 16M elements** (startup dominates), and **the grid is weighted by
-  batch, not by bytes** — the 17 cells at batch 4096 are 152.6 ms of the
-  200.5 ms total (76%). Do not read a low percentage here as headroom in the
-  kernel; read `logical_read_bandwidth` against the cell's batch and row
-  length. The wall is `READ_WALL_GBPS` in the script (C500 1,487 GB/s,
-  C600U 1,545 GB/s) and is per-part, never a constant.
-- **`official_cell` distinguishes the gate grid from the extras.** Only the
-  `official` group is `1`; the `deep_gemm_grid` group is the host repo's
-  `SELECTOR_PERF_SHAPES` (top_k=2048, fp32) and uses the harness's
-  `NormalFloatDistribution` where the host repo uses `torch.randn`, so its rows
-  are **not comparable** to the official ones even at the same shape.
-- **Adding a case is a data edit.** `CaseSpec` fields are axes; `expand()` takes
-  the cartesian product, and `--cases-file` takes them as JSON at run time.
-  An unknown axis, dtype, index dtype or distribution is an error, not a
-  default — a case silently measured at the wrong width is not a measurement.
-- **The `torch` arm is empty on cells where no kernel name contains a
-  case-sensitive `"topk"`** — `torch.topk` lowers to `gatherTopK_opt` on small
-  cells, and `tests/test.py` skips those the same way (`test.py:157-160`). An
-  empty time there is that filter, not a failure.
+  own kernel = 100%, so **>100% means that backend is faster than `maca_c`** (it
+  is `maca_c_us / that_us * 100`). It is repeated on every row of a cell, so a
+  row reads on its own.
+- **`bandwidth_pct_of_wall`/`bandwidth(GB/s)` are the operator's own traffic,
+  not the kernel's roof.** `Byte(MB)` counts the input read plus the outputs
+  written, which is the quantity `tests/test.py:138` prints as TB/s; it is
+  recomputed per cell from the shape, so it is comparable across backends. It is
+  NOT the pure-read wall: for the official grid a median 19% of the 1,487 GB/s
+  C500 wall, because 54 of 108 cells are under 16M elements and the grid is
+  weighted by batch rather than bytes (the 17 cells at batch 4096 are 152.6 ms
+  of the 200.5 ms total). The same kernel's pass 1 measures 94.9–97.9% of the
+  wall on a full-length row.
+- **Adding a case is data.** `--cases-file FILE` takes a JSON list of
+  `lib.TestParam` fields; only `batch_size`, `vocab_size` and `topk` are
+  required, and `dtype` / `out_idx_dtype` take `bf16`/`fp32`/`int32`/`int64`.
+  An unknown axis or dtype is an error, not a default.
 - **`torch.set_default_device("cuda")` must be set before generating cases**
-  (the environment traps below); the script does it first thing.
+  (the environment traps below); the script does it first thing, and
+  `--cases-file` cases go through `lib.generate_testcase` like every other.
 
 ## Testing and benchmarking environment traps
 

@@ -1,45 +1,53 @@
 #!/usr/bin/env python3
-"""Record the official performance grid, per backend, as a CSV.
+"""Run the official performance grid for every backend and write it as a CSV.
+This is a *thin* recorder: the cases, the data, the checks and the timings are
+all `tests/test.py`'s own, called rather than re-implemented.  Per cell the body
+is `run_testcase`'s, line for line:
+    t = lib.generate_testcase(p)
+    value, index = deep_select.topk(...)         # backend=<arm>
+    check_result(p, t, value, index)
+    kk.bench(...) -> one matching kernel's time, else the span
+and the reference arm is literally `torch.topk(t.input, p.topk, dim=1,
+sorted=p.sorted_value)` under the same eligibility guard the official runner
+uses, timed with the same rule.  The only thing added is the axis the official
+harness cannot express: **which backend answered**, one row per (cell, backend),
+with a `status` of `pass` / `fail` / `unsupported`.
+Three backends:
+  maca_c     this repository's kernel (the default backend)
+  torch      the official reference -- a bare `torch.topk`, as `tests/test.py`
+             times it (NOT `backend="torch"`, which pads, masks and converts
+             around the same call and measures something else entirely)
+  deep_gemm  the host repository's `fp32_indexer_topk_selector`, through
+             `backend="deep_gemm"`.  It ranks float32 only, so it is
+             `unsupported` on the whole bf16 grid -- which is why
+             `--deep-gemm-axes` adds the host repo's own fp32 selector grid:
+             without it the `deep_gemm` column has no number in it at all.
+Cases: the official grid by default (`tests/test.py::performance_cases()`), plus
+extra ones from `--cases-file`, a JSON list of `lib.TestParam` fields:
+    [{"batch_size": 6, "vocab_size": 32768, "topk": 1024},
+     {"batch_size": 256, "vocab_size": 131072, "topk": 2048,
+      "dtype": "fp32", "num_runs": 20}]
+Only `batch_size`, `vocab_size` and `topk` are required; the rest default to the
+Lightning Indexer's configuration (sorted and return_value off, bf16, int32).
+`dtype` / `out_idx_dtype` take the short names bf16, fp32, int32, int64; an
+unknown one is an error rather than a default.
 
-"Official" is load-bearing here, and it is why this file is thin:
-
-  * the cases are `tests/test.py`'s own `performance_cases()` -- the 95-cell grid
-    (Lightning Indexer bf16 at 2 topk x 5 batch x 9 sequence lengths, plus the
-    fp32 Sampler at 5 batch x 129280), with their own dtypes, index types,
-    `NormalFloatDistribution` data and `num_runs=10`;
-  * the data is built with `lib.generate_testcase` and seeded through the same
-    `kk.Counter` the official run uses;
-  * every arm is checked with `test.check_result` / `test.check_call_contract`
-    and timed with `test.bench_topk` -- the harness's own assertions and the
-    harness's own timing rule (one matching kernel's time, else the span over
-    the matching kernels), so nothing here is a second opinion about either.
-
-The one thing this adds is an axis: which backend answered.  Each cell produces
-one row per backend, each with a `status` of `pass`, `fail` or `unsupported`.
-A backend that cannot serve a cell *says so* rather than being dropped -- the
-`deep_gemm` backend ranks float32 only (`topk <= 2048`, unordered), so it is
-`unsupported` on all 90 bf16 cells, and a table that omitted those rows would
-read as "the two backends agree everywhere" when only 5 cells were compared.
-
-What is recorded per row: the shape, the backend, the status, the time, the
-throughput and bandwidth the official run prints, and the relative percentage
-against this repository's own kernel (`maca_c` = 100%).
-
+Output, following the host repository's `deep_gemm/tests/perf_data/` layout:
+    perf_data/<chip>/<YYYYmmdd_HHMMSS>/deepselect_perf.csv
+    perf_data/<chip>/<YYYYmmdd_HHMMSS>/manifest.json
 Usage:
     CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \\
         python3 scripts/perf_snapshot.py
-    ... --arms maca_c,torch        # a subset of the backends
-    ... --out-dir /tmp/x --tag t1  # elsewhere, and named
+    ... --deep-gemm-axes          # + the host repo's fp32 selector grid
+    ... --cases-file extra.json   # + your own cases
+    ... --dry-run                 # print what would run, measure nothing
+    ./run_bench.sh                # the orchestrator: this + the official gate
 """
-
 from __future__ import annotations
-
 import argparse
 import csv
-import dataclasses
 import datetime as _dt
 import hashlib
-import itertools
 import json
 import os
 import platform
@@ -47,236 +55,25 @@ import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional
-
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "tests"))
 sys.path.insert(0, REPO)
-
 import torch  # noqa: E402
-
 import kernelkit as kk  # noqa: E402
 import lib  # noqa: E402
 import test as official  # noqa: E402
-
 from deep_select import _arch  # noqa: E402
-
 PYBIN = sys.executable
 ARMS = ("maca_c", "torch", "deep_gemm")
-
-# ── the case table ──────────────────────────────────────────────────────────
-#
-# A case is a *shape plus a configuration*: which dtype the input is, which
-# dtype the indices come back as, whether the output is sorted, how many times
-# the case is timed.  They are declarative (`CaseSpec`) so a new case is a data
-# edit, not a code edit -- `expand()` takes named axes and produces the
-# cartesian product, and a group of cases is just a list of specs.
-#
-# Three ways to add one, in increasing order of ceremony:
-#
-#   1. add axes to an existing `expand(...)` call in `DEFAULT_CASE_GROUPS`;
-#   2. add a new group to `DEFAULT_CASE_GROUPS` and name it in `--groups`;
-#   3. pass `--cases-file extra.json` -- no code change at all.
-#
-# The `official` group is the one exception, and it is deliberate: it is
-# *produced* by `tests/test.py::performance_cases()` rather than restated here,
-# so it cannot drift from the gate.  Every other group says `official_cell=0`
-# in the CSV.
-
-DTYPES = {
-    "bf16": "bfloat16",
-    "bfloat16": "bfloat16",
-    "fp32": "float32",
-    "float32": "float32",
-}
+# Short spellings for `--cases-file`.  Only the pair this operator serves.
+DTYPES = {"bf16": "bfloat16", "bfloat16": "bfloat16",
+          "fp32": "float32", "float32": "float32"}
 IDX_DTYPES = {"int32": "int32", "int64": "int64"}
-
-# The input distributions `lib` provides that can be named from a table.  The
-# two `UintDistributionWithHotspotAndSpecifiedPivot` (NaN-hotspot) cases in the
-# official correctness table need arguments a table cannot carry, so they are
-# not here; nothing in a performance grid uses them.
-DISTRIBUTIONS = ("normal_float", "uint_uniform", "uniform_01")
-
-
-@dataclasses.dataclass
-class CaseSpec:
-    """One measured case: a shape plus everything the harness needs to build it.
-
-    Field names match `lib.TestParam` so a spec reads as the case it produces.
-    """
-    batch_size: int
-    vocab_size: int
-    topk: int
-    dtype: str = "bf16"
-    out_idx_dtype: str = "int32"
-    sorted_value: bool = False
-    sorted_index: bool = False
-    return_value: bool = False
-    enable_end_position: bool = False
-    enable_output_idx_offset: bool = False
-    input_distrib: str = "normal_float"
-    num_runs: int = 10
-    # `-1` takes the next seed from the same process-global `kk.Counter` the
-    # official run uses, so two snapshots see fresh data exactly as two official
-    # runs do.  Any other value pins the case, which is what an A/B needs (the
-    # environment traps: a timing comparison must pin the seed yourself).
-    seed: int = -1
-    note: str = ""
-
-    @property
-    def family(self) -> str:
-        return "sampler" if self.sorted_value else "lightning_indexer"
-
-    def __post_init__(self) -> None:
-        """Reject a spec that names a dtype or distribution this file cannot build.
-
-        Done at construction rather than at `param()` so a bad axis is caught by
-        `--dry-run` and by whoever wrote the table, not 40 minutes into a run.
-        An unknown name is an error rather than a default: a case silently
-        measured at the wrong width is not a measurement.
-        """
-        for field, table, what in (("dtype", DTYPES, "dtype"),
-                                   ("out_idx_dtype", IDX_DTYPES, "index dtype"),
-                                   ("input_distrib", DISTRIBUTIONS, "distribution")):
-            value = getattr(self, field)
-            if value not in table:
-                raise ValueError(
-                    f"{what} {value!r} is not one of {', '.join(table)} "
-                    f"(add it to scripts/perf_snapshot.py::{field.upper()})")
-
-    def param(self, seed: Optional[int] = None):
-        """The `lib.TestParam` for this spec."""
-        kw: Dict[str, Any] = {}
-        if self.input_distrib == "uint_uniform":
-            kw["input_distrib"] = lib.UniformUIntDistribution(0x0, 0xFFFFFFFF)
-        return lib.TestParam(
-            self.batch_size, self.vocab_size, self.topk,
-            self.sorted_value, self.sorted_index, self.return_value,
-            getattr(torch, DTYPES[self.dtype]), getattr(torch, IDX_DTYPES[self.out_idx_dtype]),
-            self.enable_end_position, self.enable_output_idx_offset,
-            num_runs=self.num_runs, seed=self.seed if seed is None else seed, **kw)
-
-    @staticmethod
-    def from_param(p) -> "CaseSpec":
-        """The spec of an official `lib.TestParam` (for the `official` group)."""
-        dtype = str(p.dtype).replace("torch.", "")
-        idx = str(p.out_idx_dtype).replace("torch.", "")
-        return CaseSpec(p.batch_size, p.vocab_size, p.topk,
-                        "fp32" if dtype == "float32" else dtype, idx,
-                        p.sorted_value, p.sorted_index, p.return_value,
-                        p.enable_end_position, p.enable_output_idx_offset,
-                        num_runs=p.num_runs, seed=p.seed)
-
-
-def expand(**axes) -> List[CaseSpec]:
-    """Cartesian product of named axes -> specs.  Unknown axis names raise.
-
-    Scalars are broadcast, lists are iterated, so
-    `expand(batch_size=[6, 256], vocab_size=4096, topk=[512, 1024])` is two
-    batches x one vocab x two topk = four cases.
-    """
-    fields = {f.name for f in dataclasses.fields(CaseSpec)}
-    bad = set(axes) - fields
-    if bad:
-        raise ValueError(f"unknown case axis {sorted(bad)}; "
-                         f"expected any of {sorted(fields)}")
-    names = sorted(axes)
-    values = [[(n, axes[n])] if not isinstance(axes[n], (list, tuple))
-              else [(n, v) for v in axes[n]] for n in names]
-    out: List[CaseSpec] = []
-    for combo in itertools.product(*values):
-        kwargs = dict(combo)
-        missing = {"batch_size", "vocab_size", "topk"} - set(kwargs)
-        if missing:
-            raise ValueError(f"case axes {sorted(missing)} are required "
-                             f"(a case with no shape is not a case)")
-        out.append(CaseSpec(**kwargs))
-    return out
-
-
-def _official_group() -> List[CaseSpec]:
-    """`tests/test.py::performance_cases()` -- the 95-cell gate grid.
-
-    Produced by the harness rather than restated, so the snapshot's `official`
-    rows are the same cases the official run measures, by construction.
-    """
-    return [CaseSpec.from_param(p) for p in official.performance_cases()]
-
-
-def _deep_gemm_grid() -> List[CaseSpec]:
-    """The host repository's `SELECTOR_PERF_SHAPES`, `top_k=2048`, fp32.
-
-    Transcribed from `deep_gemm/tests/test_indexer_topk_selector.py:78-123`
-    (three named families: test-topk, sglang, dsa).  Kept as a group because it
-    is the only grid here shaped for a *different* implementation than this
-    repository's -- the comparison it exists for is `maca_c` vs `deep_gemm`.
-
-    Its data is `torch.randn` in the host repo and `NormalFloatDistribution`
-    here (the harness's own generator), so a row in this group and a row in
-    `official` are not comparable even at the same shape.
-    """
-    out: List[CaseSpec] = []
-    out += expand(batch_size=[1, 16, 132, 512], vocab_size=66551, topk=2048,
-                  dtype="fp32", note="test-topk")
-    for b in (1, 132, 256, 4096):
-        for seq in (2048, 4096, 16384, 65536):
-            out += [CaseSpec(b, 131072, 2048, "fp32",
-                             note=f"sglang-bs{b}-seq{seq}; seq_len is a column "
-                                  f"in the host grid -- this adapter ranks the "
-                                  f"whole row")]
-    out += expand(batch_size=[1, 16, 132, 256, 4096], vocab_size=107520,
-                  topk=2048, dtype="fp32", note="dsa")
-    return out
-
-
-# name -> callable, so a table that is expensive to build is only built when asked
-DEFAULT_CASE_GROUPS = {
-    "official": _official_group,
-    "deep_gemm_grid": _deep_gemm_grid,
-}
-
-# A group a caller supplies at run time.  Same shape of data as `expand`'s
-# keywords, plus the group name:
-#
-#   {"fp8_probe": {"batch_size": [1, 256], "vocab_size": [32768, 131072],
-#                  "topk": [1024], "dtype": ["fp32"], "num_runs": [20]}}
-#
-# Scalars and lists are both accepted, exactly as in `expand`.
-def load_case_file(path: str) -> Dict[str, List[CaseSpec]]:
-    with open(path) as f:
-        raw = json.load(f)
-    if not isinstance(raw, dict):
-        raise ValueError(f"{path}: expected an object of group -> axes")
-    return {name: expand(**axes) for name, axes in raw.items()}
-
-
-# Measured streaming-read wall per family, in GB/s: what a pure `uint4`
-# grid-stride read of the same volume achieves on a quiet part.  Recorded as a
-# *column* so `bandwidth_pct_of_wall` is reproducible from the CSV rather than
-# from a number in someone's notes.  C500: the ledger's 1,487 GB/s streaming
-# read (1,344 mixed).  C600U: 1,545 GB/s, from a purpose-written read kernel --
-# a torch reduction on the same device measures 274 GB/s and is not the wall.
-READ_WALL_GBPS = {
-    1000: 1487.0,
-    1500: None,      # not measured on this repository
-    1600: 1545.0,
-}
-
-# `tests/test.py:138`'s own label for the input+output traffic is what the
-# official printout calls "TB/s"; the same number as GB/s is recorded beside it
-# because a bandwidth reader wants the unit they can compare to a wall.
 COUNTER = kk.Counter()
-
-
 class Unsupported(Exception):
-    """The backend refused the case; carried as a status, never as a failure."""
-
-
+    """The backend refused the case; a status, never a failure."""
 def call_topk(p, t, backend: str):
-    """Exactly the call `test.run_testcase` makes, with a backend named.
-
-    Kept byte-for-byte in step with `run_testcase`'s argument list on purpose:
-    an arm is only comparable if it is asked the same question.
-    """
+    """The operator call `tests/test.py::run_testcase` makes, with a backend."""
     from deep_select import topk
     try:
         return topk(
@@ -300,69 +97,132 @@ def call_topk(p, t, backend: str):
         if type(exc).__name__ == "UnsupportedByBackend":
             raise Unsupported(str(exc).strip()) from None
         raise
-
-
-def measure_arm(p, t, backend: str) -> Dict[str, Any]:
-    """One `(case, backend)` row: status first, then the numbers.
-
-    A `fail` row still carries its time when one could be taken -- a case that
-    selects wrong is a defect whatever it runs at, and hiding the measurement
-    would hide which of the two problems it is.
-    """
+def time_operator(p, t, backend: str) -> Optional[float]:
+    """`kk.bench` over the operator, with `tests/test.py`'s matching rule."""
+    usage, _ = official.bench_topk(
+        lambda: call_topk(p, t, backend), p, t, None, None)
+    return usage
+def measure(p, t, backend: str) -> Dict[str, Any]:
+    """One (cell, backend) result: status first, then the numbers."""
     row: Dict[str, Any] = {"status": "pass", "error_type": "", "error_message": ""}
+    if backend == "torch":
+        # The reference is checked by nothing, here as in `tests/test.py`: it is
+        # a speed baseline, and the contract's own arm is `maca_c`.
+        if t.end is not None or t.output_idx_offset is not None or p.vocab_size < p.topk:
+            # `run_testcase`'s own eligibility guard, carried as the reason so
+            # the gap is stated rather than looking like a missing measurement.
+            # A bare `torch.topk(x, k)` with `k > x.shape[1]` raises (measured:
+            # "selected index k out of range"), which is why the guard exists --
+            # the windowed operator answers such a row with its whole prefix.
+            row["error_message"] = ("not applicable: the reference arm needs "
+                                    "vocab_size >= topk, no window, no offset "
+                                    "(tests/test.py's own guard)")
+            return row
+        try:
+            row["time(us)"] = _us(official.bench_torch_reference(p, t))
+        except Exception as exc:
+            row["status"], row["error_type"] = "fail", type(exc).__name__
+            row["error_message"] = str(exc)[:200]
+        return row
     try:
         value, index = call_topk(p, t, backend)
         torch.cuda.synchronize()
         official.check_call_contract(p, value, index)
     except Unsupported as exc:
-        row["status"] = "unsupported"
-        row["error_type"] = "UnsupportedByBackend"
+        row["status"], row["error_type"] = "unsupported", "UnsupportedByBackend"
         row["error_message"] = str(exc)[:200]
         return row
     except Exception as exc:
-        row["status"] = "fail"
-        row["error_type"] = type(exc).__name__
+        row["status"], row["error_type"] = "fail", type(exc).__name__
         row["error_message"] = str(exc)[:200]
         return row
-
-    if p.check_correctness:
-        try:
-            ok = official.check_result(p, t, value.clone() if value is not None else None,
-                                       index.clone())
-        except Exception as exc:
-            row["status"] = "fail"
-            row["error_type"] = type(exc).__name__
-            row["error_message"] = str(exc)[:200]
-            return row
-        if not ok:
-            row["status"] = "fail"
-            row["error_type"] = "CheckFailed"
-            row["error_message"] = "check_result() returned False"
+    try:
+        if not official.check_result(p, t, value, index):
+            row["status"], row["error_type"] = "fail", "CheckFailed"
+            row["error_message"] = "check_result() returned false"
+    except Exception as exc:
+        row["status"], row["error_type"] = "fail", type(exc).__name__
+        row["error_message"] = str(exc)[:200]
+    row["Byte(MB)"] = round(official.topk_total_size(p, t, value, index) / 1e6, 3)
     del value, index
-
-    if p.num_runs > 0:
-        # `bench_topk` takes the call's outputs because the traffic figure
-        # counts the output buffers too, so one run is done to size them (the
-        # timing run itself re-executes `fn`, as `tests/test.py` does).
-        value, index = call_topk(p, t, backend)
-        torch.cuda.synchronize()
-        fn = lambda: call_topk(p, t, backend)          # noqa: E731
-        usage, total_size = official.bench_topk(fn, p, t, value, index)
-        del value, index
-        row["Byte(MB)"] = round(total_size / 1e6, 3)
-        if usage:
-            row["time(us)"] = round(usage * 1e6, 3)
-            row["throughput(TB/s)"] = round(total_size / usage / 1e12, 6)
-            row["bandwidth(GB/s)"] = round(total_size / usage / 1e9, 3)
-            row["logical_read_bandwidth(GB/s)"] = round(
-                p.batch_size * p.vocab_size * t.input.element_size() / usage / 1e9, 3)
-        else:
-            # No kernel name contains "topk": `tests/test.py` skips the print for
-            # exactly this reason (a small cell's torch.topk lowers to
-            # `gatherTopK_opt`).  Not timed, and said so rather than recorded as 0.
-            row["error_message"] = (row["error_message"] + "; " if row["error_message"] else "") \
-                + "not timed: no kernel name contains \"topk\""
+    # A failing case is still timed when it can be: which of "selects wrong" and
+    # "slow" it is matters, and hiding the measurement answers neither.
+    try:
+        row["time(us)"] = _us(time_operator(p, t, backend))
+    except Exception as exc:
+        row["error_message"] = (row["error_message"] + "; " if row["error_message"]
+                                else "") + f"{type(exc).__name__}: {str(exc)[:120]}"
     return row
+def _us(seconds: Optional[float]) -> Any:
+    """Seconds -> microseconds, or "" when the arm did not apply / was not timed.
+    Empty rather than 0: a 0 us cell reads as an implausible win, and the
+    reference arm is legitimately absent where the guard excludes it.
+    """
+    return round(seconds * 1e6, 3) if seconds else ""
+# ── cases ───────────────────────────────────────────────────────────────────
+def deep_gemm_cases() -> List[Any]:
+    """The host repo's `SELECTOR_PERF_SHAPES`, `top_k=2048`, fp32.
+    Transcribed from `deep_gemm/tests/test_indexer_topk_selector.py:78-123`.  The
+    only reason it is here is that `deep_gemm` has no cell on the official grid
+    (bf16), so without it the `deep_gemm` column is 95 `unsupported` rows.
+    Its rows are NOT comparable to the official ones even at the same shape: the
+    host repo feeds this grid `torch.randn` while this harness uses
+    `NormalFloatDistribution`, and several of its rows declare a window narrower
+    than `n_cols` that this adapter does not synthesize.  `case_source` marks
+    them, and `note` says which.
+    """
+    def p(b, v, note=""):
+        return (note, lib.TestParam(b, v, 2048, False, False, False,
+                                    torch.float32, torch.int32, num_runs=10))
+    out = [p(b, 66551) for b in (1, 16, 132, 512)]
+    for b in (1, 132, 256, 4096):
+        for seq in (2048, 4096, 16384, 65536):
+            out.append(p(b, 131072, f"sglang-bs{b}-seq{seq}: the host grid "
+                                     f"declares a window; this ranks the whole row"))
+    out += [p(b, 107520) for b in (1, 16, 132, 256, 4096)]
+    return out
+
+
+# `lib.TestParam` has four required fields beyond the shape; a `--cases-file`
+# entry that omits them gets the Lightning Indexer's own configuration, which is
+# also what the official grid uses.  Spelled out rather than relying on
+# `TestParam`'s defaults because those fields have none.
+PARAM_DEFAULTS = {"sorted_value": False, "sorted_index": False,
+                  "return_value": False, "dtype": "bf16", "out_idx_dtype": "int32"}
+
+
+def cases_from_file(path: str) -> List[Any]:
+    """`--cases-file`: a JSON list of `lib.TestParam` fields.
+
+    `batch_size`, `vocab_size` and `topk` are required.  The four configuration
+    fields `TestParam` requires (`sorted_value`, `sorted_index`, `return_value`,
+    `out_idx_dtype`) and the `dtype` default to `PARAM_DEFAULTS` -- the Lightning
+    Indexer's configuration, which is what the official grid uses.  `dtype` /
+    `out_idx_dtype` take the short names above and an unknown one is an error: a
+    typo should not become a different case.
+    """
+    with open(path) as f:
+        specs = json.load(f)
+    if not isinstance(specs, list):
+        raise ValueError(f"{path}: expected a JSON list of case objects")
+    out = []
+    for i, spec in enumerate(specs):
+        missing = {"batch_size", "vocab_size", "topk"} - set(spec)
+        if missing:
+            raise ValueError(f"{path}[{i}]: missing {sorted(missing)}")
+        kw = dict(PARAM_DEFAULTS)
+        kw.update(spec)
+        for field, table in (("dtype", DTYPES), ("out_idx_dtype", IDX_DTYPES)):
+            if field in kw:
+                name = kw[field]
+                if name not in table:
+                    raise ValueError(
+                        f"{path}[{i}]: {field} {name!r} is not one of "
+                        f"{', '.join(table)}")
+                kw[field] = getattr(torch, table[name])
+        note = kw.pop("note", "")
+        out.append((note, lib.TestParam(**kw)))
+    return out
 
 
 # ── provenance ──────────────────────────────────────────────────────────────
@@ -373,8 +233,6 @@ def _run(cmd: List[str], cwd: str) -> str:
                               timeout=20).stdout.strip()
     except Exception:
         return ""
-
-
 def provenance(chip: str, sm_count: int) -> Dict[str, Any]:
     here = REPO
     host = os.environ.get("DEEP_GEMM_REPO", "/home/compiler_gfx/tilelang/mcDeepGEMM")
@@ -384,18 +242,16 @@ def provenance(chip: str, sm_count: int) -> Dict[str, Any]:
     if sos:
         md5 = hashlib.md5(open(os.path.join(here, "deep_select", sos[0]),
                                "rb").read()).hexdigest()
-    dg_commit = _run(["git", "log", "-1", "--format=%H%n%cd", "--date=iso"],
-                     host) if os.path.isdir(os.path.join(host, ".git")) else ""
-    dg_lines = dg_commit.splitlines()
+    dg = _run(["git", "log", "-1", "--format=%H%n%cd", "--date=iso"], host) \
+        if os.path.isdir(os.path.join(host, ".git")) else ""
+    dg_lines = dg.splitlines()
     return {
         "chip": chip,
         "device_name": torch.cuda.get_device_name(0),
         "sm_count": sm_count,
-        "device_count": torch.cuda.device_count(),
         "torch": torch.__version__,
         "python": platform.python_version(),
         "deep_select_git_commit": _run(["git", "log", "-1", "--format=%H"], here),
-        "deep_select_git_branch": _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], here),
         "deep_select_git_dirty": bool(_run(["git", "status", "--porcelain"], here)),
         "extension_so": sos[0] if sos else "",
         "extension_md5": md5,
@@ -404,48 +260,32 @@ def provenance(chip: str, sm_count: int) -> Dict[str, Any]:
         "deep_gemm_commit_date": dg_lines[1] if len(dg_lines) > 1 else "",
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
     }
-
-
 # ── writing ─────────────────────────────────────────────────────────────────
-
-# The cells' own shape and configuration, then the backend's identity and
-# status, then the measurement.  `relative_pct_vs_maca_c` is defined against
-# `maca_c` = 100%, so **>100% means that backend is faster than this
-# repository's own kernel**; it is repeated on every row of a cell so a reader
-# never has to find the other row to interpret this one.
-#
-# `bandwidth_pct_of_wall` is *not* a fraction of the kernel's roof: it is
-# `logical_read_bandwidth(GB/s)` -- the input read alone, no output buffers --
-# over the measured streaming-read wall.  The official grid sits at a median
-# 19% of the C500 wall while the same kernel's pass 1 measures 94.9-97.9% of it
-# on a full-length row, because most of these cells are small and the grid is
-# weighted by batch rather than bytes.  Read it with the cell's batch and row
-# length, never as headroom.
+# The cell's shape and configuration, then the backend and its status, then the
+# measurement.  `relative_pct_vs_maca_c` is maca_c = 100%, so >100% means that
+# backend is faster than this repository's own kernel; it is repeated on every
+# row of a cell so a row reads on its own.
 COLUMNS = ["chip", "device_name", "sm_count", "git_commit", "extension_md5",
-           "case_group", "official_cell", "family", "n_rows", "n_cols", "top_k",
+           "case_source", "family", "n_rows", "n_cols", "top_k",
            "sorted_value", "return_value", "input_dtype", "index_dtype",
            "num_runs", "backend", "status", "error_type", "error_message",
-           "time(us)", "throughput(TB/s)", "bandwidth(GB/s)",
-           "logical_read_bandwidth(GB/s)", "Byte(MB)",
-           "speedup_vs_torch", "relative_pct_vs_maca_c",
-           "bandwidth_pct_of_wall", "note"]
+           "time(us)", "throughput(TB/s)", "bandwidth(GB/s)", "Byte(MB)",
+           "relative_pct_vs_maca_c", "note"]
 
 
-def to_rows(spec: CaseSpec, p, got: Dict[str, Dict[str, Any]],
-            prov: Dict[str, Any], group: str) -> List[Dict[str, Any]]:
-    """One row per backend, with the case's shared columns repeated on each.
-
-    Repetition is deliberate: `relative_pct_vs_maca_c` is only readable if the
-    row that defines 100% is in the same file, and a per-row `backend` column
-    means the whole CSV is one table rather than a table per backend.
-    """
-    nbytes = spec.batch_size * spec.vocab_size * p.dtype.itemsize
-    family_num = _arch.FAMILY_OF_TARGET[_arch.native_target()]
-    wall = READ_WALL_GBPS.get(family_num)
-    ref_us = got.get("maca_c", {}).get("time(us)")
-    ref_torch = got.get("torch", {}).get("time(us)")
-
-    out: List[Dict[str, Any]] = []
+def rows_for(p, source: str, note: str, got: Dict[str, Dict[str, Any]],
+             prov: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # The operator's own traffic, the same figure `tests/test.py:138` prints:
+    # the input read plus the outputs written.  Computed from the shape rather
+    # than from one backend's buffers, so every row of a cell shares it and the
+    # bandwidths are comparable across backends (including `torch`, which
+    # allocates nothing through this operator).
+    nbytes = (p.batch_size * p.vocab_size * p.dtype.itemsize
+              + p.batch_size * p.topk
+              * (p.dtype.itemsize * int(p.return_value)
+                 + p.out_idx_dtype.itemsize))
+    ref = got.get("maca_c", {}).get("time(us)")
+    out = []
     for arm in ARMS:
         g = got.get(arm)
         if g is None:
@@ -456,185 +296,120 @@ def to_rows(spec: CaseSpec, p, got: Dict[str, Dict[str, Any]],
             "sm_count": prov["sm_count"],
             "git_commit": prov["deep_select_git_commit"],
             "extension_md5": prov["extension_md5"],
-            "case_group": group, "official_cell": int(group == "official"),
-            "family": spec.family, "n_rows": spec.batch_size,
-            "n_cols": spec.vocab_size, "top_k": spec.topk,
-            "sorted_value": int(spec.sorted_value),
-            "return_value": int(spec.return_value),
-            "input_dtype": spec.dtype, "index_dtype": spec.out_idx_dtype,
-            "num_runs": spec.num_runs,
+            "case_source": source,
+            "family": "sampler" if p.sorted_value else "lightning_indexer",
+            "n_rows": p.batch_size, "n_cols": p.vocab_size, "top_k": p.topk,
+            "sorted_value": int(p.sorted_value),
+            "return_value": int(p.return_value),
+            "input_dtype": str(p.dtype).replace("torch.", ""),
+            "index_dtype": str(p.out_idx_dtype).replace("torch.", ""),
+            "num_runs": p.num_runs,
             "backend": arm,
             "status": g["status"],
             "error_type": g.get("error_type", ""),
             "error_message": g.get("error_message", ""),
-            "note": spec.note,
+            "note": note,
         })
-        for k in ("time(us)", "throughput(TB/s)", "bandwidth(GB/s)",
-                  "logical_read_bandwidth(GB/s)", "Byte(MB)"):
-            if k in g:
+        for k in ("time(us)", "Byte(MB)"):
+            if g.get(k):
                 row[k] = g[k]
         us = g.get("time(us)")
         if us:
-            # `maca_c` is the reference: its speed is 100%, and another
-            # backend's percentage is how fast it is relative to it.
-            row["relative_pct_vs_maca_c"] = (
-                round(ref_us / us * 100, 2) if ref_us else "")
-            row["speedup_vs_torch"] = (round(ref_torch / us, 3) if ref_torch else "")
-            if wall:
-                row["bandwidth_pct_of_wall"] = round(
-                    nbytes / (us * 1e-6) / 1e9 / wall * 100, 2)
+            row["throughput(TB/s)"] = round(nbytes / (us * 1e-6) / 1e12, 6)
+            row["bandwidth(GB/s)"] = round(nbytes / (us * 1e-6) / 1e9, 3)
+            row["relative_pct_vs_maca_c"] = round(ref / us * 100, 2) if ref else ""
         out.append(row)
-    return out
-
-
-def write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
-        w.writeheader()
-        for r in rows:
-            w.writerow(r)
-
-
-def resolve_groups(names: List[str], case_file: str) -> Dict[str, List[CaseSpec]]:
-    """Name -> specs, for the groups asked for.
-
-    A name is looked up in the built-in table first, then in `--cases-file`, so
-    a run-time group can shadow a built-in one (that is how a one-off grid is
-    measured without editing this file) and the CSV's `case_group` column names
-    which of the two produced a row.
-    """
-    external = load_case_file(case_file) if case_file else {}
-    out: Dict[str, List[CaseSpec]] = {}
-    for name in names:
-        if name in external:
-            out[name] = external[name]
-        elif name in DEFAULT_CASE_GROUPS:
-            out[name] = DEFAULT_CASE_GROUPS[name]()
-        else:
-            raise SystemExit(
-                f"unknown case group {name!r}; built-in groups are "
-                f"{', '.join(DEFAULT_CASE_GROUPS)}, or pass --cases-file")
-        if not out[name]:
-            raise SystemExit(f"case group {name!r} is empty")
     return out
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
-case groups (--groups):
-  official         tests/test.py::performance_cases() -- the 95-cell gate grid
-                   (default).  Produced by the harness, so it cannot drift.
-  deep_gemm_grid   the host repo's SELECTOR_PERF_SHAPES, top_k=2048, fp32 --
-                   the grid that exists for the maca_c-vs-deep_gemm comparison.
-                   Its data (NormalFloatDistribution) differs from the host
-                   repo's own (torch.randn), so its rows are not comparable to
-                   the official ones even at the same shape.
-
-adding cases:
-  --cases-file FILE   a JSON object of group -> axes, e.g.
-                        {"fp8_probe": {"batch_size": [1, 256],
-                                       "vocab_size": [32768, 131072],
-                                       "topk": [1024], "dtype": ["fp32"],
-                                       "num_runs": [20]}}
-                      Every `CaseSpec` field is an axis; a scalar is
-                      broadcast, a list is iterated.  An unknown axis or dtype
-                      is an error, not a default.
-
-backends: """ + ", ".join(ARMS))
+        epilog="extra cases (--cases-file) are a JSON list of lib.TestParam "
+               "fields; only batch_size, vocab_size and topk are required, and "
+               "dtype/out_idx_dtype take " + "/".join(sorted(set(DTYPES))) + ".")
     ap.add_argument("--arms", default=",".join(ARMS),
                     help="comma-separated subset of the backends")
-    ap.add_argument("--groups", default="official",
-                    help="comma-separated case groups (default: official)")
+    ap.add_argument("--deep-gemm-axes", action="store_true",
+                    help="also run the host repo's fp32 selector grid (the only "
+                         "cells the deep_gemm backend can answer)")
     ap.add_argument("--cases-file", default="",
-                    help="JSON file of extra case groups (see the epilog)")
+                    help="JSON list of extra cases (see the epilog)")
     ap.add_argument("--out-dir", default=os.path.join(REPO, "perf_data"))
     ap.add_argument("--tag", default="")
     ap.add_argument("--dry-run", action="store_true",
-                    help="expand the groups, print the plan, measure nothing")
+                    help="print the plan, measure nothing")
     args = ap.parse_args()
     arms = [a for a in args.arms.split(",") if a]
     for a in arms:
         if a not in ARMS:
             raise SystemExit(f"unknown backend {a!r}; expected one of {', '.join(ARMS)}")
-    groups = resolve_groups([g for g in args.groups.split(",") if g], args.cases_file)
-
+    cases = [("official", "", p) for p in official.performance_cases()]
+    if args.deep_gemm_axes:
+        cases += [("deep_gemm_axes", note, p) for note, p in deep_gemm_cases()]
+    if args.cases_file:
+        cases += [("extra", note, p) for note, p in cases_from_file(args.cases_file)]
     torch.set_default_device("cuda")
     import deep_select  # noqa: E402  (after set_default_device)
-
     target = _arch.native_target()
-    family_num = _arch.FAMILY_OF_TARGET[target]
     chip = f"metax_{target}"
-    sm_count = _arch.SM_COUNT[family_num]
-
+    sm_count = _arch.SM_COUNT[_arch.FAMILY_OF_TARGET[target]]
     if args.dry_run:
         print(f"chip {chip}  backends {arms}")
-        total = 0
-        for name, specs in groups.items():
-            print(f"  group {name:<16} {len(specs):>5} cases "
-                  f"x {len(arms)} backends = {len(specs) * len(arms)} rows")
-            by_dtype: Dict[Any, int] = {}
-            for s in specs:
-                by_dtype[(s.dtype, s.out_idx_dtype)] = by_dtype.get((s.dtype, s.out_idx_dtype), 0) + 1
-            for k, v in sorted(by_dtype.items()):
-                print(f"      {k[0]:<10} idx {k[1]:<6} {v}")
-            total += len(specs) * len(arms)
-        print(f"  total rows: {total}")
+        by = {}
+        for source, _note, p in cases:
+            by[(source, str(p.dtype), str(p.out_idx_dtype))] = \
+                by.get((source, str(p.dtype), str(p.out_idx_dtype)), 0) + 1
+        for k, v in sorted(by.items()):
+            print(f"  {k[0]:<16} {k[1]:<18} idx {k[2]:<12} {v:>4} cases")
+        print(f"  {'TOTAL':<16} {len(cases)} cases x {len(arms)} backends "
+              f"= {len(cases) * len(arms)} rows")
         return 0
-
     stamp = args.tag or _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     out = os.path.join(args.out_dir, chip, stamp)
     os.makedirs(out, exist_ok=True)
-
-    # A spec's `seed` of -1 takes the next seed from the same process-global
-    # `kk.Counter` the official run uses, so two snapshots see fresh data exactly
-    # as two official runs do; any other value pins the case.
-    cases: List[Any] = []
-    for name, specs in groups.items():
-        for spec in specs:
-            p = spec.param()
-            if spec.seed == -1:
-                p.seed = COUNTER.next()
-            cases.append((name, spec, p))
-
-    n_cases = len(cases)
     prov = provenance(chip, sm_count)
     started = _dt.datetime.now().astimezone()
     rows: List[Dict[str, Any]] = []
     print(f"chip {chip}  device {torch.cuda.get_device_name(0)}  sm {sm_count}  "
-          f"backends {arms}  cases {n_cases}  rows {n_cases * len(arms)}", flush=True)
-    print(f"{'case':<44}{'backend':<10}{'status':<13}{'us':>12}{'GB/s':>10}", flush=True)
-
-    for i, (group, spec, p) in enumerate(cases):
+          f"backends {arms}  cases {len(cases)}", flush=True)
+    print(f"{'case':<46}{'backend':<10}{'status':<12}{'us':>12}{'GB/s':>10}",
+          flush=True)
+    for i, (source, note, p) in enumerate(cases):
+        if p.seed == -1:
+            p.seed = COUNTER.next()
         t0 = time.time()
         try:
             t = lib.generate_testcase(p)
         except Exception as exc:                # OOM guard, mirrors test.py:194
-            print(f"  generate_testcase failed for {spec}: {exc}", flush=True)
+            print(f"  generate_testcase failed for {p}: {exc}", flush=True)
             break
-        got: Dict[str, Dict[str, Any]] = {}
+        got = {}
         for arm in arms:
-            got[arm] = measure_arm(p, t, arm)
+            got[arm] = measure(p, t, arm)
             g = got[arm]
-            label = (f"{group[:5]}/{spec.family[:6]} {spec.dtype:<5}"
-                     f" b{spec.batch_size}-v{spec.vocab_size}-k{spec.topk}")
-            print(f"{label:<44}{arm:<10}{g['status']:<13}"
-                  f"{g.get('time(us)', '')!s:>12}{g.get('bandwidth(GB/s)', '')!s:>10}"
-                  + (f"  [{g['error_message'][:38]}]" if g.get("error_message") else ""),
+            label = (f"{source[:5]}/{str(p.dtype).replace('torch.','')[:4]} "
+                     f"b{p.batch_size}-v{p.vocab_size}-k{p.topk}")
+            print(f"{label:<46}{arm:<10}{g['status']:<12}"
+                  f"{g.get('time(us)', '')!s:>12}"
+                  f"{(g.get('bandwidth(GB/s)') or '')!s:>10}"
+                  + (f"  [{g['error_message'][:34]}]" if g.get("error_message") else ""),
                   flush=True)
-        rows.extend(to_rows(spec, p, got, prov, group))
+        rows.extend(rows_for(p, source, note, got, prov))
         del t, got
         torch.cuda.empty_cache()
-        if i == 0 or (i + 1) % 10 == 0:
-            print(f"  ... {i + 1}/{n_cases} cases ({time.time() - t0:.1f}s)", flush=True)
-
+        if (i + 1) % 10 == 0:
+            print(f"  ... {i + 1}/{len(cases)} cases ({time.time() - t0:.1f}s)",
+                  flush=True)
     csv_path = os.path.join(out, "deepselect_perf.csv")
-    write_csv(csv_path, rows)
-
-    n_by: Dict[Any, int] = {}
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    counts: Dict[Any, int] = {}
     for r in rows:
-        n_by[(r["backend"], r["status"])] = n_by.get((r["backend"], r["status"]), 0) + 1
+        counts[(r["backend"], r["status"])] = counts.get((r["backend"], r["status"]), 0) + 1
     manifest = dict(prov)
     manifest.update({
         "run_id": stamp,
@@ -644,29 +419,26 @@ backends: """ + ", ".join(ARMS))
         "finished_at_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "csv_files": [os.path.basename(csv_path)],
         "backends": arms,
-        "case_groups": {name: len(specs) for name, specs in groups.items()},
-        "cases": n_cases,
+        "cases": len(cases),
         "rows": len(rows),
-        "status_counts": {f"{k[0]}/{k[1]}": v for k, v in sorted(n_by.items())},
-        "read_wall_gbps": READ_WALL_GBPS.get(family_num),
+        "status_counts": {f"{k[0]}/{k[1]}": v for k, v in sorted(counts.items())},
         "csv_format_version": 1,
-        "case_source": ("tests/test.py::performance_cases() for the `official` "
-                        "group; scripts/perf_snapshot.py's own tables otherwise"),
-        "measurement": ("tests/test.py's own rule: one 'topk'-matching kernel's "
-                        "time, else the e2e span over the matching kernels; "
-                        "num_runs per case (10 for the official grid), L2 "
-                        "flushed between reps (kk.bench default). "
-                        "Correctness: tests/test.py::check_result / "
-                        "check_call_contract, applied to every backend."),
+        "case_source": "tests/test.py::performance_cases() (+ --deep-gemm-axes, "
+                       "+ --cases-file)",
+        "measurement": ("tests/test.py's own: one 'topk'-matching kernel's time, "
+                        "else the e2e span over the matching kernels; p.num_runs "
+                        "reps, L2 flushed (kk.bench). Correctness: "
+                        "tests/test.py::check_result / check_call_contract, "
+                        "applied to every backend except `torch`, whose arm is a "
+                        "bare torchtopk the official harness does not check "
+                        "either."),
     })
     with open(os.path.join(out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2, sort_keys=True)
-    print(f"\nwrote {out}/deepselect_perf.csv  ({len(rows)} rows, {n_cases} cases)",
-          flush=True)
-    for k, v in sorted(n_by.items()):
+    print(f"\nwrote {out}/deepselect_perf.csv  ({len(rows)} rows, "
+          f"{len(cases)} cases)", flush=True)
+    for k, v in sorted(counts.items()):
         print(f"  {k[0]:<10} {k[1]:<12} {v}", flush=True)
     return 0
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

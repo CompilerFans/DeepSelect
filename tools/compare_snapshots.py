@@ -2,7 +2,7 @@
 """Compare two `perf_snapshot.py` runs, cell by cell.
 
 Rows are matched on the *measured* cell, not on their position:
-`(case_group, family, n_rows, n_cols, top_k, sorted_value, input_dtype,
+`(case_source, family, n_rows, n_cols, top_k, sorted_value, input_dtype,
 index_dtype)`.  A cell that appears in one run and not the other is reported as
 added/removed rather than silently dropped -- a run that measured fewer cells
 must not read as "no change".
@@ -41,7 +41,7 @@ import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
-KEY = ("case_group", "family", "n_rows", "n_cols", "top_k", "sorted_value",
+KEY = ("case_source", "family", "n_rows", "n_cols", "top_k", "sorted_value",
        "input_dtype", "index_dtype")
 # The column a run is compared on.  `relative_pct_vs_maca_c` is a derived
 # number and `speedup_vs_torch` depends on another backend's row, so both are
@@ -52,9 +52,9 @@ REQUIRED = "time(us)"
 def load(directory: str) -> Dict[Tuple, Dict[str, Dict[str, str]]]:
     """Every row of every CSV in the directory, keyed by (cell, backend).
 
-    A CSV that predates the `case_group` column keys its rows by an empty group
-    rather than failing: this tool's job is to compare two runs, and an older
-    run is the most useful baseline there is.  Keys are read with `setdefault`,
+    A CSV that predates the `case_source` column keys its rows by an empty
+    source rather than failing: this tool's job is to compare two runs, and an
+    older run is the most useful baseline there is.  Keys are read with `setdefault`,
     so an older file is matched on the columns it does have.
     """
     files = sorted(f for f in os.listdir(directory) if f.endswith(".csv"))
@@ -74,8 +74,8 @@ def load(directory: str) -> Dict[Tuple, Dict[str, Dict[str, str]]]:
 
 
 def label(cell: Tuple) -> str:
-    group, fam, n_rows, n_cols, top_k, _sv, dtype, _idx = cell
-    return f"{group[:8]:<8} {fam[:6]:<6} {dtype:<8} b{n_rows}-v{n_cols}-k{top_k}"
+    source, fam, n_rows, n_cols, top_k, _sv, dtype, _idx = cell
+    return f"{source[:8]:<8} {fam[:6]:<6} {dtype:<8} b{n_rows}-v{n_cols}-k{top_k}"
 
 
 def compare_one(base: Dict[str, str], cand: Dict[str, str], tol: float):

@@ -309,11 +309,7 @@ snapshot_failed=0
 # failure" (it can fail on memory, where the gate below would still pass).
 snap_args=(scripts/perf_snapshot.py --arms "${arms}" --out-dir "${results_dir}"
            --tag "${stamp}")
-if [[ ${full} -eq 1 ]]; then
-    snap_args+=(--groups official,deep_gemm_grid)
-else
-    snap_args+=(--groups official)
-fi
+if [[ ${full} -eq 1 ]]; then snap_args+=(--deep-gemm-axes); fi
 if ! run_arm snapshot python "${snap_args[@]}"; then
     snapshot_failed=1
     bench_status=1

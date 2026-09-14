@@ -117,6 +117,18 @@ def check_result(p: TestParam, t: Testcase, ans_topk_value, ans_topk_index) -> b
     return bool(is_correct)
 
 
+def topk_total_size(p: TestParam, t: Testcase, ans_topk_value, ans_topk_index) -> int:
+    """The operator's own traffic in bytes, as `tests/test.py:138` computes it.
+
+    Split out because `bench_topk` is not the only caller that needs it: the
+    snapshot sizes a cell's outputs once and reuses the figure across backends.
+    An output may be `None` for a caller that has none (the reference arm).
+    """
+    return (t.end.sum() if t.end is not None else p.batch_size * p.vocab_size) * t.input.element_size() \
+        + (get_space(ans_topk_value) if ans_topk_value is not None else 0) \
+        + (get_space(ans_topk_index) if ans_topk_index is not None else 0)
+
+
 def bench_topk(fn, p: TestParam, t: Testcase, ans_topk_value, ans_topk_index):
     """The official timing rule, returning `(time_usage, total_size)` in seconds
     and bytes.
@@ -127,10 +139,13 @@ def bench_topk(fn, p: TestParam, t: Testcase, ans_topk_value, ans_topk_index):
     several is the span over all of them (they are one operator's phases, and
     `mbtopk`/the chunked paths launch more than one).  Zero matches is `None`
     rather than 0, because "0 us" reads as an implausibly good result.
+
+    An output may be `None` for a caller that has none (the reference arm writes
+    its own).
     """
-    total_size = (t.end.sum() if t.end is not None else p.batch_size * p.vocab_size) * t.input.element_size() + (get_space(ans_topk_value) if ans_topk_value is not None else 0) + get_space(ans_topk_index)
+    total_size = topk_total_size(p, t, ans_topk_value, ans_topk_index)
     bench_result = kk.bench(fn, p.num_runs)
-    kernel_names = [s for s in bench_result.get_kernel_names() if "topk" in s]
+    kernel_names = [s for s in bench_result.get_kernel_names() if "topk" in s.lower()]
     if len(kernel_names) == 1:
         time_usage = bench_result.get_kernel_time(kernel_names[0])
     elif kernel_names:
@@ -138,6 +153,34 @@ def bench_topk(fn, p: TestParam, t: Testcase, ans_topk_value, ans_topk_index):
     else:
         time_usage = None
     return time_usage, total_size
+
+
+def bench_torch_reference(p: TestParam, t: Testcase):
+    """The `torch.topk` reference arm, timed by the rule above.
+
+    A bare `torch.topk`, which is what `tests/test.py` times -- not
+    `deep_select.topk(backend="torch")`, whose reference implementation pads the
+    row, masks the window and converts the indices, so it launches some twenty
+    kernels where this launches one.
+
+    `None` when the arm does not apply.  The guard is the runner's own
+    (`run_testcase`: no window, no offset, `vocab_size >= topk`); it is repeated
+    here so the helper cannot be called on a row a bare `torch.topk` would raise
+    on.
+    """
+    if t.end is not None or t.output_idx_offset is not None or p.vocab_size < p.topk:
+        return None
+
+    def run_torch_topk():
+        return torch.topk(t.input, p.topk, dim=1, sorted=p.sorted_value)
+
+    bench_result = kk.bench(run_torch_topk, p.num_runs)
+    kernel_names = [s for s in bench_result.get_kernel_names() if "topk" in s.lower()]
+    if len(kernel_names) == 1:
+        return bench_result.get_kernel_time(kernel_names[0])
+    if kernel_names:
+        return bench_result.get_e2e_time(kernel_names)
+    return None
 
 
 @torch.inference_mode()
@@ -187,18 +230,8 @@ def run_testcase(p: TestParam):
             print(f"topk           : {time_usage * 1e6:9.3f} us, {total_size / time_usage / 1e12:.3f} TB/s")
 
         if t.end is None and t.output_idx_offset is None and p.vocab_size >= p.topk:
-            def run_torch_topk():
-                return torch.topk(t.input, p.topk, dim=1, sorted=p.sorted_value)
-            torch_bench_result = kk.bench(run_torch_topk, p.num_runs)
-            # torch.topk is a multi-kernel op (`mbtopk`), so measure the span over its kernels.
-            torch_kernel_names = [s for s in torch_bench_result.get_kernel_names() if "topk" in s]
-            if len(torch_kernel_names) == 1:
-                torch_time = torch_bench_result.get_kernel_time(torch_kernel_names[0])
-            elif torch_kernel_names:
-                torch_time = torch_bench_result.get_e2e_time(torch_kernel_names)
-            else:
-                torch_time = 0
-            if torch_time > 0 and time_usage is not None:
+            torch_time = bench_torch_reference(p, t)
+            if torch_time and time_usage is not None:
                 print(f"torch.topk     : {torch_time * 1e6:9.3f} us, {total_size / torch_time / 1e12:.3f} TB/s  (speedup {torch_time / time_usage:.2f}x)")
 
     return is_correct
