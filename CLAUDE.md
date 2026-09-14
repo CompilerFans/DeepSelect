@@ -194,15 +194,26 @@ tried or explained, and the two retractions are as important as the wins:
   ~1% in this kernel.** It gives each load instruction a 64-byte lane stride.
   Coalescing pass 1 was measured at **−0.7% on the fp32 grid** (43,456 → 43,146 µs
   over 36 cells, two alternating rounds) because the real walk carries one shared
-  bucket atomic per element at **3 CTAs/SM** (2,596 B static + 14,056 B dynamic of
-  64 KiB), where the two patterns are 7% apart, not 65%. Pass 2's two walks and
+  bucket atomic per element at **4 CTAs/SM** (2,596 B static + 14,056 B dynamic of
+  64 KiB — measured with `cudaOccupancyMaxActiveBlocksPerMultiprocessor`;
+  the "3" this file carried until 2026-09-15 was a hand-computation, see the
+  occupancy note below), where the two patterns are 7% apart, not 65%. Pass 2's two walks and
   the rescan still carry the pattern deliberately: their coalesced form needs four
   live `float4` (4 more registers) and the register budget is the real constraint
   here.
-- **The shared bucket atomic is the remaining candidate for pass 1's deficit,
-  and it is unmeasured.** Every reading that showed it "free" (0.5%) was taken at
-  4 CTAs/SM; the kernel runs at 3. No change should be made on the atomic's
-  account until the 3-CTA/SM-with-atomics cell exists.
+- **The shared bucket atomic is closed as a lever, at every attainable
+  occupancy.** Measured 2026-09-15 (`/tmp/dsab/ablate_cta2.cu`: the same walk,
+  the same 2,600 B static + 14,056 B dynamic, the same `tx*4` pattern, one row
+  per CTA, grid = 104 x driver-reported occupancy, three rounds): removing the
+  atomic is worth **+0.5% at 3 CTAs/SM and +0.8% at 4** — inside the repeat
+  noise — and only becomes real below that (+3.4% at 2, +5.0% at 1), where the
+  kernel does not run. A pure-read arm at the same occupancy hits **1,645.5
+  GB/s (99.7% of the wall)**, so the whole walk is 2.6-2.8% off the wall at both
+  4 and 3 CTAs/SM. That 2.6% is the ceiling on *every* instruction-level idea
+  here: 0.5% atomic + 0.4% integer key/add + ~1% everything else. It is not a
+  4-5x gap. Do not spend effort on the atomic, on `ldg`->`bsm` (the pure-read
+  arm walks the whole load chain and still hits the wall), or on int/float
+  emission — none of the three has anywhere to go.
 
 Two general traps this cost, both of which this repo has now paid for twice:
 
@@ -515,6 +526,19 @@ With the correct number the model answers **75% at topk=512 and 50% at
 topk=1024, limiter=shared_memory** on C500's 64 KiB/AP. Registers and waves are
 not the limiter — so a register-pressure optimization on this kernel buys
 nothing, and that is worth knowing before writing one.
+
+**But do not hand-compute that division — ask the driver.** The AP's 65,536 B is
+handed out in fixed shares, so the usable threshold is not `65536/N`. Measured
+on this part (`/tmp/dsab/occ_probe.cu`), the driver's answer is 4 CTA/SM up to
+**16,388 B total**, 3 up to 21,849, 2 up to 32,600 — i.e. a granularity of
+`65536/42 = 1,560.4 B` with the top share left unused (41 x 1,560.4 = 63,976).
+The bf16 figures above (3 at topk=512, 2 at topk=1024) are unaffected, but the
+**fp32 row's 16,652 B computes to 3.94 and is really 4** — its "3 CTAs/SM" was
+wrong for as long as this file carried it, and every downstream argument that
+rested on it (the shared atomic's cost, "4 vs 3 mismatch") rested on a
+hand-computation over a boundary that is not where it was assumed. Use
+`cudaOccupancyMaxActiveBlocksPerMultiprocessor` with the *kernel's own* static
++ dynamic total, and never label an occupancy by hand.
 
 ### 3. Wave quantization against the batch — the actual binding constraint
 
