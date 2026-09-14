@@ -7,17 +7,20 @@
 # ── The three arms ──────────────────────────────────────────────────────────
 #
 #   1. perf_snapshot.py -- the OFFICIAL grid (`tests/test.py`'s own
-#      `performance_cases`), plus the host repository's own selector grid, for
-#      three backends: this tree's kernel, `torch.topk`, and
-#      `deep_gemm.fp32_indexer_topk_selector`.  This is what lands in
-#      perf_data/<chip>/<stamp>/ as CSVs.  It is the arm that answers "what is
-#      our performance, against what".
+#      `performance_cases()`, called, not restated), optionally plus the host
+#      repository's own selector grid, for three backends: this tree's kernel,
+#      `torch.topk`, and `deep_gemm.fp32_indexer_topk_selector`.  This is what
+#      lands in perf_data/<chip>/<stamp>/ as one CSV, one row per (cell,
+#      backend).  It is the arm that answers "what is our performance, against
+#      what".
 #
 #   2. tests/test.py --perf-only -- the official grid AGAIN, but driven by
 #      upstream's own file, in one process, with its own cooldowns and its own
 #      assertions (`95/95`).  Redundant with (1) on purpose: it is the run whose
 #      output other tools and humans already know how to read, and it is the
-#      gate.  It writes no CSV; its log is kept beside the CSVs.
+#      gate.  It writes no CSV; its log is kept beside the CSV.  The two agree
+#      cell for cell at a median 0.25% / max 1.3% above 100us (measured, same
+#      binary and device), so a disagreement is a signal, not noise.
 #
 #   3. tests/test.py --perf-only --dtype fp32 -- the official grid's fp32 arm.
 #      `tests/test.py` filters its own `performance_cases`, which are bf16, so
@@ -25,16 +28,18 @@
 #      `All 5 cases passed` is the shape of a healthy run).  Cheap, and it is
 #      the other dtype the operator serves.
 #
-# Nothing here re-implements a measurement: every arm is upstream's file or the
-# snapshot tool, which itself calls upstream's primitives.
+# Nothing here re-implements a measurement: every arm is upstream's file, and
+# the snapshot calls upstream's `performance_cases` / `check_result` /
+# `bench_topk` rather than a copy of them.
 #
 # ── Why the snapshot is its own arm and not a mode of arm 2 ─────────────────
 #
 # `tests/test.py` has no way to select a backend (its call site passes no
-# `backend=`), no way to emit a CSV, and no `end=`/offset columns -- and the
-# whole point of `perf_data/` is a per-cell record with the chip and the
-# artifact identity attached.  So the snapshot drives the same axes through the
-# same `lib`/`kernelkit` primitives, and arm 2 stays the untouched gate.
+# `backend=`), no way to emit a CSV, and no way to add cases -- and the whole
+# point of `perf_data/` is a per-cell, per-backend record with the chip and the
+# artifact identity attached.  So the snapshot drives the same cases through the
+# same primitives and reports `unsupported` / `fail` per backend, while arm 2
+# stays the untouched gate.
 #
 # ── Failure, and the baseline ──────────────────────────────────────────────
 #
@@ -54,9 +59,10 @@
 # snapshotted for forensics and never trusted to decide.
 #
 # The measurement is a LONG run -- the official grid's largest cell is 4096 x
-# 1048576 (an 8 GiB bf16 input, measured at a 16 GiB peak on a free 64 GiB
+# 1048576 (an 8 GiB bf16 input, and `test.check_result` needs a same-size clone
+# plus a boolean mask of it, so the peak is 16.1 GiB, measured on a free 64 GiB
 # C500), and the host grid adds ~1.8 GB cells.  Budget a mostly-idle device for
-# `--full`; the default is the cheaper official axes only.
+# `--full`; the default is the cheaper official grid only.
 #
 # Usage:
 #     ./run_bench.sh                          # snapshot + the official gate
@@ -296,21 +302,28 @@ snapshot_failed=0
 # failure" (it can fail on memory, where the gate below would still pass).
 snap_args=(scripts/perf_snapshot.py --arms "${arms}" --out-dir "${results_dir}"
            --tag "${stamp}")
-if [[ ${full} -eq 1 ]]; then snap_args+=(--include-deep-gemm-axes); fi
+if [[ ${full} -eq 1 ]]; then
+    snap_args+=(--groups official,deep_gemm_grid)
+else
+    snap_args+=(--groups official)
+fi
 if ! run_arm snapshot python "${snap_args[@]}"; then
     snapshot_failed=1
     bench_status=1
 fi
 
 # arm 2 -- the official grid, upstream's own file.  The gate.
+# `python tests/test.py`, not `./tests/test.py`: upstream's file is not
+# executable, and a bare path there fails with rc=126 before it runs anything
+# (which reads as a bench failure but is a launcher mistake).
 if [[ ${skip_gate} -eq 0 ]]; then
-    run_arm official tests/test.py --perf-only -nc || bench_status=1
+    run_arm official python tests/test.py --perf-only -nc || bench_status=1
 fi
 
 # arm 3 -- the official grid's fp32 arm (`tests/test.py` filters its own
 # `performance_cases`, which are bf16, so this is the Sampler cells).
 if [[ ${skip_gate} -eq 0 ]]; then
-    run_arm official_fp32 tests/test.py --perf-only -nc --dtype fp32 || bench_status=1
+    run_arm official_fp32 python tests/test.py --perf-only -nc --dtype fp32 || bench_status=1
 fi
 
 {

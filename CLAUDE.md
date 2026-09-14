@@ -662,41 +662,61 @@ done
 
 ```bash
 CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \
-  python3 scripts/perf_snapshot.py --include-deep-gemm-axes --max-elements 40000000
+  python3 scripts/perf_snapshot.py                       # the official grid
+  ... --groups official,deep_gemm_grid                   # + the host repo's grid
+  ... --dry-run                                          # expand and print, measure nothing
+  ... --cases-file extra.json                            # add cases without editing code
 ```
 
 Writes `perf_data/<chip>/<YYYYmmdd_HHMMSS>/` — following the host repository's
-`deep_gemm/tests/perf_data/` layout — with `manifest.json` plus two CSVs:
-`deepselect_official_axes.csv` (110 rows, `tests/test.py`'s own
-`performance_cases`) and `deepselect_deep_gemm_axes.csv` (20 rows, the host
-repo's `SELECTOR_PERF_SHAPES`). Three arms per row: `maca_c`, `torch`, and
-`deep_gemm` (the host package, reached through `backend="deep_gemm"`).
+`deep_gemm/tests/perf_data/` layout — with `manifest.json` plus
+`deepselect_perf.csv`, **one row per (cell, backend)**. Three backends:
+`maca_c`, `torch`, and `deep_gemm` (the host package, reached through
+`backend="deep_gemm"`). `run_bench.sh` is the orchestrator; it also keeps a
+`baseline` symlink under `perf_data/<chip>/` and compares against it with
+`tools/compare_snapshots.py`.
+
+**The measurement is the harness's, not this tool's.** The `official` case
+group is produced by `tests/test.py::performance_cases()` — not restated — and
+every backend is checked with `test.check_result` / `test.check_call_contract`
+and timed with `test.bench_topk`. `tests/test.py` imports cleanly with no side
+effects, which is what makes that possible; **do not** reintroduce work at
+import time there. Verified against the harness: same binary, same device, the
+snapshot reproduces `tests/test.py --perf-only` cell for cell at a **median
+0.25%, max 1.3%** per cell above 100 µs (total across the grid `+0.01%`). The
+only cells that differ by more than 5% are the two ~6 µs short rows, where the
+absolute difference is ≤ 1.2 µs.
 
 - **The chip is in the path, the manifest and every row.** A perf record whose
   artifact is not identified is not a record: the manifest carries
-  `device_name`, `sm_count`, torch version, *both* repositories' commits and the
-  extension's md5.
-- **An arm that cannot serve a cell still gets its row**, with an empty `_us`
-  and the reason in `note`. A row that silently vanished would read as covered.
-- **`--max-elements` is why the count is 110 and not 115**, and it is explicit
-  rather than hidden: five of the host grid's rows (4096 rows × 107520–131072
-  columns) are ~1.8 GB fp32 allocations each and are skipped at the default
-  `2**28`. Raise it when the machine is free.
-- **The two axes do not have the same data distribution.** The official axis
-  uses the harness's `NormalFloatDistribution`; the host grid uses
-  `torch.randn`. That is deliberate — the second one is what the host
-  repository measures itself against — but it means a `deep_gemm_axes` row and
-  an `official_axes` row are not comparable even at the same shape.
-- **Several host-grid shapes declare a window narrower than `n_cols`**
-  (`sglang-bs1-seq2048` … `-seq65536` are one 131072-wide shape at four
-  windows). This adapter does not synthesize an `end=` table, so all arms rank
-  the whole row; `seq_len` is a column and those rows say so in `note`. They are
-  one measurement, not four.
-- The `torch` arm is the official one (`torch.topk`, same timing rule), so it is
-  **empty on cells where no kernel name contains a case-sensitive `"topk"`** —
-  `torch.topk` lowers to `gatherTopK_opt` on small cells, and `tests/test.py`
-  skips those the same way (`test.py:157-160`). An empty `torch_us` is that
-  filter, not a failure.
+  `device_name`, `sm_count`, torch version, *both* repositories' commits, the
+  extension's md5, the case groups and the status counts.
+- **`status` is a column, and it is how an arm declines.** `pass` / `fail` /
+  `unsupported`. `deep_gemm` is `unsupported` on **all 95** official cells —
+  the grid is bf16 and that backend ranks float32 only — and a table that
+  dropped those rows would read as "the two backends agree everywhere" when
+  only the fp32 cells were ever compared. `fail` still carries its time when
+  one could be taken: a case that selects wrong is a defect whatever it runs at.
+- **`relative_pct_vs_maca_c` is the comparison**, defined as this repository's
+  own kernel = 100% (>100% = that backend is faster). It is repeated on every
+  row of a cell, so a row is readable without finding its row-mates.
+  `bandwidth_pct_of_wall` is the same idea against the measured streaming-read
+  wall (`READ_WALL_GBPS` in the script; C500 1,487 GB/s, C600U 1,545 GB/s).
+- **`official_cell` distinguishes the gate grid from the extras.** Only the
+  `official` group is `1`; the `deep_gemm_grid` group is the host repo's
+  `SELECTOR_PERF_SHAPES` (top_k=2048, fp32) and uses the harness's
+  `NormalFloatDistribution` where the host repo uses `torch.randn`, so its rows
+  are **not comparable** to the official ones even at the same shape.
+- **Adding a case is a data edit.** `CaseSpec` fields are axes; `expand()` takes
+  the cartesian product, and `--cases-file` takes them as JSON at run time.
+  An unknown axis, dtype, index dtype or distribution is an error, not a
+  default — a case silently measured at the wrong width is not a measurement.
+- **The `torch` arm is empty on cells where no kernel name contains a
+  case-sensitive `"topk"`** — `torch.topk` lowers to `gatherTopK_opt` on small
+  cells, and `tests/test.py` skips those the same way (`test.py:157-160`). An
+  empty time there is that filter, not a failure.
+- **`torch.set_default_device("cuda")` must be set before generating cases**
+  (the environment traps below); the script does it first thing.
 
 ## Testing and benchmarking environment traps
 
