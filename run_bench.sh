@@ -171,8 +171,24 @@ print(family_of_target(targets[0]) if targets else "")
 PY
 ) || { echo "run_bench.sh: could not resolve the target architecture" >&2; exit 1; }
 
-chip="metax_xcore${family}"
-chip_dir="${results_dir}/${chip}"
+# The results directory is named after the **device**, not the arch family: the
+# folder answers "which board did I measure on", and `perf_data/MetaX_C600` and
+# `perf_data/MetaX_C600-U` are two different machines that share xcore1600.
+# The arch family is still recorded in every row (`chip`) and in the manifest.
+# `perf_snapshot.py` derives this the same way from the same call, so the two
+# cannot land in different directories.
+device_dir=$(python - <<'PY'
+import torch
+print((torch.cuda.get_device_name(0) or "").strip().replace(" ", "_"))
+PY
+) || { echo "run_bench.sh: could not read the device name from torch" >&2; exit 1; }
+if [[ -z "$device_dir" ]]; then
+    echo "run_bench.sh: torch reports no device name; naming the directory after" >&2
+    echo "              the arch family instead (metax_xcore${family})" >&2
+    device_dir="metax_xcore${family}"
+fi
+
+chip_dir="${results_dir}/${device_dir}"
 so=$(ls deep_select/deep_select_xcore${family}*.so 2>/dev/null | head -1 || true)
 if [[ -z "$so" ]]; then
     echo "run_bench.sh: no extension for xcore${family} in deep_select/" >&2
@@ -206,7 +222,9 @@ latest_result_dir() {
 }
 
 if [[ "$list_only" == "1" ]]; then
-    echo "run_bench.sh: chip        = ${chip}"
+    echo "run_bench.sh: device dir  = ${device_dir}  (the device's own name;"
+    echo "                              the arch family metax_xcore${family} is"
+    echo "                              recorded per row as \`chip\`)"
     echo "run_bench.sh: extension   = ${so}"
     echo "run_bench.sh: md5         = ${md5}"
     echo "run_bench.sh: devices     = ${devices}"
@@ -255,7 +273,7 @@ if [[ ${compare_only} -eq 1 ]]; then
     {
         echo "# compare: ${latest} vs baseline $(readlink "${chip_dir}/baseline")"
         python3 tools/compare_snapshots.py "${chip_dir}/${latest}" \
-            --base "${chip_dir}/baseline" --chip "${chip}"
+            --base "${chip_dir}/baseline" --device "${device_dir}"
     } 2>&1 | tee "${chip_dir}/${latest}/compare_result.txt" || exit $?
     exit 0
 fi
@@ -268,7 +286,7 @@ out="${chip_dir}/${stamp}"
 mkdir -p "$out"
 
 {
-    echo "# run_bench.sh    chip=${chip}"
+    echo "# run_bench.sh    device_dir=${device_dir}  chip=metax_xcore${family}"
     echo "# timestamp_utc   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "# host            $(hostname)"
     echo "# extension       ${so}"
@@ -358,7 +376,7 @@ else
         {
             echo "# compare: ${stamp} vs baseline ${base_name}"
             python3 tools/compare_snapshots.py "${out}" \
-                --base "${chip_dir}/baseline" --chip "${chip}" --top 40
+                --base "${chip_dir}/baseline" --device "${device_dir}" --top 40
         } 2>&1 | tee "${out}/compare_result.txt"
         compare_rc=${PIPESTATUS[0]}
         set -e

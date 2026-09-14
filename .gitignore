@@ -4,7 +4,6 @@ build
 *.egg-info/
 __pycache__/
 dist/
-*perf.csv
 /.vscode
 compile_commands.json
 .cache

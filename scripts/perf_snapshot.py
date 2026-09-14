@@ -33,8 +33,18 @@ Lightning Indexer's configuration (sorted and return_value off, bf16, int32).
 unknown one is an error rather than a default.
 
 Output, following the host repository's `deep_gemm/tests/perf_data/` layout:
-    perf_data/<chip>/<YYYYmmdd_HHMMSS>/deepselect_perf.csv
-    perf_data/<chip>/<YYYYmmdd_HHMMSS>/manifest.json
+    perf_data/<device>/<YYYYmmdd_HHMMSS>/deepselect_perf.csv
+    perf_data/<device>/<YYYYmmdd_HHMMSS>/manifest.json
+
+`<device>` is the **device name torch reports** (`MetaX C500` -> `MetaX_C500`),
+not the arch family: the folder answers "which board did I measure on", and the
+part identity is what makes two records comparable.  Two boards of one family
+(`MetaX C600` and `MetaX C600-U`, both xcore1600) share an ISA but not a clock,
+a wall or an SM count, so a family-named folder would silently stack them.  The
+arch family is still recorded per row (`chip`) and never inferred back out of
+the folder name.  A stale empty directory left by the arch spelling
+(`perf_data/metax_xcore1000/`) is skipped by the baseline scan below, so an
+untouched one is inert rather than misleading.
 Usage:
     CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \\
         python3 scripts/perf_snapshot.py
@@ -233,7 +243,25 @@ def _run(cmd: List[str], cwd: str) -> str:
                               timeout=20).stdout.strip()
     except Exception:
         return ""
-def provenance(chip: str, sm_count: int) -> Dict[str, Any]:
+def device_dir_name() -> str:
+    """`perf_data/`'s directory, named after the **device**, not the arch.
+
+    `MetaX C500` -> `MetaX_C500`: the folder this run's record lives in should
+    answer "which board was measured", because that is what makes two records
+    comparable.  The arch family is not enough -- two parts of one family can
+    differ in clocks, wall and SM count while sharing an ISA -- so it is
+    recorded per row (`chip`) rather than used to name the directory.
+
+    Falls back to the arch spelling only when torch reports no device name at
+    all (a driver quirk, not a normal case).
+    """
+    name = (torch.cuda.get_device_name(0) or "").strip()
+    if not name:
+        return f"metax_{_arch.native_target()}"
+    return name.replace(" ", "_")
+
+
+def provenance(sm_count: int) -> Dict[str, Any]:
     here = REPO
     host = os.environ.get("DEEP_GEMM_REPO", "/home/compiler_gfx/tilelang/mcDeepGEMM")
     sos = sorted(f for f in os.listdir(os.path.join(here, "deep_select"))
@@ -246,7 +274,12 @@ def provenance(chip: str, sm_count: int) -> Dict[str, Any]:
         if os.path.isdir(os.path.join(host, ".git")) else ""
     dg_lines = dg.splitlines()
     return {
-        "chip": chip,
+        # The arch family, per row: `metax_xcore<N>`, derived from the device
+        # rather than from the directory name (the directory is the device's).
+        # This is the column a reader filters on to find same-ISA records.
+        "chip": f"metax_{_arch.native_target()}",
+        # The `perf_data/` directory this run belongs in -- the device's name.
+        "device_dir": device_dir_name(),
         "device_name": torch.cuda.get_device_name(0),
         "sm_count": sm_count,
         "torch": torch.__version__,
@@ -352,10 +385,9 @@ def main() -> int:
     torch.set_default_device("cuda")
     import deep_select  # noqa: E402  (after set_default_device)
     target = _arch.native_target()
-    chip = f"metax_{target}"
     sm_count = _arch.SM_COUNT[_arch.FAMILY_OF_TARGET[target]]
     if args.dry_run:
-        print(f"chip {chip}  backends {arms}")
+        print(f"chip {target}  dir {device_dir_name()}  backends {arms}")
         by = {}
         for source, _note, p in cases:
             by[(source, str(p.dtype), str(p.out_idx_dtype))] = \
@@ -366,12 +398,13 @@ def main() -> int:
               f"= {len(cases) * len(arms)} rows")
         return 0
     stamp = args.tag or _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = os.path.join(args.out_dir, chip, stamp)
+    prov = provenance(sm_count)
+    device_dir = prov["device_dir"]
+    out = os.path.join(args.out_dir, device_dir, stamp)
     os.makedirs(out, exist_ok=True)
-    prov = provenance(chip, sm_count)
     started = _dt.datetime.now().astimezone()
     rows: List[Dict[str, Any]] = []
-    print(f"chip {chip}  device {torch.cuda.get_device_name(0)}  sm {sm_count}  "
+    print(f"chip {prov['chip']}  device {prov['device_name']}  sm {sm_count}  "
           f"backends {arms}  cases {len(cases)}", flush=True)
     print(f"{'case':<46}{'backend':<10}{'status':<12}{'us':>12}{'GB/s':>10}",
           flush=True)

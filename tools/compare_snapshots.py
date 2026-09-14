@@ -104,7 +104,11 @@ def main() -> int:
                          "0.25%% and a max 1.3%% per cell above 100us)")
     ap.add_argument("--top", type=int, default=25,
                     help="how many cells to print per backend, by |delta|")
-    ap.add_argument("--chip", default="")
+    ap.add_argument("--device", default="",
+                    help="the device these two runs were taken on, for the "
+                         "header only; it is never used to decide anything "
+                         "(the comparison is per cell, and both sides are the "
+                         "same directory's runs by construction)")
     args = ap.parse_args()
 
     base = load(args.base)

@@ -658,7 +658,7 @@ done
 
 82,170 cases, **must be 4 serial shards** (~5.6 min each). **Do not run 8 concurrent** — 8 concurrent torch processes make CUB's onesweep radix sort wedge the device and take the machine down with it (measured). Serial is just as fast; the cost is per-case construction.
 
-### Performance snapshots — `scripts/perf_snapshot.py`, `perf_data/<chip>/<stamp>/`
+### Performance snapshots — `scripts/perf_snapshot.py`, `perf_data/<device>/<stamp>/`
 
 ```bash
 CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \
@@ -669,12 +669,30 @@ CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \
 ./run_bench.sh [--full] [--quick] [--set-baseline] [--compare-only] [--list]
 ```
 
-Writes `perf_data/<chip>/<YYYYmmdd_HHMMSS>/` — following the host repository's
+Writes `perf_data/<device>/<YYYYmmdd_HHMMSS>/` — following the host repository's
 `deep_gemm/tests/perf_data/` layout — with `manifest.json` plus
 `deepselect_perf.csv`, **one row per (cell, backend)**. Three backends:
 `maca_c`, `torch`, and `deep_gemm`. `run_bench.sh` is the orchestrator; it keeps
-a `baseline` symlink under `perf_data/<chip>/` and compares against it with
+a `baseline` symlink under `perf_data/<device>/` and compares against it with
 `tools/compare_snapshots.py`.
+
+**`<device>` is the device's own name, not the arch family** (`MetaX C500` ->
+`MetaX_C500`). The directory has to answer *which board was measured on* —
+`MetaX C600` and `MetaX C600-U` are both xcore1600 but have different clocks, a
+different read wall and a different SM count, so a family-named directory stacks
+two machines silently. The arch family is still recorded **per row** as the
+`chip` column (`metax_xcore<N>`) and in the manifest, and a reader filters on
+that to find same-ISA records; it is never inferred back out of the directory
+name. Both sides derive the name from the same call — `perf_snapshot.py`'s
+`device_dir_name()` and `run_bench.sh`'s `device_dir` — so a snapshot and its
+`run_bench.sh` wrapper cannot land in different directories. The `--device N`
+CLI flag is unrelated: it is shorthand for `CUDA_VISIBLE_DEVICES=N`, the GPU
+index, not the directory name.
+
+**The directory is one device's, so a mixed-device tree has one `baseline` per
+device.** A record taken on another board is not a comparison for this one;
+`perf_data/` is expected to hold several `<device>/` trees, each with its own
+`baseline` symlink and its own history.
 
 **The recorder is thin on purpose: the measurement is the harness's.** Every
 piece is `tests/test.py`, called rather than re-implemented — `performance_cases()`
@@ -762,7 +780,7 @@ These cells frequently have **no compute roofline** — the kernel does a few co
 **A contended run is not a record, and it must not move the baseline.** The tell is that **every** backend moved against the same bit-identical `.so` (see the environment traps §2 for the measurement). One more is available before spending a run: `run_bench.sh --compare-only` prints the per-cell `relative_pct_vs_maca_c` for the latest run against the baseline for free, and `deep_select_perf.csv` carries the same ratio on every row — a contended grid shows the *reference* arm drifting, which no tree change can cause. Two rules follow:
 
 - **Do not pass `--set-baseline` on a run whose header shows another torch process.** `run_bench.sh` repoints whenever every arm passed (`BENCH_STATUS -eq 0`), which a contended run does — all three arms "pass", they just measure the wrong thing. Repointing then bakes a phantom regression into the baseline that later runs are compared against, and the run_bench warning ("--set-baseline was given, so the baseline WILL move past this. That is a decision") is exactly the decision not to make. Land the run as a directory, cite the ratio evidence, and re-measure on a quiet box.
-- **A baseline directory written by `perf_snapshot.py` directly is invisible to `run_bench.sh`.** `latest_result_dir()` requires a `manifest.json` **and** a `run_header.txt`; the baseline at `perf_data/metax_xcore1000/20260914_230000/` has only the former (it was produced by the snapshot, not by `run_bench.sh`), so `--compare-only` and the automatic comparison both report "no baseline at …" and skip. A repoint under `run_bench.sh` will therefore look like it worked and change nothing about what gets compared.
+- **A baseline directory written by `perf_snapshot.py` directly is invisible to `run_bench.sh`.** `latest_result_dir()` requires a `manifest.json` **and** a `run_header.txt`; a baseline produced by the snapshot rather than by `run_bench.sh` has only the former, so `--compare-only` and the automatic comparison both report "no baseline at …" and skip. A repoint under `run_bench.sh` will therefore look like it worked and change nothing about what gets compared. (Both old baselines were deleted on 2026-09-15 — `perf_data/` is empty and awaited a clean re-measure on a quiet device; a `run_bench.sh --set-baseline` run is what is supposed to create the first one, precisely so it has a `run_header.txt` and is not born invisible.)
 
 ## Build-change discipline
 
