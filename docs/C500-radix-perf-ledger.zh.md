@@ -498,6 +498,7 @@ chunk 数恒为 2 之后是 `256 × 3 = 768`。**旧的反号结论的前提没�
 |---|---|
 | 官方 200/200 抽样（`--backend maca_c`） | **200/200 passed**，0 unsupported，0 failed，16 s |
 | 官方 fp32 性能网格（`tests/test.py --perf-only --dtype fp32`） | **All 5 cases passed**，rc=0 |
+| 官方 bf16 性能网格（`tests/test.py --perf-only --dtype bf16 -nc`） | **All 90 cases passed**，rc=0 —— 两条改动只碰 fp32 的门槛（`chunked_f32_applies` / `f32_chunked_chunks`），这条把"bf16 未受影响"从推断变成实测 |
 | **全表 4 shard 串行** | 见 §5 |
 | arange 冒烟（集合判，不是位置判） | bf16 `b2-v512-k8` 集合精确；fp32 `b256-v65536-k512`、`b4096-v65536-k512`、`b256-v129280-k512`、`b768-v65536-k1024`、`b4096-v262144-k512` 集合全部精确 |
 
