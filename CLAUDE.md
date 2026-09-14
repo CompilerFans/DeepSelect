@@ -658,6 +658,46 @@ done
 
 82,170 cases, **must be 4 serial shards** (~5.6 min each). **Do not run 8 concurrent** — 8 concurrent torch processes make CUB's onesweep radix sort wedge the device and take the machine down with it (measured). Serial is just as fast; the cost is per-case construction.
 
+### Performance snapshots — `scripts/perf_snapshot.py`, `perf_data/<chip>/<stamp>/`
+
+```bash
+CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \
+  python3 scripts/perf_snapshot.py --include-deep-gemm-axes --max-elements 40000000
+```
+
+Writes `perf_data/<chip>/<YYYYmmdd_HHMMSS>/` — following the host repository's
+`deep_gemm/tests/perf_data/` layout — with `manifest.json` plus two CSVs:
+`deepselect_official_axes.csv` (110 rows, `tests/test.py`'s own
+`performance_cases`) and `deepselect_deep_gemm_axes.csv` (20 rows, the host
+repo's `SELECTOR_PERF_SHAPES`). Three arms per row: `maca_c`, `torch`, and
+`deep_gemm` (the host package, reached through `backend="deep_gemm"`).
+
+- **The chip is in the path, the manifest and every row.** A perf record whose
+  artifact is not identified is not a record: the manifest carries
+  `device_name`, `sm_count`, torch version, *both* repositories' commits and the
+  extension's md5.
+- **An arm that cannot serve a cell still gets its row**, with an empty `_us`
+  and the reason in `note`. A row that silently vanished would read as covered.
+- **`--max-elements` is why the count is 110 and not 115**, and it is explicit
+  rather than hidden: five of the host grid's rows (4096 rows × 107520–131072
+  columns) are ~1.8 GB fp32 allocations each and are skipped at the default
+  `2**28`. Raise it when the machine is free.
+- **The two axes do not have the same data distribution.** The official axis
+  uses the harness's `NormalFloatDistribution`; the host grid uses
+  `torch.randn`. That is deliberate — the second one is what the host
+  repository measures itself against — but it means a `deep_gemm_axes` row and
+  an `official_axes` row are not comparable even at the same shape.
+- **Several host-grid shapes declare a window narrower than `n_cols`**
+  (`sglang-bs1-seq2048` … `-seq65536` are one 131072-wide shape at four
+  windows). This adapter does not synthesize an `end=` table, so all arms rank
+  the whole row; `seq_len` is a column and those rows say so in `note`. They are
+  one measurement, not four.
+- The `torch` arm is the official one (`torch.topk`, same timing rule), so it is
+  **empty on cells where no kernel name contains a case-sensitive `"topk"`** —
+  `torch.topk` lowers to `gatherTopK_opt` on small cells, and `tests/test.py`
+  skips those the same way (`test.py:157-160`). An empty `torch_us` is that
+  filter, not a failure.
+
 ## Testing and benchmarking environment traps
 
 1. **`torch.set_default_device("cuda")` must be set** before generating cases. `tests/lib.py`'s `generate_testcase` otherwise builds CPU tensors, and the extension dereferences a host pointer — reported as `Xnack Error / ATU Fault`, which looks like a kernel bug and is not.
