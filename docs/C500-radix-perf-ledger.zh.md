@@ -372,13 +372,19 @@ ON/OFF 两列相同（0.99×/1.00×）。这正是条目 ① 当时欠着的那�
    也不含调用间的空隙，因此对这三条改动是**中性的尺子**：split 的 96 个 CTA
    在设备上真的是 84 µs，而不是"和 6 个 CTA 的 425 µs 一样快只是被遮住了"。
 
-**门**（`4baee61`，也就是本节末的二进制，最终 4 shard 全表见 §5）：
+**门**（`4baee61`，也就是本节末的二进制；最终 4 shard 全表见 §5）：
 
 | 门 | 结果 |
 |---|---|
 | 官方 200/200 抽样（`--backend maca_c`） | **200/200 passed**，0 unsupported，0 failed |
+| **全表 4 shard 串行** | **82170/82170 passed**，0 unsupported，0 failed（20543+20543+20542+20542，1,730–1,917 s/shard） |
 | ABI | 0 `libtorch`/`libc10` DT_NEEDED，0 `c10`/`torch`/`at::` 符号，2 个 `__tvm_ffi_` 导出 |
-| arange 冒烟（期望下标写死） | b2-v262144-k8、b6-v262144-k512、b6-v524288-k512、b6-v1048576-k512、b64-v262144-k512、b64-v1048576-k1024 全部精确 |
+| arange 冒烟（期望下标写死） | b2-v262144-k8、b6-v262144-k512、b6-v524288-k512、b6-v1048576-k512、b64-v262144-k512、b64-v1048576-k1024 的**选中集合**全部精确 |
+
+（注：本节各格在 `sorted_index=False` 下**位置**是乱序的——FP32 输出本就是
+**无序**的（`deep_select.topk` 从不承诺顺序，`tests/test.py` 全程判集合与序关系），
+`b6-v262144-k512` 返回的是 `[261824, 261825, …]` 这样的升序段。**冒烟判的是集合**，
+这是契约；不要拿位置去对 `arange` 的降序。）
 | 全表 4 shard 串行 | §5 |
 
 **带出来两个无声缺陷（都记档，因第一个是本仓库 dispatch 撞过的同一类）：**
@@ -466,7 +472,8 @@ xcore1600 逐字节不变，**不欠 C600U 验证**。本题不涉及 FP8。
 
 | 门 | 命令 | 结果 |
 |---|---|---|
-| 官方大表（正确性） | `scripts/official_slice.py --backend maca_c --sample 1000000 --shard i/4` ×4 串行 | `ea8bcb0`：82170/82170，0 unsupported，0 failed，17.5 min；`4cd740a`：82170/82170；**`3f8dfe7`：82170/82170**（20543+20543+20542+20542，每 shard ~340 s） |
+| 官方大表（正确性） | `scripts/official_slice.py --backend maca_c --sample 1000000 --shard i/4` ×4 串行 | `ea8bcb0`：82170/82170，0 unsupported，0 failed，17.5 min；`4cd740a`：82170/82170；`3f8dfe7`：82170/82170；**`4baee61`（fp32 split + 两级门槛）：82170/82170**（20543+20543+20542+20542，每 shard 1,730–1,917 s） |
+| 官方抽样（迭代用） | `scripts/official_slice.py --backend maca_c` | `eaa0131`（pass 1 连续化）：200/200 passed，0 unsupported，0 failed，36 s |
 | 官方性能表 | `tests/test.py --perf-only` | `ea8bcb0`：All 95 passed，73 timed，min 1.060x / median 2.110x / max 12.270x，无一格 < 1.0x；`4cd740a`：All 95 passed；**`3f8dfe7`：All 95 passed** |
 
 **架构边界**：三次改动都只在 `csrc/xcore1000/` 内，xcore1600（C600/C600U）的源
