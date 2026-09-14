@@ -77,6 +77,81 @@ Consequences:
   with the kernelkit kineto harness and times `torch.topk` beside it. The
   numbers in [Performance](#performance) are still the upstream CUDA kernels'.
 
+## Design philosophy: one operator, four axes, no universal kernel
+
+TopK is the rare operator where **no single kernel is optimal over the shape
+space**, not for want of engineering but because two of its optima are opposed.
+DeepSelect answers that with specialization; this section is what the
+specialization is *for*, and where its limits are.
+
+### The shape space has two regimes, and they want opposite structures
+
+Measured on C500, one row per CTA, fp32, 262144 floats per row
+(`docs/C500-to-parity-plan.zh.md` §16; `mt_gap_low.cu`):
+
+| grid (CTAs) | 1 | 6 | 104 | 208 | 312 | 4096 |
+| --- | --- | --- | --- | --- | --- | --- |
+| GB/s | 12.9 | 64.9 | 851.5 | 1413.6 | 1576.0 | 1647.5 |
+| % of the 1650 GB/s read wall | 0.8% | 3.9% | **51.6%** | 85.7% | **95.5%** | 99.8% |
+
+The curve is linear in the CTA count until ~250 and only then bends. **Launch
+overhead is not what it shows**: an empty kernel with the same geometry measures
+6.4 µs at grid 1 and 5.3 µs at grid 104. At grid 6 the kernel runs 96.9 µs, so
+94% of it is the work itself, done on a machine where 6 of 104 APs are busy.
+
+- **Small batch, long rows** (`b6` here) is a *parallelism* problem. No amount of
+  tuning a one-row-per-CTA kernel fixes it: the row must be **split** across
+  CTAs and merged, which costs a merge kernel and a workspace.
+- **Large batch, any rows** is a *per-byte efficiency* problem. Here splitting is
+  a loss: the merge CTAs are pure overhead once the grid is already several
+  waves deep. Measured at `b256`, opening the fp32 split's floor cost **+13.7%**
+  on `b4096-v16384`.
+
+The same inversion appears in the algorithm itself: `deep_gemm`'s single-pass
+threshold-and-compact selector reads every element once, and it **wins** at
+`vocab_size = 1024` (0.73×, 0.90×, 0.90× — its fixed cost has not amortized yet)
+while **losing everywhere long** (up to 10.10× against a two-pass radix that
+reads the row twice). One pass is not better; it is better *at some shapes*.
+
+### The four axes, and what each one costs
+
+The specialization budget is finite -- the MACA-C backend JIT-compiles one
+kernel per distinct generated source (~2 s each, disk-cached), so a routing
+change must re-point between **registered** entries and never add a
+shape-keyed instantiation axis. Within that budget:
+
+| axis | why it splits | what it costs |
+| --- | --- | --- |
+| **Radix rounds** | A 16-bit key resolves in two levels (12 coarse bits + 4 fine = the whole key, so refine never ranks past a fine tie). A 32-bit key cannot: 8 bits leaves 24, and an honest 12-bit coarse layer forces a re-scan of the full row on overflow. | More rounds = more passes over the row; fewer = a wider threshold bin and a bigger candidate arena. The coarse level for fp32 is derived by rounding to fp16 first, so only **256 of 4,096 bins are reachable** -- a precision cost paid at the key, not at the scan. |
+| **Coarse screening** | The threshold bin's width decides both the arena's overflow rate and how many candidates refine touches. | Widening the coarse level to cut refinement is *not* free: measured, skipping the whole refine block moved `b4096-v262144` by less than that measurement's own ±0.3% noise band (§13). The refinement is already not the bottleneck. |
+| **Splitting** | The only lever that raises parallelism, and the only one this project has measured to move the small-batch regime. | `chunks` merge CTAs on top of the row, and ~3 µs of fixed cost per CTA, so short chunks eat the gain back. Hence a *tiered* policy keyed on batch, not a constant. |
+| **Shared-memory staging** | Staging buffers are sized against the per-SM capacity, and a config that does not fit is rejected **at compile time**. | This is why parts are separate builds, and why a 227 KiB H100-sized tuple cannot ride into a 64 KiB part and fail at launch. |
+
+### The balance is per-part, and 128 KiB parts are not solved by scaling
+
+The `NATIVE_*` constants in `csrc/structs.h` are one row per family on purpose.
+C500's `NATIVE_F32_CHUNK_WORK_TARGET = 260` is **2.5 × its 104 APs, fitted over
+24 measured points**; the C600 (70) and C600U (80) rows are **scaled
+reservations, not measurements**, and the doc comment says so. The ratio
+`K / SM_COUNT` is precisely the thing the C500 data cannot tell us -- and the
+whole chunk policy is that one ratio.
+
+What changes on a 128 KiB part, and in which direction:
+
+- **More staging room per SM** means wider coarse layers and bigger arenas are
+  affordable, which shifts the radix-rounds axis toward *fewer rounds*.
+- **Fewer APs** (32 vs 104) means the parallelism-starved regime starts at a
+  *smaller* batch: `b256` is 2.46 waves on C500 but **8 waves on C600U**, so
+  shapes that need splitting on C500 may not need it there -- while the merge
+  cost, being per-row, is *relatively larger*.
+- The two push the split threshold in opposite directions, which is why the port
+  is gated on measurement rather than on the ratio.
+
+**A 128 KiB device therefore owes its own measurement of the same curve**, not a
+rescaling of the C500 one. The unvalidated port in `csrc/xcore1600/` is the
+other half of that story -- see [MACA support](#maca-support) and CLAUDE.md's
+"Known holes".
+
 ## Supported Cases
 
 TopK workloads vary widely, and the fastest algorithm & implementation highly depends on the input dtype, `batch_size`, `vocab_size`, and `topk`. This repository only focuses on the following cases:
