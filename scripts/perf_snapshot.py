@@ -169,22 +169,36 @@ def _timed(fn, reps: int) -> Optional[float]:
 
 
 def contract_ok(x: torch.Tensor, k: int, idx: torch.Tensor,
-                end: Optional[torch.Tensor] = None) -> Optional[bool]:
-    """`tests/test.py`'s own checks, as a predicate.
+                end: Optional[torch.Tensor] = None,
+                chunk: int = 1 << 16) -> Optional[bool]:
+    """`tests/test.py`'s own checks, as a predicate, in bounded memory.
 
-    Two corrections against the naive form, both of which the official harness
-    makes and a hand-written check does not:
+    The three corrections against the naive form, all of which the official
+    harness makes and a hand-written check does not:
 
       * **A row selects `min(vocab, topk)` entries, not `topk`.**  When the row
         is shorter than `topk` the tail slots are out-of-band fill and neither
-        their indices nor their values mean anything (`test.py:70-75`).  Callers
-        pass `end` so the visible length is known; otherwise every short cell
-        reports a spurious failure.
+        their indices nor their values mean anything (`test.py:70-75`).
       * **A NaN row's slot 0 is the guard value** and the row is excluded from
         the value checks (`test.py:77-82`).
+      * **The visible window**, when `end` narrows it, is what the value
+        comparison ranges over -- `run_wise_masked_fill_` in the harness.
 
-    Returns None for "not checkable" (relative to the other arms' *sets*, which
-    is what `sets_match_*` records) rather than a misleading False.
+    The value check is `min(selected) >= max(unselected)`, but written so that
+    no full-size tensor is materialized: a clone of the input plus a boolean
+    mask of it is 2x the input, and the official grid's largest cell is an
+    8 GiB bf16 input, so the direct form OOMs on the cell that most needs
+    checking.  Instead, with `t = min(selected)` per row, the condition is
+    exactly "every element strictly greater than `t` is selected" -- so count
+    elements `> t` over column chunks and compare against the number of
+    *selected* elements `> t`.
+
+    Both sides of that count are taken in the SAME column-chunked walk, and the
+    chunk is a slice of `vis` chosen so that gather + comparison + both counts
+    are the only tensors live at once: one chunk plus the `(rows, k)` index
+    block, independent of the row length.  A gathered-prefix `picked` of the
+    whole `(rows, k)` does not fit -- at 4096 x 1048576 the chunk is 2 GiB and
+    the gather mask that went with it was 16 GiB, which is what OOMed here.
     """
     n_rows, n_cols = x.shape
     i64 = idx.to(torch.int64)
@@ -212,15 +226,57 @@ def contract_ok(x: torch.Tensor, k: int, idx: torch.Tensor,
         return False
 
     safe = torch.where(selected & in_range, i64, 0)
-    gathered = x.gather(1, safe)
-    rest = x.clone()
-    rest.scatter_(1, safe, float("-inf"))
-    # The visible window only: `row_wise_masked_fill_` is what the official
-    # harness uses to push the columns past `end` out of the comparison.
-    tail = torch.arange(n_cols, device=x.device).unsqueeze(0) >= visible.unsqueeze(1)
-    rest = rest.masked_fill(tail, float("-inf"))
-    sel_min = gathered.masked_fill(~selected, float("inf")).amin(dim=1)
-    return bool((sel_min >= rest.amax(dim=1)).all())
+    picked = x.gather(1, safe)
+    t = picked.masked_fill(~selected, float("inf")).amin(dim=1)
+
+    # Rows the harness excludes from the value comparison: no visible column,
+    # or a NaN row.
+    checked = counts > 0
+    if nan_rows is not None:
+        checked = checked & ~nan_rows
+    if not bool(checked.any()):
+        return True
+
+    # `t = min(selected)` first, over the `k` gathered slots in chunks.  `safe`
+    # is an index block of at most `chunk` columns; a row shorter than `k`
+    # gathers its own x[0] in the unselected tail, which is valid memory, and
+    # `sel` is what keeps that fill out of the minimum.
+    sel = selected & in_range
+    threshold = torch.full((n_rows,), float("inf"), device=x.device, dtype=x.dtype)
+    for s in range(0, k, chunk):
+        e = min(s + chunk, k)
+        gathered = x.gather(1, torch.where(sel[:, s:e], i64[:, s:e], 0))
+        threshold = torch.minimum(
+            threshold,
+            gathered.masked_fill(~sel[:, s:e], float("inf")).amin(dim=1))
+    t = threshold
+
+    # Then the two counts of the same test, "every element strictly above `t`
+    # is selected": over the *selected values* (the same gather again) and over
+    # the row (a column walk).  They are equal exactly when the selection is
+    # an upper set of the row, which is `min(selected) >= max(unselected)`.
+    #
+    # The counts must not be conflated with a column mask: the number of
+    # *columns* s..e that exceed `t` is not the number of *selected slots*
+    # whose values exceed it, and comparing one against the other is the bug
+    # this shape of the check had (`selected` is indexed by slot, not column).
+    n_above_selected = torch.zeros(n_rows, dtype=torch.int64, device=x.device)
+    for s in range(0, k, chunk):
+        e = min(s + chunk, k)
+        gathered = x.gather(1, torch.where(sel[:, s:e], i64[:, s:e], 0))
+        above = gathered > t.unsqueeze(1)
+        n_above_selected += (above & sel[:, s:e]).sum(dim=1)
+
+    n_above_total = torch.zeros(n_rows, dtype=torch.int64, device=x.device)
+    whole_row = bool((visible == n_cols).all())
+    for s in range(0, n_cols, chunk):
+        e = min(s + chunk, n_cols)
+        above = x[:, s:e] > t.unsqueeze(1)
+        if not whole_row:
+            cols = torch.arange(s, e, device=x.device).unsqueeze(0)
+            above &= cols < visible.unsqueeze(1)
+        n_above_total += above.sum(dim=1)
+    return bool((n_above_total[checked] == n_above_selected[checked]).all())
 
 
 def measure(cell: Cell, arms: List[str]) -> Dict[str, Any]:
@@ -408,8 +464,13 @@ def main() -> int:
     ap.add_argument("--include-deep-gemm-axes", action="store_true",
                     help="also snapshot the host repo's own topk-selector grid")
     ap.add_argument("--families", default="lightning_indexer,sampler")
-    ap.add_argument("--max-elements", type=float, default=2 ** 28,
-                    help="skip a cell whose n_rows*n_cols exceeds this")
+    ap.add_argument("--max-elements", type=float, default=0,
+                    help="skip a cell whose n_rows*n_cols exceeds this; 0 = no "
+                         "cap (the default).  The official perf grid's largest "
+                         "cell is 4096 x 1048576 = 2**32 elements, which is an "
+                         "8 GiB bf16 input and was measured at a 16 GiB peak "
+                         "allocation on a free 64 GiB C500; the host grid's "
+                         "largest is 4096 x 131072 = 5.4e8.")
     args = ap.parse_args()
     arms = [a for a in args.arms.split(",") if a]
 
@@ -426,14 +487,27 @@ def main() -> int:
     os.makedirs(out, exist_ok=True)
 
     wants = set(args.families.split(","))
+    def over_cap(c: Cell) -> bool:
+        return bool(args.max_elements) and c.n_rows * c.n_cols > args.max_elements
+
     cells = [c for c in official_axes_cells() if c.family in wants]
-    cells = [c for c in cells if c.n_rows * c.n_cols <= args.max_elements]
+    dropped = [c for c in cells if over_cap(c)]
+    cells = [c for c in cells if not over_cap(c)]
+    if dropped:
+        print(f"--max-elements {args.max_elements:g} drops {len(dropped)} "
+              f"official cell(s): " + ", ".join(
+                  f"b{c.n_rows}-v{c.n_cols}-k{c.top_k}"
+                  f"({'bf16' if c.dtype == torch.bfloat16 else 'fp32'})"
+                  for c in dropped), flush=True)
 
     prov = provenance({"chip": chip, "sm_count": sm_count})
     started = _dt.datetime.now().astimezone()
     rows: List[Dict[str, Any]] = []
     print(f"chip {chip}  device {torch.cuda.get_device_name(0)}  "
-          f"sm {sm_count}  arms {arms}  cells {len(cells)}", flush=True)
+          f"sm {sm_count}  arms {arms}  cells {len(cells)}"
+          + (f" of {len(official_axes_cells()) - len([c for c in official_axes_cells() if c.family not in wants])}"
+             if dropped else f" of {len(official_axes_cells())}"),
+          flush=True)
     print(f"{'cell':<34}{'torch':>10}{'maca_c':>10}{'deep_gemm':>11}  ok", flush=True)
     for i, c in enumerate(cells):
         t0 = time.time()
@@ -451,11 +525,10 @@ def main() -> int:
 
     files = [os.path.basename(csv_path)]
     if args.include_deep_gemm_axes:
-        dg_cells = [c for c in deep_gemm_axes_cells()
-                    if c.n_rows * c.n_cols <= args.max_elements]
+        dg_cells = [c for c in deep_gemm_axes_cells() if not over_cap(c)]
         skipped = len(deep_gemm_axes_cells()) - len(dg_cells)
         print(f"\ndeep_gemm axes: {len(dg_cells)} rows"
-              + (f" ({skipped} over --max-elements)" if skipped else ""),
+              + (f" ({skipped} dropped by --max-elements)" if skipped else ""),
               flush=True)
         # Same arms as the official axis: the whole point of this file is the
         # three-way comparison over the host repository's own grid.
