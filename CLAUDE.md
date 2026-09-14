@@ -698,10 +698,21 @@ absolute difference is ≤ 1.2 µs.
   only the fp32 cells were ever compared. `fail` still carries its time when
   one could be taken: a case that selects wrong is a defect whatever it runs at.
 - **`relative_pct_vs_maca_c` is the comparison**, defined as this repository's
-  own kernel = 100% (>100% = that backend is faster). It is repeated on every
-  row of a cell, so a row is readable without finding its row-mates.
-  `bandwidth_pct_of_wall` is the same idea against the measured streaming-read
-  wall (`READ_WALL_GBPS` in the script; C500 1,487 GB/s, C600U 1,545 GB/s).
+  own kernel = 100%, so **>100% means that backend is faster than `maca_c`**
+  (it is `maca_c_us / that_us * 100`). It is repeated on every row of a cell,
+  so a row is readable without finding its row-mates.
+- **`bandwidth_pct_of_wall` is NOT a fraction of the kernel's roof.** It is
+  `logical_read_bandwidth(GB/s)` — the input read alone, no output buffers —
+  over the measured streaming-read wall. The official grid reads at a **median
+  287 GB/s logical, 19% of the 1,487 GB/s wall** on C500 (best 375 GB/s, 25%),
+  while the same kernel's pass 1 measures 94.9–97.9% of the wall on a
+  full-length row. Two reasons, both visible in the CSV: **54 of 108 cells are
+  under 16M elements** (startup dominates), and **the grid is weighted by
+  batch, not by bytes** — the 17 cells at batch 4096 are 152.6 ms of the
+  200.5 ms total (76%). Do not read a low percentage here as headroom in the
+  kernel; read `logical_read_bandwidth` against the cell's batch and row
+  length. The wall is `READ_WALL_GBPS` in the script (C500 1,487 GB/s,
+  C600U 1,545 GB/s) and is per-part, never a constant.
 - **`official_cell` distinguishes the gate grid from the extras.** Only the
   `official` group is `1`; the `deep_gemm_grid` group is the host repo's
   `SELECTOR_PERF_SHAPES` (top_k=2048, fp32) and uses the harness's

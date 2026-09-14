@@ -408,10 +408,19 @@ def provenance(chip: str, sm_count: int) -> Dict[str, Any]:
 
 # ── writing ─────────────────────────────────────────────────────────────────
 
-# The cells' own shape and configuration, then the arm's identity and status,
-# then the measurement.  `relative_pct` is defined against `maca_c` (100%), so
-# every row of a cell carries the same pair of reference numbers and a reader
+# The cells' own shape and configuration, then the backend's identity and
+# status, then the measurement.  `relative_pct_vs_maca_c` is defined against
+# `maca_c` = 100%, so **>100% means that backend is faster than this
+# repository's own kernel**; it is repeated on every row of a cell so a reader
 # never has to find the other row to interpret this one.
+#
+# `bandwidth_pct_of_wall` is *not* a fraction of the kernel's roof: it is
+# `logical_read_bandwidth(GB/s)` -- the input read alone, no output buffers --
+# over the measured streaming-read wall.  The official grid sits at a median
+# 19% of the C500 wall while the same kernel's pass 1 measures 94.9-97.9% of it
+# on a full-length row, because most of these cells are small and the grid is
+# weighted by batch rather than bytes.  Read it with the cell's batch and row
+# length, never as headroom.
 COLUMNS = ["chip", "device_name", "sm_count", "git_commit", "extension_md5",
            "case_group", "official_cell", "family", "n_rows", "n_cols", "top_k",
            "sorted_value", "return_value", "input_dtype", "index_dtype",

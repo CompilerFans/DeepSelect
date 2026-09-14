@@ -15,11 +15,15 @@ manufacture a win out of a refusal.  A `status` that changed between the two
 runs is called out separately -- `pass` -> `fail` is a regression whatever the
 clock says, and it is not a timing row.
 
-The reference is this repository's own kernel: `relative_pct` is defined there
-as 100%, so the `maca_c` rows compare *this* run's maca_c against the
-baseline's, and the same for the other backends' own relative numbers.  A
-`torch` row moving is informative; a `maca_c` row moving is the regression the
-exit status reports.
+The reference is this repository's own kernel: `relative_pct_vs_maca_c` is
+defined there as 100%, so **>100% means that backend is faster than `maca_c`**
+(`maca_c_us / that_us * 100`).  A `torch` row moving is informative; a `maca_c`
+row moving is the regression the exit status reports.
+
+What the exit status means: **1** when a `maca_c` cell moved beyond `--tol` or a
+`maca_c` cell's `status` changed (either direction -- `unsupported` -> `pass` is
+an improvement worth seeing, `pass` -> `fail` is a regression); **0** otherwise,
+including when a `torch` or `deep_gemm` row moved.
 
 Usage:
     tools/compare_snapshots.py <candidate_dir> --base <baseline_dir>
