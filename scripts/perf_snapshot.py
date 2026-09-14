@@ -79,7 +79,13 @@ class Cell:
     return_value: bool
     dtype: torch.dtype
     index_dtype: torch.dtype
-    family: str          # "lightning_indexer" | "sampler"
+    family: str          # "lightning_indexer" | "sampler" | "deep_gemm_axes"
+    # The visible window when it is narrower than `n_cols`.  The official axes
+    # leave it equal to `n_cols`; the host repo's selector grid uses it to make
+    # several of its rows distinct (its `sglang-bs1-seq{2048..65536}` family is
+    # one shape at four windows, and without this column those four rows are
+    # indistinguishable).
+    seq_len: Optional[int] = None
 
     @property
     def key(self):
@@ -91,22 +97,25 @@ def official_axes_cells() -> List[Cell]:
     """`tests/test.py`'s `performance_cases`, verbatim in shape.
 
     Two deliberate departures, both recorded per row:
-      * `dtype=torch.float` for the Lightning Indexer rows as well.  The
-        official grid is bf16 there, which `backend="deep_gemm"` refuses
-        outright; running the axis in fp32 is what makes the cell comparable
-        across all three arms.  `perf_snapshot_fp32_widened` says so per row.
-      * the Sampler rows keep the official `sorted_value=True`, which
-        `deep_gemm` also refuses.  Widening those would change the operator
-        (the sort is part of the case), so they stay official and simply have
-        no `deep_gemm` arm.
+
+      * **The Lightning Indexer axis is run in both dtypes.**  The official grid
+        is bf16 there; a second fp32 pass over the same axis is what gives it a
+        `deep_gemm` arm at all, since that backend refuses bf16 outright.  The
+        bf16 rows are the official cell and the fp32 rows are the widened one;
+        `perf_snapshot_note` on each row says which.
+      * **The Sampler rows keep the official `sorted_value=True`**, which
+        `deep_gemm` refuses too.  Widening those would change the operator (the
+        sort is part of the case), so they stay official and simply have no
+        `deep_gemm` arm.
     """
     cells = []
-    for topk in (512, 1024):
-        for b in (6, 256, 512, 768, 4096):
-            for seqlen in (256, 1024, 4096, 16384, 65536, 131072, 262144,
-                           524288, 1048576):
-                cells.append(Cell(b, seqlen, topk, False, False, torch.float32,
-                                  torch.int32, "lightning_indexer"))
+    for dtype in (torch.bfloat16, torch.float32):
+        for topk in (512, 1024):
+            for b in (6, 256, 512, 768, 4096):
+                for seqlen in (256, 1024, 4096, 16384, 65536, 131072, 262144,
+                               524288, 1048576):
+                    cells.append(Cell(b, seqlen, topk, False, False, dtype,
+                                      torch.int32, "lightning_indexer"))
     for b in (6, 256, 512, 768, 4096):
         cells.append(Cell(b, 129280, 512, True, True, torch.float32,
                           torch.int64, "sampler"))
@@ -114,31 +123,30 @@ def official_axes_cells() -> List[Cell]:
 
 
 def deep_gemm_axes_cells() -> List[Cell]:
-    """The host repo's `test_indexer_topk_selector.py` grid, read from it.
+    """The host repository's own selector grid, `SELECTOR_PERF_SHAPES`.
 
-    Imported rather than transcribed: a second copy of another repository's
-    grid is a copy that goes stale.  The rows it yields are `(n_rows, n_cols,
-    top_k)`; the dtype is fp32 by that file's own definition.
+    Transcribed from `deep_gemm/tests/test_indexer_topk_selector.py:78-123`:
+    three named families at `top_k=2048`, fp32 throughout (that file's own
+    `_gen_selector_inputs`).  The name is kept in the note so a row here can be
+    lined up with a row of `test_indexer_topk_selector.csv` in the host repo's
+    `perf_data/` by name.
+
+    The size is bounded the same way the official axis is -- `n_rows * n_cols`
+    -- because this grid's largest shape is 4096 x 107520 = 4.4e8 elements,
+    which is a 1.8 GB fp32 allocation and a 1.8 GB read.
     """
-    host = os.environ.get("DEEP_GEMM_REPO",
-                          "/home/compiler_gfx/tilelang/mcDeepGEMM")
-    path = os.path.join(host, "deep_gemm", "tests",
-                        "test_indexer_topk_selector.py")
-    if not os.path.exists(path):
-        return []
-    src = open(path).read()
-    cells: List[Cell] = []
-    seen = set()
-    import re
-    # `(n_rows, n_cols, top_k)` triples as they appear in that file's grids.
-    for m in re.finditer(r"\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", src):
-        r, c, k = (int(x) for x in m.groups())
-        if c < 2 or k < 1 or k > 2048 or (r, c, k) in seen:
-            continue
-        seen.add((r, c, k))
-        cells.append(Cell(r, c, k, False, True, torch.float32, torch.int32,
-                          "deep_gemm_axes"))
-    return cells
+    out: List[Cell] = []
+    for b in (1, 16, 132, 512):                                  # test-topk
+        out.append(Cell(b, 66551, 2048, False, False, torch.float32,
+                        torch.int32, "deep_gemm_axes"))
+    for b in (1, 132, 256, 4096):                                # sglang
+        for seq in (2048, 4096, 16384, 65536):
+            out.append(Cell(b, 131072, 2048, False, False, torch.float32,
+                            torch.int32, "deep_gemm_axes", seq_len=seq))
+    for b in (1, 16, 132, 256, 4096):                            # dsa
+        out.append(Cell(b, 107520, 2048, False, False, torch.float32,
+                        torch.int32, "deep_gemm_axes"))
+    return out
 
 
 # ── measurement ─────────────────────────────────────────────────────────────
@@ -244,6 +252,12 @@ def measure(cell: Cell, arms: List[str]) -> Dict[str, Any]:
 
     notes: List[str] = []
     idx_ref: Optional[torch.Tensor] = None
+    if cell.seq_len is not None and cell.seq_len != cell.n_cols:
+        # The arm measures the whole row: `deep_select.topk` takes a visible
+        # window through `end=`, and this adapter does not synthesize one.  Said
+        # rather than left for a reader to work out from a repeated number.
+        notes.append("seq_len < n_cols: the arms rank the whole row; the "
+                     "declared window is a column, not a smaller read")
 
     for arm in arms:
         try:
@@ -326,12 +340,25 @@ def provenance(extra: Dict[str, Any]) -> Dict[str, Any]:
 # ── writing ─────────────────────────────────────────────────────────────────
 
 COLUMNS = ["chip", "device_name", "sm_count", "git_commit", "extension_md5",
-           "family", "n_rows", "n_cols", "top_k", "sorted_value",
-           "return_value", "input_dtype", "index_dtype", "torch_us",
-           "maca_c_us", "deep_gemm_us", "speedup_vs_torch",
+           "family", "n_rows", "n_cols", "seq_len", "top_k", "sorted_value",
+           "return_value", "input_dtype", "index_dtype", "official_cell",
+           "torch_us", "maca_c_us", "deep_gemm_us", "speedup_vs_torch",
            "speedup_vs_deep_gemm", "maca_c_ok", "torch_ok", "deep_gemm_ok",
            "sets_match_torch", "sets_match_deep_gemm",
            "logical_gbps_maca_c", "note"]
+
+
+def is_official_cell(cell: Cell) -> bool:
+    """Is this the cell the official grid names, or a widened copy of it?
+
+    `tests/test.py:227` declares the Lightning Indexer rows bf16 and the Sampler
+    rows fp32; everything else on those axes is this snapshot's addition, for
+    the arms that can serve it.  Recorded in the CSV so a reader can filter to
+    the official grid without having to know that.
+    """
+    if cell.family == "sampler":
+        return cell.dtype == torch.float32
+    return cell.dtype == torch.bfloat16
 
 
 def to_row(cell: Cell, got: Dict[str, Any], prov: Dict[str, Any]) -> Dict[str, Any]:
@@ -355,6 +382,8 @@ def to_row(cell: Cell, got: Dict[str, Any], prov: Dict[str, Any]) -> Dict[str, A
                 "n_cols": cell.n_cols, "top_k": cell.top_k,
                 "sorted_value": int(cell.sorted_value),
                 "return_value": int(cell.return_value),
+                "official_cell": int(is_official_cell(cell)),
+                "seq_len": cell.seq_len if cell.seq_len is not None else cell.n_cols,
                 "input_dtype": str(cell.dtype).replace("torch.", ""),
                 "index_dtype": str(cell.index_dtype).replace("torch.", "")})
     for k, v in got.items():
@@ -410,21 +439,27 @@ def main() -> int:
         t0 = time.time()
         got = measure(c, arms)
         rows.append(to_row(c, got, prov))
-        cell_s = f"{c.family[:6]} b{c.n_rows}-v{c.n_cols}-k{c.top_k}"
-        print(f"{cell_s:<34}{got.get('torch_us', ''):>10}"
+        c_at_i = f"{c.family[:6]} {'bf16' if c.dtype == torch.bfloat16 else 'fp32'} b{c.n_rows}-v{c.n_cols}-k{c.top_k}"
+        print(f"{c_at_i:<44}{got.get('torch_us', ''):>10}"
               f"{got.get('maca_c_us', ''):>10}{got.get('deep_gemm_us', ''):>11}"
-              f"  {'ok' if got.get('maca_c_ok') else ('FAIL' if got.get('maca_c_ok') == 0 else '-')}"
+              f"  {'ok' if got.get('maca_c_ok') == 1 else ('FAIL' if got.get('maca_c_ok') == 0 else '-')}"
               f"  ({time.time() - t0:.1f}s)"
-              + (f"  [{got['note'][:60]}]" if got.get("note") else ""), flush=True)
+              + (f"  [{got['note'][:50]}]" if got.get("note") else ""), flush=True)
 
     csv_path = os.path.join(out, "deepselect_official_axes.csv")
     write_csv(csv_path, rows)
 
     files = [os.path.basename(csv_path)]
     if args.include_deep_gemm_axes:
-        dg_cells = deep_gemm_axes_cells()
-        dg_rows = [to_row(c, measure(c, ["maca_c", "torch"]), prov)
-                   for c in dg_cells]
+        dg_cells = [c for c in deep_gemm_axes_cells()
+                    if c.n_rows * c.n_cols <= args.max_elements]
+        skipped = len(deep_gemm_axes_cells()) - len(dg_cells)
+        print(f"\ndeep_gemm axes: {len(dg_cells)} rows"
+              + (f" ({skipped} over --max-elements)" if skipped else ""),
+              flush=True)
+        # Same arms as the official axis: the whole point of this file is the
+        # three-way comparison over the host repository's own grid.
+        dg_rows = [to_row(c, measure(c, arms), prov) for c in dg_cells]
         p2 = os.path.join(out, "deepselect_deep_gemm_axes.csv")
         write_csv(p2, dg_rows)
         files.append(os.path.basename(p2))
