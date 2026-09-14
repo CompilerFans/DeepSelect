@@ -1,0 +1,38 @@
+{
+  "backends": [
+    "maca_c",
+    "torch",
+    "deep_gemm"
+  ],
+  "case_source": "tests/test.py::performance_cases() (+ --deep-gemm-axes, + --cases-file)",
+  "cases": 95,
+  "chip": "metax_xcore1000",
+  "command": "/home/compiler_gfx/miniconda3/bin/python scripts/perf_snapshot.py --arms maca_c,torch,deep_gemm --out-dir perf_data --tag 20260915_000332",
+  "csv_files": [
+    "deepselect_perf.csv"
+  ],
+  "csv_format_version": 1,
+  "cuda_visible_devices": "3",
+  "deep_gemm_commit_date": "2026-09-14 23:58:06 +0800",
+  "deep_gemm_git": "dd33f070c163685ef4208af3f488be8153136daf",
+  "deep_gemm_repo": "/home/compiler_gfx/tilelang/mcDeepGEMM",
+  "deep_select_git_commit": "dc8525d0cc52220cb982d39c69c5f41f2a9d3b08",
+  "deep_select_git_dirty": true,
+  "device_name": "MetaX C500",
+  "extension_md5": "d07e79f595b00dfc2683b941a8484a07",
+  "extension_so": "deep_select_xcore1000.cpython-310-x86_64-linux-gnu.so",
+  "finished_at_utc": "2026-09-14T16:04:33.609649+00:00",
+  "measurement": "tests/test.py's own: one 'topk'-matching kernel's time, else the e2e span over the matching kernels; p.num_runs reps, L2 flushed (kk.bench). Correctness: tests/test.py::check_result / check_call_contract, applied to every backend except `torch`, whose arm is a bare torchtopk the official harness does not check either.",
+  "output_dir": "perf_data/metax_xcore1000/20260915_000332",
+  "python": "3.10.20",
+  "rows": 285,
+  "run_id": "20260915_000332",
+  "sm_count": 104,
+  "started_at_utc": "2026-09-14T16:03:46.872187+00:00",
+  "status_counts": {
+    "deep_gemm/unsupported": 95,
+    "maca_c/pass": 95,
+    "torch/pass": 95
+  },
+  "torch": "2.6.0+metax3.7.0.7"
+}
