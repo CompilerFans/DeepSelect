@@ -55,36 +55,30 @@ def _maca_root() -> str:
 
 
 def build_for_maca():
-    """Build one extension carrying every architecture's image.
+    """Build the one extension: `SOURCES` compiled for every target.
 
-    **There is one source tree and it is `csrc/xcore1000/`.**  That tree is the
-    hand-written MACA kernel, and it is what a C600 and a C600U run as well:
-    measured on a C600U it is 1.5-2.9x faster than the ported kernels under
-    `csrc/xcore1600/` and passes `check_result` on every cell the port fails
-    (CLAUDE.md, "Can a C600U run the C500 kernel").  **The port is not built at
-    all** -- not by a switch, not by an env var, not on one architecture: its
-    source and its `kerutils` dependency are off the include paths below, so
-    nothing in this file can reach it.  Bringing it back is a source change to
-    `sources` AND to `include_dirs` together, which is the point: a switch that
-    could put the broken kernel back is a switch that can be left on.
+    **This is a csrc compile and nothing else.**  One `.cu`, one `.so`;
+    everything under `deep_select/` is Python and reaches the artifact through
+    `tvm_ffi.load_module`.
 
-    **The architectures are images in one extension, not separate builds.**
     `CUCC_TARGETS` (same variable and meaning as the host repository's
-    `build.sh`) becomes a single comma-separated `-offload-arch`, which mxcc
-    accepts and compiles into a fat binary -- measured: three images for
-    `xcore1000,xcore1500,xcore1600`, 33 KB of device code growing to 82 KB.
-    So one `.so` runs on every family it names, and nothing here has to know
-    which device will load it.
+    `build.sh`) becomes one comma-separated `-offload-arch`, which mxcc takes
+    as a set of images of the same source in one file -- measured, three
+    targets, 3.7 MB for one image against 11.07 MB for three.  Unset means
+    `_arch.DEFAULT_TARGETS`, one target per family, so a build host needs no
+    MACA card to produce a shippable wheel; `native` is the one-image shortcut.
 
-    That is also why **nothing is specialized per architecture at compile
-    time**.  A `-DDEEP_SELECT_...` family macro would be a lie in a fat binary
-    (one compile, three images), so the two numbers the kernel sizes its grids
-    against travel as arguments instead -- `deep_select/_arch.py`'s family rows
-    are where they live, keyed by the family the *device* reports.
+    Nothing is specialized per architecture at compile time, and nothing can
+    be: a family macro would be a lie in two of the three images.  The two
+    numbers the kernel sizes its grids against travel as arguments instead --
+    see CLAUDE.md, "the arch constants are arguments".
 
-    Unset `CUCC_TARGETS` means `_arch.DEFAULT_TARGETS`, one target per family,
-    so a build host needs no MACA card to produce a shippable wheel;
-    `CUCC_TARGETS=native` is the shortcut for a one-image local build.
+    `csrc/xcore1600/` is not built, and cannot be from here: its source is off
+    `SOURCES` and its `kerutils` include is off `include_dirs` below.  It is
+    the ported upstream kernel, which fails `check_result` on a C600U where
+    `maca_topk.cu` passes and runs 1.5-2.9x faster (CLAUDE.md).  Re-adding
+    both lines is how the audit would be done; a switch that could put it back
+    is a switch that can be left on.
 
     `CUDA_HOME` is deliberately left alone -- see the cu-bridge note above.
     Every source is a `.cu`, so the device compiler is the only compiler this
@@ -105,47 +99,31 @@ def build_for_maca():
     tvm_ffi_root, lib_subdir = _tvm_ffi_root()
     targets = resolve_targets(os.environ.get("CUCC_TARGETS"))
 
-    # torch's MACA build appends a second `--offload-arch` of its own when this
-    # is set, and `CUCC_TARGETS` already produces one -- two in one extension,
-    # neither of them the list the caller asked for.
-    if os.environ.get("TORCH_EXTENSION_ENABLE_XC1500_COMPILE"):
-        raise RuntimeError(
-            "TORCH_EXTENSION_ENABLE_XC1500_COMPILE makes torch append "
-            "--offload-arch=xcore1000/xcore1500 to every source; setup.py "
-            "already takes the architecture list from CUCC_TARGETS.  Unset it "
-            "and pass the architectures to build there instead."
-        )
-
     # The compiler pair, printed rather than assumed -- see the cu-bridge note
     # above for why `CUDA_HOME` must be the one torch resolved.
     print(f"deep_select: device compiler is "
           f"{os.path.join(cpp_extension.CUDA_HOME, 'bin', 'cucc')}, "
           f"host compiler is {cpp_extension.get_cxx_compiler()}")
 
-    # cucc appends this catalogue to every invocation, so it is part of the
-    # flags the kernels were developed against even though torch's ninja file
-    # never mentions it.  `soft-link/cutlass` is load-bearing:
-    # `cutlass/kernel_launch.h` exists only there, as a symlink to `mctlass/`.
-    maca_library_includes = ["mcr", "mcblas", "mcfft", "mcsolver", "mcdnn",
-                             "common", "mcsparse", "mcrand", "mckl", "mcsml",
-                             "mctx", "thrust/detail"]
-
+    # Three paths, and the MACA catalogue is not one of them: cucc's own
+    # `all/adder` (`$MACA_PATH/tools/cu-bridge/bin/conf.json`) already passes
+    # `-I` for `cu-bridge/include`, `include/soft-link` and every `include/mc*`
+    # library, plus `-imacros __macro_mxcc.h`.  What it does *not* add is the
+    # toolkit's own `include/`, which is where `maca_bfloat16.h` and `cub/` are.
     include_dirs = [
         os.path.join(this_dir, "csrc"),
         # `csrc/ffi/` -- the tvm-ffi edge (tensor/error/check helpers).  Both
         # kernel trees include it as `"../ffi/..."`, `dispatch_utils.h` as
         # `"ffi_..."`, so the directory itself is on the path.
         os.path.join(this_dir, "csrc", "ffi"),
+        os.path.join(maca_root, "include"),
         # `csrc/xcore1600/` is NOT on this list and neither is
         # `csrc/3rdparty/kerutils/include`, which only its kernels include
         # (`csrc/ffi/` names kerutils once, in a comment, and includes nothing
         # from it).  Both trees stay in the repo as source; neither is compiled.
         # Re-adding these two paths is the first half of building the port
         # again -- see CLAUDE.md, "the port is not built".
-        os.path.join(maca_root, "include"),
-        os.path.join(maca_root, "tools", "cu-bridge", "include"),
-        os.path.join(maca_root, "tools", "cu-bridge", "include", "soft-link"),
-    ] + [os.path.join(maca_root, "include", d) for d in maca_library_includes]
+    ]
 
     # In mxcc's dialect.  cucc forwards what it does not recognize, so these
     # reach mxcc unchanged.
