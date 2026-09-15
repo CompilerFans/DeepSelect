@@ -87,6 +87,14 @@ CUCC_TARGETS=xcore1600 ./install.sh           # for another architecture
   to one invocation. One run cannot straddle the second boundary; the split is
   what `pip install .` creates.
 
+**The wheel is left in `dist/` and nowhere else — there is no `BUILDROOT`
+export.** That is a decision, not an omission: a `${BUILDROOT}/wheel/` export
+landed once (`761edc0`) and was dropped along with the flag parsing it shipped
+with when these three scripts were rewritten to the host repo's shape
+(`9a6105b`, "the target list is an env var, not four flags"). If a packaging
+step needs the wheel somewhere else, `dist/*.whl` is what to collect; do not
+re-introduce a second output path or an env var that only some callers set.
+
 The underlying call, if you need it directly (this bypasses the scripts' env
 derivation, so export `MACA_PATH`/`CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`
 yourself — see the build-change discipline section for why):
@@ -110,7 +118,7 @@ that would be deleting another project's cache. `--yes` is accepted and ignored
 (it was this script's first spelling, when the default was to remove nothing).
 `./clean.sh && ./build.sh` is the supported full-rebuild chain.
 
-`CUCC_TARGETS` defaults to `native` (the device the build runs on); same variable and meaning as the host repo's `build.sh`. One extension **per architecture** — `deep_select/deep_select_xcore<N>.cpython-310-x86_64-linux-gnu.so` — because a config's shared-memory footprint is only valid against the architecture it was sized for.
+`CUCC_TARGETS` is the same variable and meaning as the host repo's `build.sh`, but **both scripts here default it to `xcore1000,xcore1500,xcore1600`, not to the host's `native`** — `native` is the opt-in `CUCC_TARGETS=native ./build.sh`, and a wheel is what a packaging step collects, so the default carries every family. (This line said "defaults to `native`" until 2026-09-15 and contradicted the command block above it; the tree is the authority — `grep -o 'CUCC_TARGETS:-[^}]*' build.sh install.sh`.) One extension **per architecture** — `deep_select/deep_select_xcore<N>.cpython-310-x86_64-linux-gnu.so` — because a config's shared-memory footprint is only valid against the architecture it was sized for.
 
 **The stale `.so` must be deleted before rebuilding** — `build.sh` does this for
 you, but a bare `setup.py build_ext --inplace` does not (see the handover §4):
@@ -160,12 +168,19 @@ Build plumbing worth knowing before editing `setup.py`:
   type it knows.)
 - `-use-fast-math` is passed with FTZ turned back off (`-Xclang -fdenormal-fp-math-f32=ieee`) so the one float conversion (`__float2bfloat16` of `value_oob_fill_value`) stays exact for a denormal fill. The ranking path is integer-only and indifferent.
 - `pip install .` does **not** work, for an inherited upstream reason: `setup.py` stamps the version with `datetime.now()` and a PEP 517 install runs it twice (metadata then wheel); straddling a second boundary yields `Wheel has unexpected file name`. Build isolation adds a second failure (torch absent from pip's isolated env). Use `build_ext --inplace`.
-- `install.sh` reads the built wheel through `python -m zipfile -l`, **not `unzip`**: `unzip` is absent on this host and the
-  check failed closed on a wheel that was fine.
+- `install.sh` does not inspect the wheel at all: it runs one `bdist_wheel` and hands `dist/*.whl` to pip, then
+  checks the result from **outside the repo** (`cd /tmp && python -c 'import deep_select'`) — run that check from the
+  repo and it imports the local package, passing even when the install did nothing. An earlier revision did verify
+  the wheel's contents, through `python -m zipfile -l` rather than `unzip`: **`unzip` is absent on this host**, and
+  that check failed closed on a wheel that was fine. Keep that fact if the verification ever comes back.
 
-MACA toolkit root is `$MACA_HOME` or `$MACA_PATH` or `/opt/maca` (a symlink; it pointed at `maca-3.5.3.17` while
-`MACA_PATH` named `maca-sdk-3.8.1.3/opt/maca-3.8.1` — the env var is the authoritative one here, and the two are
-different SDK generations on this box).
+MACA toolkit root is `$MACA_HOME` or `$MACA_PATH` or `/opt/maca`. **`MACA_PATH` is authoritative; `/opt/maca` is a
+symlink that gets re-pointed under you, so never cite it as the version.** Measured across three sessions on this box:
+it pointed at `maca-3.5.3.17` while `MACA_PATH` named `maca-sdk-3.8.1.3/opt/maca-3.8.1`; on 2026-09-15 it pointed at
+`maca-3.7.0`, which was also the only other toolkit installed. Passing an explicit `MACA_PATH=<root>` to `build.sh` /
+`install.sh` / `run_test.sh` is the whole fix, and both scripts derive `CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH` and
+`LD_LIBRARY_PATH` from it for that reason. Print `ls -ld /opt/maca` and the resolved `libmcruntime.so` before blaming
+a kernel for a device-function failure — see the run-time trap in the environment section.
 
 ## Kernel architecture
 
@@ -1008,6 +1023,61 @@ print(ii[0].tolist())   # want [511,510,509,508,507,506,505,504]
 `arange` matters twice over: the values are exactly representable in bf16 (so the expected indices *are* `range`), and
 it removes the seeding that made an earlier reading of this look deterministic when it is not. Run it a few times.
 
+## Comment discipline — a comment carries the rule, not the campaign
+
+This tree was once 3,687 comment lines over its 28 most-touched files; it is 2,530 now (`e3f73cb`, −31%). The rule that
+produced the cut, and that governs new comments, is one question: **would a reader who is about to EDIT this line be
+wrong without it?**
+
+- **Keep, always:** the silent-wrong-answer warning (the `above + c > remain_topk` crossing test, the
+  `s_wide = s_input_flat` aliasing, the fp32 arena overflow and its rescan, the NaN bit-pattern contract, the dead
+  `hist_add_bf16_reg` transport), the contract invariant, the naming of an env knob, and any measured number that *is*
+  the argument for the code being there. A path labelled "do not remove" whose evidence has been replaced by a
+  qualitative claim is a path that gets deleted as unreachable — the fp32 rescan's
+  "8025 members against an arena of 1757, 391 of 512 picks mis-placed" earns its four lines.
+- **Cut:** the sweep table behind a constant (state the constant and the one line that explains it, then point at the
+  note), the multi-table before/after ledger, the architecture recap, and the campaign history narrating which
+  experiment was tried and retracted. Those belong in `docs/`, and a copy of them here goes stale where it sits —
+  that is the cost, and it is paid by every later reader.
+- **A pointer must resolve.** Replacing a table with "see `docs/X`" is only safe if `X` actually carries it. Before
+  landing, grep the docs for the numbers you are about to delete. Some of them are only in the code; those stay.
+
+**A comment is invisible to the compiler and to review at this size, so "comments only" has to be gated, not
+asserted. The gate ships: `tools/comment_gate.py`.**
+
+```bash
+python3 tools/comment_gate.py --commit e3f73cb     # 28 documentation-only, 0 differ in code
+python3 tools/comment_gate.py --worktree           # the working tree against HEAD
+python3 tools/comment_gate.py OLD.cuh NEW.cuh      # one pair
+python3 tools/comment_gate.py --self-test          # 12 controls, 4 of them negative
+```
+
+It gates **code files only** (`.py`/`.sh`/`.cu`/`.cuh`/`.h`/`.cpp`, …) and says
+`not gated` for anything else rather than inventing a verdict — a `.md` run
+through the C stripper has no comment syntax to strip and would report DIFFERS
+on a file containing no code. It also resolves the repository from the script's
+own location, not the caller's cwd: this tree is vendored inside another one, so
+"run it from somewhere else" is a real place to be standing.
+
+It strips comments **and docstrings** from both revisions, collapses whitespace, and requires the remainder
+byte-identical; exit status is the verdict. Run `--self-test` after any change to the gate — **a gate nobody has
+seen fail is not evidence**, and 4 of its 12 controls are pairs that must report DIFFER.
+
+**The gate lies in two ways, both measured, both defended against in that file:**
+
+1. **Dispatch on the real extension.** A copy staged as `/tmp/x/h.bak` does not end in `.sh`, so it reaches the C
+   stripper — which strips `//` and `/* */` and **not `#`** — and every shell file reads as "code changed" while
+   nothing changed. This is not hypothetical: it produced exactly that false verdict on all three build scripts
+   here. Stage both sides under the same basename; `--commit`/`--worktree` do it for you.
+2. **Docstrings are documentation, not code.** Python's tokenizer emits them as `STRING`, not `COMMENT`, so
+   tokenize-only stripping treats a rewritten docstring as a behaviour change. The gate drops the spans `ast`
+   reports for `Module`/`ClassDef`/`FunctionDef` bodies too. Runtime strings — `assert` messages, log lines, format
+   strings — are **not** docstrings and stay in the comparison, because changing one can change behaviour.
+
+Landing this kind of change: `rm -rf build && ./build.sh` (a comment edit still changes the artifact — mxcc embeds
+source line numbers — so "the md5 moved" is not evidence of a behaviour change, and the gate is), then
+`./run_test.sh --test`. `e3f73cb` is the worked example: 28/28 documentation-only, `BUILD_RC=0`, 202/202 passed.
+
 ## Known holes (recorded, not hidden)
 
 - **`csrc/xcore1600/` selects wrong on a C600U. This is measured, not suspected, and it is the first thing to
@@ -1047,13 +1117,25 @@ it removes the seeding that made an earlier reading of this look deterministic w
   part the port was ever run on. Where it can be taken, it drops the high members of a **tied run at the threshold** and
   writes every member back with the *group's low member's* key: five 508s for a group `{508, 510, 512}`, three 504s for
   `{504, 506}`. That is exactly the measured shape, it explains why the index set survives and only the values do not,
-  and it is reachable only on the larger part. The 32-lane list below remains a live suspect for the *other* symptoms
-  (`device-side assert`, the NaN trap on NaN-free input) — it is no longer the explanation for this one.
-  **Prime suspect, already documented:** the port carries CUDA's 32-lane model on a 64-lane wave. `common_parts.cuh:121`
-  (`NUM_WARPS = NUM_THREADS / 32`), `:1463` (`__ballot_sync(0xFFFFFFFF, …)`), `:488`/`:496`/`:497`/`:784`/`:791`/`:1432`/
-  `:1440`/`:1469` (`__reduce_add_sync(0xFFFFFFFF, …)`), `v3/topk_select.cuh:54` (`threadIdx.x % 32`), and the `0xFFFFFFFF`
-  mask in `utils.cuh:7-12`, whose own comment says the mask's validity rests on "**前提是 MACA 的 warp 宽度确为 32**" —
-  which it is not. On a 64-lane wave `0xFFFFFFFF` names the low half, so every one of those under-counts silently.
+  and it is reachable only on the larger part. What remains of the 32-lane surface is not the long list this file used
+  to carry but ONE file — see the re-audit immediately below. It is a live suspect for the *other* symptoms
+  (`device-side assert`, the NaN trap on NaN-free input); it is not the explanation for this one.
+
+  **Prime suspect, RE-AUDITED 2026-09-15 — the list that stood here was stale, and most of it described a fix that
+  has since landed.** The port's 32-lane surface is now handled by two constants in `utils.cuh`: `MACA_WARP_SIZE`
+  (= 64, `:11`) and `MACA_FULL_MASK` (`(uint64_t)0xFFFFFFFFFFFFFFFFull`, `:15`, spelled with the type because MACA
+  ships both a `uint64_t` and an `unsigned` overload of `__reduce_*_sync` and an unsuffixed literal fails to compile).
+  Measured at `fdb65b9`'s tree, in `csrc/xcore1600/`: **zero** `__ballot_sync(0xFFFFFFFF, …)`; **zero**
+  `__shfl_sync(0xFFFFFFFF, …)`; **zero** `threadIdx.x % 32` as code (it survives only as the text of a warning comment
+  in `v3/topk_select.cuh` and `v3_fp32/topk_select.cuh`); `common_parts.cuh` fully migrated — **8**
+  `__reduce_add_sync(MACA_FULL_MASK, …)` against **0** with a 32-bit mask, so the eight line numbers cited there
+  before (and `:121`'s `/ 32`, which is `NUM_THREADS / MACA_WARP_SIZE`) no longer name anything.
+  **The live remainder is exactly three sites, all in `v3_fp32/topk_select.cuh` — `:483`, `:504`, `:508`** — bare
+  `__reduce_add_sync(0xFFFFFFFF, …)` in that kernel's hit-count and warp-count reductions. On a 64-lane wave that mask
+  names physical lanes 0..31, so those three sum the low half and under-count silently. That is the whole of the
+  32-lane target for the xcore1600 audit, and it is much narrower than this file claimed.
+  **Cite this paragraph by the re-audit, not by the old list** — if a future pass finds the counts moved, re-measure
+  (`git -C <repo> grep -c -- '<pattern>' HEAD -- csrc/xcore1600/`) rather than restoring the list from memory.
   **It is worse than "wrong": it does not run.** With the port built (the `setup.py` source line pointed at
   `_xcore1600_sources()`) and *correct* inputs
   (`torch.set_default_device("cuda")` set, per the environment traps below), three cells — `b4096-v1024-k512`,
@@ -1073,9 +1155,19 @@ reason the migration happened:
 
 ```bash
 readelf -d deep_select/deep_select_xcore1000*.so | grep -iE 'libtorch|libc10'   # empty
-nm -D     deep_select/deep_select_xcore1000*.so | grep -icE 'c10|torch|at::'    # 0
+nm -D     deep_select/deep_select_xcore1000*.so | awk 'NF>=3{print $3}' \
+                                                 | grep -icE 'c10|torch|at::'    # 0
 nm -D     deep_select/deep_select_xcore1000*.so | grep -c  '__tvm_ffi_'         # 2
 ```
+
+**The `awk` in the middle line is not decoration — without it the gate reports a
+false positive.** `nm -D` prints an address column, and a mangled name's address
+can end in `c10`: measured 2026-09-15 on an artifact with no torch symbol at all
+(`readelf` clean, 0 undefined torch imports), the un-filtered form reported **2**,
+both of them the address `0000000000022c10` / `0000000000024c10` matching the
+`c10` alternative. Grep the name column (`$3`) or the symbol's own text, never
+the whole line. A gate that guards against unnoticed linkage and itself
+mis-reports is worse than no gate: it trains the reader to ignore it.
 
 The pybind11 build linked six torch libraries, which tied the extension to the
 host's torch build (`c10_cuda_check_implementation`) and to a cpython tag its
