@@ -166,14 +166,18 @@ def build_for_maca():
         strip_torch_libs(CUDAExtension(
                 # The tvm-ffi artifact has no `PyInit` and is NOT an importable
                 # python module -- `_binding.py` loads it through
-                # `tvm_ffi.load_module`.  `no_python_abi_suffix` keeps a
-                # cpython-310 tag off something the import system never sees.
+                # `tvm_ffi.load_module`.  A cpython tag would be a claim about
+                # an ABI nothing here uses, so it comes off both names: the
+                # `.so` filename through `no_python_abi_suffix` on the **build
+                # command** (not on this Extension -- torch reads that flag out
+                # of the command's kwargs, so an attribute here does nothing)
+                # and the wheel through `_BdistWheel` at the bottom.  The floor
+                # is then `python_requires` in `setup()`.
                 #
                 # Named for the *package*, not for an architecture: there is
                 # one of these and it serves every family it carries an image
                 # for.  `deep_select_maca` matches the C++ namespace.
                 name="deep_select.deep_select_maca",
-                no_python_abi_suffix=True,
                 sources=SOURCES,
                 # Every source is a `.cu`, so the `nvcc` list is the only one
                 # torch reads, and its contents are mxcc's dialect because
@@ -185,10 +189,14 @@ def build_for_maca():
                 library_dirs=[os.path.join(tvm_ffi_root, lib_subdir)],
                 libraries=["tvm_ffi"],
                 extra_link_args=[
-                    # No rpath for `libtvm_ffi.so`: it lives in a python
-                    # package, so an rpath would bake this build machine's
-                    # `site-packages` into every wheel.  `_binding.py` loads it
-                    # by SONAME before the extension instead.
+                    # No rpath for `libtvm_ffi.so`, deliberately: it ships
+                    # inside the `tvm_ffi` *python package*, so any rpath would
+                    # bake this build machine's `site-packages` into the wheel.
+                    # The soname is satisfied at run time by `import tvm_ffi`,
+                    # which `_binding.load` does -- no rpath, no ctypes preload,
+                    # and upstream's `auditwheel --exclude libtvm_ffi.so` says
+                    # the same thing from the packaging side.  See that function
+                    # before adding either back.
                     f"-L{maca_root}/lib",
                     f"-Wl,-rpath,{maca_root}/lib",
                     # `DT_RUNPATH`, not `DT_RPATH`: the two differ in *order*
@@ -205,7 +213,13 @@ def build_for_maca():
     ]
     print(f"deep_select: compiling {', '.join(SOURCES)} for {','.join(targets)}")
 
-    return (ext_modules, BuildExtension.with_options(use_ninja=True))
+    # `no_python_abi_suffix` belongs *here*, not on the Extension above: torch's
+    # `BuildExtension.__init__` reads it out of its own kwargs
+    # (`cpp_extension.py`), and `with_options` is what puts it there.  Set it on
+    # the Extension object and nothing reads it -- the `.so` keeps
+    # `cpython-310-x86_64-linux-gnu` in its name.
+    return (ext_modules,
+            BuildExtension.with_options(use_ninja=True, no_python_abi_suffix=True))
 
 
 # --- stack-frame check (the MACA counterpart of upstream's spill gate) ------
@@ -288,11 +302,49 @@ ext_modules, build_ext = build_for_maca()
 # against.
 _maca_stack_check(ext_modules, _maca_root())
 
+# --- wheel tag --------------------------------------------------------------
+#
+# `bdist_wheel` derives the tag from the *build* interpreter, which would stamp
+# `cpython-310-cp310-linux_x86_64` on a wheel whose extension exports
+# `__tvm_ffi_*` symbols and no `PyInit` -- an ABI the artifact does not use and
+# a python version it does not care about.  `py3-none-<plat>` is upstream's
+# spelling of the same thing (`wheel.py-api = "py3"` in scikit-build-core), and
+# it is the honest one: what is version-sensitive here is the *platform*, and
+# what is not is the interpreter.
+#
+# The floor that remains real is `python_requires` below, which is about the
+# runtime prerequisites rather than the extension: torch 2.6 requires >= 3.9
+# and `apache-tvm-ffi` >= 3.8, so this package's floor is the higher of the two.
+try:
+    # Canonical since setuptools 70.1; the `wheel` package's copy still works
+    # but prints a FutureWarning on every command, including `--version`.
+    from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel_base
+except ImportError:
+    from wheel.bdist_wheel import bdist_wheel as _bdist_wheel_base
+
+
+class _BdistWheel(_bdist_wheel_base):
+    def get_tag(self):
+        _, _, plat = super().get_tag()
+        # Keep the platform `super()` resolved -- `root_is_pure` is False
+        # because this distribution has ext_modules, so it is the real one.
+        return "py3", "none", plat
+
+
 setup(
     name="deep_select",
     version=f"{__version__}+{git_rev}.{datetime_rev}",
     packages=find_packages(include=["deep_select"]),
     ext_modules=ext_modules,
-    cmdclass={"build_ext": build_ext},
+    cmdclass={
+        "build_ext": build_ext,
+        "bdist_wheel": _BdistWheel,
+    },
+    # Both are imported at run time by `interface.py` / `_binding.py`, and
+    # neither is vendored here; torch is also the build's own prerequisite.
+    # Unpinned on purpose: the MACA builds of torch are metax-suffixed local
+    # versions, and a pin would refuse them.
+    install_requires=["torch", "apache-tvm-ffi"],
+    python_requires=">=3.9",
     zip_safe=False,
 )

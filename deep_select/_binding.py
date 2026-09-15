@@ -62,48 +62,27 @@ class _Module:
         return self._alignment()
 
 
-def _preload_tvm_ffi() -> None:
-    """Load `libtvm_ffi.so` from the installed package before the extension.
-
-    The extension carries `DT_NEEDED: libtvm_ffi.so`, and that library ships
-    inside the `tvm_ffi` *python package* -- a path only the running process
-    knows.  Letting the loader find it through `DT_RPATH` would bake the build
-    machine's `site-packages` into the artifact, so it is loaded here instead:
-    an object already in the global scope satisfies a later `DT_NEEDED` by
-    soname, wherever it was found.  Measured: the shipped library's `SONAME` is
-    exactly `libtvm_ffi.so`, the same string the extension records.
-
-    Called once per process (`load` is cached), and only when a kernel is
-    actually about to be loaded -- importing `deep_select` must not.
-    """
-    import ctypes
-
-    import tvm_ffi
-
-    root = os.path.dirname(os.path.abspath(tvm_ffi.__file__))
-    for sub in ("lib", os.path.join("lib64")):
-        hits = sorted(glob.glob(os.path.join(root, sub, "libtvm_ffi.so*")))
-        if hits:
-            # RTLD_GLOBAL: a private (RTLD_LOCAL) load does not enter the
-            # global scope and would not satisfy the extension's DT_NEEDED.
-            ctypes.CDLL(hits[0], mode=ctypes.RTLD_GLOBAL)
-            return
-    raise RuntimeError(
-        f"tvm_ffi at {root} has no lib/ or lib64/ with libtvm_ffi.so in it; "
-        f"the extension links it and cannot be loaded without it"
-    )
-
-
 @functools.lru_cache(maxsize=None)
 def load(name: str) -> Any:
     """The loaded tvm-ffi module named ``name``.
 
     Cached: the module holds a device binary, and a process that never calls
     `topk` should not load one.
+
+    **The `import tvm_ffi` above is load-bearing, not just for `load_module`.**
+    The extension carries `DT_NEEDED: libtvm_ffi.so`, which ships inside the
+    `tvm_ffi` package -- and importing that package maps the library into the
+    process, which is enough for the loader to satisfy the `DT_NEEDED` by
+    soname.  Upstream states the guarantee ("guaranteed to be loaded by
+    importing `tvm_ffi`") and it is measured here.  The alternative is an
+    `-Wl,-rpath` at link time, and that is the wrong one: it bakes the *build*
+    machine's `site-packages` into the artifact.  So: do not add one back, and
+    do not "helpfully" preload the library with `ctypes` -- that was tried and
+    is dead code (upstream also says to exclude `libtvm_ffi` from any
+    `auditwheel repair`, for the same reason).
     """
     import tvm_ffi
 
-    _preload_tvm_ffi()
     hits = sorted(glob.glob(os.path.join(_PACKAGE_DIR, _LIBRARY_GLOB.format(name=name))))
     if not hits:
         raise RuntimeError(

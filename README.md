@@ -242,6 +242,13 @@ with its flag parsing (`9a6105b`). A cut that needs the wheel elsewhere copies i
 out of `dist/`; a reader should not re-add an output path that was removed on
 purpose.
 
+It is tagged `py3-none-linux_x86_64` and declares `torch` and `apache-tvm-ffi`
+(unpinned -- the MACA torch builds carry metax-suffixed local versions, which a
+pin would reject). The tag is honest: the extension is loaded through
+`tvm_ffi.load_module` and exports no `PyInit`, so there is no CPython ABI in it
+to name, and what the wheel is actually sensitive to is the platform. See
+CLAUDE.md's wheel table for what the target machine must still provide.
+
 ```bash
 ./build.sh                             # every family (CUCC_TARGETS to narrow)
 ./install.sh                           # build a wheel and install it

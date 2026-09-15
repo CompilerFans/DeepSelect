@@ -129,7 +129,7 @@ default carries every family. (This line said "defaults to `native`" until
 authority: `grep -n DEFAULT_TARGETS deep_select/_arch.py`.)
 
 **The target list is an image list, not a build list.** One extension —
-`deep_select/deep_select_maca.cpython-310-x86_64-linux-gnu.so` — carries one
+`deep_select/deep_select_maca.so` — carries one
 image per target, because mxcc takes a comma-separated `-offload-arch` and
 compiles each into its own image of the same source. Measured: three targets →
 three images in one file, 11.07 MB against 3.7 MB for one. There is therefore
@@ -146,19 +146,25 @@ on another family. Measured on the distribution artifact:
 
 | | |
 | --- | --- |
-| tags | `cp310-cp310-linux_x86_64` — Python 3.10 AND linux x86_64. `no_python_abi_suffix` does not take effect through `BuildExtension`, so the tag is real and pip enforces it. |
-| `Requires-Dist` | **none.** `torch` and `tvm_ffi` are not declared; the caller installs them. |
+| tags | `py3-none-linux_x86_64` — the *platform* is real, the interpreter is not. Fixed 2026-09-15: the tag is now upstream tvm-ffi's spelling (`wheel.py-api = "py3"`, i.e. `py3-none-<plat>`) and the extension file is `deep_select_maca.so`. It used to be `cp310-cp310-linux_x86_64` / `deep_select_maca.cpython-310-x86_64-linux-gnu.so`, on a claim about an ABI nothing here uses — the artifact has no `PyInit`. Two causes, both fixed: torch's `BuildExtension.__init__` reads `no_python_abi_suffix` out of its **own kwargs**, so the flag has to go through `with_options` rather than sit on the `Extension` (where nothing read it); and the wheel tag comes from the build interpreter, so it needs a `bdist_wheel` subclass (`_BdistWheel` in `setup.py`). |
+| `Requires-Dist` | `torch`, `apache-tvm-ffi` — declared since 2026-09-15, unpinned (the MACA torch builds are metax-suffixed local versions, so a pin would refuse them). `Requires-Python: >=3.9` is the honest floor: the *extension* has no python dependency at all, and 3.9 is the higher of torch 2.6's `>=3.9` and tvm-ffi's `>=3.8`. |
 | `DT_NEEDED` | `libtvm_ffi.so` + the MACA set (`libmcruntime`, `libToolsExt_cu`, `libruntime_cu`, `libmcToolsExt`, `libmccompiler`, `libmaca_mathlib_host`). |
 | `DT_RUNPATH` | `/opt/maca/lib:/opt/maca/mxgpu_llvm/lib` — MACA conventions, and overridable (see trap 8). |
 | build-machine paths | only as `__FILE__` literals inside error-message strings (six of them, all `DS_HOST_CHECK` sites). Zero in `.dynamic`, so nothing load-bearing. |
 
 Two consequences worth stating rather than discovering:
 
-- **`libtvm_ffi.so` is resolved by `_binding.py`, not by the loader.**
-  `_preload_tvm_ffi()` `dlopen`s it from the installed `tvm_ffi` package with
-  `RTLD_GLOBAL` before the extension is loaded, so the `DT_NEEDED` is satisfied
-  by soname. An rpath would have been the alternative and it is the wrong one:
-  it bakes *this build machine's* `site-packages` into every wheel.
+- **`libtvm_ffi.so` is resolved at run time by `import tvm_ffi`, and there is
+  no rpath.** The library ships inside the `tvm_ffi` *python package*, so an
+  rpath would bake *this build machine's* `site-packages` into every wheel —
+  which is why there is none, and why upstream's packaging guidance is
+  `auditwheel repair --exclude libtvm_ffi.so` (guaranteed loaded by importing
+  `tvm_ffi`). `_binding.load`'s `import tvm_ffi` is therefore load-bearing, not
+  merely how `load_module` is reached; it is the whole mechanism. An earlier
+  revision added a `ctypes` `RTLD_GLOBAL` preload of the library and it was
+  **measured redundant** (2026-09-15: with the preload removed the extension
+  loads and the suite passes) — deleted, since a second mechanism that cannot
+  be observed to do anything is a second thing to keep correct.
 - **MACA is a prerequisite of torch, not only of this kernel.** `import torch`
   alone dies with `OSError: libmxomp.so: cannot open shared object file` when
   the toolkit's libs are off the loader path, so a target machine needs a
@@ -1266,11 +1272,12 @@ stream, which does not synchronize with torch's non-blocking side streams. The
 one call site is wrapped; `DEEP_SELECT_NO_STREAM_GUARD=1` is the explicit
 escape hatch for bisecting it.
 
-**Two things did not decouple and are not claimed to have:**
-`no_python_abi_suffix=True` does not take effect through torch's
-`BuildExtension`, so the artifact filenames still carry `cpython-310`; and
-`get_alignment_requirement` returns `Array<int64_t>` rather than the pybind
-build's `std::pair` (tvm-ffi cannot carry `std::pair`), which
-`interface.py` normalizes to a tuple.
+**One thing did not decouple, and the other now has.** `get_alignment_requirement`
+returns `Array<int64_t>` rather than the pybind build's `std::pair` (tvm-ffi
+cannot carry `std::pair`), which `interface.py` normalizes to a tuple. The
+`no_python_abi_suffix` half is no longer true — it *does* take effect, through
+`BuildExtension.with_options(...)` rather than through the `Extension` (torch
+reads the flag from its own kwargs); the artifact is `deep_select_maca.so` and
+the wheel is tagged `py3-none-linux_x86_64` (see the wheel table above).
 
 `csrc/xcore1600/api.cu` is host code but is compiled by mxcc's host pass (clang 19), so `std::format` *is* available there now that the file is a `.cu`. The one check message that needs formatting keeps its `snprintf` anyway: it is the ABI-safe spelling at this boundary (and `<format>` needs GCC 13's libstdc++; the host is GCC 11.4). Do not "fix" it back. Anything including `<cuda_runtime_api.h>` must not depend on cu-bridge's compatibility layer for `__nv_bfloat16`: `csrc/structs.h` includes `<maca_bfloat16.h>` so that `api.cu` and every instantiation TU see the *same* `maca_bfloat16`, and `TopkSelectConfig<maca_bfloat16, ...>`'s template entity is one symbol on both sides.
