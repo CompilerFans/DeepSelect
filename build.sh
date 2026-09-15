@@ -51,8 +51,9 @@ python -c 'import sys, torch
 print(f"build.sh: python {sys.version.split()[0]}, torch {torch.__version__}")'
 echo "build.sh: CUCC_TARGETS=${CUCC_TARGETS:-<unset: setup.py takes _arch.DEFAULT_TARGETS>}"
 
-# The loop over targets lives in setup.py: one extension per architecture, each
-# with its own `--offload-arch`.
+# `CUCC_TARGETS` becomes one `-offload-arch` list in setup.py: every target is
+# an image of the same source in the one extension, so a single build serves
+# every family it names.
 python setup.py build_ext --inplace
 
 echo "build.sh: done"

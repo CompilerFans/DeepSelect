@@ -169,13 +169,17 @@ print(family_of_target(native_target()))
 PY
 ) || { echo "run_test.sh: could not resolve the target architecture" >&2; exit 1; }
 
-so=$(ls deep_select/deep_select_xcore${family}*.so 2>/dev/null | head -1 || true)
+# One extension for every family, so this does not depend on the device -- but
+# the *note* below still names this device's family, because whether the .so
+# carries an image for it is a real question a one-image local build answers
+# with a launch failure.
+so=$(ls deep_select/deep_select_maca*.so 2>/dev/null | head -1 || true)
 if [[ -z "$so" ]]; then
-    echo "run_test.sh: no extension for xcore${family} in deep_select/" >&2
+    echo "run_test.sh: no extension in deep_select/" >&2
     echo "             build it first:  ./build.sh" >&2
     if [[ "$allow_build" == "1" ]]; then
         ./build.sh
-        so=$(ls deep_select/deep_select_xcore${family}*.so 2>/dev/null | head -1 || true)
+        so=$(ls deep_select/deep_select_maca*.so 2>/dev/null | head -1 || true)
     else
         exit 1
     fi
@@ -194,7 +198,7 @@ if [[ -n "$newest_src" ]]; then
     if [[ "$allow_build" == "1" ]]; then
         echo "run_test.sh: --allow-build: running ./build.sh"
         ./build.sh
-        so=$(ls deep_select/deep_select_xcore${family}*.so 2>/dev/null | head -1 || true)
+        so=$(ls deep_select/deep_select_maca*.so 2>/dev/null | head -1 || true)
         stale_note="# STALE           rebuilt by --allow-build before this run"
     else
         stale_note="# STALE           yes ($newest_src newer than the extension)"

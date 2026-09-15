@@ -2343,13 +2343,14 @@ __global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage2_kernel(
 // fallback -- is the 16-bit split's.
 //
 // The chunk count, the work target behind it and the reason a short batch is
-// split at all are in `csrc/structs.h` (NATIVE_F32_CHUNK_WORK_TARGET).
+// split at all are the caller's (`maca_topk.cu`'s `f32_chunk_work_target`).
 constexpr size_t kF32ChunkBlocks = kBlockSize;   // `radix_topk_row_f32`'s width
-// The split's chunk count is the caller's (`deep_select_maca::kChunkedChunks`,
-// currently 16, which is also what `nan_scan_kernel` is launched with).  It is
-// only ever used for *sizing* here -- the kernels take it as an argument -- so
-// this header does not need the caller's constant, just a ceiling to bound
-// `uint32_t` arithmetic with.  64 covers any value the dispatcher could pick.
+// The split's chunk count is the caller's (`chunked_chunks`: 16 on C500, and
+// rounded to fill a wave elsewhere, which is also what `nan_scan_kernel` is
+// launched with).  It is only ever used for *sizing* here -- the kernels take
+// it as an argument -- so this header does not need the caller's value, just a
+// ceiling to bound `uint32_t` arithmetic with.  64 covers any the dispatcher
+// could pick.
 constexpr uint32_t kF32MaxTopK = 4096u;
 
 inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,

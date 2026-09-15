@@ -1,10 +1,17 @@
 """MACA architecture vocabulary shared by the build and the runtime.
 
-A kernel's config is sized against its architecture's shared memory capacity,
-so the build names architectures and the runtime picks the matching build;
-both go through here so the two cannot disagree about what a device is.
+Two jobs, and they meet at the family base (1000 / 1500 / 1600):
 
-The spellings and capacities duplicate the host repository's
+* the build turns `CUCC_TARGETS` into `--offload-arch` spellings, and
+* the runtime turns the device torch sees into the two **machine numbers a
+  grid is sized against** -- the SM count and the fp32 split's work target.
+
+Neither number is asked of the driver.  The device reports its architecture
+through torch, the architecture names a family, and the family is the key to
+the table below -- one lookup on a fact the caller already has, rather than a
+device query per call.
+
+The family rows duplicate the host repository's
 ``deep_gemm/utils/arch_config.py`` ``XcoreFamily`` rows by hand -- this
 repository is standalone and cannot import it -- so a change to either belongs
 in the same review.
@@ -27,22 +34,23 @@ FAMILY_OF_TARGET = {
 # One source for it, so `build.sh`/`install.sh` do not repeat the literal.
 DEFAULT_TARGETS = "xcore1000,xcore1500,xcore1600"
 
-# Family base -> per-SM shared memory capacity in bytes: the number a kernel's
-# config table is valid against.
-CAPACITY_BYTES = {
-    1000: 64 * 1024,
-    1500: 128 * 1024,
-    1600: 128 * 1024,
-}
-
-# Family base -> SM ("AP") count of the parts in it.  The same numbers as
-# `csrc/structs.h`'s `NATIVE_SM_COUNT`, which is where the kernels read them;
-# this copy lets a host-side report name the machine without a device call.
+# Family base -> SM ("AP") count of the parts in it.  A chunked grid is sized
+# in CTAs of `kBatch * chunks`, and a count that is not a multiple of this
+# leaves `ctas mod SM` SMs idle in the last wave, so every grid-sizing
+# decision in the kernel is a function of it.  Passed to the kernel, not
+# compiled in: one extension serves all three families (setup.py), so there is
+# no per-family compile to bake it into.
 SM_COUNT = {
     1000: 104,   # C500
     1500: 28,    # C600
     1600: 32,    # C600U / C600-UL
 }
+
+# There is no work-target row here: the fp32 split derives its own, from
+# `SM_COUNT` alone.  K = 2.5 x SM, and 2.5 is the C500 fit (256 measured, i.e.
+# 2.46 x 104, rounded to a form that is visibly a machine property).  Writing
+# 70 and 80 out as rows would dress one multiplication up as two measurements.
+# See `maca_topk.cu`'s `f32_chunk_work_target`.
 
 # The CUDA-compat sm spelling torch reports -> family base.  Which xcore1600
 # spelling a part reports depends on the SDK generation, so the family is the
@@ -72,39 +80,55 @@ def family_of_target(target: str) -> int:
         ) from None
 
 
-def native_target() -> str:
-    """The ``--offload-arch`` spelling of the device in this process.
+def native_family() -> int:
+    """Family base of the device in this process, read through torch.
 
-    Read through torch, which is how the runtime picks a build too -- the same
-    answer from the same source, so the wheel and the module it loads cannot
-    disagree.
+    torch is the only source consulted, for both the build's `native` spelling
+    and the runtime's machine numbers -- one answer from one place, so a build
+    and the module loaded into a process on that device cannot disagree about
+    what the device is.
     """
     import torch
 
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "no MACA device visible, so the native target cannot be detected; "
-            "build with an explicit CUCC_TARGETS=xcore<N> instead"
+            "no MACA device visible, so the native architecture cannot be "
+            "detected; the build is unaffected (it names its targets with "
+            "CUCC_TARGETS), but a kernel launch is not"
         )
-    sm = torch.cuda.get_device_capability()[0] * 10 + torch.cuda.get_device_capability()[1]
+    major, minor = torch.cuda.get_device_capability()
+    sm = major * 10 + minor
     try:
-        family = FAMILY_OF_SM[sm]
+        return FAMILY_OF_SM[sm]
     except KeyError:
         raise RuntimeError(
             f"device reports sm{sm}, which is not a known MACA family; add it to "
             f"deep_select/_arch.py::FAMILY_OF_SM"
         ) from None
-    return f"xcore{family}"
+
+
+def native_target() -> str:
+    """The ``--offload-arch`` spelling of the device in this process."""
+    return f"xcore{native_family()}"
+
+
+def native_sm_count() -> int:
+    """SM count of the device in this process, from its family."""
+    return SM_COUNT[native_family()]
 
 
 def resolve_targets(spec: Optional[str]) -> list:
     """Expand a ``CUCC_TARGETS`` value into concrete target spellings.
 
+    These become the one extension's `-offload-arch` list, so this is the set
+    of images in the fat binary, not a set of builds.
+
     **The default is the whole family list, not this device.**  A build host
-    need not have a MACA card in it at all, and a wheel that names only the
+    need not have a MACA card in it at all, and a wheel that carries only the
     device it was built on is a wheel that cannot be shipped anywhere else --
     so "no value" means every family this tree names, and ``native`` remains
-    available as an *explicit* spelling for a caller who wants exactly one.
+    available as an *explicit* spelling for a caller who wants a fast local
+    build of exactly one image.
     """
     if not spec:
         spec = DEFAULT_TARGETS
@@ -134,12 +158,13 @@ def resolve_targets(spec: Optional[str]) -> list:
 # `maca_topk.cu` passes all of them and is 1.5-2.9x faster besides.  That is
 # feasible because nothing in `csrc/xcore1000/` is C500-specific code (no
 # `__MACA_ARCH__` branch, 64-lane cross-lane primitives, integer-key ranking
-# with no float math to differ per part) and because the capacity gate cannot
-# fire upward: a 64 KiB-sized config in a 128 KiB SM cannot trip it while
-# `-DDEEP_SELECT_NATIVE_ARCH` is passed from the target.
+# with no float math to differ per part) and because the two per-family numbers
+# the kernel does need are parameters now, not compile-time constants.
 #
 # What a caller gets on a 128 KiB part from `maca_topk.cu` rather than the port:
 # `topk` in `(1024, 4096]` is answerable, `vocab_size >= 2^23` is not a limit,
 # and bf16 `sorted_value` works.  To work on the port, add its sources AND its
-# two include paths back to `setup.py` and expect it to fail; see the handover
-# and CLAUDE.md's "Known holes" for the measurement and the diagnosis.
+# two include paths back to `setup.py` and expect it to fail; its own
+# `NATIVE_SHARED_MEMORY_PER_SM_BYTES` went with the rest of the compile-time
+# architecture selection (see `csrc/structs.h`).  See the handover and
+# CLAUDE.md's "Known holes" for the measurement and the diagnosis.

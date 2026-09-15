@@ -7,7 +7,10 @@ from setuptools import setup, find_packages
 
 exec(open("deep_select/__version__.py").read())
 
-XCORE1000_SOURCES = [
+# One source, one extension.  `csrc/xcore1600/` is the ported upstream kernel:
+# it stays in the repo as source and is off the build entirely -- see
+# `build_for_maca`.
+SOURCES = [
     "csrc/xcore1000/maca_topk.cu",
 ]
 
@@ -52,8 +55,7 @@ def _maca_root() -> str:
 
 
 def build_for_maca():
-    """Build one extension per architecture, each holding that architecture's
-    kernel.
+    """Build one extension carrying every architecture's image.
 
     **There is one source tree and it is `csrc/xcore1000/`.**  That tree is the
     hand-written MACA kernel, and it is what a C600 and a C600U run as well:
@@ -61,19 +63,28 @@ def build_for_maca():
     `csrc/xcore1600/` and passes `check_result` on every cell the port fails
     (CLAUDE.md, "Can a C600U run the C500 kernel").  **The port is not built at
     all** -- not by a switch, not by an env var, not on one architecture: its
-    source and its `kerutils` dependency are off the include paths above, so
+    source and its `kerutils` dependency are off the include paths below, so
     nothing in this file can reach it.  Bringing it back is a source change to
     `sources` AND to `include_dirs` together, which is the point: a switch that
     could put the broken kernel back is a switch that can be left on.
 
-    Each architecture still gets its own extension, `deep_select_xcore<N>`,
-    because a config's shared memory footprint is only valid for the
-    architecture it was sized for, and that name is exactly how
-    `topk(backend="maca_c")` resolves one.  Which get built comes from
-    `CUCC_TARGETS`, same variable and meaning as the host repository's
-    `build.sh`; unset means `_arch.DEFAULT_TARGETS`, one target per family, so a
-    build host needs no MACA card to produce a shippable wheel.  `-offload-arch`
-    is passed per extension, so each targets exactly one architecture.
+    **The architectures are images in one extension, not separate builds.**
+    `CUCC_TARGETS` (same variable and meaning as the host repository's
+    `build.sh`) becomes a single comma-separated `-offload-arch`, which mxcc
+    accepts and compiles into a fat binary -- measured: three images for
+    `xcore1000,xcore1500,xcore1600`, 33 KB of device code growing to 82 KB.
+    So one `.so` runs on every family it names, and nothing here has to know
+    which device will load it.
+
+    That is also why **nothing is specialized per architecture at compile
+    time**.  A `-DDEEP_SELECT_...` family macro would be a lie in a fat binary
+    (one compile, three images), so the two numbers the kernel sizes its grids
+    against travel as arguments instead -- `deep_select/_arch.py`'s family rows
+    are where they live, keyed by the family the *device* reports.
+
+    Unset `CUCC_TARGETS` means `_arch.DEFAULT_TARGETS`, one target per family,
+    so a build host needs no MACA card to produce a shippable wheel;
+    `CUCC_TARGETS=native` is the shortcut for a one-image local build.
 
     `CUDA_HOME` is deliberately left alone -- see the cu-bridge note above.
     Every source is a `.cu`, so the device compiler is the only compiler this
@@ -83,8 +94,7 @@ def build_for_maca():
     import torch.utils.cpp_extension as cpp_extension
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-    from deep_select._arch import (CAPACITY_BYTES, family_of_target,
-                                   resolve_targets)
+    from deep_select._arch import family_of_target, resolve_targets
 
     maca_root = _maca_root()
     this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -96,15 +106,14 @@ def build_for_maca():
     targets = resolve_targets(os.environ.get("CUCC_TARGETS"))
 
     # torch's MACA build appends a second `--offload-arch` of its own when this
-    # is set, which would put two in one extension -- a config sized for 128 KiB
-    # silently riding into a 64 KiB build.  Refuse rather than build something
-    # wrong on one of the two architectures it claims.
+    # is set, and `CUCC_TARGETS` already produces one -- two in one extension,
+    # neither of them the list the caller asked for.
     if os.environ.get("TORCH_EXTENSION_ENABLE_XC1500_COMPILE"):
         raise RuntimeError(
             "TORCH_EXTENSION_ENABLE_XC1500_COMPILE makes torch append "
             "--offload-arch=xcore1000/xcore1500 to every source; setup.py "
-            "targets one architecture per extension.  Unset it and pass the "
-            "architectures to build via CUCC_TARGETS instead."
+            "already takes the architecture list from CUCC_TARGETS.  Unset it "
+            "and pass the architectures to build there instead."
         )
 
     # The compiler pair, printed rather than assumed -- see the cu-bridge note
@@ -138,54 +147,57 @@ def build_for_maca():
         os.path.join(maca_root, "tools", "cu-bridge", "include", "soft-link"),
     ] + [os.path.join(maca_root, "include", d) for d in maca_library_includes]
 
-    def compile_args(target):
-        # In mxcc's dialect.  cucc forwards what it does not recognize, so
-        # these reach mxcc unchanged.
-        args = [
-            "-O3",
-            "-std=c++20",
-            "-DNDEBUG",
-            "-Wno-deprecated-declarations",
-            # torch injects `-fPIC` on the `cxx` side and
-            # `--compiler-options '-fPIC'` on the device side, which cucc
-            # rewrites to `-Xcompiler -fPIC`; named here anyway so the device
-            # pass does not rely on that rewrite -- one duplicate flag.
-            "-fPIC",
-            "-use-fast-math",
-            # `-use-fast-math` implies FTZ, turned back off here so the one
-            # float conversion in the kernel -- `__float2bfloat16` of
-            # `value_oob_fill_value` -- stays exact for a denormal fill.  The
-            # ranking path is pure integer key manipulation and cannot care.
-            "-Xclang", "-fdenormal-fp-math-f32=ieee",
-            f"-offload-arch={target}",
-            # `__MACA_ARCH__` is only defined in the device pass, but the
-            # capacity constant lives in `structs.h`, which every TU includes,
-            # so it is spelled out on the command line -- the same number the
-            # toolchain derives, set from the same loop iteration.
-            f"-DDEEP_SELECT_NATIVE_ARCH={family_of_target(target)}",
-        ]
-        return args + [f"-I{d}" for d in include_dirs]
+    # In mxcc's dialect.  cucc forwards what it does not recognize, so these
+    # reach mxcc unchanged.
+    nvcc_args = [
+        "-O3",
+        "-std=c++20",
+        "-DNDEBUG",
+        "-Wno-deprecated-declarations",
+        # torch injects `-fPIC` on the `cxx` side and
+        # `--compiler-options '-fPIC'` on the device side, which cucc
+        # rewrites to `-Xcompiler -fPIC`; named here anyway so the device
+        # pass does not rely on that rewrite -- one duplicate flag.
+        "-fPIC",
+        "-use-fast-math",
+        # `-use-fast-math` implies FTZ, turned back off here so the one
+        # float conversion in the kernel -- `__float2bfloat16` of
+        # `value_oob_fill_value` -- stays exact for a denormal fill.  The
+        # ranking path is pure integer key manipulation and cannot care.
+        "-Xclang", "-fdenormal-fp-math-f32=ieee",
+        # One comma-separated list: mxcc compiles each architecture into its
+        # own image of the same source, in one extension.
+        f"-offload-arch={','.join(targets)}",
+    ] + [f"-I{d}" for d in include_dirs]
 
-    ext_modules = []
-    for target in targets:
-        family = family_of_target(target)
-        capacity_kib = CAPACITY_BYTES[family] // 1024
-        # One source tree for every family, no branch -- see the docstring.
-        sources = XCORE1000_SOURCES
-        ext = CUDAExtension(
+    def strip_torch_libs(ext):
+        # `CUDAExtension`'s constructor auto-appends c10/torch/torch_cuda, and
+        # the artifact must carry no torch DT_NEEDED entry -- the point of the
+        # tvm-ffi migration.
+        ext.libraries = [
+            lib for lib in ext.libraries
+            if lib.lower() not in ("c10", "torch", "torch_cpu", "torch_python",
+                                   "c10_cuda", "torch_cuda")
+        ]
+        return ext
+
+    ext_modules = [
+        strip_torch_libs(CUDAExtension(
                 # The tvm-ffi artifact has no `PyInit` and is NOT an importable
                 # python module -- `_binding.py` loads it through
                 # `tvm_ffi.load_module`.  `no_python_abi_suffix` keeps a
                 # cpython-310 tag off something the import system never sees.
-                name=f"deep_select.deep_select_xcore{family}",
+                #
+                # Named for the *package*, not for an architecture: there is
+                # one of these and it serves every family it carries an image
+                # for.  `deep_select_maca` matches the C++ namespace.
+                name="deep_select.deep_select_maca",
                 no_python_abi_suffix=True,
-                sources=sources,
+                sources=SOURCES,
                 # Every source is a `.cu`, so the `nvcc` list is the only one
                 # torch reads, and its contents are mxcc's dialect because
                 # `$nvcc` resolves to cucc.
-                extra_compile_args={
-                    "nvcc": compile_args(target),
-                },
+                extra_compile_args={"nvcc": nvcc_args},
                 # The MACA catalogue, the tvm-ffi headers the binding edge
                 # needs, and torch's own paths.
                 include_dirs=include_dirs + [os.path.join(tvm_ffi_root, "include")],
@@ -199,19 +211,11 @@ def build_for_maca():
                     # LD_LIBRARY_PATH.
                     f"-Wl,-rpath,{os.path.join(tvm_ffi_root, lib_subdir)}",
                 ],
-            )
-        # `CUDAExtension`'s constructor auto-appends c10/torch/torch_cuda to
-        # `libraries`; strip them so the artifact carries no torch DT_NEEDED
-        # entry -- the point of the migration.
-        ext.libraries = [
-            lib for lib in ext.libraries
-            if lib.lower() not in ("c10", "torch", "torch_cpu", "torch_python",
-                                   "c10_cuda", "torch_cuda")
-        ]
-        ext_modules.append(ext)
-        print(f"deep_select: building xcore{family} "
-              f"({capacity_kib} KiB shared memory) for {target}: "
-              f"csrc/xcore1000 (maca_topk.cu)")
+            ))
+    ]
+    print(f"deep_select: building {','.join(targets)} "
+          f"({', '.join('xcore' + str(family_of_target(t)) for t in targets)}) "
+          f"from csrc/xcore1000/maca_topk.cu")
 
     return (ext_modules, BuildExtension.with_options(use_ninja=True))
 

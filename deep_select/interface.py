@@ -5,7 +5,7 @@ import torch
 from typing import Optional, Tuple
 
 from . import _binding
-from ._arch import FAMILY_OF_TARGET, native_target
+from ._arch import native_sm_count
 
 
 # The public backend names: implementations, not architectures.  `maca_c` is
@@ -39,22 +39,37 @@ class UnsupportedByBackend(ValueError):
     call was refused need not know the difference.
     """
 
-# The kernels the build produces, one extension per architecture, named
-# `deep_select.deep_select_xcore<N>`.  Internal: the build's vocabulary.
-_KERNEL_NAMES = tuple(f"xcore{family}"
-                      for family in sorted(set(FAMILY_OF_TARGET.values())))
+# The kernel the build produces: one extension, `deep_select.deep_select_maca`,
+# carrying every architecture's image.  Internal: the build's vocabulary.
+_KERNEL_NAME = "deep_select_maca"
 
 
-@functools.lru_cache(maxsize=None)
-def _backend_for(name: str):
-    """The loaded tvm-ffi extension implementing the kernel `name`.
+@functools.lru_cache(maxsize=1)
+def _backend_for():
+    """The loaded tvm-ffi extension implementing `maca_c`.
 
     Loaded on demand and cached (here and in `_binding`): the module holds a
     device binary, and a process that never calls `topk` on a kernel should
     not load one.
     """
-    assert name in _KERNEL_NAMES, name
-    return _binding.load(name)
+    return _binding.load(_KERNEL_NAME)
+
+
+@functools.lru_cache(maxsize=1)
+def _sm_count() -> int:
+    """SM count of this process's device, from the architecture torch reports.
+
+    Cached at the same granularity as the module above, and for the same
+    reason: it is a property of the process, not of the call.  `topk` would
+    otherwise ask torch for the device capability on every invocation -- not
+    free, and not something a caller can make vary between two calls that
+    cross the same artifact.
+
+    Resolved through the architecture and not by asking the driver for
+    `multiProcessorCount`: the device already reports which part it is, and a
+    family is what the number is a property of.
+    """
+    return native_sm_count()
 
 
 # `structs.h`'s INPUT_/OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT, which a built kernel
@@ -70,7 +85,7 @@ def get_stride_requirement() -> Tuple[int, int]:
     """
     try:
         # The FFI entry returns a python list, not a C++ pair; normalize it.
-        pair = _backend_for(native_target()).get_alignment_requirement()
+        pair = _backend_for().get_alignment_requirement()
         return (int(pair[0]), int(pair[1]))
     except RuntimeError:
         return _ALIGNMENT_REQUIREMENT_BYTES
@@ -186,11 +201,18 @@ def topk(
             abort_when_nan_found=abort_when_nan_found,
         )
     else:
-        # The 12 positional arguments the tvm-ffi entry takes, all DLTensor or
+        # The 13 positional arguments the tvm-ffi entry takes, all DLTensor or
         # plain scalar.  `begin` and `hint` are rejected above, so neither
         # crosses the boundary, and `output_val` is None when `return_value` is
-        # False (`Optional<TensorView>`).  `kernels=[...]` is not part of this
+        # False (`Optional[TensorView>`).  `kernels=[...]` is not part of this
         # operator's contract, so nothing here reads it.
+        #
+        # `_sm_count()` is the odd one out: the only argument derived from the
+        # *device* rather than the problem.  The kernel sizes its grids against
+        # it and one extension serves every family, so it cannot be compiled
+        # in; it comes from the architecture the device reports, not from a
+        # driver query, not from the build's target list, and -- being a
+        # process invariant -- not from a call that reads it again each time.
         backend_args = (
             input,
             topk,
@@ -202,6 +224,7 @@ def topk(
             value_oob_fill_value,
             return_value,
             abort_when_nan_found,
+            _sm_count(),
         )
         # `maca_c` means this device's kernel: the extension is resolved here,
         # not in the signature, which keeps `torch` usable with no MACA device.
@@ -210,10 +233,10 @@ def topk(
         # null handle and launch on the legacy default stream.
         # `DEEP_SELECT_NO_STREAM_GUARD` is the escape hatch for bisecting that.
         if os.environ.get("DEEP_SELECT_NO_STREAM_GUARD"):
-            _backend_for(native_target()).topk(*backend_args)
+            _backend_for().topk(*backend_args)
         else:
             with _binding.launching():
-                _backend_for(native_target()).topk(*backend_args)
+                _backend_for().topk(*backend_args)
         return output_val, output_idx
 
 

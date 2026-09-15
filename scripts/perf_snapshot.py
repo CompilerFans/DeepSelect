@@ -232,13 +232,13 @@ def provenance(sm_count: int) -> Dict[str, Any]:
     here = REPO
     # The host repo the `deep_gemm` arm comes from; `DEEP_GEMM_REPO` overrides.
     host = os.environ.get("DEEP_GEMM_REPO", "/home/compiler_gfx/tilelang/mcDeepGEMM")
-    # The extension the *device* loads -- `_binding.load(native_target())`, the
-    # same name `run_bench.sh` resolves its md5 through.  Never "the first `.so`
-    # in deep_select/": with several families built it names the C500 artifact in
-    # a C600U record, and naming the measured one is the manifest's whole job.
-    target = _arch.native_target()
+    # The extension the *device* loads -- `_binding.load()`, the same artifact
+    # `run_bench.sh` resolves its md5 through.  There is one name now (the
+    # build produces a single fat extension), but this stays in terms of the
+    # loader's own constant so the two cannot drift into naming different
+    # files: a record whose md5 is not the loaded artifact's is not a record.
     sos = sorted(os.path.basename(p) for p in glob.glob(
-        os.path.join(here, "deep_select", f"deep_select_{target}*.so")))
+        os.path.join(here, "deep_select", "deep_select_maca*.so")))
     md5 = ""
     if sos:
         md5 = hashlib.md5(open(os.path.join(here, "deep_select", sos[0]),
@@ -352,7 +352,7 @@ def main() -> int:
     torch.set_default_device("cuda")
     import deep_select  # noqa: E402  (after set_default_device)
     target = _arch.native_target()
-    sm_count = _arch.SM_COUNT[_arch.FAMILY_OF_TARGET[target]]
+    sm_count = _arch.native_sm_count()
     if args.dry_run:
         print(f"chip {target}  dir {device_dir_name()}  backends {arms}")
         by = {}

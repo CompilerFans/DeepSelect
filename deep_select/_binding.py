@@ -1,8 +1,8 @@
 # 2026 - Modified for DeepSelect.  The tvm-ffi binding loader, modelled on the
 # host repository's `deep_gemm/maca_binding.py`.
-"""Load the torch-free kernel extensions through tvm-ffi.
+"""Load the torch-free kernel extension through tvm-ffi.
 
-The artifacts (`deep_select_xcore<N>*.so`) are built at the Apache TVM FFI ABI,
+The artifact (`deep_select_maca*.so`) is built at the Apache TVM FFI ABI,
 export `__tvm_ffi_*` symbols, have **no `PyInit`** and are not importable python
 modules -- they are loaded with `tvm_ffi.load_module`.  Deliberate: the pybind11
 artifacts this replaces linked libtorch/libc10, which tied the extension to the
@@ -28,10 +28,10 @@ from typing import Any
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# One artifact per architecture, named for the architecture it serves.  The
+# One artifact, carrying every architecture the build was asked for.  The
 # loader resolves a backend by that name, which is what keeps the FFI change
 # invisible from `backend="maca_c"`.
-_LIBRARY_GLOB = "deep_select_{name}*.so"
+_LIBRARY_GLOB = "{name}*.so"
 
 
 class _Module:
@@ -64,7 +64,7 @@ class _Module:
 
 @functools.lru_cache(maxsize=None)
 def load(name: str) -> Any:
-    """The loaded tvm-ffi module for architecture extension ``name``.
+    """The loaded tvm-ffi module named ``name``.
 
     Cached: the module holds a device binary, and a process that never calls
     `topk` should not load one.
@@ -74,9 +74,9 @@ def load(name: str) -> Any:
     hits = sorted(glob.glob(os.path.join(_PACKAGE_DIR, _LIBRARY_GLOB.format(name=name))))
     if not hits:
         raise RuntimeError(
-            f"backend {name!r} has not been built; build it with "
-            f"CUCC_TARGETS={name} (setup.py builds one extension per "
-            f"architecture, and only for the architectures it is asked for)"
+            f"{name} has not been built; build it with ./build.sh (setup.py "
+            f"produces one extension, deep_select_maca, carrying an image for "
+            f"each architecture in CUCC_TARGETS)"
         )
     # Newest build wins on stale-cache ties -- the host repository's rule.
     return _Module(tvm_ffi.load_module(hits[-1]))

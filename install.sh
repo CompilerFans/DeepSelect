@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build a wheel and install it into the active environment.  Same build as
-# `./build.sh` (same variable, same default, one extension per architecture),
+# `./build.sh` (same variable, same default, the same one extension),
 # producing a wheel instead of an in-place extension.  Two departures from the
 # host repository's `install.sh`:
 #

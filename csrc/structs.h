@@ -64,74 +64,18 @@ static constexpr uint32_t MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION = 1u << 23;
 static constexpr uint32_t MAX_VOCAB_SIZE = 1u << 23;
 static_assert(MAX_VOCAB_SIZE <= MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION);
 
-// Shared memory per SM of the architecture this extension is built for.
+// There is no compile-time architecture selection here, and no
+// `DEEP_SELECT_NATIVE_ARCH`.  One extension carries every family's image
+// (`setup.py`: one source, one `-offload-arch` list), so a per-family constant
+// has no build to be baked into; the kernel that needs one takes it as an
+// argument instead.  `deep_select/_arch.py` is where the rows live.
 //
-// One target per build (`--offload-arch`), so this is a compile-time fact, and
-// the kernels use it to reject -- at compile time -- a config that could not
-// launch.  Upstream's config tables are sized for 227 KiB, so without this
-// check a 128 KiB tuple would ride into a 64 KiB build and fail at launch with
-// mcErrorInvalidValue instead.
-//
-// `DEEP_SELECT_NATIVE_ARCH` is the xcore family base, set by `setup.py` from
-// the same `CUCC_TARGETS` entry it passes to `--offload-arch`.  The toolchain
-// defines `__MACA_ARCH__` from that target, but only in the device pass, and
-// these templates are parsed in both.
-//
-// Mirrors `deep_gemm/utils/arch_config.py`'s `XcoreFamily.shared_memory_bytes`.
-// This repository cannot import it, so the two are kept in sync by hand.
-#if !defined(DEEP_SELECT_NATIVE_ARCH)
-#error "DEEP_SELECT_NATIVE_ARCH is not defined; build through setup.py, which \
-sets it per target from CUCC_TARGETS"
-#elif DEEP_SELECT_NATIVE_ARCH == 1000
-static constexpr uint32_t NATIVE_SHARED_MEMORY_PER_SM_BYTES = 64 * 1024;
-#elif DEEP_SELECT_NATIVE_ARCH == 1500 || DEEP_SELECT_NATIVE_ARCH == 1600
-static constexpr uint32_t NATIVE_SHARED_MEMORY_PER_SM_BYTES = 128 * 1024;
-#else
-#error "unknown xcore family in DEEP_SELECT_NATIVE_ARCH; add its shared \
-memory capacity here and its row to deep_gemm/utils/arch_config.py"
-#endif
-
-// SM count of the architecture this extension is built for, from the same
-// `DEEP_SELECT_NATIVE_ARCH`.  Compile-time, not read from the runtime API:
-// grid sizing and chunk counts are host-side constants and depend on it.
-//
-// It matters because a chunked grid is sized in CTAs and one whose count is
-// not a multiple of the SM count leaves `ctas mod SM` SMs idle in its last
-// wave.  If a future part in one of these families reports a different count,
-// this table is where it goes.
-#if DEEP_SELECT_NATIVE_ARCH == 1000
-static constexpr uint32_t NATIVE_SM_COUNT = 104;
-#elif DEEP_SELECT_NATIVE_ARCH == 1500
-static constexpr uint32_t NATIVE_SM_COUNT = 28;
-#elif DEEP_SELECT_NATIVE_ARCH == 1600
-static constexpr uint32_t NATIVE_SM_COUNT = 32;
-#endif
-static_assert(NATIVE_SM_COUNT > 0, "NATIVE_SM_COUNT must be set per family");
-
-// Work target for the fp32 chunked split's small-batch arm, per family.
-//
-// The split's small-batch arm fills a machine a short batch leaves empty:
-// `batches` row CTAs over one wave's worth of SMs is a fraction of a wave.
-// How many chunks that takes is "enough to fill a couple of waves, and no
-// more" -- every extra chunk also adds a merge CTA -- and `chunks = largest
-// power of two <= K / batches` fits the measured sweep, so the policy is the
-// single constant K.  K = 260 is 2.5 x the SM count, rounded from a fitted
-// 256 to a form that is visibly a machine property.
-//
-// The 1500/1600 rows are a scaled reservation, not a measurement -- no such
-// hardware was available.  Keeping them as separate constants means a real
-// measurement replaces one number rather than changing a formula.  The sweep
-// behind K, and the C600/C600U caveat, are in
-// `docs/C500-radix-perf-ledger.zh.md`.
-#if DEEP_SELECT_NATIVE_ARCH == 1000
-static constexpr uint32_t NATIVE_F32_CHUNK_WORK_TARGET = 260;   // measured
-#elif DEEP_SELECT_NATIVE_ARCH == 1500
-static constexpr uint32_t NATIVE_F32_CHUNK_WORK_TARGET = 70;    // scaled, unmeasured
-#elif DEEP_SELECT_NATIVE_ARCH == 1600
-static constexpr uint32_t NATIVE_F32_CHUNK_WORK_TARGET = 80;    // scaled, unmeasured
-#endif
-static_assert(NATIVE_F32_CHUNK_WORK_TARGET > 0,
-              "NATIVE_F32_CHUNK_WORK_TARGET must be set per family");
+// The ported kernels under `csrc/xcore1600/` selected their config tuples
+// against `NATIVE_SHARED_MEMORY_PER_SM_BYTES` (64 KiB for family 1000, 128 KiB
+// for 1500/1600) and asserted at compile time that their staging fitted.  That
+// constant went with the macro: with one extension there is no single capacity
+// to assert against.  The port is off the build either way -- see
+// `deep_select/_arch.py`'s closing note.
 
 
 struct TopkSelectArgs {

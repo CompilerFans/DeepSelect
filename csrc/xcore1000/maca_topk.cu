@@ -73,6 +73,14 @@ struct RowParams {
     uint64_t stride_output_index_batch;
     uint32_t vocab_size;
     uint32_t topk;
+    // The one machine number every grid-sizing decision below reads, supplied
+    // by the caller from `deep_select/_arch.py`'s `SM_COUNT`.  An argument
+    // rather than a compile-time constant because one extension serves all
+    // three families, and not read from the driver because the device already
+    // reported its architecture to the caller (torch), which names the family
+    // this is keyed by.  Zero means "unknown", which `resolve_sm_count` turns
+    // into an error rather than a plausible wrong grid.
+    uint32_t sm_count;
     int32_t idx_fill;
     float value_fill;
     bool abort_on_nan;
@@ -540,7 +548,7 @@ inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk)
 //
 // One row per CTA leaves the machine idle when the batch is small and the rows
 // long: B=6 at L=1M is 6 CTAs for the whole device.  The split ranks each row
-// across `kChunkedChunks` CTAs and merges.  It wins by 11x at B=6/L=1M and
+// across `chunked_chunks(params)` CTAs and merges.  It wins by 11x at B=6/L=1M and
 // loses above ~256 rows, which is the batch bound.  Upstream's own gate
 // (`needs_chunked`: L >= 1M) is the same idea with a higher floor; 262144 is
 // where the row count is still the problem here.  Measurements in
@@ -551,15 +559,26 @@ constexpr uint32_t kChunkedMinVocab = 262144;
 // The chunk count is SM-count-sensitive: a grid of `kBatch * chunks` CTAs
 // leaves `ctas mod SM` SMs idle unless it is a whole number of waves, and the
 // same 16 is a different fraction of a wave on a 104-AP C500, a 28-SM C600 and
-// a 32-SM C600U.  `NATIVE_SM_COUNT` (csrc/structs.h) makes that decidable at
-// compile time.
+// a 32-SM C600U.  `params.sm_count` (the caller's, from the device) makes that
+// decidable at launch time.
 //
 // The rule: **keep the measured count where it already fills at least half of
 // its last wave, and otherwise round up to a whole number of waves.**  The
 // half-wave floor is what keeps C500 exactly where it was measured.
-constexpr int wave_filled_chunks(int base_chunks) {
+// The fp32 split's work target, derived rather than tabulated.
+//
+// The split exists to fill a machine a short batch leaves empty, so its size
+// is a *machine* property and the only question the sweep had to answer is
+// what multiple of the SM count it is.  On C500 that fit is 256 (2.46 x 104
+// APs), rounded to 5/2.  A per-family table would be three rows of which one
+// is measured; this is the one measured fact, written once.
+inline uint32_t f32_chunk_work_target(uint32_t sm_count) {
+    return sm_count * 5 / 2;
+}
+
+inline int wave_filled_chunks(int base_chunks, int sm_count) {
     constexpr int kBatch = 6;                      // the split's gate is small
-    constexpr int kSms = (int)NATIVE_SM_COUNT;
+    const int kSms = sm_count;
     const int ctas = kBatch * base_chunks;
     const int last_wave = ctas % kSms;
     if (last_wave == 0 || last_wave * 2 >= kSms) return base_chunks;
@@ -569,7 +588,9 @@ constexpr int wave_filled_chunks(int base_chunks) {
 // [MACA] SM-count-sensitive.  C500's 104 APs are what 16 was measured against
 // (b6 x 16 = 96 CTAs = 92% of the last wave, and the chunk sweep shows 16-32
 // flat there); C600 (28) and C600U (32) round it by `wave_filled_chunks`.
-constexpr int kChunkedChunks = wave_filled_chunks(16);
+inline int chunked_chunks(const RowParams &params) {
+    return wave_filled_chunks(16, (int)params.sm_count);
+}
 
 struct ChunkedWorkspace {
     int32_t *candidate_indices;
@@ -587,8 +608,9 @@ inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
     return params.topk == 512 || params.topk == 1024;
 }
 
-inline size_t chunked_workspace_bytes(uint32_t batches, uint32_t topk) {
-    const size_t candidates = (size_t)batches * kChunkedChunks * topk;
+inline size_t chunked_workspace_bytes(uint32_t batches, uint32_t topk,
+                                      uint32_t chunks) {
+    const size_t candidates = (size_t)batches * chunks * topk;
     // The merge reads `candidate_values` with the vectorized row path, so the
     // two candidate arrays are 16-byte apart at the seam.
     const size_t indices_bytes = candidates * sizeof(int32_t);
@@ -598,8 +620,8 @@ inline size_t chunked_workspace_bytes(uint32_t batches, uint32_t topk) {
 }
 
 inline ChunkedWorkspace chunked_workspace(void *base, uint32_t batches,
-                                          uint32_t topk) {
-    const size_t candidates = (size_t)batches * kChunkedChunks * topk;
+                                          uint32_t topk, uint32_t chunks) {
+    const size_t candidates = (size_t)batches * chunks * topk;
     ChunkedWorkspace ws{};
     ws.candidate_indices = (int32_t *)base;
     ws.candidate_values = (maca_bfloat16 *)((char *)base + candidates * sizeof(int32_t));
@@ -656,8 +678,8 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 // `end_ptr` route are one code path.  The chunk count is a function of the
 // batch because the two row regimes disagree: long rows prefer fewer chunks
 // monotonically (hence the constant 2 above 64 rows), short rows want
-// `largest power of two <= K / batches` -- `NATIVE_F32_CHUNK_WORK_TARGET`
-// (csrc/structs.h).  Sweeps and caveats:
+// `largest power of two <= K / batches`, where K is the caller's
+// `f32_chunk_work_target(params.sm_count)`.  Sweeps and caveats:
 // `docs/C500-radix-perf-ledger.zh.md`.
 //
 // At an SM count other than the one measured, the large-batch arm's merge CTA
@@ -666,7 +688,7 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 // launch, not a constant, so it is not made on arithmetic alone.
 namespace {
 // The `DEEP_SELECT_F32_CHUNKS` sweep behind the work target is tabulated at
-// `NATIVE_F32_CHUNK_WORK_TARGET` in `csrc/structs.h` -- do not re-derive it.
+// `deep_select/_arch.py`'s `F32_CHUNK_WORK_TARGET` -- do not re-derive it.
 //
 // `DEEP_SELECT_F32_CHUNK32` raises the ceiling from 16 to 32 for the b6/V=1M
 // cell the V-sweep flagged (parity plan §17.3).  A ceiling, not a count, so
@@ -679,16 +701,17 @@ inline bool f32_chunk_ceiling_32() {
     return on;
 }
 inline constexpr int kF32ChunkCeiling = 16;
-constexpr int f32_chunks_for(uint32_t batches, int ceiling) {
+inline int f32_chunks_for(uint32_t batches, int ceiling, uint32_t work_target) {
     const uint32_t b = batches == 0 ? 1u : batches;
     int c = 2;
-    while (c < ceiling && (uint64_t)(c * 2) * b <= NATIVE_F32_CHUNK_WORK_TARGET) c *= 2;
+    while (c < ceiling && (uint64_t)(c * 2) * b <= work_target) c *= 2;
     return c;
 }
-constexpr int f32_chunks_small_batch(uint32_t batches, int ceiling) {
-    return f32_chunks_for(batches, ceiling);
+inline int f32_chunks_small_batch(uint32_t batches, int ceiling,
+                                  uint32_t work_target) {
+    return f32_chunks_for(batches, ceiling, work_target);
 }
-constexpr int f32_chunks_large_batch() { return 2; }
+inline int f32_chunks_large_batch() { return 2; }
 
 // The batch above which the chunk count stops being a parallelism knob: 64 is
 // the split's own small-batch ceiling, a property of the gate rather than a
@@ -697,7 +720,8 @@ constexpr int f32_chunks_large_batch() { return 2; }
 inline constexpr uint32_t kF32ChunksFewBatches = 64;
 }  // namespace
 
-int f32_chunked_chunks(uint32_t batches) {
+int f32_chunked_chunks(uint32_t batches, uint32_t sm_count) {
+    const uint32_t work_target = f32_chunk_work_target(sm_count);
     static const int override_n = [] {
         const char *v = std::getenv("DEEP_SELECT_F32_CHUNKS");
         if (v != nullptr && v[0] != '\0') {
@@ -709,7 +733,7 @@ int f32_chunked_chunks(uint32_t batches) {
     if (override_n != 0) return override_n;   // A/B knob; does not change default
     const int ceiling = f32_chunk_ceiling_32() ? 32 : kF32ChunkCeiling;
     return batches <= kF32ChunksFewBatches
-               ? f32_chunks_small_batch(batches, ceiling)
+               ? f32_chunks_small_batch(batches, ceiling, work_target)
                : f32_chunks_large_batch();
 }
 
@@ -822,7 +846,7 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
                               cudaStream_t stream, bool sorted_index,
                               bool sorted_value, bool return_value, int block,
                               void *workspace) {
-    const int chunks = f32_chunked_chunks(batches);
+    const int chunks = f32_chunked_chunks(batches, params.sm_count);
     const ChunkedF32Workspace ws = chunked_f32_workspace(
         workspace, batches, params.topk, chunks);
     // `nan_flags` is the table.  It is memset and then OR-ed per row, so the
@@ -857,16 +881,18 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
                           cudaStream_t stream, bool sorted_index,
                           bool sorted_value, bool return_value, int block,
                           void *workspace) {
-    const ChunkedWorkspace ws = chunked_workspace(workspace, batches, params.topk);
+    const int chunks = chunked_chunks(params);
+    const ChunkedWorkspace ws =
+        chunked_workspace(workspace, batches, params.topk, (uint32_t)chunks);
     cudaMemsetAsync(ws.nan_flags, 0, (size_t)batches * sizeof(int32_t), stream);
-    nan_scan_kernel<maca_bfloat16><<<batches * kChunkedChunks, kScanBlock, 0, stream>>>(
+    nan_scan_kernel<maca_bfloat16><<<batches * chunks, kScanBlock, 0, stream>>>(
         params.input, params.end_ptr,
         (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)),
-        params.vocab_size, kChunkedChunks, ws.nan_flags);
+        params.vocab_size, (uint32_t)chunks, ws.nan_flags);
     const cudaError_t rc = rk::launch_topk_bf16_chunked(
         (const maca_bfloat16 *)params.input, params.end_ptr, ws.merged,
         ws.candidate_indices, ws.candidate_values, (int)batches,
-        (int)params.vocab_size, (int)params.topk, kChunkedChunks, stream,
+        (int)params.vocab_size, (int)params.topk, chunks, stream,
         // The row stride is in bytes at this layer and in elements there.
         (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)));
     RowParams merged = params;
@@ -900,7 +926,8 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     // workspace for exactly this gate, and the split reads 16-bit input.
     if (value_dtype == 1 && chunked_workspace != nullptr &&
         params.end_ptr != nullptr &&
-        chunked_bytes >= detail::chunked_workspace_bytes(n, params.topk) &&
+        chunked_bytes >= detail::chunked_workspace_bytes(
+                             n, params.topk, (uint32_t)detail::chunked_chunks(params)) &&
         detail::chunked_bf16_applies(params, n)) {
         if (index_dtype == 0) {
             detail::launch_typed_chunked<int32_t>(
@@ -916,7 +943,8 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     if (value_dtype == 0 && chunked_workspace != nullptr &&
         params.end_ptr != nullptr &&
         chunked_bytes >= detail::chunked_f32_workspace_bytes(
-                             n, params.topk, detail::f32_chunked_chunks(n)) &&
+                             n, params.topk,
+                             detail::f32_chunked_chunks(n, params.sm_count)) &&
         detail::chunked_f32_applies(params, n) &&
         // The engine's own bound, kept separate from the policy predicate so
         // the two cannot be confused (they were one expression until §21.2).
@@ -1038,7 +1066,12 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
           const tvm::ffi::TensorView &output_index,
           const tvm::ffi::Optional<tvm::ffi::TensorView> &output_idx_offset,
           int64_t idx_oob_fill_value, double value_oob_fill_value,
-          bool return_value, bool abort_when_nan_found) {
+          bool return_value, bool abort_when_nan_found,
+          // SM count of the device this call runs on, from the caller's
+          // architecture table (`deep_select/_arch.py`).  The last argument
+          // rather than one near `topk` because it is the only one the caller
+          // derives from the *device* rather than from the problem.
+          int64_t sm_count) {
     DS_HOST_CHECK(input.ndim() == 2, "input must be 2-D, got ", input.ndim());
     const int64_t batches = dsf::size(input, 0);
     const int64_t vocab_size = dsf::size(input, 1);
@@ -1118,6 +1151,11 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         (uint64_t)dsf::stride(output_index, 0) * dsf::element_size(output_index);
     p.vocab_size = (uint32_t)vocab_size;
     p.topk = (uint32_t)topk;
+    // A zero here sizes every grid below to nothing -- an empty answer, not a
+    // crash -- and the caller cannot fail to know it (it reads the number off
+    // the device).  Refuse rather than round it to something plausible.
+    DS_HOST_CHECK(sm_count > 0, "sm_count must be > 0 (got ", sm_count, ")");
+    p.sm_count = (uint32_t)sm_count;
     p.idx_fill = (int32_t)idx_oob_fill_value;
     p.value_fill = (float)value_oob_fill_value;
     p.abort_on_nan = abort_when_nan_found;
@@ -1170,14 +1208,16 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     const bool f32_split =
         value_dtype == 0 && detail::chunked_f32_applies(p, (uint32_t)batches);
     if (bf16_split || f32_split) {
-        const int f32_chunks = detail::f32_chunked_chunks((uint32_t)batches);
+        const int f32_chunks =
+            detail::f32_chunked_chunks((uint32_t)batches, p.sm_count);
         const size_t need_lengths = (size_t)batches * sizeof(int32_t);
         const size_t need_workspace =
             f32_split
                 ? detail::chunked_f32_workspace_bytes((uint32_t)batches,
                                                       (uint32_t)topk, f32_chunks)
-                : detail::chunked_workspace_bytes((uint32_t)batches,
-                                                  (uint32_t)topk);
+                : detail::chunked_workspace_bytes(
+                      (uint32_t)batches, (uint32_t)topk,
+                      (uint32_t)detail::chunked_chunks(p));
 
         if (!kCacheScratch) {
             if (!end.has_value()) {
