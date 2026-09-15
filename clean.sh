@@ -6,22 +6,14 @@
 #     ./clean.sh --dry-run     # print what would go, remove nothing
 #     ./clean.sh --help
 #
-# ── Why the listing rides with `--dry-run` ──────────────────────────────────
+# The default is to remove, with no confirmation: `./clean.sh && ./build.sh`
+# would otherwise print nothing alarming, succeed anyway (`build.sh` does its
+# own `rm`), and silently not rebuild.  The listing is on request because it is
+# a second traversal.
 #
-# Do not put a confirmation gate back: `./clean.sh && ./build.sh` then prints
-# nothing alarming, the build succeeds anyway (build.sh does its own `rm`), and
-# the full rebuild silently does not happen.  A listing would not have caught
-# this tree's real mistakes either -- those were wrong *content* at a correct
-# path.  So the default is what it says, and the listing is on request: it is a
-# second traversal, and paying for it on every run is the kind of cost that gets
-# a script replaced by `rm -rf build dist` in someone's shell history.
-#
-# ── What this deliberately does NOT do ──────────────────────────────────────
-#
-# The host `clean.sh` also deletes `~/.triton`, `~/.tilelang`, `~/.deep_gemm`
-# and `~/.metax`; nothing here writes them.  The `find` passes also skip
-# `csrc/3rdparty/**` -- nothing there matches today, but a prune by name over
-# vendored source is a trap for the first `__pycache__` that appears inside one.
+# The `find` passes skip `csrc/3rdparty/**`, and delete nothing outside this
+# tree -- in particular not `~/.triton`, `~/.tilelang`, `~/.deep_gemm` or
+# `~/.metax`, which nothing here writes.
 #
 set -euo pipefail
 

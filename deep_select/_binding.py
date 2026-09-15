@@ -1,13 +1,8 @@
-# 2026 - Modified for DeepSelect.  The tvm-ffi binding loader, modelled on the
-# host repository's `deep_gemm/maca_binding.py`.
 """Load the torch-free kernel extension through tvm-ffi.
 
-The artifact (`deep_select_maca*.so`) is built at the Apache TVM FFI ABI,
-export `__tvm_ffi_*` symbols, have **no `PyInit`** and are not importable python
-modules -- they are loaded with `tvm_ffi.load_module`.  Deliberate: the pybind11
-artifacts this replaces linked libtorch/libc10, which tied the extension to the
-host's torch build (the `c10_cuda_check_implementation` trap) and to a cpython
-tag.
+The artifact (`deep_select_maca*.so`) is built at the Apache TVM FFI ABI and
+exports `__tvm_ffi_*` symbols with **no `PyInit`**, so it is not an importable
+python module -- it is loaded with `tvm_ffi.load_module`.
 
 A caller still needs **torch at the call site** (a `torch.Tensor` is what has
 the `__dlpack__` protocol; this module imports torch only in `launching()`) and
@@ -35,7 +30,7 @@ _LIBRARY_GLOB = "{name}*.so"
 
 
 class _Module:
-    """A loaded extension with the two entries this tree exports.
+    """A loaded extension with the two entries it exports.
 
     `get_function` *raises* rather than returning None when the name is absent,
     so the probe goes through `implements_function` first -- a module loaded
@@ -69,17 +64,12 @@ def load(name: str) -> Any:
     Cached: the module holds a device binary, and a process that never calls
     `topk` should not load one.
 
-    **The `import tvm_ffi` above is load-bearing, not just for `load_module`.**
-    The extension carries `DT_NEEDED: libtvm_ffi.so`, which ships inside the
-    `tvm_ffi` package -- and importing that package maps the library into the
-    process, which is enough for the loader to satisfy the `DT_NEEDED` by
-    soname.  Upstream states the guarantee ("guaranteed to be loaded by
-    importing `tvm_ffi`") and it is measured here.  The alternative is an
-    `-Wl,-rpath` at link time, and that is the wrong one: it bakes the *build*
-    machine's `site-packages` into the artifact.  So: do not add one back, and
-    do not "helpfully" preload the library with `ctypes` -- that was tried and
-    is dead code (upstream also says to exclude `libtvm_ffi` from any
-    `auditwheel repair`, for the same reason).
+    **The `import tvm_ffi` above is load-bearing beyond `load_module`.**  The
+    extension carries `DT_NEEDED: libtvm_ffi.so`, which ships inside the
+    `tvm_ffi` package, and importing that package maps the library into the
+    process -- which is how the loader satisfies the `DT_NEEDED` by soname.  An
+    `-Wl,-rpath` is not an alternative: it would bake the *build* machine's
+    `site-packages` into the artifact.
     """
     import tvm_ffi
 
@@ -90,7 +80,7 @@ def load(name: str) -> Any:
             f"produces one extension, deep_select_maca, carrying an image for "
             f"each architecture in CUCC_TARGETS)"
         )
-    # Newest build wins on stale-cache ties -- the host repository's rule.
+    # Newest build wins, so a stale artifact cannot shadow a fresh one.
     return _Module(tvm_ffi.load_module(hits[-1]))
 
 

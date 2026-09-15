@@ -23,20 +23,15 @@
 # grid was not fully measured is not a comparison.  The verdict is written to
 # `compare_result.txt` before the baseline moves.
 #
-# `--set-baseline` repoints when every ARM passed (the host repository's rule,
-# not the comparator's exit status); REGRESSED does not block it but is printed
-# loudly, so repointing past a regression is a decision someone made.
+# `--set-baseline` repoints when every ARM passed, not on the comparator's exit
+# status; REGRESSED does not block it but is printed loudly, so repointing past
+# a regression is a decision someone made.
 #
 # ── What this deliberately does NOT do ──────────────────────────────────────
 #
 # No exclusivity gate: nothing can see which device a process is pinned to, so
 # pick one with `CUDA_VISIBLE_DEVICES`.  `mx-smi` is snapshotted for forensics,
 # never trusted to decide.
-#
-# There is no `--full`: the host repo's selector shapes are ON by default, and
-# the switch for them is `--no-host-shapes`.  `--full` used to be documented as
-# the thing that added them, and had not done so since the default inverted --
-# it appended `_full` to the output directory name and nothing else.
 #
 # Usage:
 #     ./run_bench.sh                          # snapshot + the official gate
@@ -47,8 +42,8 @@
 #     ./run_bench.sh --baseline-dir 20260801  # repoint, do not measure
 #
 # Env:
-#     CUDA_VISIBLE_DEVICES  device selection, applied to every arm (as
-#                           run_ci.sh does).  Default: unchanged.
+#     CUDA_VISIBLE_DEVICES  device selection, applied to every arm.
+#                           Default: unchanged.
 #     DS_BENCH_DIR          output root (default perf_data)
 #     DS_BENCH_TIMEOUT      per-arm timeout in seconds (default 5400)
 #     MACA_PATH             MACA toolkit root (default /opt/maca)
@@ -198,8 +193,8 @@ fi
 mkdir -p "$chip_dir"
 
 # ── --baseline-dir: repoint and exit, measuring nothing ─────────────────────
-# The host repository's affordance: moving a baseline back or forward to re-read
-# an old verdict must not cost a full re-measure.
+# Moving the baseline back or forward to re-read an old verdict, without paying
+# for a re-measure.
 if [[ -n "$baseline_dir" ]]; then
     target="${baseline_dir}"
     if [[ ! -d "${chip_dir}/${target}" ]]; then target="${target##*/}"; fi

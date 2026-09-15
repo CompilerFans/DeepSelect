@@ -153,7 +153,7 @@ on another family. Measured on the distribution artifact:
 | `Requires-Dist` | `torch`, `apache-tvm-ffi` — declared since 2026-09-15, unpinned (the MACA torch builds are metax-suffixed local versions, so a pin would refuse them). `Requires-Python: >=3.9` is the honest floor: the *extension* has no python dependency at all, and 3.9 is the higher of torch 2.6's `>=3.9` and tvm-ffi's `>=3.8`. |
 | `DT_NEEDED` | `libtvm_ffi.so` + the MACA set (`libmcruntime`, `libToolsExt_cu`, `libruntime_cu`, `libmcToolsExt`, `libmccompiler`, `libmaca_mathlib_host`). |
 | `DT_RUNPATH` | `/opt/maca/lib:/opt/maca/mxgpu_llvm/lib` — MACA conventions, and overridable (see trap 8). |
-| build-machine paths | only as `__FILE__` literals inside error-message strings (six of them, all `DS_HOST_CHECK` sites). Zero in `.dynamic`, so nothing load-bearing. |
+| build-machine paths | in no error message: every `DS_HOST_CHECK` site reports `__FILE_NAME__:__LINE__`, i.e. the basename (`csrc/ffi/ffi_error.h`). Measured 2026-09-15, what `strings` still finds is **four paths, all `tvm_ffi`'s own installed headers** from the build machine's `site-packages` — not this tree. Zero in `.dynamic`, so nothing load-bearing. |
 
 Two consequences worth stating rather than discovering:
 
@@ -1236,6 +1236,23 @@ source line numbers — so "the md5 moved" is not evidence of a behaviour change
 - `backend="deep_gemm"`'s host kernel collects the members of the threshold *coarse* bin (half-precision ordered key `>> 6`) before refining, and the chunked kernel silently drops members past its staging capacity. A row with more than 4096 values in one such bucket gets a top-k of an arbitrary subset, varying run to run. Filed as a strict `xfail` in the host repo: `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`. **`maca_c` has no such hole** — but note the xcore1600 hole above is a `maca_c` hole, so this sentence is about the `deep_gemm` backend only.
 - The `radix_topk_row_bf16_k` static-k row used by the chunked path still runs the 8-bit coarse level and the 3,514-slot arena; it has not received coarse12.
 - The fp32 row is a separate codebase path whose overflow handling is multi-round full-row rescan (up to 8 trips). Same "coarse level too coarse" disease, different cure — a 32-bit key cannot be resolved in two levels the way a 16-bit one can. Retesting fp32 cells is mandatory when touching it.
+
+## Call logging — `deep_select/_log.py`, `DS_LOG`
+
+Off unless `DS_LOG` names a target (`1`/`stderr`, `file`/`log`, a directory, or
+a path); **when it is off the decorator returns each function unwrapped**, so
+the hot path has no wrapper and nothing to disable. Two rules a future edit has
+to keep:
+
+- **The outermost public call owns the record** (`_LOCAL.depth`). `topk` calls
+  into `topk_torch`/`topk_deep_gemm`, so without the guard one call logs twice.
+- **`functools.wraps` is load-bearing**, not style: the module docstring's
+  account of `backend=None` (top of this file) is read through
+  `inspect.signature(deep_select.topk)`, which follows `__wrapped__`. Drop the
+  wraps and that documented default silently becomes a wrapper's `*args`.
+
+Records are metadata only — a tensor is shape/dtype/device and its values are
+never read. A rejected call is recorded too, with its reason.
 
 ## Torch ABI / host compiler notes
 

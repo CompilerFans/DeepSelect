@@ -8,20 +8,20 @@ Two jobs, and they meet at the family base (1000 / 1500 / 1600):
 
 Neither number is asked of the driver.  The device reports its architecture
 through torch, the architecture names a family, and the family is the key to
-the table below -- one lookup on a fact the caller already has, rather than a
+the tables below -- one lookup on a fact the caller already has, rather than a
 device query per call.
 
-The family rows duplicate the host repository's
-``deep_gemm/utils/arch_config.py`` ``XcoreFamily`` rows by hand -- this
-repository is standalone and cannot import it -- so a change to either belongs
-in the same review.
+The family rows mirror the host repository's
+``deep_gemm/utils/arch_config.py`` ``XcoreFamily`` rows, copied by hand because
+this repository does not import it; a change to either belongs in the same
+review.
 """
 
 from typing import Optional
 
 # Compiler target spelling (`--offload-arch=xcore<N>`) -> family base.  Only
 # what `mxcc` accepts: `xcore1008`, `xcore1610` and `xcore1620` are rejected
-# with `invalid target ID` (measured 2026-09-15), so they are not here.
+# with `invalid target ID`, so they are not here.
 FAMILY_OF_TARGET = {
     "xcore1000": 1000,
     "xcore1500": 1500,
@@ -38,19 +38,15 @@ DEFAULT_TARGETS = "xcore1000,xcore1500,xcore1600"
 # in CTAs of `kBatch * chunks`, and a count that is not a multiple of this
 # leaves `ctas mod SM` SMs idle in the last wave, so every grid-sizing
 # decision in the kernel is a function of it.  Passed to the kernel, not
-# compiled in: one extension serves all three families (setup.py), so there is
-# no per-family compile to bake it into.
+# compiled in: one extension serves all three families (setup.py).
 SM_COUNT = {
     1000: 104,   # C500
     1500: 28,    # C600
     1600: 32,    # C600U / C600-UL
 }
 
-# There is no work-target row here: the fp32 split derives its own, from
-# `SM_COUNT` alone.  K = 2.5 x SM, and 2.5 is the C500 fit (256 measured, i.e.
-# 2.46 x 104, rounded to a form that is visibly a machine property).  Writing
-# 70 and 80 out as rows would dress one multiplication up as two measurements.
-# See `maca_topk.cu`'s `f32_chunk_work_target`.
+# No work-target row: the fp32 split derives it from `SM_COUNT` alone (see
+# `maca_topk.cu`'s `f32_chunk_work_target`).
 
 # The CUDA-compat sm spelling torch reports -> family base.  Which xcore1600
 # spelling a part reports depends on the SDK generation, so the family is the
@@ -67,16 +63,15 @@ FAMILY_OF_SM = {
 def family_of_target(target: str) -> int:
     """Family base of a ``--offload-arch`` spelling, or raise if unknown.
 
-    An unknown target is an error rather than a default: guessing a capacity is
-    the mistake the capacity table exists to prevent.
+    An unknown target is an error rather than a default: a guessed family
+    silently builds images for a part the caller did not name.
     """
     try:
         return FAMILY_OF_TARGET[target]
     except KeyError:
         raise ValueError(
             f"unknown MACA target {target!r}; add it to "
-            f"deep_select/_arch.py::FAMILY_OF_TARGET (and to the host "
-            f"repository's arch table if it is a new family)"
+            f"deep_select/_arch.py::FAMILY_OF_TARGET"
         ) from None
 
 
@@ -143,28 +138,3 @@ def resolve_targets(spec: Optional[str]) -> list:
     for target in targets:
         family_of_target(target)
     return targets
-
-
-# ── which kernel a family builds -- a build-side note, not this module's ──
-#
-# **Every family this tree builds runs `csrc/xcore1000/maca_topk.cu`, and that
-# is the only kernel the build knows about.**  The ported upstream kernels under
-# `csrc/xcore1600/` stay in the repo as source but are off the build entirely:
-# not a source in `setup.py`, and not on its include paths -- nor is
-# `csrc/3rdparty/kerutils`, which only they include.  There is no switch.
-#
-# The port is not merely disabled, it is wrong: it fails `check_result` on every
-# cell measured on a C600U and selects wrong on an `arange` row, while
-# `maca_topk.cu` passes all of them and is 1.5-2.9x faster besides.  That is
-# feasible because nothing in `csrc/xcore1000/` is C500-specific code (no
-# `__MACA_ARCH__` branch, 64-lane cross-lane primitives, integer-key ranking
-# with no float math to differ per part) and because the two per-family numbers
-# the kernel does need are parameters now, not compile-time constants.
-#
-# What a caller gets on a 128 KiB part from `maca_topk.cu` rather than the port:
-# `topk` in `(1024, 4096]` is answerable, `vocab_size >= 2^23` is not a limit,
-# and bf16 `sorted_value` works.  To work on the port, add its sources AND its
-# two include paths back to `setup.py` and expect it to fail; its own
-# `NATIVE_SHARED_MEMORY_PER_SM_BYTES` went with the rest of the compile-time
-# architecture selection (see `csrc/structs.h`).  See the handover and
-# CLAUDE.md's "Known holes" for the measurement and the diagnosis.

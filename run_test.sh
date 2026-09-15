@@ -25,16 +25,15 @@
 #
 # ── Recording, and what this script deliberately does NOT do ────────────────
 #
-# Follows the host repository's model (`mcDeepGEMM/run_ci.sh`: "GPU selection:
-# CUDA_VISIBLE_DEVICES applies to every stage").  Pick the device with the
-# environment, run, record the context.  There is no exclusivity gate, on
-# purpose:
+# Pick the device with `CUDA_VISIBLE_DEVICES`, run, record the context.  There
+# is no exclusivity gate, on purpose:
 #
 #   * `pgrep -af python` cannot see which device a process is pinned to -- it
 #     fires on a neighbour pinned elsewhere, and the box is shared.  A gate that
 #     is wrong most of the time trains people to stop reading it, which is worse
 #     than no gate.
-#   * `mx-smi` is not a gate either; measured here lying in both directions.
+#   * `mx-smi` is not a gate either: it reports processes against the wrong
+#     device, and reports none while a job runs.
 #
 # The consequence for the CLI is that there is no `--force`/`--strict` to
 # override a gate, and asking for one is an unknown argument rather than a
