@@ -83,6 +83,14 @@ struct RowParams {
     uint32_t sm_count;
     int32_t idx_fill;
     float value_fill;
+    // `check_nan` is whether the row is scanned at all; `abort_on_nan` is what
+    // happens once one is found, and is inert when nothing scans.  Two flags
+    // rather than one because the scan is a whole extra pass over the row and a
+    // caller that has already established its input is NaN-free pays it for
+    // nothing: measured on C500, 22-32% of the five official fp32 cells
+    // (7243.7 -> 5618.1 us at b4096-v129280) -- while a caller that has not
+    // still gets the full contract by default.
+    bool check_nan;
     bool abort_on_nan;
 };
 
@@ -412,10 +420,16 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
     // with the machine busy (`nan_scan_kernel`), which is the difference that
     // matters when the batch is small: this CTA alone would be the only thing
     // reading the row.
+    //
+    // `params.check_nan` is uniform across the grid, so skipping the
+    // `__syncthreads_or` skips it in every thread of every CTA -- no barrier is
+    // left half-entered.  When it is false the flag tables are neither written
+    // (`nan_scan_kernel` is not launched) nor read (this branch), which is why
+    // the chunked arm can skip its memset as well.
     bool nan_local = false;
     if constexpr (kPreSelected) {
-        nan_local = params.nan_flags[row] != 0;
-    } else {
+        nan_local = params.check_nan && params.nan_flags[row] != 0;
+    } else if (params.check_nan) {
         nan_local = row_has_nan(input_row, 0, length);
         nan_local = __syncthreads_or((int)nan_local) != 0;
     }
@@ -849,17 +863,22 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
     const int chunks = f32_chunked_chunks(batches, params.sm_count);
     const ChunkedF32Workspace ws = chunked_f32_workspace(
         workspace, batches, params.topk, chunks);
-    // `nan_flags` is the table.  It is memset and then OR-ed per row, so the
-    // length is whichever ran.  `end_ptr` being non-null is the dispatch's
-    // precondition and the dispatcher only reaches here with the scratch's own
-    // all-`vocab_size` table, but clearing first makes the scan independent of
-    // that rather than merely consistent with it.
+    // `ws.lengths` is the NaN-flag table here, not the split's row table --
+    // that one is `params.end_ptr`, passed through below.  It is memset and
+    // then OR-ed per row, so the length is whichever ran.  `end_ptr` being
+    // non-null is the dispatch's precondition and the dispatcher only reaches
+    // here with the scratch's own all-`vocab_size` table, but clearing first
+    // makes the scan independent of that rather than merely consistent with
+    // it.  Both the clearing and the scan go when `check_nan` is off: the row
+    // kernel reads this table only under that same flag.
     const size_t table_bytes = (size_t)batches * sizeof(int32_t);
-    cudaMemsetAsync(ws.lengths, 0, table_bytes, stream);
-    nan_scan_kernel<float><<<batches * chunks, kScanBlock, 0, stream>>>(
-        params.input, params.end_ptr,
-        (int64_t)(params.stride_input_batch / sizeof(float)),
-        params.vocab_size, (uint32_t)chunks, ws.lengths);
+    if (params.check_nan) {
+        cudaMemsetAsync(ws.lengths, 0, table_bytes, stream);
+        nan_scan_kernel<float><<<batches * chunks, kScanBlock, 0, stream>>>(
+            params.input, params.end_ptr,
+            (int64_t)(params.stride_input_batch / sizeof(float)),
+            params.vocab_size, (uint32_t)chunks, ws.lengths);
+    }
     const cudaError_t rc = rk::launch_topk_f32_chunked(
         (const float *)params.input, params.end_ptr, ws.cols, ws.merged,
         (int)batches, (int)params.vocab_size, (int)params.topk, chunks, stream,
@@ -884,11 +903,13 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
     const int chunks = chunked_chunks(params);
     const ChunkedWorkspace ws =
         chunked_workspace(workspace, batches, params.topk, (uint32_t)chunks);
-    cudaMemsetAsync(ws.nan_flags, 0, (size_t)batches * sizeof(int32_t), stream);
-    nan_scan_kernel<maca_bfloat16><<<batches * chunks, kScanBlock, 0, stream>>>(
-        params.input, params.end_ptr,
-        (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)),
-        params.vocab_size, (uint32_t)chunks, ws.nan_flags);
+    if (params.check_nan) {
+        cudaMemsetAsync(ws.nan_flags, 0, (size_t)batches * sizeof(int32_t), stream);
+        nan_scan_kernel<maca_bfloat16><<<batches * chunks, kScanBlock, 0, stream>>>(
+            params.input, params.end_ptr,
+            (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)),
+            params.vocab_size, (uint32_t)chunks, ws.nan_flags);
+    }
     const cudaError_t rc = rk::launch_topk_bf16_chunked(
         (const maca_bfloat16 *)params.input, params.end_ptr, ws.merged,
         ws.candidate_indices, ws.candidate_values, (int)batches,
@@ -1066,7 +1087,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
           const tvm::ffi::TensorView &output_index,
           const tvm::ffi::Optional<tvm::ffi::TensorView> &output_idx_offset,
           int64_t idx_oob_fill_value, double value_oob_fill_value,
-          bool return_value, bool abort_when_nan_found,
+          bool return_value, bool abort_when_nan_found, bool check_nan,
           // SM count of the device this call runs on, from the caller's
           // architecture table (`deep_select/_arch.py`).  The last argument
           // rather than one near `topk` because it is the only one the caller
@@ -1158,6 +1179,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     p.sm_count = (uint32_t)sm_count;
     p.idx_fill = (int32_t)idx_oob_fill_value;
     p.value_fill = (float)value_oob_fill_value;
+    p.check_nan = check_nan;
     p.abort_on_nan = abort_when_nan_found;
 
     const int value_dtype = float32 ? 0 : 1;

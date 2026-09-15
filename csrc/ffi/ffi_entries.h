@@ -40,8 +40,19 @@ tvm::ffi::Array<int64_t> get_alignment_requirement();
 
 // One row-wise top-K over a 2-D input.  `idx_oob_fill_value` /
 // `value_oob_fill_value` fill the slots a row shorter than `topk` leaves
-// over; `abort_when_nan_found` chooses trap-on-NaN or the `0x3F3F3F3F`
-// guard in `output_index[row, 0]`.
+// over; `check_nan` is whether each row is scanned for a NaN and
+// `abort_when_nan_found` what happens when the scan finds one (trap, or the
+// `0x3F3F3F3F` guard in `output_index[row, 0]`) -- the second is inert when
+// the first is false.  `sm_count` is the device's, from `_arch.py`.
+//
+// Keep this in step with the definition in `csrc/xcore1000/maca_topk.cu`,
+// parameter for parameter.  It had drifted: `sm_count` was added to the
+// definition (2026-09-15, the arch-constants work) and never here, and
+// nothing failed -- the built extension takes 13 arguments and rejects 12
+// with `TypeError: Mismatched number of arguments`, so the stale form was
+// never the one being exported, and a declaration off by a parameter on this
+// side is a defect no build or test reports.  Read the definition, or check
+// the artifact's own arity, when you change either.
 void topk(const tvm::ffi::TensorView &input, int64_t topk,
           const tvm::ffi::Optional<tvm::ffi::TensorView> &end,
           bool sorted_value, bool sorted_index,
@@ -49,7 +60,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
           const tvm::ffi::TensorView &output_index,
           const tvm::ffi::Optional<tvm::ffi::TensorView> &output_idx_offset,
           int64_t idx_oob_fill_value, double value_oob_fill_value,
-          bool return_value, bool abort_when_nan_found);
+          bool return_value, bool abort_when_nan_found, bool check_nan,
+          int64_t sm_count);
 
 }  // namespace deep_select
 

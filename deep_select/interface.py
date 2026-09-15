@@ -87,6 +87,7 @@ def topk(
     return_value: bool = True,
     abort_when_nan_found: bool = True,
     backend: Optional[str] = None,
+    check_nan: bool = True,
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """
     Arguments:
@@ -106,13 +107,24 @@ def topk(
         idx_oob_fill_value: int. See comments above when end[i]-begin[i]<topk.
         return_value: bool. If False, only return indices without values to accelerate the kernel. The return value is still a Tuple, but the first element will be None.
         abort_when_nan_found: bool. When a NaN is found, if True, aborts the whole kernel; if False, writes 0x3F3F3F3F to the corresponding output_idx[batch_idx][0] and exits.
-                The NaN check itself is always enabled. Exception: when the row's length <= topk, it is skipped.
+                Exception: when the row's length <= topk, it is skipped. Inert when `check_nan` is False, since then nothing is ever found.
         backend: str. Which implementation to run: `"torch"` (the default), a
                 reference implementation built from torch ops that runs on any
                 device and dtype; `"maca_c"`, this device's MACA kernel; or
                 `"deep_gemm"`, the `deep_gemm` package's selector, which implements
                 a subset of the contract (see `topk_deep_gemm`).
                 `DS_TOPK_BACKEND` overrides the default for a whole process.
+        check_nan: bool. Whether each row is scanned for a NaN at all.  With
+                False no scan runs, `abort_when_nan_found` never fires, and a
+                row holding a NaN is ranked like any other value -- the
+                caller is asserting its input is NaN-free, and the operator
+                takes it at its word.  It is not a faster way to get
+                `abort_when_nan_found=False`.
+                The scan is a full extra pass over the row, so this is a real
+                cost on a known-clean input: measured on C500, 22-32% of the
+                five official fp32 cells (7243.7 -> 5618.1 us at
+                b4096-v129280).  The default is the contract: check, and
+                answer as `abort_when_nan_found` says.
 
     Return:
         output_val: (b, topk), dtype=input.dtype.
@@ -165,6 +177,7 @@ def topk(
             value_oob_fill_value=value_oob_fill_value,
             return_value=return_value,
             abort_when_nan_found=abort_when_nan_found,
+            check_nan=check_nan,
         )
     if backend == "deep_gemm":
         return topk_deep_gemm(
@@ -175,9 +188,10 @@ def topk(
             value_oob_fill_value=value_oob_fill_value,
             return_value=return_value,
             abort_when_nan_found=abort_when_nan_found,
+            check_nan=check_nan,
         )
     else:
-        # The 13 positional arguments the tvm-ffi entry takes, all DLTensor or
+        # The 14 positional arguments the tvm-ffi entry takes, all DLTensor or
         # plain scalar.  `begin` and `hint` are rejected above, so neither
         # crosses the boundary, and `output_val` is None when `return_value` is
         # False (`Optional[TensorView>`).  `kernels=[...]` is not part of this
@@ -189,6 +203,11 @@ def topk(
         # in; it comes from the architecture the device reports, not from a
         # driver query, not from the build's target list, and -- being a
         # process invariant -- not from a call that reads it again each time.
+        #
+        # This tuple's order is the C++ entry's parameter list, not this
+        # signature's: `check_nan` is appended last here as a keyword, and
+        # arrives next to `abort_when_nan_found` there.  `sm_count` stays last
+        # on both sides.
         backend_args = (
             input,
             topk,
@@ -200,6 +219,7 @@ def topk(
             value_oob_fill_value,
             return_value,
             abort_when_nan_found,
+            check_nan,
             _sm_count(),
         )
         # `maca_c` means this device's kernel: the extension is resolved here,
@@ -266,6 +286,7 @@ def topk_deep_gemm(
     value_oob_fill_value: float = float("-inf"),
     return_value: bool = True,
     abort_when_nan_found: bool = True,
+    check_nan: bool = True,
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """`topk` served by the `deep_gemm` package's indexer selector
     (`deep_gemm.fp32_indexer_topk_selector`).
@@ -333,9 +354,11 @@ def topk_deep_gemm(
                if end is None
                else end.to(torch.int64).clamp(min=0, max=vocab_size))
 
-    # The NaN contract, checked as `topk_torch` checks it: always on, and
-    # skipped for a row whose window is not longer than `topk`.
-    if bool((lengths > topk).any().item()):
+    # The NaN contract, checked as `topk_torch` checks it: on unless the caller
+    # turned it off, and skipped for a row whose window is not longer than
+    # `topk`.  The `any()` probe is itself a device sync on a per-row predicate,
+    # so it goes inside the flag rather than being saved by it.
+    if check_nan and bool((lengths > topk).any().item()):
         cols = torch.arange(vocab_size, device=device)
         nan_rows = (torch.isnan(input)
                     & (cols.unsqueeze(0) < lengths.unsqueeze(1))).any(dim=1)
@@ -392,6 +415,7 @@ def topk_torch(
     value_oob_fill_value: float = float("-inf"),
     return_value: bool = True,
     abort_when_nan_found: bool = True,
+    check_nan: bool = True,
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """Reference `torch` implementation of the `topk` contract.
 
@@ -436,14 +460,15 @@ def topk_torch(
     device = input.device
 
     # `end` is an exclusive per-row upper bound.  The kernel never NaN-checks
-    # a row whose visible length is <= topk; the check itself is always on.
+    # a row whose visible length is <= topk; the check is on unless
+    # `check_nan` says otherwise.
     if end is not None:
         lengths = end.to(torch.int64).clamp(min=0, max=vocab_size)
     else:
         lengths = torch.full((n_rows,), vocab_size, dtype=torch.int64, device=device)
 
     nan_rows = torch.zeros(n_rows, dtype=torch.bool, device=device)
-    checked = lengths > topk
+    checked = (lengths > topk) if check_nan else torch.zeros_like(lengths, dtype=torch.bool)
     if bool(checked.any().item()):
         cols = torch.arange(vocab_size, device=device)
         visible = torch.isnan(input.float()) & (cols.unsqueeze(0) < lengths.unsqueeze(1))
