@@ -216,10 +216,10 @@ Build plumbing worth knowing before editing `setup.py`:
   `bin/gnu`, which torch asks *this same `CUDA_HOME`* for unconditionally (`get_wcuda_gnu_path()`, called from
   `build_extensions` at `cpp_extension.py:1225`) and which is the **only** return value of `get_cxx_compiler()` under
   `USE_MACA`. Every build died with `no cu-bridge gnu found`, and the file's `os.environ["CXX"] = "g++"` line was dead
-  code: ninja's `$cxx` was cu-bridge's `gnu` either way. The lesson is the shape of the bug, not the instance — a
-  synthesized `CUDA_HOME` is a contract with torch's MACA patch, and it is not written down anywhere.
+  code: ninja's `$cxx` was cu-bridge's `gnu` either way. The lesson is the shape of the bug, not the instance.
   **If a CUDA_HOME must be synthesized, `bin/gnu` is not optional.** (Recovered with `git reset --mixed`-free edits;
-  the fix is commit-sized and the fallback is `./build.sh` from a clean `build/`.)
+  the fix is commit-sized and the fallback is `./build.sh` from a clean `build/`. The general form of the lesson is
+  the headline of "Build-change discipline" below.)
 - Every source in `csrc/` is a `.cu`, so the device compiler is the only compiler the build runs for sources.
   `api.cu` is host *code* (no `__global__`), spelled `.cu` so torch routes it to the device rule rather than to `$cxx`:
   mxcc defines `__MACA__` for a `.cu` and only for a `.cu`, and `kerutils/common/common.h` keys `KERUTILS_IS_BUILD_ON_CUDA`
