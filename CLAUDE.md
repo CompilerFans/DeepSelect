@@ -118,14 +118,32 @@ that would be deleting another project's cache. `--yes` is accepted and ignored
 (it was this script's first spelling, when the default was to remove nothing).
 `./clean.sh && ./build.sh` is the supported full-rebuild chain.
 
-`CUCC_TARGETS` is the same variable and meaning as the host repo's `build.sh`, but **both scripts here default it to `xcore1000,xcore1500,xcore1600`, not to the host's `native`** — `native` is the opt-in `CUCC_TARGETS=native ./build.sh`, and a wheel is what a packaging step collects, so the default carries every family. (This line said "defaults to `native`" until 2026-09-15 and contradicted the command block above it; the tree is the authority — `grep -o 'CUCC_TARGETS:-[^}]*' build.sh install.sh`.) One extension **per architecture** — `deep_select/deep_select_xcore<N>.cpython-310-x86_64-linux-gnu.so` — because a config's shared-memory footprint is only valid against the architecture it was sized for.
+`CUCC_TARGETS` is the same variable and meaning as the host repo's `build.sh`,
+and **neither script here sets it** — an unset variable stays unset and
+`setup.py` applies `deep_select/_arch.py::DEFAULT_TARGETS`
+(`xcore1000,xcore1500,xcore1600`, one per family), so the scripts cannot drift
+from it. `native` is the opt-in `CUCC_TARGETS=native ./build.sh` for a
+one-image local build, and a wheel is what a packaging step collects, so the
+default carries every family. (This line said "defaults to `native`" until
+2026-09-15 and contradicted the command block above it. The tree is the
+authority: `grep -n DEFAULT_TARGETS deep_select/_arch.py`.)
+
+**The target list is an image list, not a build list.** One extension —
+`deep_select/deep_select_maca.cpython-310-x86_64-linux-gnu.so` — carries one
+image per target, because mxcc takes a comma-separated `-offload-arch` and
+compiles each into its own image of the same source. Measured: three targets →
+three images in one file, 11.07 MB against 3.7 MB for one. There is therefore
+**no compile-time architecture selection at all** — a family macro would be a
+lie in two of the three images — and the two numbers the kernel sizes its grids
+against arrive as arguments from `_arch.py`. See "the arch constants are
+arguments" below.
 
 **The stale `.so` must be deleted before rebuilding** — `build.sh` does this for
 you, but a bare `setup.py build_ext --inplace` does not (see the handover §4):
 
 ```bash
-rm -f deep_select/deep_select_xcore1000*.so \
-      build/lib.linux-x86_64-cpython-310/deep_select/deep_select_xcore1000*.so
+rm -f deep_select/deep_select_maca*.so \
+      build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca*.so
 ```
 
 `build_ext --inplace` compares timestamps and **silently skips** the copy when the target is newer than `build/lib`. The `.so` lives under `deep_select/` and is gitignored, so it is stale by default. The `.so` md5 is sensitive to source line endings and is usable as a "which source did I actually measure" receipt — **but it is not a content-addressed hash, and a differing md5 is not by itself evidence that the source or the behavior differs.**
@@ -192,12 +210,14 @@ The kernel tree is split **by per-SM shared memory**, because that is what a top
 | `csrc/xcore1600/` | C600, C600U (128 KiB/SM) | the upstream kernels, ported — **reserved, not built, not reachable** |
 
 **Every family this tree builds compiles `csrc/xcore1000/`, and there is no
-switch that says otherwise.** `setup.py`'s source selection is one
-unconditional `sources = XCORE1000_SOURCES` line, and `_xcore1600_sources()`
-sits beside it **uncalled** as the reserved implementation: it is complete and
-compiling, and nothing reaches it. Wiring it back is that one line, deliberately
-a source change rather than an environment variable — a switch that could put
-the broken kernel back is a switch that can be left on.
+switch that says otherwise.** `setup.py`'s source list is one unconditional
+`SOURCES` constant holding `csrc/xcore1000/maca_topk.cu` — there is no
+`_xcore1600_sources()` any more, and no branch that could select it. The port's
+`csrc/xcore1600/` tree stays in the repo as source and is not merely uncalled
+but **unreachable**: its own sources are off `SOURCES` and its `kerutils`
+dependency is off `include_dirs`. Wiring it back is a source change to both,
+deliberately rather than an environment variable — a switch that could put the
+broken kernel back is a switch that can be left on.
 
 The reason is not only that the port selects wrong on a C600U (see Known holes);
 it is that the C500 kernel is the **better** artifact there: 1.5–2.9x faster,
@@ -205,7 +225,24 @@ and passing `check_result` on every cell the port fails. Nothing in that tree is
 C500-specific code, and the capacity gate cannot fire in this direction — see
 "Can a C600U run the C500 kernel" below.
 
-`csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel), `TopkSelectArgs` — and the per-SM capacity constant `NATIVE_SHARED_MEMORY_PER_SM_BYTES`, selected by `-DDEEP_SELECT_NATIVE_ARCH` (set by `setup.py` from the same `CUCC_TARGETS` entry as `--offload-arch`). Both kernels reject a config that cannot fit that capacity **at compile time**, so upstream's 227 KiB-sized tuples cannot ride into a 64 KiB build and fail at launch instead.
+`csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel) and `TopkSelectArgs` (the port's params type; `maca_topk.cu` has its own `RowParams`, and `TopkSelectArgs::shared_memory_size_per_sm` is read only by `csrc/xcore1600/`). It carries **no per-architecture constant and no `DEEP_SELECT_NATIVE_ARCH`** — see "the arch constants are arguments".
+
+### The arch constants are arguments
+
+One extension carries an image per family, so nothing can be specialized at compile time: a `-DDEEP_SELECT_...` family macro would be correct in one image and a lie in the other two. The two numbers the kernel sizes its grids against therefore cross the FFI:
+
+| number | source | where it lands |
+| --- | --- | --- |
+| SM count (104/28/32) | the **architecture the device reports** — torch → `_arch.FAMILY_OF_SM` → `SM_COUNT` row | `RowParams::sm_count`, one `int64_t` appended to the tvm-ffi entry's positional args |
+| fp32 split work target (260/70/80) | **derived in the kernel**, `sm_count * 5 / 2` | `maca_topk.cu`'s `f32_chunk_work_target` |
+
+Three things this is deliberately not:
+
+- **Not a driver query.** `cudaDeviceGetAttribute(cudaDevAttrMultiProcessorCount)` would answer, but the device has already told the caller which part it is, and a family is what the number is a property of. One dict lookup on a known fact beats a device call.
+- **Not the build's target list.** `CUCC_TARGETS` says what images were compiled, not what device is in front of you; deriving the grid from it names the wrong artifact as soon as the list does not lead with this device's family (the same defect `perf_snapshot.provenance()` and the two `run_*` scripts each had once).
+- **Not re-read per call.** `interface.py::_sm_count()` is `lru_cache`d at the same granularity as `_backend_for()` — both are process invariants.
+
+`sm_count = 0` is refused by `DS_HOST_CHECK` rather than defaulted: a zero sizes every grid to nothing, which is an empty answer rather than a crash.
 
 ### xcore1000 — `maca_topk.cu` + `radix_core.cuh` (the shipping C500 kernel)
 
@@ -302,18 +339,22 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
   anywhere in the tree; every cross-lane primitive is already 64-lane
   (`radix_core.cuh`'s `kWarpSize = 64` under `__MACACC__`); the ranking is
   integer key manipulation with no float math to differ per part.
-- **Capacity cannot fire in this direction.** `structs.h` picks
-  `NATIVE_SHARED_MEMORY_PER_SM_BYTES` (64 KiB for family 1000, 128 KiB for
-  1500/1600) from `-DDEEP_SELECT_NATIVE_ARCH`, which `setup.py` passes from the
-  target, so a C600U build gets the 128 KiB constant. The compile-time rejection
-  exists to stop an *oversized* config; a 64 KiB-sized one in a 128 KiB SM
-  cannot trip it.
-- **The SM-count-sensitive constants are already parameterized** by
-  `NATIVE_SM_COUNT` (104/28/32): `wave_filled_chunks` (the chunked split),
-  `NATIVE_F32_CHUNK_WORK_TARGET`, and the grid sizing. The C500 values are the
-  measured ones; the 1500/1600 values are arithmetic carried over and **marked
-  unmeasured in the source**. That is a performance caveat, and the table above
-  bounds it — the correct artifact still wins by the measured margin.
+- **Capacity cannot fire in this direction, and there is no capacity constant
+  to fire.** `NATIVE_SHARED_MEMORY_PER_SM_BYTES` and the
+  `-DDEEP_SELECT_NATIVE_ARCH` that selected it went with the per-architecture
+  builds (2026-09-15, `5f5a93c`): one extension serves every family, so a
+  per-family compile-time constant has no build to live in. The gate it
+  implemented — reject an oversized config at compile time — was the port's
+  own; `maca_topk.cu` has no capacity gate by design.
+- **The SM-count-sensitive numbers are arguments now**, not constants:
+  `wave_filled_chunks` (the chunked split's grid) and the fp32 split's work
+  target both read `params.sm_count`, which `interface.py` resolves from the
+  architecture the device reports (`_arch.native_sm_count()`, cached per
+  process). The work target is `sm_count * 5 / 2` — the 2.5 is the C500 fit,
+  the only one ever measured; the old 70/80 constants were that same
+  arithmetic written out. **No C600/C600U measurement stands behind the 2.5**,
+  so the caveat is unchanged by having removed the table: the table never had
+  evidence for those two rows either.
 - What is given up is exactly the port's reason for existing: `topk` in
   `(1024, 4096]` and `vocab_size >= 2^23` are the *ported* kernel's limits, and
   `maca_topk.cu` has neither (it has no capacity gate by design — "a 128 KiB SM
@@ -322,16 +363,20 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
 
 So the default is not a workaround standing in for a broken kernel: it is the
 shipping kernel, on a part it is correct and faster on. There is no override to
-reach the port — it is a one-line source change in `setup.py`, and that is the
-point: a switch that could put the broken kernel back is a switch that can be
-left on.
+reach the port — it takes a source change to `setup.py`'s `SOURCES` *and* to its
+`include_dirs`, and that is the point: a switch that could put the broken kernel
+back is a switch that can be left on.
 ### xcore1600 — the ported upstream kernels
 
 **This tree does not currently pass on a C600U and is not built at all** — see
 Known holes for the measurement, the reproduction, and the 32-lane suspect list.
 Everything below describes it as written; treat it as unvalidated. To work on
-it, point `setup.py`'s `sources =` line at `_xcore1600_sources()` and re-run
-`scripts/official_slice.py --backend maca_c` on a C600U.
+it, put `csrc/xcore1600/api.cu` and its `instantiations/` into `SOURCES`, put
+`csrc/xcore1600/` and `csrc/3rdparty/kerutils/include` back on `include_dirs`,
+and re-run `scripts/official_slice.py --backend maca_c` on a C600U. It will not
+compile as-is: its `NATIVE_SHARED_MEMORY_PER_SM_BYTES` went with the
+per-architecture build (see "the arch constants are arguments"), so it needs a
+capacity passed at runtime the same way `sm_count` now is.
 
 **A C600U pass is necessary but not sufficient to wire it back in**: switching
 the source tree also changes which kernel serves C600 and C600U production
@@ -936,7 +981,7 @@ Facts the CSV records and the traps in reading it:
 5. **Alignment**: rows whose length is a multiple of 8 and offset-16 B-aligned take the vector path, otherwise a scalar fallback (`bf16x8_is_aligned`). Mixed vector + tail was intermittently racy on a 1024-thread block, so odd-length rows uniformly use one load mode.
 6. **mxcc's compile cache** is `~/.deep_gemm/cache` (keyed by entry name + source digest); a source edit recompiles only the affected entry. Counting `kernel.*` dirs under a fresh `DG_JIT_CACHE_DIR` is how you check a routing change did not grow the compiled-kernel count.
 7. `NormalFloatDistribution` (the official table's data) is **not** bit-pattern uniform — many elements per row crowd into one high byte. This is the fact every optimization here is organized around.
-8. **A toolkit mismatch at *run* time reports as `mcErrorInvalidDeviceFunction`, and it looks exactly like a kernel defect.** The extension is linked against `libmcruntime.so` by soname, and torch's `-Wl,-rpath` becomes a `DT_RUNPATH`, which `LD_LIBRARY_PATH` **overrides**. Measured 2026-09-15 on this box, the *same* `deep_select_xcore1600*.so`, device 1, one variable changed:
+8. **A toolkit mismatch at *run* time reports as `mcErrorInvalidDeviceFunction`, and it looks exactly like a kernel defect.** The extension is linked against `libmcruntime.so` by soname, and torch's `-Wl,-rpath` becomes a `DT_RUNPATH`, which `LD_LIBRARY_PATH` **overrides**. Measured 2026-09-15 on this box, the *same* `deep_select_xcore1600*.so` (the per-architecture name the build used until `5f5a93c`; it is `deep_select_maca*.so` now, and the trap is about the library a loaded artifact resolves, so the name is incidental), device 1, one variable changed:
 
    | `MACA_PATH` (and the `LD_LIBRARY_PATH` it derives) | result |
    | --- | --- |
@@ -1084,8 +1129,9 @@ source line numbers — so "the md5 moved" is not evidence of a behaviour change
   fix.** It is *contained* — every family builds `csrc/xcore1000/`, unconditionally and with no override
   (see Kernel architecture above), which passes 200/200 on a C600U — and that is not merely
   correct there but **faster**: see "Can a C600U run the C500 kernel", which measures 1.5-2.9x against the port and
-  records why the containment is the right answer rather than a fallback. The port is still in the tree and
-  compiling; building it is a one-line source change in `setup.py`, which is how the audit is done.
+  records why the containment is the right answer rather than a fallback. The port is still in the tree as
+  source; building it is the two-line source change in `setup.py` described under "xcore1600 — the ported
+  upstream kernels", which is how the audit would be done.
   On a `MetaX C600-U` (reports `sm89` → family 1600, so `backend="maca_c"` resolved *here*, not to `maca_topk.cu`;
   that measurement was taken with the port built, which is no longer what a build produces):
   a monotonic row of `0..511` with `topk=8` returns indices like `[448..455]` where the answer is `[511..504]`, and
@@ -1136,8 +1182,7 @@ source line numbers — so "the md5 moved" is not evidence of a behaviour change
   32-lane target for the xcore1600 audit, and it is much narrower than this file claimed.
   **Cite this paragraph by the re-audit, not by the old list** — if a future pass finds the counts moved, re-measure
   (`git -C <repo> grep -c -- '<pattern>' HEAD -- csrc/xcore1600/`) rather than restoring the list from memory.
-  **It is worse than "wrong": it does not run.** With the port built (the `setup.py` source line pointed at
-  `_xcore1600_sources()`) and *correct* inputs
+  **It is worse than "wrong": it does not run.** With the port built (back when `setup.py` selected it) and *correct* inputs
   (`torch.set_default_device("cuda")` set, per the environment traps below), three cells — `b4096-v1024-k512`,
   `b4096-v16384-k512`, `b512-v262144-k512`, all bf16 — all die with `device-side assert` before a single timing is
   taken. So this tree cannot be benchmarked against the rerouted one cell for cell; there is no before to put beside the
@@ -1154,10 +1199,10 @@ and export two `__tvm_ffi_*` symbols each. The gate is mechanical and is the
 reason the migration happened:
 
 ```bash
-readelf -d deep_select/deep_select_xcore1000*.so | grep -iE 'libtorch|libc10'   # empty
-nm -D     deep_select/deep_select_xcore1000*.so | awk 'NF>=3{print $3}' \
-                                                 | grep -icE 'c10|torch|at::'    # 0
-nm -D     deep_select/deep_select_xcore1000*.so | grep -c  '__tvm_ffi_'         # 2
+readelf -d deep_select/deep_select_maca*.so | grep -iE 'libtorch|libc10'   # empty
+nm -D     deep_select/deep_select_maca*.so | awk 'NF>=3{print $3}' \
+                                           | grep -icE 'c10|torch|at::'    # 0
+nm -D     deep_select/deep_select_maca*.so | grep -c  '__tvm_ffi_'         # 2
 ```
 
 **The `awk` in the middle line is not decoration — without it the gate reports a

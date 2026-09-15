@@ -18,10 +18,10 @@ what a top-K kernel's staging buffers are sized against:
 | `csrc/xcore1000/` | C500 (64 KiB per SM) | `maca_topk.cu`, written for MACA |
 | `csrc/xcore1600/` | C600, C600U (128 KiB per SM) | the upstream kernels, ported |
 
-Which one a device runs is a property of the device, not a choice: `setup.py`
-builds one extension per architecture, and `deep_select.topk` loads the one its
-device has. (A 128 KiB part currently builds `csrc/xcore1000/` as well; see the
-note under `csrc/xcore1600/` below.)
+Which one a device runs is a property of the device, not a choice — but there
+is only one answer today: `setup.py` builds a single extension carrying an image
+per architecture it was asked for, and **every family runs
+`csrc/xcore1000/maca_topk.cu`**. (See the note under `csrc/xcore1600/` below.)
 
 `csrc/xcore1000/maca_topk.cu` reimplements the operator -- the same public
 contract, the same `deep_select.interface.topk` signature -- with portable
@@ -41,11 +41,12 @@ re-derived for 128 KiB, since upstream's are sized for an H100's 227 KiB.
 > the official slice scored 4/200. So every family builds
 > `csrc/xcore1000/maca_topk.cu` instead, which passes 200/200 on a C600U **and
 > is 1.5-2.9x faster there** (CLAUDE.md, "Can a C600U run the C500 kernel").
-> The port stays in the tree complete and compiling as the reserved
-> implementation; it is reached by pointing `setup.py`'s `sources =` line at
-> `_xcore1600_sources()`, not by an environment variable, and
-> `deep_select/_arch.py` has no switch for it. Everything below in this section
-> describes `csrc/xcore1600/` as it stands, port bugs included.
+> The port stays in the tree as the reserved implementation, but it is no longer
+> built or buildable: reaching it now takes a source change to `setup.py`'s
+> `SOURCES` *and* its `include_dirs` (its `kerutils` include was dropped from the
+> build with it), not an environment variable, and `deep_select/_arch.py` has no
+> switch for it. Everything below in this section describes `csrc/xcore1600/` as
+> it stands, port bugs included.
 
 Consequences:
 
@@ -226,39 +227,55 @@ CUCC_TARGETS=xcore1000,xcore1600 python setup.py build_ext --inplace   # both
 PYTHONPATH=. python scripts/official_slice.py                          # correctness
 ```
 
-The scripts wrap those calls. `build.sh` builds in place, `install.sh` builds a
-wheel and installs it (symlinking the extension back under `deep_select/`, since
-every suite here runs with `PYTHONPATH=.` and would otherwise resolve the repo's
-copy), `clean.sh` removes the build artifacts, and `run_test.sh` runs the suites
-and records what it measured. `BUILDROOT=<dir>` makes `install.sh` also drop the
-wheel in `<dir>/wheel/`, the host repository's own destination, so one packaging
-step can collect both wheels:
+The scripts wrap those calls. `build.sh` builds **in place** — that is the one
+the suites here need, since they run with `PYTHONPATH=.` and so resolve the
+repo's `deep_select/`, where `_binding.load()` globs for the extension.
+`install.sh` builds a wheel and `pip install`s it, which puts the extension in
+`site-packages/deep_select/` and nothing back in the tree — so a tree that has
+been `clean.sh`ed needs a `build.sh` before `run_test.sh` will find anything.
+`clean.sh` removes the build artifacts, and `run_test.sh` runs the suites and
+records what it measured.
+
+**The wheel is left in `dist/` and nowhere else.** There is no `BUILDROOT`
+export and no `--build-only`: both were this script's earlier spellings and went
+with its flag parsing (`9a6105b`). A cut that needs the wheel elsewhere copies it
+out of `dist/`; a reader should not re-add an output path that was removed on
+purpose.
 
 ```bash
-./build.sh                             # this device
+./build.sh                             # every family (CUCC_TARGETS to narrow)
 ./install.sh                           # build a wheel and install it
 ./clean.sh && ./build.sh               # full rebuild
 ./run_test.sh --perf --dtype bf16 -nc  # the performance grid
 ./run_test.sh --all                    # performance grid + correctness sample
-
-BUILDROOT=/tmp/out ./install.sh --build-only   # export the wheel, install nothing
 ```
 
-`CUCC_TARGETS` is the whole target interface (the same variable and meaning as
+`CUCC_TARGETS` is the whole build interface (the same variable and meaning as
 the host repository's `build.sh`); it defaults to `xcore1000,xcore1500,xcore1600`
 -- one target per family, the same *set* of families the host default names,
-minus its per-part aliases, which this build cannot take (one extension per
-family: two targets in one family would overwrite each other, and `mxcc` rejects
-`xcore1610`/`xcore1620` outright). `CUCC_TARGETS=native` is the shortcut for
-"just this device", and `CUCC_TARGETS=xcore1600 ./build.sh` for one family.
+minus its per-part aliases, which `mxcc` rejects outright (`xcore1008`,
+`xcore1610`, `xcore1620`). `CUCC_TARGETS=native` is the shortcut for "just this
+device", and `CUCC_TARGETS=xcore1600 ./build.sh` for one family.
 
-Each target builds `csrc/xcore1000/maca_topk.cu` -- the hand-written MACA
-kernel, for every capacity, 64 KiB and 128 KiB alike -- producing
-`deep_select/deep_select_xcore<N>*.so`. The ported kernels under
-`csrc/xcore1600/` are reserved and unbuilt: they select wrong on a C600U, and
-the C500 kernel is both correct there and 1.5-2.9x faster (see CLAUDE.md, "Can a
-C600U run the C500 kernel"). Wiring the port back is a one-line source change in
-`setup.py`, deliberately not an environment variable.
+**The target list is a list of images, not of builds.** One extension,
+`deep_select/deep_select_maca*.so`, carries one image per target, because mxcc
+takes a comma-separated `-offload-arch` and compiles each into its own image of
+the same source (measured: three targets → three images, 11.07 MB against
+3.7 MB for one). Each target builds `csrc/xcore1000/maca_topk.cu` -- the
+hand-written MACA kernel, for every capacity, 64 KiB and 128 KiB alike.
+
+One consequence is worth stating because it shapes the source: **there is no
+per-architecture specialization at compile time.** A family macro would be
+correct in one image and a lie in the other two, so the two numbers the kernel
+sizes its grids against -- the SM count and the fp32 split's work target --
+travel as arguments, sourced from the architecture the device reports through
+torch. See CLAUDE.md, "the arch constants are arguments".
+
+The ported kernels under `csrc/xcore1600/` are reserved and unbuilt: they select
+wrong on a C600U, and the C500 kernel is both correct there and 1.5-2.9x faster
+(see CLAUDE.md, "Can a C600U run the C500 kernel"). Wiring the port back is a
+source change to `setup.py`'s `SOURCES` and `include_dirs` together, deliberately
+not an environment variable.
 
 Both scripts derive `CUDA_HOME`/`CUDA_PATH`/`CUCC_PATH` from `MACA_PATH`: torch's
 `_find_cuda_home()` reads the first two before its `${MACA_PATH}/tools/cu-bridge`
