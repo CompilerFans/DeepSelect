@@ -18,9 +18,15 @@ This directory is **its own git repository** (`origin` = `git@github.com:Compile
 
 Public entry point is `deep_select.topk` (`deep_select/interface.py`). Three backends, which name **implementations, not architectures** (the same vocabulary as the host repo's `backend=`):
 
-- `"maca_c"` (default) — the MACA kernel this device has. Which kernel that is is a property of the device, not a call-site choice.
+- `"maca_c"` (**the default**, `interface.py:95`) — the MACA kernel this device has. Which kernel that is is a property of the device, not a call-site choice.
 - `"torch"` — reference implementation built from torch ops; runs on any device/dtype, including where no kernel is built. Also the differential-check arm.
 - `"deep_gemm"` — the host repo's `deep_gemm.fp32_indexer_topk_selector`, called through its Python API, imported lazily. Implements a **strict subset** of the contract (float32 only, `topk <= 2048`, unordered); what it cannot serve raises `UnsupportedByBackend`, never a narrower answer.
+
+The default is verified rather than assumed: `inspect.signature(deep_select.topk)`
+’s `backend` defaults to `"maca_c"`, a bare call runs this device’s kernel,
+and `'maca c'` / `'maca-c'` / `'MACA_C'` / `'cuda'` / `''` all raise the
+`ValueError` that lists `maca_c, torch, deep_gemm`.  **Production does not run
+the reference.**
 
 ## Build
 
@@ -640,6 +646,46 @@ not thereby cheaper in the kernel.
 The check is **always on**. It is a raw **bit-pattern** test (exponent all-ones with non-zero payload — every NaN encoding, either sign, quiet or signaling), *not* a comparison against a sentinel key: the order-preserving encode maps the two signed NaNs to opposite ends of the key space, so comparing keys catches only the single fp32 encoding `0x7FFFFFFF`. `v != v` is not usable — the build enables `--use_fast_math`. Rows whose visible length is `<= topk` are never NaN-checked.
 
 `abort_when_nan_found=True` (default) calls `trap()` / aborts. With `False`, such a row leaves `0x3F3F3F3F` in `output_idx[row, 0]` and the rest of the row is undefined — a NaN row must be excluded from any value comparison, as the suites do.
+
+## What `backend="torch"` is, and is not, as the validation arm
+
+`"torch"` is the right arm for **adapter and interface** work, and it is not an
+oracle for the *ranking*.  Both halves are measured; keep them apart.
+
+- **It is not a bare `torch.topk`.**  `topk_torch` (`interface.py:387-557`) is
+  ~140 lines of contract glue over one `torch.topk`: the window mask, the
+  re-pick loop for rows whose window holds fewer than `k_eff` values above the
+  `-inf` mask, the padding fills, `output_idx_offset`, `sorted_index`'s stable
+  re-order, and the NaN sentinel.  **The glue is where the bugs have been** —
+  two fixed ones sit in its own comments.  So it is a *reference*, not ground
+  truth.
+- **A set difference against it is not a defect.**  The contract is
+  `min(selected) >= max(unselected)` and says nothing about ties.  Measured with
+  `NormalFloatDistribution` (bf16, b 8/64, v 4096/65536, k 512/2048, with and
+  without a window, `/tmp/dsab/tie2.py`) both arms pass that contract on every
+  row, yet they agree on the selected **set** for only **11/64 and 22/64** of
+  rows — because **7 to 44 elements of a row tie at the k-th value**, and which
+  of them is selected is unspecified.  Set (or elementwise) agreement is
+  therefore **not** a usable gate on bf16; the contract check is.
+- **Where it does serve as an oracle: the fp32 windowed/sorted cells.**  Same
+  measurement, `(8, 4096, 512, fp32, window, sorted_value)` and the same with
+  `sorted_index`: `maca_c` and `torch` agree **elementwise, 100%**.  That is the
+  measurable differential across dtypes, and it is the one to use.
+- **The cost is real.**  The re-pick loop is a **per-row python loop** over
+  `(~in_window).any(...)`.  On bf16 it fires often enough to dominate a timing
+  run, which is why the snapshot's `torch` column is a **bare** `torch.topk`
+  (`perf_snapshot.time_torch_reference`, matching what `tests/test.py` times)
+  and **not** `backend="torch"`.
+- **Do not copy it as production glue.**  `torch.arange(vocab_size)` plus a
+  full `input.float()` are not valid for the shapes here, and it assumes the
+  caller already rejected `sorted and not return_value` — `if sorted and
+  return_value` is the only use of `return_value` in that function, so
+  `sorted_index=True, return_value=False` can come back with `out_val=None`.
+
+So: use it to validate **adapter behaviour** — window handling, the fills,
+`output_idx_offset`, `sorted_index`'s ordering, dtype/index-dtype plumbing, the
+NaN sentinel, that no row is left undefined — elementwise on **fp32** cells and
+against the contract on **bf16** cells.  Do not gate on `maca_c == torch`.
 
 ## Tests
 
