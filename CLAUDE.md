@@ -88,6 +88,15 @@ the default.
   repo root would report the repo back and produce a symlink onto itself). A
   symlink rather than a copy, so re-running `build.sh` overwrites the target
   instead of racing it. Skip it with `--no-link`.
+- **Export the wheel to `${BUILDROOT}/wheel/` when `BUILDROOT` is set** — the
+  host repo's `build.sh` destination and variable, so one packaging step can
+  collect both wheels with a single `BUILDROOT`. It happens after the
+  target-presence check and before the `--build-only` exit, so
+  `BUILDROOT=... ./install.sh --build-only` is the "give me the artifact,
+  install nothing" path. An earlier revision also renamed the wheel here to
+  reconcile a version-field mismatch; that branch was unreachable (see
+  `install.sh`'s note — PEP 440 normalization leaves the local segment as one
+  dashed field) and is gone.
 
 The underlying call, if you need it directly:
 

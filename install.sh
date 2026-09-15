@@ -15,17 +15,20 @@
 # here by one `bdist_wheel` run, and pip is handed the finished file.  See
 # README.md, "Installation" / "MACA (MetaX)".
 #
+# Env:
+#     CUCC_TARGETS   targets to build (default native); explicit value wins
+#     MACA_PATH      MACA toolkit root (default /opt/maca)
+#     MAX_JOBS       forwarded to ninja as -j
+#     BUILDROOT      if set, the wheel is also copied to ${BUILDROOT}/wheel/
+#                    (the host repository's `build.sh` destination, so one
+#                    packaging step can collect both wheels)
+#
 # Usage:
 #     ./install.sh                             # build for this device, install
 #     ./install.sh --targets xcore1600         # build for another architecture
 #     ./install.sh --all                       # xcore1000,xcore1500,xcore1600
 #     ./install.sh --build-only                # leave the wheel in dist/
 #     ./install.sh --clean                     # rm -rf build dist first
-#
-# Env:
-#     CUCC_TARGETS   targets to build (default native); explicit value wins
-#     MACA_PATH      MACA toolkit root (default /opt/maca)
-#     MAX_JOBS       forwarded to ninja as -j
 #
 set -euo pipefail
 
@@ -133,10 +136,11 @@ which pip
 python -c 'import sys, torch
 print(f"install.sh: python {sys.version.split()[0]}, torch {torch.__version__}")'
 
-# `setup.py` derives the wheel's version from `datetime.now()`, so hoisting the
-# version off the freshly written filename and putting it back with `mv` makes
-# pip's filename-vs-metadata check independent of how long the build took.
-# (`pip install .` cannot do this: it is the two-invocation split that breaks.)
+# A single `bdist_wheel` invocation, then pip is handed the finished file.
+# `setup.py` derives the version from `datetime.now()`, and a PEP 517 install
+# runs it twice -- metadata, then wheel -- so the two runs can straddle a
+# second and pip rejects the result as misnamed.  One run cannot straddle
+# itself, and `pip install .` is the split this avoids.
 dist_dir="$script_dir/dist"
 rm -rf "$dist_dir"
 mkdir -p "$dist_dir"
@@ -153,40 +157,15 @@ if [[ -z "$wheel" ]]; then
     exit 1
 fi
 
-# The version a run records is `__version__+git_rev.datetime_rev`; the two
-# short derived pieces are what must agree with the metadata.
-version=$(python - <<'PY'
-import os
-from deep_select.__version__ import __version__
-
-rev = os.popen("git rev-parse --short HEAD 2>/dev/null").read().strip() or "unknown"
-print(f"{__version__}+{rev}")
-PY
-)
-# Compare on the version's own fields rather than by string-stripping a prefix:
-# the local version segment contains dots, so a prefix strip does not stop at
-# the field boundary.  Splitting on "-" does -- the name is the first field,
-# the version is *either* field 1 (a build normalizes it, dropping
-# `setup.py`'s `+git_rev.datetime_rev` local segment) *or* field 1 plus the
-# second field (when it survives).  Only the first shape needs repairing, and
-# then only to drop a stale `datetime_rev`; the second already matches the
-# metadata and is left alone.
-base=$(basename "$wheel")
-fixed=$(python - "$base" "$version" <<'PY'
-import sys
-
-fields = sys.argv[1].split("-")
-if len(fields) < 3 or "." in fields[1]:
-    sys.exit(0)                        # version already spans the field; leave
-print("-".join(["deep_select", sys.argv[2]] + fields[2:]))
-PY
-)
-if [[ -n "$fixed" ]]; then
-    echo "install.sh: wheel version drift, renaming to match metadata:"
-    echo "install.sh:   $fixed"
-    mv "$wheel" "$dist_dir/$fixed"
-    wheel="$dist_dir/$fixed"
-fi
+# No version repair.  An earlier revision renamed the wheel here when the
+# filename's version field disagreed with the metadata, and the branch was
+# unreachable: `setup.py`'s version is `<__version__>+<git_rev>.<datetime_rev>`,
+# and PEP 440 normalization turns the whole `+...` local segment into `[a-z0-9.]`
+# -- so the hyphens that would split it into its own filename field become dots
+# before the name is built (verified: `1.0.0+abc-20260915` lands in the
+# filename as `1.0.0+abc.20260915`, one field, dots present).  The predicate's
+# `"." in fields[1]` guard then always fired and the rename never ran.  The
+# wheel is named by the build and installed by that name.
 echo "install.sh: built $(basename "$wheel")"
 
 # Verify the targets got in before installing anything.  A wheel built for one
@@ -196,16 +175,33 @@ echo "install.sh: built $(basename "$wheel")"
 # on every MACA host (it is absent on the one this was measured on), while
 # python is already required by everything above.
 missing=0
-for line in "${resolved[@]}"; do
-    read -r target _family _kibs _tree <<<"$line"
+while read -r target _family _kibs _tree; do
     if python -m zipfile -l "$wheel" | grep -q "deep_select/deep_select_${target}"; then
         echo "install.sh: OK  wheel contains $target"
     else
         echo "install.sh: ERROR wheel has no extension for $target" >&2
         missing=1
     fi
-done
+done <<<"$resolved"
 [[ "$missing" == 0 ]] || exit 1
+
+# ── export ──────────────────────────────────────────────────────────────────
+# Same destination and same env var as the host repository's `build.sh`
+# (`${BUILDROOT}/wheel/`), so one packaging step can collect both wheels by
+# pointing a single BUILDROOT at it.  The host copies there from `build.sh`
+# right after `bdist_wheel`; here the wheel is `install.sh`'s to produce, so
+# this is the only place it can happen.
+#
+# After the verification above, not before: what is exported is a wheel that
+# was confirmed to carry an extension for every requested target.  And before
+# the `--build-only` exit below, so a caller who only wants the artifact
+# (`--build-only` + BUILDROOT) gets it without installing anything.
+if [[ -n "${BUILDROOT:-}" ]]; then
+    dest="${BUILDROOT}/wheel"
+    mkdir -p "$dest"
+    cp "$wheel" "$dest/"
+    echo "install.sh: wheel also copied to $dest/$(basename "$wheel")"
+fi
 
 if [[ "$build_only" == 1 ]]; then
     echo "install.sh: --build-only, leaving the wheel at $wheel"

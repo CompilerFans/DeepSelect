@@ -229,7 +229,9 @@ The scripts wrap those calls. `build.sh` builds in place, `install.sh` builds a
 wheel and installs it (symlinking the extension back under `deep_select/`, since
 every suite here runs with `PYTHONPATH=.` and would otherwise resolve the repo's
 copy), `clean.sh` removes the build artifacts, and `run_test.sh` runs the suites
-and records what it measured:
+and records what it measured. `BUILDROOT=<dir>` makes `install.sh` also drop the
+wheel in `<dir>/wheel/`, the host repository's own destination, so one packaging
+step can collect both wheels:
 
 ```bash
 ./build.sh                             # this device
@@ -237,6 +239,8 @@ and records what it measured:
 ./clean.sh && ./build.sh               # full rebuild
 ./run_test.sh --perf --dtype bf16 -nc  # the performance grid
 ./run_test.sh --all                    # performance grid + correctness sample
+
+BUILDROOT=/tmp/out ./install.sh --build-only   # export the wheel, install nothing
 ```
 
 `CUCC_TARGETS` defaults to `native`, the device the build is running on (the
