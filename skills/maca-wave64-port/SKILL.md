@@ -212,13 +212,15 @@ builtin catalogue and the measured instruction counts behind this.
 4. **Then** run the project's own gate.
 
 ```bash
-# the shape of a localizer: no seed, no harness, the answer is typed in
+# the shape of a localizer: no seed, no harness, the answer is typed in.
+# backend="maca_c" is required -- the library default is `torch`, and a bare
+# call would localize the reference, which is not what a kernel audit is for.
 python -c "
 import torch, deep_select
 b, v, k = 2, 512, 8
 x = torch.arange(v, device='cuda', dtype=torch.float32) \
      .unsqueeze(0).repeat(b, 1).to(torch.bfloat16)
-print(deep_select.topk(x, k)[1][0].tolist())
+print(deep_select.topk(x, k, backend="maca_c")[1][0].tolist())
 # want [511, 510, 509, 508, 507, 506, 505, 504]
 "
 ```

@@ -18,15 +18,33 @@ This directory is **its own git repository** (`origin` = `git@github.com:Compile
 
 Public entry point is `deep_select.topk` (`deep_select/interface.py`). Three backends, which name **implementations, not architectures** (the same vocabulary as the host repo's `backend=`):
 
-- `"maca_c"` (**the default**, `interface.py:95`) — the MACA kernel this device has. Which kernel that is is a property of the device, not a call-site choice.
-- `"torch"` — reference implementation built from torch ops; runs on any device/dtype, including where no kernel is built. Also the differential-check arm.
+- `"torch"` (**the default**) — reference implementation built from torch ops; runs on any device/dtype, including where no kernel is built. Also the differential-check arm.
+- `"maca_c"` — the MACA kernel this device has: the **production path** and the fast one. Which kernel that is is a property of the device, not a call-site choice.
 - `"deep_gemm"` — the host repo's `deep_gemm.fp32_indexer_topk_selector`, called through its Python API, imported lazily. Implements a **strict subset** of the contract (float32 only, `topk <= 2048`, unordered); what it cannot serve raises `UnsupportedByBackend`, never a narrower answer.
 
-The default is verified rather than assumed: `inspect.signature(deep_select.topk)`
-’s `backend` defaults to `"maca_c"`, a bare call runs this device’s kernel,
-and `'maca c'` / `'maca-c'` / `'MACA_C'` / `'cuda'` / `''` all raise the
-`ValueError` that lists `maca_c, torch, deep_gemm`.  **Production does not run
-the reference.**
+**The default is correctness-first, and that is a deliberate reversal of an
+earlier one.** `backend` used to default to `"maca_c"`; it defaults to
+`"torch"` now (2026-09-15), because the reference is the arm that does not
+depend on a kernel being correct on the device in front of you — so making it
+the default costs no coverage (the kernel is validated *against* it) and
+removes the last route by which a caller who asked for nothing in particular
+could reach a kernel defect.  The cost is speed, and it is real: the `torch`
+arm is the slow one.
+
+The default is **not** a string default in the signature — `backend=None`
+means "take the process default", resolved per call by `_default_backend()`
+from `DS_TOPK_BACKEND` (unrecognized values ignored, so a typo in the
+environment cannot break every call).  Read the resolution there rather than
+in the signature: `inspect.signature(deep_select.topk)` reports `None`, and a
+caller who wants the kernel asks for it by name or exports
+`DS_TOPK_BACKEND=maca_c`.
+
+Two arms therefore say different things and both are needed when the default
+moves: `scripts/official_slice.py --backend maca_c` **pins** the call (it
+rebinds `deep_select.topk`), so it tests the kernel and says *nothing* about
+the default; `--default-arm maca_c` leaves the official call site unmodified
+and sets `DS_TOPK_BACKEND`, so it tests the path a bare call actually takes.
+Passing both is refused rather than silently reported as one.
 
 ## Build
 
@@ -697,7 +715,7 @@ PYTHONPATH=. python tests/test.py --perf-only -nc          # skip the inter-case
 PYTHONPATH=. python tests/test.py --perf-only --dtype bf16 # 90 of them, ~1 min on C500
 
 PYTHONPATH=. python scripts/official_slice.py              # correctness, 200/200 sampled
-PYTHONPATH=. python scripts/official_slice.py --backend maca_c   # the default
+PYTHONPATH=. python scripts/official_slice.py                    # the default (torch)
 PYTHONPATH=. python scripts/official_slice.py --backend torch    # the reference
 PYTHONPATH=/path/to/mcDeepGEMM:. python scripts/official_slice.py --backend deep_gemm
 ```
@@ -895,14 +913,16 @@ Never a bare `git commit -a` (see repo identity, top).
 
 Symptom → first look (handover §8): wrong-but-not-much (a few slots, rank off by a few) → the threshold's subtraction convention (the `above + c > remain_topk` rule); `Memory Violation(0x4)` / `ATU Fault` → first the probe's missing `set_default_device`, then an out-of-range threshold leaving a shared variable uninitialized; one cell slow while others unchanged → occupancy, check `static + dynamic` against 32,768; source changed with no behavior change → a stale `.so`; compile-time `undeclared identifier` → constant/helper ordering in `radix_core.cuh`; **wrong indices that change run to run → a lane-width bug** (a 32-bit mask or `/ 32` on a 64-lane wave in `csrc/xcore1600/`), not a threshold-convention one — a fixed offset is the threshold, a varying one is a race.
 
-Reproduce the xcore1600 hole with no seed and no harness, so the expected answer is written down rather than computed:
+Reproduce the xcore1600 hole with no seed and no harness, so the expected answer is written down rather than computed.
+**`backend="maca_c"` is not optional here** — the process default is `torch`, so a bare call would exercise the
+reference and "reproduce" nothing at all.
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python -c "
 import torch, deep_select
 b, v, k = 2, 512, 8
 x = torch.arange(v, device='cuda', dtype=torch.float32).unsqueeze(0).repeat(b, 1).to(torch.bfloat16)
-_, ii = deep_select.topk(x, k)
+_, ii = deep_select.topk(x, k, backend="maca_c")   # the default is torch now
 print(ii[0].tolist())   # want [511,510,509,508,507,506,505,504]
 "
 ```

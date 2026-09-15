@@ -2386,15 +2386,26 @@ exact for a denormal fill" —— **这条只有 fp32 一侧成立**。所以拿
 
 ## 21. backend 默认值核实，与 §19.3 那个"实例化代价"的真身（2026-09-15）
 
-### 21.1 `backend` 的默认值是 **`maca_c`**，三个名字都通（实测）
+> **§21.1 的前提已在本日稍后翻转，本节其余结论不受影响。**
+> 用户同日的决定是：**默认改为 `torch`**（正确性优先，见 `CLAUDE.md` 的
+> "backends" 一节）。`backend=` 的签名默认值现为 `None`，由
+> `_default_backend()` 逐次解析 `DS_TOPK_BACKEND`（未设置 → `torch`；
+> 无法识别的值忽略）。§21.1 记录的是**翻转前**的实测，作为"曾经是什么"
+> 仍然成立；§21.2–§21.4 讲的是实例化代价与门控，与默认值无关。
+> 同批加入 `scripts/official_slice.py --default-arm`：`--backend` 钉的是
+> **调用**（不测默认），`--default-arm` 钉的是**默认**（调用点不动），
+> 二者互斥地各答一个问题。
 
-本仓 `topk` 的签名（`deep_select/interface.py:80-95`）：
+### 21.1 `backend` 的默认值是 **`maca_c`**，三个名字都通（实测，默认翻转前）
+
+本仓 `topk` 的签名（翻转前的 `deep_select/interface.py:80-95`；翻转后签名
+里的默认值已是 `None`，代码块保留翻转前的样子）：
 
 ```python
-def topk(..., backend: str = "maca_c", ...)
+def topk(..., backend: str = "maca_c", ...)   # 翻转前
 ```
 
-`_BACKENDS = ("maca_c", "torch", "deep_gemm")`（`:20`）。实测
+`_BACKENDS = ("maca_c", "torch", "deep_gemm")`（`:20`，未变）。实测
 （`CUDA_VISIBLE_DEVICES=3`）：
 
 | 调用 | 结果 |

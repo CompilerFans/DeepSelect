@@ -19,6 +19,28 @@ from ._arch import FAMILY_OF_TARGET, native_target
 # `topk_deep_gemm` for exactly which part.
 _BACKENDS = ("maca_c", "torch", "deep_gemm")
 
+# What `topk` runs when the caller does not choose.  `torch` is deliberate: it
+# is the implementation of this contract that does not depend on a kernel
+# being correct on the device in front of you, and the kernel path is validated
+# *against* it -- so making it the default costs no coverage and removes the
+# last route by which a caller who asked for nothing in particular could reach
+# a kernel defect.  The cost is speed: the torch arm is the slow one (its
+# largest official cell peaks at 16.4 GiB and runs in seconds, not milliseconds).
+def _default_backend() -> str:
+    """`DS_TOPK_BACKEND` if it names a backend, else `"torch"`.
+
+    Explicit rather than implied, and stated in the docstring, because the
+    production route and the default route are now different: a caller who
+    wants the kernel this device has asks for `"maca_c"`, or sets
+    `DS_TOPK_BACKEND=maca_c` for a whole process.  An unrecognized value is
+    ignored rather than raised -- this is a default, and a typo in an
+    environment variable must not break every call.
+    """
+    v = os.environ.get("DS_TOPK_BACKEND")
+    if v and v in _BACKENDS:
+        return v
+    return "torch"
+
 
 class UnsupportedByBackend(ValueError):
     """This backend does not implement this part of the contract.
@@ -92,7 +114,7 @@ def topk(
     value_oob_fill_value: float = float("-inf"),
     return_value: bool = True,
     abort_when_nan_found: bool = True,
-    backend: str = "maca_c",
+    backend: Optional[str] = None,
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """
     Arguments:
@@ -113,17 +135,33 @@ def topk(
         return_value: bool. If False, only return indices without values to accelerate the kernel. The return value is still a Tuple, but the first element will be None.
         abort_when_nan_found: bool. When a NaN is found, if True, aborts the whole kernel; if False, writes 0x3F3F3F3F to the corresponding output_idx[batch_idx][0] and exits.
                 The NaN check itself is always enabled. Exception: when the row's length <= topk, it is skipped.
-        backend: str. Which implementation to run.  `"maca_c"` (the default)
-                is the MACA kernel this device has: the hand-written kernel on
-                a 64 KiB part, the ported one on a 128 KiB part -- which of
-                the two is a property of the device, not a choice, so the name
-                does not name an architecture.  `"torch"` is a reference
-                implementation of the same contract, built on torch ops; it
-                runs on any device and dtype, including where no kernel is
-                built.  `"deep_gemm"` is the host repository's selector, which
-                is faster on long rows and implements a subset of this
+        backend: str. Which implementation to run.  `"torch"` (the default) is a
+                reference implementation of the contract built on torch ops:
+                it runs on any device and dtype, including where no kernel is
+                built, and it is the arm to trust when the question is what
+                the *answer* should be.  `"maca_c"` is the MACA kernel this
+                device has -- the hand-written kernel on a 64 KiB part, the
+                ported one on a 128 KiB part, which of the two being a
+                property of the device rather than a choice, so the name does
+                not name an architecture.  It is the production path and the
+                fast one, and it is what `DS_TOPK_BACKEND=maca_c` restores
+                (see below).  `"deep_gemm"` is the host repository's selector,
+                faster again on long rows, implementing a subset of this
                 contract; what it cannot serve raises `UnsupportedByBackend`
                 (see `topk_deep_gemm`).
+
+                **The default is correctness-first, not speed-first.**  The
+                kernel path is validated against this one (a differential
+                check, plus the official contract suite with `backend=` bound
+                by `scripts/official_slice.py`), so leaving it out of the
+                default costs nothing in coverage and removes the last place a
+                kernel defect could be reached by a caller who did not ask for
+                one.  `DS_TOPK_BACKEND` overrides the default for a whole
+                process -- the escape hatch for production, for a perf run
+                (the benchmark arms set it rather than editing any call site;
+                `scripts/perf_snapshot.py` names its backend per arm by
+                construction), and for bisecting.  An unrecognized value is
+                ignored, so the default still governs.
 
     Return:
         output_val: (b, topk), dtype=input.dtype.
@@ -131,6 +169,13 @@ def topk(
                     The output tensors may not be contiguous, when topk * sizeof(input.dtype or indices_dtype) is not a multiple of 32 Bytes
     """
 
+    # `None` means "take the process default", which is `torch` unless
+    # `DS_TOPK_BACKEND` says otherwise -- see the docstring.  Read here rather
+    # than in the signature so the environment is consulted per call (a
+    # process that sets it late still gets it) and so `backend=None` cannot be
+    # mistaken for a caller error.
+    if backend is None:
+        backend = _default_backend()
     # Checked before anything is read off `input`: a caller who mistyped a
     # backend name should hear about that, not about whatever the None they
     # passed in place of a tensor does to the next line.

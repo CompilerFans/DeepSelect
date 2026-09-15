@@ -288,10 +288,18 @@ values, indices = deep_select.topk(
     sorted_index=True,         # return each row's indices in ascending order
     indices_type=torch.int32,  # torch.int32 or torch.int64
     return_value=True,         # False skips the value output (~10% faster)
+    backend="maca_c",          # the MACA kernel; see "backends" below for why
 )
 # values:  (batch_size, topk) of x.dtype
 # indices: (batch_size, topk) of indices_type
 ```
+
+**`backend="maca_c"` above is not decoration.** The library's default is
+`"torch"`, a reference implementation built from torch ops -- picked so that a
+call which names no backend cannot reach a kernel defect on a device the kernel
+has not been validated on. A caller who wants the kernel asks for it, by name
+or with `DS_TOPK_BACKEND=maca_c` for a whole process. What each backend is, and
+why the default is where it is, is the next section.
 
 The row stride of the input tensor (`x`) must be aligned to `deep_select.get_stride_requirement()[0]` bytes. For unaligned inputs, padding is necessary.
 
@@ -300,16 +308,27 @@ Both outputs are allocated by the call, and their strides are aligned to `deep_s
 For the full signature, see [`deep_select/interface.py`](deep_select/interface.py).
 
 `backend=` picks the implementation, and it names implementations rather than
-architectures -- the same vocabulary as the host repository. `"maca_c"` (the
-default) is the MACA kernel this device has: the hand-written kernel on a
+architectures -- the same vocabulary as the host repository.
+
+`"torch"` (**the default**) is a reference implementation of the same contract
+built from torch ops: it runs on any device and dtype, so it is usable on a
+machine with no MACA kernel built at all, and for differentially checking
+results (`scripts/official_slice.py --backend torch`). It is the arm to trust
+when the question is what the *answer* should be, and it is the default for
+that reason: the kernel path is validated against it, so leaving it out of the
+default costs no coverage and removes the last route by which a caller who
+asked for nothing in particular could reach a kernel defect. The cost is speed
+-- it is the slow one. Unlike the kernels it rejects `bfloat16` +
+`sorted_value`, matching upstream.
+
+`"maca_c"` is the MACA kernel this device has: the hand-written kernel on a
 64 KiB part, the ported one on a 128 KiB part. Which of the two that is, is a
 property of the device rather than a choice, so no architecture name appears at
 this level (`setup.py` still builds one kernel per architecture, and
-`CUCC_TARGETS` still selects which). `"torch"` is a reference implementation of
-the same contract built from torch ops: it runs on any device and dtype, so it
-is usable on a machine with no MACA kernel built at all, and for differentially
-checking results (`scripts/official_slice.py --backend torch`). Unlike the kernels it
-rejects `bfloat16` + `sorted_value`, matching upstream.
+`CUCC_TARGETS` still selects which). It is the production path and the fast
+one: ask for it by name, or set `DS_TOPK_BACKEND=maca_c` for a whole process.
+An unrecognized value in that variable is ignored rather than raised, so a typo
+cannot break every call.
 
 `"deep_gemm"` is the host repository's own indexer selector
 (`deep_gemm.fp32_indexer_topk_selector`), called through its Python API. That
@@ -406,9 +425,20 @@ passes no `backend=` -- so the driver rebinds `deep_select.topk` for the run
 rather than editing the official file:
 
 ```bash
-PYTHONPATH=. python scripts/official_slice.py --backend maca_c   # the default
+PYTHONPATH=. python scripts/official_slice.py                    # the default (torch)
+PYTHONPATH=. python scripts/official_slice.py --backend maca_c   # the kernel, pinned
 PYTHONPATH=. python scripts/official_slice.py --backend torch    # the reference
 PYTHONPATH=/path/to/mcDeepGEMM:. python scripts/official_slice.py --backend deep_gemm
+```
+
+A pinned arm and the default are different questions and there is a flag for
+each. `--backend maca_c` pins the call, so it says nothing about the default --
+the process default is never consulted. `--default-arm maca_c` leaves the
+official call site exactly as written and sets `DS_TOPK_BACKEND` instead, so
+what runs is the path a caller who names no backend actually takes.
+
+```bash
+PYTHONPATH=. python scripts/official_slice.py --default-arm maca_c
 ```
 
 A backend whose service range is narrower than the operator's says so through

@@ -13,7 +13,8 @@ uses, timed with the same rule.  The only thing added is the axis the official
 harness cannot express: **which backend answered**, one row per (cell, backend),
 with a `status` of `pass` / `fail` / `unsupported`.
 Three backends:
-  maca_c     this repository's kernel (the default backend)
+  maca_c     this repository's kernel (the DEFAULT is `torch` now; this arm
+             names what it wants explicitly, as the recorder always has)
   torch      the official reference -- a bare `torch.topk`, as `tests/test.py`
              times it (NOT `backend="torch"`, which pads, masks and converts
              around the same call and measures something else entirely)

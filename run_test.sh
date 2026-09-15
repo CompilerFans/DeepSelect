@@ -68,6 +68,11 @@
 #                           does.  Default: unchanged (whatever the host set).
 #     DS_RESULTS_DIR        same as --results
 #     MACA_PATH             MACA toolkit root (default /opt/maca)
+#     DS_TOPK_BACKEND       which implementation a call with no `backend=` runs
+#                           (the library default is `torch`, the reference);
+#                           honoured by BOTH arms, since `tests/test.py`'s call
+#                           site names no backend.  `run_bench.sh` sets
+#                           `maca_c` for its gate arms for the same reason.
 #
 set -euo pipefail
 
@@ -90,7 +95,13 @@ Options:
   -nc, --no-cooldown   forwarded to tests/test.py; skip the per-case sleeps
   --sample N           correctness arm: how many cases (default 200)
   --shard I/N          correctness arm: run shard I of N
-  --backend NAME       correctness arm: maca_c (default) | torch | deep_gemm
+  --backend NAME       correctness arm, PINNED call: maca_c | torch | deep_gemm.
+                       Unset = the library's own default (torch), exercised
+                       through the unmodified official call site.
+  --default-arm NAME   correctness arm, UNPINNED call: set the process default
+                       to NAME and leave `deep_select.topk(...)` as written.
+                       "maca_c" here = "the default serves the kernel", which
+                       --backend maca_c does not test (it pins the call).
   --results DIR        where the log + receipt go (default results/)
   --allow-build        build first if the extension is missing or older than
                        the sources (default: run anyway, and say so in the log)
@@ -126,10 +137,10 @@ while [[ $# -gt 0 ]]; do
         --dtype)            [[ $# -ge 2 ]] || { echo "run_test.sh: --dtype needs a value" >&2; exit 2; }
                             dtype="$2"; perf_args+=("--dtype" "$2"); shift 2 ;;
         --dtype=*)          dtype="${1#*=}"; perf_args+=("$1"); shift ;;
-        --sample|--shard|--backend)
+        --sample|--shard|--backend|--default-arm)
                             [[ $# -ge 2 ]] || { echo "run_test.sh: $1 needs a value" >&2; exit 2; }
                             test_args+=("$1" "$2"); shift 2 ;;
-        --sample=*|--shard=*|--backend=*) test_args+=("$1"); shift ;;
+        --sample=*|--shard=*|--backend=*|--default-arm=*) test_args+=("$1"); shift ;;
         --results)          [[ $# -ge 2 ]] || { echo "run_test.sh: --results needs a value" >&2; exit 2; }
                             results_dir="$2"; shift 2 ;;
         --results=*)        results_dir="${1#*=}"; shift ;;

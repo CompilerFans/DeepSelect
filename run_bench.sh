@@ -351,15 +351,29 @@ fi
 # (which reads as a bench failure but is a launcher mistake).
 gate_host=()
 if [[ ${host_shapes} -eq 1 ]]; then gate_host+=(--host-shapes); fi
+# `DS_TOPK_BACKEND=maca_c` pins the DEFAULT, not the call -- `tests/test.py`'s
+# call site is unmodified, so what runs is the path a caller who names no
+# backend takes, with the kernel behind it.  Without this the library default
+# (`torch`, see `deep_select/interface.py`) would serve these arms and the gate
+# would time the reference.  (`perf_snapshot.py` needs nothing: it passes
+# `backend=` per arm by construction.)
+#
+# The prefixed `env` is load-bearing and applies to arm 3 too.  Arm 3 is
+# `--dtype fp32` over the same `performance_cases()`, whose last five rows are
+# the Sampler (fp32, `sorted_value=True`, int64 indices) -- fp32 cells, not the
+# host shapes.  Those are exactly where `deep_gemm` raises `UnsupportedByBackend`
+# ("returns an unordered selection"), so an unpinned arm 3 would be five cells of
+# reference and no kernel measurement at all.
+gate_env=(env DS_TOPK_BACKEND=maca_c)
 if [[ ${skip_gate} -eq 0 ]]; then
-    run_arm official python tests/test.py --perf-only -nc "${gate_host[@]}" || bench_status=1
+    run_arm official "${gate_env[@]}" python tests/test.py --perf-only -nc "${gate_host[@]}" || bench_status=1
 fi
 
 # arm 3 -- the official grid's fp32 arm (`tests/test.py` filters its own
 # `performance_cases`, which are bf16, so this is the Sampler cells, plus the
 # host selector shapes when they are on).
 if [[ ${skip_gate} -eq 0 ]]; then
-    run_arm official_fp32 python tests/test.py --perf-only -nc --dtype fp32 "${gate_host[@]}" || bench_status=1
+    run_arm official_fp32 "${gate_env[@]}" python tests/test.py --perf-only -nc --dtype fp32 "${gate_host[@]}" || bench_status=1
 fi
 
 {

@@ -22,6 +22,15 @@ instead of editing the official file (see `_bind_backend`).
 
     PYTHONPATH=. python scripts/official_slice.py [--sample N] [--seed S]
                                                  [--backend {maca_c,torch,deep_gemm}]
+                                                 [--default-arm NAME]
+
+`--backend` and `--default-arm` are different questions and the harness asks
+both.  `--backend` pins the call and is the differential check: "is the kernel
+right?"  `--default-arm` leaves `tests/test.py` calling `deep_select.topk(...)`
+exactly as written -- no rebinding -- and only changes what that bare call
+resolves to, i.e. it exercises the path a caller who names no backend actually
+takes.  Run both when the default changes; a pinned `--backend maca_c` pass
+says nothing about the default, because it is not the default that answered.
 """
 
 import argparse
@@ -127,6 +136,19 @@ def _bind_backend(original, backend):
     return bound
 
 
+def _set_default_backend(backend):
+    """Point the *unpinned* call at a backend, through the library's own knob.
+
+    The counterpart of `_bind_backend`, and deliberately not the same
+    mechanism: this one sets `DS_TOPK_BACKEND`, which is how a process is
+    supposed to choose the default, and it leaves `deep_select.topk` alone --
+    so `tests/test.py`'s call site is the unmodified one and what is exercised
+    is the real default path (the resolution in `_default_backend`, the lazy
+    `deep_gemm` import, everything).
+    """
+    os.environ["DS_TOPK_BACKEND"] = backend
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sample", type=int, default=200,
@@ -137,6 +159,13 @@ def main():
                         help="implementation under test; unset leaves the "
                              "library's own choice, which is what the official "
                              "suite runs with unmodified")
+    parser.add_argument("--default-arm", default=None,
+                        choices=["maca_c", "torch", "deep_gemm"],
+                        help="leave the official call site unpinned and set "
+                             "the *process default* instead "
+                             "(DS_TOPK_BACKEND); this is the arm that tests "
+                             "the default, as opposed to --backend, which "
+                             "tests one implementation")
     parser.add_argument("--shard", default=None, metavar="I/N",
                         help="run every N-th case of the sample, offset I "
                              "(0-based): N processes together cover the whole "
@@ -144,8 +173,20 @@ def main():
                              "down to one process's wall clock")
     args = parser.parse_args()
 
+    if args.backend is not None and args.default_arm is not None:
+        # They answer different questions and combining them would report one
+        # answer under the other's name: `--backend` pins the call, so the
+        # process default would never be consulted and the `--default-arm`
+        # result would be a lie.
+        raise SystemExit("official_slice.py: --backend pins the call and "
+                         "--default-arm sets what an unpinned call resolves "
+                         "to; pass one, not both")
     if args.backend is not None:
         deep_select.topk = _bind_backend(deep_select.topk, args.backend)
+    elif args.default_arm is not None:
+        _set_default_backend(args.default_arm)
+        print(f"unpinned arm: DS_TOPK_BACKEND={args.default_arm} "
+              f"(the official call site is unmodified)", flush=True)
 
     random.seed(args.seed)
     # The host repo's own correctness shapes come first and are not sampled:
