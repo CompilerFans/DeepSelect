@@ -10,8 +10,8 @@ from ._log import log, log_call
 
 
 # The backend names.  `maca_c` is the kernel this device has, `torch` is a
-# reference implementation of the contract, `deep_gemm` the host repository's
-# selector.
+# reference implementation of the contract, `deep_gemm` the soft-dependency
+# package's selector.
 _BACKENDS = ("maca_c", "torch", "deep_gemm")
 
 
@@ -110,7 +110,7 @@ def topk(
         backend: str. Which implementation to run: `"torch"` (the default), a
                 reference implementation built from torch ops that runs on any
                 device and dtype; `"maca_c"`, this device's MACA kernel; or
-                `"deep_gemm"`, the host repository's selector, which implements
+                `"deep_gemm"`, the `deep_gemm` package's selector, which implements
                 a subset of the contract (see `topk_deep_gemm`).
                 `DS_TOPK_BACKEND` overrides the default for a whole process.
 
@@ -216,15 +216,15 @@ def topk(
         return output_val, output_idx
 
 
-# The host kernel's `kMaxTopK` (`csrc/kernels/fp32_topk.cu`).  Its selector
-# refuses more, so this backend refuses first, naming the gap rather than the
-# kernel's assert.
+# `deep_gemm`'s `kMaxTopK` (`csrc/kernels/fp32_topk.cu`).  Its selector refuses
+# more, so this backend refuses first, naming the gap rather than the kernel's
+# assert.
 _DEEP_GEMM_MAX_TOPK = 2048
 
 
 @functools.lru_cache(maxsize=1)
 def _deep_gemm():
-    """The host repository's package, imported on first use.
+    """The `deep_gemm` package, imported on first use.
 
     A soft dependency -- this repository is standalone -- so it is imported
     only when `backend="deep_gemm"` is asked for.
@@ -232,6 +232,24 @@ def _deep_gemm():
     import deep_gemm
 
     return deep_gemm
+
+
+@functools.lru_cache(maxsize=1)
+def deep_gemm_available() -> bool:
+    """Whether `backend="deep_gemm"` can run in this process.
+
+    True when the `deep_gemm` package imports *and* carries the entry that
+    backend calls.  Asked of the package, not of a location: which checkout
+    `import deep_gemm` lands on is not this repository's business, only
+    whether the call will work.
+
+    The harnesses ask this to decide whether to run the cells only that
+    backend can answer; a caller can ask it before naming the backend.
+    """
+    try:
+        return callable(getattr(_deep_gemm(), "fp32_indexer_topk_selector", None))
+    except Exception:
+        return False
 
 
 @log_call
@@ -249,7 +267,7 @@ def topk_deep_gemm(
     return_value: bool = True,
     abort_when_nan_found: bool = True,
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
-    """`topk` served by the host repository's indexer selector
+    """`topk` served by the `deep_gemm` package's indexer selector
     (`deep_gemm.fp32_indexer_topk_selector`).
 
     It implements a subset of this contract, and what it cannot serve raises
@@ -305,7 +323,7 @@ def topk_deep_gemm(
     n_rows, vocab_size = input.shape
     device = input.device
     if input.stride(0) != vocab_size:
-        # The host kernel walks a row as `scores + row * n_cols`, i.e. it
+        # The `deep_gemm` kernel walks a row as `scores + row * n_cols`, i.e. it
         # assumes tightly packed rows; a padded row stride would quietly rank
         # the wrong elements.  Padding is legal in this contract, so normalize
         # instead of refusing.

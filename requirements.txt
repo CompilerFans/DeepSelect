@@ -6,12 +6,12 @@
 # `install_requires`.  So there is no upstream list to agree with, and what
 # follows describes THIS tree as it is vendored (a submodule of mcDeepGEMM,
 # branch `dev_tvm_ffi`).  That is why `deep_gemm` below is called a cycle
-# rather than an omission, and why `tilelang` / `mctlassEx` are named as the
-# host repository's rather than ours.
+# rather than an omission, and why `tilelang` / `mctlassEx` are named as
+# mcDeepGEMM's rather than ours.
 #
 # Note the import name is not the distribution name for every one of these:
 # `import tvm_ffi` is the distribution `apache-tvm-ffi` (there is no `tvm_ffi`
-# distribution), and the same is true of the host repository's own edge.  Pin
+# distribution), and the same is true of mcDeepGEMM's own edge.  Pin
 # what a resolver wants, not what `import` says.
 #
 # This file does NOT list the MACA toolkit (`$MACA_PATH`, default `/opt/maca`)
@@ -42,7 +42,7 @@ apache-tvm-ffi>=0.1.2,~=0.1.0
 # touches torch immediately (`deep_select/interface.py`), so it is not optional
 # for any use of this package.
 #
-# The floor matches the host repository's own `install_requires`.  The real
+# The floor matches mcDeepGEMM's own `install_requires`.  The real
 # constraint is narrower and not expressible here: it must be the
 # MACA-compatible PyTorch for the toolkit on the machine, and a wheel built
 # against one torch major/minor must be loaded by that same one.
@@ -90,18 +90,17 @@ ninja
 # reason; add it only if an old setuptools on the target needs it.
 
 # ---- NOT listed, and why --------------------------------------------------
-# `deep_gemm` (the host repository's package): a SOFT dependency, reached only
-# by `backend="deep_gemm"`, imported lazily inside a cached accessor in
-# `deep_select/interface.py`.  This repository is vendored as a submodule of
-# that same host, so requiring it here would be a cycle.  `backend="maca_c"`
-# -- the default -- never touches it.
+# `deep_gemm`: a SOFT dependency, reached only by `backend="deep_gemm"`, and
+# imported lazily inside a cached accessor in `deep_select/interface.py`.
+# This repository is vendored inside that package's own checkout, so requiring
+# it here would be a cycle.  The default backend (`torch`) never touches it.
 #
 # `ray`: `tests/kernelkit/stress.py` guards its import with try/except and
 # defines a pass-through stub when absent, so the stress suite degrades rather
 # than failing.  Listing it would make a test-only extra mandatory.
 #
-# `tilelang` / `mctlassEx`: the host repository's dependencies, not this one's.
+# `tilelang` / `mctlassEx`: mcDeepGEMM's dependencies, not this one's.
 # No file in this tree imports either.
 #
-# `pytest`: there is no pytest suite here and no conftest.py -- unlike the host
-# repository.  The suite is upstream's, driven by its own `__main__`.
+# `pytest`: there is no pytest suite here and no conftest.py -- unlike
+# mcDeepGEMM.  The suite is upstream's, driven by its own `__main__`.

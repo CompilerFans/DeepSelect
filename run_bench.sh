@@ -7,8 +7,8 @@
 # ── The three arms ──────────────────────────────────────────────────────────
 #
 #   1. `perf_snapshot.py` -- writes the CSV: the OFFICIAL grid (`tests/test.py`'s
-#      own `performance_cases()`, called not restated), plus the host repo's
-#      selector grid, for the backends named in `--arms`.
+#      own `performance_cases()`, called not restated), plus the selector
+#      grid, for the backends named in `--arms`.
 #   2. `tests/test.py --perf-only` -- the same grid driven by upstream's own file
 #      in one process.  Redundant with (1) on purpose: it is the gate.
 #   3. `tests/test.py --perf-only --dtype fp32` -- the fp32 Sampler cells.
@@ -46,7 +46,8 @@
 #                           Default: unchanged.
 #     DS_BENCH_DIR          output root (default perf_data)
 #     DS_BENCH_TIMEOUT      per-arm timeout in seconds (default 5400)
-#     MACA_PATH             MACA toolkit root (default /opt/maca)
+#     MACA_PATH             MACA toolkit root (default /opt/maca).  MACA_HOME is
+#                           consulted when this is unset; this one wins if both are set.
 #
 set -euo pipefail
 # `set -e` with `[[ ]] && cmd` as a statement exits when the test is false, so
@@ -65,23 +66,34 @@ Usage: run_bench.sh [options]
   --set-baseline      repoint <chip>/baseline at this run (only if all arms pass)
   --baseline-dir DIR  repoint the baseline at DIR and exit without measuring
   --compare-only      compare the latest run against the baseline, measure nothing
-  --no-host-shapes    do not add the host repo's selector shapes to the
-                      snapshot (by default they ARE added; the deep_gemm
-                      backend has no cell on the official bf16 grid, so
-                      without them its column is 95 `unsupported` rows)
+  --no-deep-gemm-shapes  do not add the selector shapes to any arm (by default
+                      they are added when the `deep_gemm` package can serve
+                      them; that backend has no cell on the official bf16 grid,
+                      so without them its column is 95 `unsupported` rows)
   --skip-gate         do not run tests/test.py --perf-only (the official grid)
   --results DIR       output root (default perf_data)
   --list              print what would run and exit
   -h, --help          this message
 
-Env: CUDA_VISIBLE_DEVICES, DS_BENCH_DIR, DS_BENCH_TIMEOUT, MACA_PATH
+Env: CUDA_VISIBLE_DEVICES, DS_BENCH_DIR, DS_BENCH_TIMEOUT, MACA_PATH (or MACA_HOME)
 EOF
 }
 
-export MACA_PATH="${MACA_PATH:-/opt/maca}"
+export MACA_PATH="${MACA_PATH:-${MACA_HOME:-/opt/maca}}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
-host_shapes=1
+# Whether the `deep_gemm` column can be measured at all is the *package's*
+# answer -- does it import, and does it carry the entry `backend="deep_gemm"`
+# calls -- and never a question about where its source lives.  Off when it
+# cannot serve them, so the run does not spend 25 cells on rows that would all
+# read `unsupported`.  `--no-deep-gemm-shapes` overrides it off.
+deep_gemm_shapes=$(python -W "ignore:Could not find flash_attn:UserWarning" - <<'PY'
+import os, sys
+sys.path.insert(0, os.getcwd())
+from deep_select import deep_gemm_available
+print(1 if deep_gemm_available() else 0)
+PY
+) || deep_gemm_shapes=0
 arms="maca_c,torch,deep_gemm"
 set_baseline=0
 baseline_dir=""
@@ -93,7 +105,7 @@ timeout_s="${DS_BENCH_TIMEOUT:-5400}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --no-host-shapes)   host_shapes=0; shift ;;
+        --no-deep-gemm-shapes)   deep_gemm_shapes=0; shift ;;
         --arms)             [[ $# -ge 2 ]] || { echo "run_bench.sh: --arms needs a value" >&2; exit 2; }
                             arms="$2"; shift 2 ;;
         --arms=*)           arms="${1#*=}"; shift ;;
@@ -119,7 +131,7 @@ done
 # The **device's** family -- see the same block in `run_test.sh` for why the
 # build list is the wrong question (it answers "what did I build first", not
 # "what does this device load").
-family=$(python - <<'PY'
+family=$(python -W "ignore:Could not find flash_attn:UserWarning" - <<'PY'
 import os, sys
 sys.path.insert(0, os.getcwd())
 from deep_select._arch import family_of_target, native_target
@@ -130,7 +142,7 @@ PY
 # Named after the **device**, not the arch family: two boards can share one
 # family, and the family is recorded per row (`chip`) anyway.  `perf_snapshot.py`
 # derives the name from the same call, so the two cannot land in different dirs.
-device_dir=$(python - <<'PY'
+device_dir=$(python -W "ignore:Could not find flash_attn:UserWarning" - <<'PY'
 import torch
 print((torch.cuda.get_device_name(0) or "").strip().replace(" ", "_"))
 PY
@@ -181,8 +193,8 @@ if [[ "$list_only" == "1" ]]; then
     echo "run_bench.sh: md5         = ${md5}"
     echo "run_bench.sh: devices     = ${devices}"
     echo "run_bench.sh: arms        = ${arms}"
-    echo "run_bench.sh: host shapes = $([[ ${host_shapes} -eq 1 ]] && echo yes || echo no)  (the host repo's selector grid: 25 perf cells at top_k=2048 fp32, plus the host correctness shapes on the gate; the only cells the deep_gemm backend can answer)"
-    echo "run_bench.sh: grid        = $([[ ${host_shapes} -eq 1 ]] && echo '95 official + 25 host = 120 cells' || echo '95 official cells only')"
+    echo "run_bench.sh: selector shapes = $([[ ${deep_gemm_shapes} -eq 1 ]] && echo yes || echo no)  (the deep_gemm backend's grid: 25 perf cells at top_k=2048 fp32, plus its correctness shapes on the gate; the only cells it can answer)"
+    echo "run_bench.sh: grid        = $([[ ${deep_gemm_shapes} -eq 1 ]] && echo '95 official + 25 selector = 120 cells' || echo '95 official cells only')"
     echo "run_bench.sh: official gate = $([[ ${skip_gate} -eq 1 ]] && echo skipped || echo yes)"
     echo "run_bench.sh: out root    = ${chip_dir}/<YYYYmmdd_HHMMSS>"
     echo "run_bench.sh: baseline    = ${chip_dir}/baseline"
@@ -276,9 +288,10 @@ snapshot_failed=0
 # still pass).
 snap_args=(scripts/perf_snapshot.py --arms "${arms}" --out-dir "${results_dir}"
            --tag "${stamp}")
-# Without the host shapes the `deep_gemm` column compares nothing, so they ride
-# in the SNAPSHOT whenever they are on (which is the default).
-if [[ ${host_shapes} -eq 1 ]]; then snap_args+=(--deep-gemm-axes); fi
+# Without the selector shapes the `deep_gemm` column compares nothing, so they
+# ride in the SNAPSHOT whenever they are on (which is the default when the
+# package can serve them).
+if [[ ${deep_gemm_shapes} -eq 1 ]]; then snap_args+=(--deep-gemm-axes); fi
 if ! run_arm snapshot python "${snap_args[@]}"; then
     snapshot_failed=1
     bench_status=1
@@ -288,8 +301,8 @@ fi
 # `python tests/test.py`, not `./tests/test.py`: upstream's file is not
 # executable, and a bare path there fails with rc=126 before it runs anything
 # (which reads as a bench failure but is a launcher mistake).
-gate_host=()
-if [[ ${host_shapes} -eq 1 ]]; then gate_host+=(--host-shapes); fi
+gate_deep_gemm=()
+if [[ ${deep_gemm_shapes} -eq 1 ]]; then gate_deep_gemm+=(--deep-gemm-shapes); fi
 # `DS_TOPK_BACKEND=maca_c` pins the DEFAULT, not the call: `tests/test.py`'s call
 # site is unmodified, so what runs is the path a caller who names no backend
 # takes.  Without it the library default (`torch`, see `deep_select/interface.py`)
@@ -301,13 +314,14 @@ if [[ ${host_shapes} -eq 1 ]]; then gate_host+=(--host-shapes); fi
 # kernel at all.
 gate_env=(env DS_TOPK_BACKEND=maca_c)
 if [[ ${skip_gate} -eq 0 ]]; then
-    run_arm official "${gate_env[@]}" python tests/test.py --perf-only -nc "${gate_host[@]}" || bench_status=1
+    run_arm official "${gate_env[@]}" python tests/test.py --perf-only -nc "${gate_deep_gemm[@]}" || bench_status=1
 fi
 
 # arm 3 -- the official grid's fp32 arm: `tests/test.py` filters its own
-# `performance_cases` (bf16), so this is the Sampler cells plus the host shapes.
+# `performance_cases` (bf16), so this is the Sampler cells plus the selector
+# shapes.
 if [[ ${skip_gate} -eq 0 ]]; then
-    run_arm official_fp32 "${gate_env[@]}" python tests/test.py --perf-only -nc --dtype fp32 "${gate_host[@]}" || bench_status=1
+    run_arm official_fp32 "${gate_env[@]}" python tests/test.py --perf-only -nc --dtype fp32 "${gate_deep_gemm[@]}" || bench_status=1
 fi
 
 {

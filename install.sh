@@ -10,7 +10,8 @@
 # Env:
 #     CUCC_TARGETS  targets to compile; unset means
 #                   `deep_select/_arch.py::DEFAULT_TARGETS`, one per family
-#     MACA_PATH     MACA toolkit root (default /opt/maca)
+#     MACA_PATH     MACA toolkit root (default /opt/maca).  MACA_HOME is
+#                   consulted when this is unset; this one wins if both are set.
 #     MAX_JOBS      ninja's -j
 #
 # `pip install .` is not used: a PEP 517 install runs `setup.py` twice
@@ -25,7 +26,7 @@ original_dir=$(pwd)
 script_dir=$(realpath "$(dirname "$0")")
 cd "$script_dir"
 
-export MACA_PATH="${MACA_PATH:-/opt/maca}"
+export MACA_PATH="${MACA_PATH:-${MACA_HOME:-/opt/maca}}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
 # See build.sh: a stale `CUDA_HOME`/`CUDA_PATH`/`CUCC_PATH` in the caller's

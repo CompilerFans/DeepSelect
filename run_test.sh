@@ -51,7 +51,8 @@
 #     CUDA_VISIBLE_DEVICES  device selection; applied to the arm.  Default:
 #                           unchanged (whatever the host set).
 #     DS_RESULTS_DIR        same as --results
-#     MACA_PATH             MACA toolkit root (default /opt/maca)
+#     MACA_PATH             MACA toolkit root (default /opt/maca).  MACA_HOME is
+#                           consulted when this is unset; this one wins if both are set.
 #     DS_TOPK_BACKEND       which implementation a call with no `backend=` runs
 #                           (the library default is `torch`, the reference),
 #                           honoured by BOTH arms; `run_bench.sh` sets `maca_c`
@@ -94,11 +95,11 @@ Anything after `--` goes to the arm verbatim.
 There is no exclusivity gate: pick the device with CUDA_VISIBLE_DEVICES, and
 read the recorded md5 + mx-smi snapshot before comparing two runs.
 
-Env: CUDA_VISIBLE_DEVICES, DS_RESULTS_DIR, MACA_PATH
+Env: CUDA_VISIBLE_DEVICES, DS_RESULTS_DIR, MACA_PATH (or MACA_HOME)
 EOF
 }
 
-export MACA_PATH="${MACA_PATH:-/opt/maca}"
+export MACA_PATH="${MACA_PATH:-${MACA_HOME:-/opt/maca}}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
 arm=""
@@ -157,7 +158,7 @@ arm="${arm:-perf}"
 # whichever was built first -- right only while `CUCC_TARGETS` happens to lead
 # with this device's family, which is how a receipt ends up naming the C500
 # artifact of a C600U measurement.)
-family=$(python - <<'PY'
+family=$(python -W "ignore:Could not find flash_attn:UserWarning" - <<'PY'
 import os, sys
 sys.path.insert(0, os.getcwd())
 from deep_select._arch import family_of_target, native_target

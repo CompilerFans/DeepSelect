@@ -265,49 +265,49 @@ def correctness_cases_() -> List[TestParam]:
                                 correctness_cases.append(cur_case)
     return correctness_cases
 
-# ── the host repo's selector shapes ─────────────────────────────────────────
+# ── the `deep_gemm` selector's shapes ───────────────────────────────────────
 # `deep_gemm/tests/test_indexer_topk_selector.py`'s `SELECTOR_PERF_SHAPES`
 # (= test-topk + sglang + dsa), all `top_k = 2048`, fp32.  Without them the
 # `deep_gemm` backend is `unsupported` on every row, so nothing is compared.
-# `csrc/structs.h`'s `kHostSelectorPerfShapes` is the C++ copy -- edit together.
+# `csrc/structs.h`'s `kDeepGemmSelectorPerfShapes` is the C++ mirror -- edit together.
 #
-# (n_rows, n_cols, seq_len): `seq_len` is the host grid's window, this repo
-# ranks the whole row, so the two are NOT numerically comparable.
-HOST_SELECTOR_PERF_SHAPES = (
+# (n_rows, n_cols, seq_len): `seq_len` is the `deep_gemm` grid's window, this
+# repo ranks the whole row, so the two are NOT numerically comparable.
+DEEP_GEMM_SELECTOR_PERF_SHAPES = (
     [(b, 66551, 66551) for b in (1, 16, 132, 512)]                    # test-topk
     + [(b, 131072, s) for b in (1, 132, 256, 4096)                    # sglang
        for s in (2048, 4096, 16384, 65536)]
     + [(1, 107520, 107520), (16, 66551, 66551), (132, 107520, 107520),  # dsa
        (256, 107520, 107520), (4096, 107520, 107520)]
 )
-HOST_SELECTOR_PERF_TOPK = 2048
+DEEP_GEMM_SELECTOR_PERF_TOPK = 2048
 
 
-def host_selector_perf_cases() -> List[TestParam]:
-    """`HOST_SELECTOR_PERF_SHAPES` as `TestParam`s: fp32, `top_k=2048` -- all the
+def deep_gemm_selector_perf_cases() -> List[TestParam]:
+    """`DEEP_GEMM_SELECTOR_PERF_SHAPES` as `TestParam`s: fp32, `top_k=2048` -- all the
     `deep_gemm` backend serves (`topk <= 2048`, fp32 only)."""
     return [
-        TestParam(b, v, HOST_SELECTOR_PERF_TOPK, False, False, False,
+        TestParam(b, v, DEEP_GEMM_SELECTOR_PERF_TOPK, False, False, False,
                   torch.float32, torch.int32, num_runs=10)
-        for b, v, _seq in HOST_SELECTOR_PERF_SHAPES
+        for b, v, _seq in DEEP_GEMM_SELECTOR_PERF_SHAPES
     ]
 
-# The host grid's own correctness shapes (`SELECTOR_CORRECTNESS_SHAPES`):
-# (n_rows, n_cols, top_k).  The host declares `seq_lens` / `seq_starts` windows;
-# this repository ranks the whole row instead -- valid here, deliberately not the
-# host's semantics, and the shapes a `deep_gemm` column exists on at all.
-HOST_SELECTOR_CORRECTNESS_SHAPES = (
-    (16,  257,   31),     # host `chunks` kernel
-    (512, 65536, 2048),   # host `coarse12` kernel
+# The `deep_gemm` grid's own correctness shapes (`SELECTOR_CORRECTNESS_SHAPES`):
+# (n_rows, n_cols, top_k).  That grid declares `seq_lens` / `seq_starts` windows;
+# this repository ranks the whole row instead -- valid here, deliberately not its
+# semantics, and the shapes a `deep_gemm` column exists on at all.
+DEEP_GEMM_SELECTOR_CORRECTNESS_SHAPES = (
+    (16,  257,   31),     # deep_gemm `chunks` kernel
+    (512, 65536, 2048),   # deep_gemm `coarse12` kernel
 )
 
 
-def host_selector_correctness_cases() -> List[TestParam]:
-    """`HOST_SELECTOR_CORRECTNESS_SHAPES` as `TestParam`s, fp32."""
+def deep_gemm_selector_correctness_cases() -> List[TestParam]:
+    """`DEEP_GEMM_SELECTOR_CORRECTNESS_SHAPES` as `TestParam`s, fp32."""
     return [
         TestParam(b, v, k, False, False, False, torch.float32, torch.int32,
                   num_runs=0)
-        for b, v, k in HOST_SELECTOR_CORRECTNESS_SHAPES
+        for b, v, k in DEEP_GEMM_SELECTOR_CORRECTNESS_SHAPES
     ]
 
 
@@ -346,18 +346,26 @@ if __name__ == '__main__':
                         help="Only run testcases whose input dtype matches")
     parser.add_argument("--perf-only", action="store_true",
                         help="Only run performance testcases (num_runs > 0)")
-    parser.add_argument("--host-shapes", action="store_true",
-                        help="Also run the host repo's selector shapes "
-                             "(fp32, top_k=2048): the only rows the deep_gemm "
-                             "backend can answer, so the only rows it can be "
-                             "compared on")
+    parser.add_argument("--deep-gemm-shapes", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="Run the selector shapes (fp32, top_k=2048): the only "
+                             "rows the `deep_gemm` backend can answer, so the only "
+                             "rows it can be compared on.  Default: run them when "
+                             "the `deep_gemm` package is importable and carries the "
+                             "entry that backend calls, skip them otherwise")
     args = parser.parse_args()
+
+    # A package question, not a location one: whether the backend will work is
+    # `import deep_gemm` plus the entry it calls, which is what this asks.
+    if args.deep_gemm_shapes is None:
+        import deep_select
+        args.deep_gemm_shapes = deep_select.deep_gemm_available()
 
     correctness_cases = correctness_cases_()
 
     performance_cases = performance_cases()
-    if args.host_shapes:
-        performance_cases = performance_cases + host_selector_perf_cases()
+    if args.deep_gemm_shapes:
+        performance_cases = performance_cases + deep_gemm_selector_perf_cases()
 
     testcases = correctness_cases + performance_cases
 

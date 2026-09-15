@@ -7,7 +7,7 @@
 // `TVMFFIErrorSetRaisedFromCStr` env API is the documented way for a host
 // function to report a failure that carries a useful message.
 //
-// Two levels, mirroring the host repository's `DG_HOST_ASSERT` /
+// Two levels, mirroring `deep_gemm`'s `DG_HOST_ASSERT` /
 // `DG_CUDA_RUNTIME_CHECK` pair:
 //
 //   DS_HOST_ASSERT(cond)            a contract violation the caller caused

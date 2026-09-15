@@ -8,9 +8,9 @@ A cell a backend cannot serve states its reason there, and is never dropped.
 Backends: `maca_c` -- this repository's kernel, the production arm (the DEFAULT
 is `torch`, so it is asked for by name); `torch` -- the official reference, a
 bare `torch.topk`, NOT `backend="torch"`, which pads, masks and converts around
-the same call and measures something else entirely; `deep_gemm` -- the host
-repo's `fp32_indexer_topk_selector`, float32 only, hence `unsupported` on the
-whole bf16 official grid.  `--deep-gemm-axes` adds the host fp32 grid it answers.
+the same call and measures something else entirely; `deep_gemm` -- that
+package's `fp32_indexer_topk_selector`, float32 only, hence `unsupported` on the
+whole bf16 official grid.  `--deep-gemm-axes` adds the fp32 grid it answers.
 Cases: the official grid (`tests/test.py::performance_cases()`) plus
 `--cases-file`, a JSON list of `lib.TestParam` fields, e.g.
 `{"batch_size": 6, "vocab_size": 32768, "topk": 1024}`.  Those three are the
@@ -18,7 +18,7 @@ required keys; the rest default to the Lightning Indexer's configuration, and
 `dtype` / `out_idx_dtype` take bf16 / fp32 / int32 / int64 -- an unknown name is
 an error, not a default.
 
-Output, following the host repo's `deep_gemm/tests/perf_data/` layout:
+Output, following mcDeepGEMM's `deep_gemm/tests/perf_data/` layout:
 `perf_data/<device>/<YYYYmmdd_HHMMSS>/` (`deepselect_perf.csv`, `manifest.json`).
 `<device>` is the **device name torch reports** (`MetaX C500` -> `MetaX_C500`),
 never the arch family: the folder answers "which board did I measure on", and two
@@ -28,7 +28,7 @@ Usage:
     CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \\
         python3 scripts/perf_snapshot.py
     ... --arms a,b                # subset of the backends (default: all three)
-    ... --deep-gemm-axes          # + the host repo's fp32 selector grid
+    ... --deep-gemm-axes          # + the fp32 selector grid (default: when usable)
     ... --cases-file extra.json   # + your own cases
     ... --out-dir DIR --tag NAME  # where the record lands / its timestamp
     ... --dry-run                 # print what would run, measure nothing
@@ -150,24 +150,24 @@ def _us(seconds: Optional[float]) -> Any:
     return round(seconds * 1e6, 3) if seconds else ""
 # ── cases ──
 def deep_gemm_cases() -> List[Any]:
-    """The host repo's selector perf shapes, from `tests/test.py`.
+    """The `deep_gemm` selector perf shapes, from `tests/test.py`.
 
-    The table lives there (`HOST_SELECTOR_PERF_SHAPES`), not here: the official
-    grid drives the *same* shapes via `--host-shapes`, and a second copy drifts
-    from the gate meant to check it.  `note` marks the rows whose host `seq_len`
+    The table lives there (`DEEP_GEMM_SELECTOR_PERF_SHAPES`), not here: the official
+    grid drives the *same* shapes via `--deep-gemm-shapes`, and a second copy drifts
+    from the gate meant to check it.  `note` marks the rows whose `seq_len`
     is narrower than `n_cols` -- windows there, whole-row rankings here, so the
     two are not comparable at the same shape.
     """
     return [(_deep_gemm_note(b, v, seq),
-             lib.TestParam(b, v, official.HOST_SELECTOR_PERF_TOPK, False, False,
+             lib.TestParam(b, v, official.DEEP_GEMM_SELECTOR_PERF_TOPK, False, False,
                            False, torch.float32, torch.int32, num_runs=10))
-            for b, v, seq in official.HOST_SELECTOR_PERF_SHAPES]
+            for b, v, seq in official.DEEP_GEMM_SELECTOR_PERF_SHAPES]
 
 
 def _deep_gemm_note(b: int, v: int, seq: int) -> str:
     if seq == v:
         return ""
-    return (f"sglang-bs{b}-seq{seq}: the host grid declares a window; this "
+    return (f"sglang-bs{b}-seq{seq}: that grid declares a window; this "
             f"ranks the whole row")
 
 
@@ -228,10 +228,27 @@ def device_dir_name() -> str:
     return name.replace(" ", "_")
 
 
+def _deep_gemm_package() -> Dict[str, str]:
+    """What the `deep_gemm` arm is, recorded from the *package* it imports.
+
+    A package question, not a location one: `backend="deep_gemm"` is
+    `import deep_gemm`, so what decides the numbers is the module that import
+    lands on and its version -- not which checkout holds its source, which
+    this repository has no business knowing.  Empty strings mean the package
+    is not importable, which is a true answer and the one to record.
+    """
+    try:
+        import deep_gemm
+        return {
+            "deep_gemm_package": os.path.dirname(os.path.abspath(deep_gemm.__file__)),
+            "deep_gemm_version": str(getattr(deep_gemm, "__version__", "")),
+        }
+    except Exception:
+        return {"deep_gemm_package": "", "deep_gemm_version": ""}
+
+
 def provenance(sm_count: int) -> Dict[str, Any]:
     here = REPO
-    # The host repo the `deep_gemm` arm comes from; `DEEP_GEMM_REPO` overrides.
-    host = os.environ.get("DEEP_GEMM_REPO", "/home/compiler_gfx/tilelang/mcDeepGEMM")
     # The extension the *device* loads -- `_binding.load()`, the same artifact
     # `run_bench.sh` resolves its md5 through.  There is one name now (the
     # build produces a single fat extension), but this stays in terms of the
@@ -243,10 +260,8 @@ def provenance(sm_count: int) -> Dict[str, Any]:
     if sos:
         md5 = hashlib.md5(open(os.path.join(here, "deep_select", sos[0]),
                                "rb").read()).hexdigest()
-    dg = _run(["git", "log", "-1", "--format=%H%n%cd", "--date=iso"], host) \
-        if os.path.isdir(os.path.join(host, ".git")) else ""
-    dg_lines = dg.splitlines()
     return {
+        **_deep_gemm_package(),
         # Arch family per row (`metax_xcore<N>`), from the device, not the
         # directory name: the column to filter on for same-ISA rows.
         "chip": f"metax_{target}",
@@ -259,9 +274,6 @@ def provenance(sm_count: int) -> Dict[str, Any]:
         "deep_select_git_dirty": bool(_run(["git", "status", "--porcelain"], here)),
         "extension_so": sos[0] if sos else "",
         "extension_md5": md5,
-        "deep_gemm_repo": host,
-        "deep_gemm_git": dg_lines[0] if dg_lines else "",
-        "deep_gemm_commit_date": dg_lines[1] if len(dg_lines) > 1 else "",
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
     }
 # ── writing ──
@@ -330,9 +342,12 @@ def main() -> int:
                "dtype/out_idx_dtype take " + "/".join(sorted(set(DTYPES))) + ".")
     ap.add_argument("--arms", default=",".join(ARMS),
                     help="comma-separated subset of the backends")
-    ap.add_argument("--deep-gemm-axes", action="store_true",
-                    help="also run the host repo's fp32 selector grid (the only "
-                         "cells the deep_gemm backend can answer)")
+    ap.add_argument("--deep-gemm-axes", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="run the fp32 selector grid too (the only cells the "
+                         "deep_gemm backend can answer).  Default: run it when "
+                         "the `deep_gemm` package is importable and carries the "
+                         "entry that backend calls")
     ap.add_argument("--cases-file", default="",
                     help="JSON list of extra cases (see the epilog)")
     ap.add_argument("--out-dir", default=os.path.join(REPO, "perf_data"))
@@ -345,6 +360,9 @@ def main() -> int:
         if a not in ARMS:
             raise SystemExit(f"unknown backend {a!r}; expected one of {', '.join(ARMS)}")
     cases = [("official", "", p) for p in official.performance_cases()]
+    if args.deep_gemm_axes is None:
+        from deep_select import deep_gemm_available
+        args.deep_gemm_axes = deep_gemm_available()
     if args.deep_gemm_axes:
         cases += [("deep_gemm_axes", note, p) for note, p in deep_gemm_cases()]
     if args.cases_file:

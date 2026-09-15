@@ -11,7 +11,7 @@ through torch, the architecture names a family, and the family is the key to
 the tables below -- one lookup on a fact the caller already has, rather than a
 device query per call.
 
-The family rows mirror the host repository's
+The family rows mirror the `deep_gemm` package's
 ``deep_gemm/utils/arch_config.py`` ``XcoreFamily`` rows, copied by hand because
 this repository does not import it; a change to either belongs in the same
 review.

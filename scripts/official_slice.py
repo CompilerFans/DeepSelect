@@ -176,23 +176,28 @@ def main():
               f"(the official call site is unmodified)", flush=True)
 
     random.seed(args.seed)
-    # The host repo's own correctness shapes come first and are not sampled:
-    # they are the rows the `deep_gemm` backend has a kernel for, so without
-    # them a `--backend deep_gemm` run compares nothing (same reason
-    # `perf_snapshot.py` carries the host perf shapes).  Still element-budgeted.
-    host = [p for p in official.host_selector_correctness_cases()
-            if p.batch_size * p.vocab_size <= ELEM_BUDGET]
-    table = host + cases()
+    # The `deep_gemm` selector's own correctness shapes come first and are not
+    # sampled: they are the rows that backend has a kernel for, so without them
+    # a `--backend deep_gemm` run compares nothing (same reason
+    # `perf_snapshot.py` carries its perf shapes).  Whether they ride along is
+    # the package's answer -- can it serve them here -- and not a question about
+    # where its source lives.  Still element-budgeted.
+    from deep_select import deep_gemm_available
+    selector = (official.deep_gemm_selector_correctness_cases()
+                if deep_gemm_available() else [])
+    selector_cases = [p for p in selector
+                      if p.batch_size * p.vocab_size <= ELEM_BUDGET]
+    table = selector_cases + cases()
     light = [p for p in table if p.batch_size * p.vocab_size <= ELEM_BUDGET]
-    sample = host + random.Random(args.seed).sample(
+    sample = selector_cases + random.Random(args.seed).sample(
         light, min(args.sample, len(light)))
     if args.shard is not None:
         index, count = (int(part) for part in args.shard.split("/"))
         sample = sample[index::count]
     print(f"official table: {len(table)} cases, {len(light)} within "
           f"{ELEM_BUDGET} elements; running {len(sample)} "
-          f"({len(host)} host-selector + "
-          f"{len(sample) - len(host)} sampled) with seed {args.seed}"
+          f"({len(selector_cases)} deep-gemm-selector + "
+          f"{len(sample) - len(selector_cases)} sampled) with seed {args.seed}"
           + (f", shard {args.shard}" if args.shard else ""), flush=True)
 
     passed, failed, skipped = 0, [], 0

@@ -11,7 +11,8 @@
 #                   `deep_select/_arch.py::DEFAULT_TARGETS`, one per family;
 #                   `setup.py` applies that default, so the scripts do not
 #                   repeat the literal.  An unrecognized target fails the build.
-#     MACA_PATH     MACA toolkit root (default /opt/maca)
+#     MACA_PATH     MACA toolkit root (default /opt/maca).  MACA_HOME is
+#                   consulted when this is unset; this one wins if both are set.
 #     MAX_JOBS      ninja's -j
 #
 # `build_ext --inplace` rather than `bdist_wheel`: a wheel run executes
@@ -24,7 +25,7 @@ original_dir=$(pwd)
 script_dir=$(realpath "$(dirname "$0")")
 cd "$script_dir"
 
-export MACA_PATH="${MACA_PATH:-/opt/maca}"
+export MACA_PATH="${MACA_PATH:-${MACA_HOME:-/opt/maca}}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
 # torch's `_find_cuda_home()` reads `CUDA_HOME`/`CUDA_PATH` *before* its

@@ -43,7 +43,13 @@ def _tvm_ffi_root():
 
 
 def _maca_root() -> str:
-    return os.environ.get("MACA_HOME") or os.environ.get("MACA_PATH") or "/opt/maca"
+    """`MACA_PATH` first, then `MACA_HOME`, then `/opt/maca`.
+
+    That order is the scripts' order too (`build.sh` exports `MACA_PATH` from
+    `${MACA_PATH:-${MACA_HOME:-/opt/maca}}`), so a host that sets only
+    `MACA_HOME` gets one root here and in every path they derive from it.
+    """
+    return os.environ.get("MACA_PATH") or os.environ.get("MACA_HOME") or "/opt/maca"
 
 
 # The device compiler is cu-bridge's `cucc`, and this file does not reimplement

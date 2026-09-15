@@ -11,26 +11,27 @@
 static constexpr uint32_t INPUT_STRIDE_ALIGNMENT_REQUIREMENT = 1024; // In number of bytes
 static constexpr uint32_t OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT = 32; // In number of bytes
 
-// The host repository's selector perf shapes, transcribed from
+// The `deep_gemm` selector's perf shapes, transcribed from
 // `deep_gemm/tests/test_indexer_topk_selector.py::SELECTOR_PERF_SHAPES`
-// (test-topk + sglang + dsa), all fp32 and `top_k = 2048`.  Three consumers
-// need the same list -- the perf grid, the perf recorder and the correctness
-// sample -- so the C++ copy lives here and `tests/test.py` carries the Python
-// one; a list repeated in three places is a list that will disagree with
-// itself.
+// (test-topk + sglang + dsa), all fp32 and `top_k = 2048`.
 //
-// Each entry is (n_rows, n_cols, seq_len).  `seq_len` is the window the host
-// grid declares, which this repository does not synthesize -- it ranks the
-// whole row -- so the two are not comparable at the same shape.
+// This is a *mirror*, kept by hand: `tests/test.py` carries the Python list
+// that the perf grid, the perf recorder and the correctness sample actually
+// run, and this copy is the compile-time record of the same shapes.  Edit the
+// two together.  Nothing in `csrc/` reads it.
 //
-// `top_k` is 2048 because that is what the host grid measures and what the
-// `deep_gemm` backend serves; a larger `top_k` would leave its column empty.
-struct HostSelectorShape {
+// Each entry is (n_rows, n_cols, seq_len).  `seq_len` is the window the
+// `deep_gemm` grid declares, which this repository does not synthesize -- it
+// ranks the whole row -- so the two are not comparable at the same shape.
+//
+// `top_k` is 2048 because that is what the `deep_gemm` grid measures and what
+// its backend serves; a larger `top_k` would leave its column empty.
+struct DeepGemmSelectorShape {
     uint32_t n_rows;
     uint32_t n_cols;
     uint32_t seq_len;
 };
-inline constexpr HostSelectorShape kHostSelectorPerfShapes[] = {
+inline constexpr DeepGemmSelectorShape kDeepGemmSelectorPerfShapes[] = {
     {   1,  66551,  66551},   // test-topk-bs1
     {  16,  66551,  66551},   // test-topk-bs16
     { 132,  66551,  66551},   // test-topk-bs132
@@ -57,7 +58,7 @@ inline constexpr HostSelectorShape kHostSelectorPerfShapes[] = {
     { 256, 107520, 107520},   // dsa-bs256-seq107520
     {4096, 107520, 107520},   // dsa-bs4096-seq107520
 };
-inline constexpr uint32_t kHostSelectorPerfTopK = 2048;
+inline constexpr uint32_t kDeepGemmSelectorPerfTopK = 2048;
 
 
 static constexpr uint32_t MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION = 1u << 23;

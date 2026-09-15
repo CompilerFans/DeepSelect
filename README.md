@@ -258,8 +258,8 @@ CLAUDE.md's wheel table for what the target machine must still provide.
 ```
 
 `CUCC_TARGETS` is the whole build interface (the same variable and meaning as
-the host repository's `build.sh`); it defaults to `xcore1000,xcore1500,xcore1600`
--- one target per family, the same *set* of families the host default names,
+mcDeepGEMM's `build.sh`); it defaults to `xcore1000,xcore1500,xcore1600`
+-- one target per family, the same *set* of families mcDeepGEMM's default names,
 minus its per-part aliases, which `mxcc` rejects outright (`xcore1008`,
 `xcore1610`, `xcore1620`). `CUCC_TARGETS=native` is the shortcut for "just this
 device", and `CUCC_TARGETS=xcore1600 ./build.sh` for one family.
@@ -353,7 +353,7 @@ Both outputs are allocated by the call, and their strides are aligned to `deep_s
 For the full signature, see [`deep_select/interface.py`](deep_select/interface.py).
 
 `backend=` picks the implementation, and it names implementations rather than
-architectures -- the same vocabulary as the host repository.
+architectures -- the same vocabulary as `mcDeepGEMM`'s `backend=`.
 
 `"torch"` (**the default**) is a reference implementation of the same contract
 built from torch ops: it runs on any device and dtype, so it is usable on a
@@ -366,16 +366,16 @@ asked for nothing in particular could reach a kernel defect. The cost is speed
 -- it is the slow one. Unlike the kernels it rejects `bfloat16` +
 `sorted_value`, matching upstream.
 
-`"maca_c"` is the MACA kernel this device has: the hand-written kernel on a
-64 KiB part, the ported one on a 128 KiB part. Which of the two that is, is a
-property of the device rather than a choice, so no architecture name appears at
-this level (`setup.py` still builds one kernel per architecture, and
-`CUCC_TARGETS` still selects which). It is the production path and the fast
-one: ask for it by name, or set `DS_TOPK_BACKEND=maca_c` for a whole process.
-An unrecognized value in that variable is ignored rather than raised, so a typo
-cannot break every call.
+`"maca_c"` is the MACA kernel this device has: the hand-written kernel under
+`csrc/xcore1000/`, built as one image per family named in `CUCC_TARGETS` (see
+"Build" above). **Every capacity runs that same kernel** -- 64 KiB and 128 KiB
+parts alike -- so no architecture name appears at this level, and nothing about
+the part a caller happens to be on has to reach the call. It is the production
+path and the fast one: ask for it by name, or set `DS_TOPK_BACKEND=maca_c` for
+a whole process. An unrecognized value in that variable is ignored rather than
+raised, so a typo cannot break every call.
 
-`"deep_gemm"` is the host repository's own indexer selector
+`"deep_gemm"` is that package's own indexer selector
 (`deep_gemm.fp32_indexer_topk_selector`), called through its Python API. That
 package is imported only when this backend is asked for, so this repository
 stays standalone without it. It is much faster than the MACA kernel on long
@@ -388,8 +388,8 @@ ordered key >> 6, so everything inside one 64-half-ULP bucket -- which is what
 a row of near-tied scores fills) before refining, and the chunked kernel
 silently drops members past its staging capacity. A row with more than 4096
 values in one such bucket can therefore be ranked against an arbitrary subset
-of it, varying run to run. That is filed as a strict `xfail` in the host
-repository's suite,
+of it, varying run to run. That is filed as a strict `xfail` in mcDeepGEMM's
+suite,
 `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`;
 `maca_c` has no such hole.
 
@@ -427,6 +427,42 @@ Two things to know before using it on a benchmark: every record synchronizes
 the device (that is the only way its elapsed time means anything), and the
 switch is read when `deep_select` is first imported, so it has to be set before
 then.
+
+### Environment variables
+
+**Read by the library** (`deep_select/`), at import or per call:
+
+| variable | default | effect |
+| --- | --- | --- |
+| `DS_TOPK_BACKEND` | unset → `"torch"` | which implementation a call with no `backend=` runs. Unrecognized values are ignored, not raised |
+| `DS_LOG` | unset → off | call log target: `1`/`stderr`, `file`/`log`, a directory, or a path. See "Call logging" |
+| `DEEP_SELECT_NO_STREAM_GUARD` | unset | set = launch without installing torch's current stream, i.e. on the legacy default stream. Only for bisecting that handoff; a call made this way races a producer on a side stream |
+
+**Read by the build**:
+
+| variable | default | effect |
+| --- | --- | --- |
+| `CUCC_TARGETS` | `xcore1000,xcore1500,xcore1600` | which `-offload-arch` images go into the one extension; `native` = this device only. An unrecognized target fails the build |
+| `MACA_PATH` | `/opt/maca` | the MACA toolkit root, and the authority for it. `build.sh`/`install.sh` derive `CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`/`LD_LIBRARY_PATH` from it, since a stale one of those in the caller's shell silently beats it |
+| `MACA_HOME` | — | toolkit root too, consulted when `MACA_PATH` is unset. `MACA_PATH` wins if both are set |
+| `MAX_JOBS` | torch's | ninja's `-j`. Not read by this tree -- `build.sh` passes it through to the build |
+| `DEEP_SELECT_MACA_STACK_CHECK` | unset → skip | run the mxcc `--resource-usage` spill gate over `1` (all sources) or a comma-separated list |
+| `DEEP_SELECT_MACA_STACK_BASELINE` | `48` | the gate's threshold, in bytes. Per toolchain: 48 is what this one reports for a device function that does not spill |
+
+**Read by the test and benchmark harness**:
+
+| variable | default | effect |
+| --- | --- | --- |
+| `CUDA_VISIBLE_DEVICES` | the machine's | which device the arms run on. Recorded in the perf manifest, and the way to pick a device -- there is no exclusivity gate |
+| `DS_RESULTS_DIR` | `results/` | where `run_test.sh` writes its log and receipt |
+| `DS_BENCH_DIR` | `perf_data` | `run_bench.sh`'s output root |
+| `DS_BENCH_TIMEOUT` | `5400` | per-arm timeout, in seconds |
+
+There is no variable that points at the `deep_gemm` source or checkout: what
+the backend needs is the *package*, so whether it can serve a run is
+`import deep_gemm` plus the entry it calls -- which is what
+`deep_select.deep_gemm_available()` answers, and what decides whether the
+selector shapes ride along.
 
 ### Variable-length rows
 

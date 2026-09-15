@@ -18,11 +18,11 @@ This directory is **its own git repository** (`origin` = `git@github.com:Compile
 
 Public entry point is `deep_select.topk` (`deep_select/interface.py`). **Its signature is upstream's, parameter for parameter** — the same 14 positional-or-keyword arguments in the same order with the same defaults (`input … abort_when_nan_found`) — plus exactly one added keyword, `backend: Optional[str] = None`, appended last. That is checkable rather than asserted: `git diff upstream/main HEAD -- deep_select/interface.py` shows the `def topk(` block unchanged apart from the added parameter, and `upstream/main` is a direct ancestor of this branch. An upstream call site works here unchanged, including one that passes every argument positionally. Upstream exports `topk` and `get_stride_requirement`; this tree adds `UnsupportedByBackend`, `topk_torch` and `topk_deep_gemm`.
 
-Three backends, which name **implementations, not architectures** (the same vocabulary as the host repo's `backend=`):
+Three backends, which name **implementations, not architectures** (the same vocabulary as mcDeepGEMM's `backend=`):
 
 - `"torch"` (**the default**) — reference implementation built from torch ops; runs on any device/dtype, including where no kernel is built. Also the differential-check arm.
 - `"maca_c"` — the MACA kernel this device has: the **production path** and the fast one. Which kernel that is is a property of the device, not a call-site choice.
-- `"deep_gemm"` — the host repo's `deep_gemm.fp32_indexer_topk_selector`, called through its Python API, imported lazily. Implements a **strict subset** of the contract (float32 only, `topk <= 2048`, unordered); what it cannot serve raises `UnsupportedByBackend`, never a narrower answer.
+- `"deep_gemm"` — the `deep_gemm` package's `fp32_indexer_topk_selector`, called through its Python API, imported lazily. Implements a **strict subset** of the contract (float32 only, `topk <= 2048`, unordered); what it cannot serve raises `UnsupportedByBackend`, never a narrower answer.
 
 **The default is correctness-first, and that is a deliberate reversal of an
 earlier one.** `backend` used to default to `"maca_c"`; it defaults to
@@ -57,7 +57,7 @@ CUCC_TARGETS=xcore1600       ./build.sh       # one architecture
 ```
 
 `build.sh` is the entry point; it wraps the same `setup.py` calls shown below.
-It mirrors the host `build.sh` in shape but deliberately does **not** run
+It mirrors mcDeepGEMM's `build.sh` in shape but deliberately does **not** run
 `bdist_wheel` — see the `pip install .` note below for why `--inplace` is the
 working path — and it removes the stale in-place `.so` before building rather
 than trusting `build_ext`'s timestamp comparison. It resolves targets through
@@ -66,11 +66,11 @@ unrecognized target fails the build rather than being skipped. `MACA_PATH`
 (default `/opt/maca`) and `MAX_JOBS` are honored.
 
 **There is no argument parsing — the target list is `CUCC_TARGETS` and nothing
-else**, which is the host repository's shape. Two things `build.sh` does that
-the host one does not, both recorded in its header: it removes the stale
+else**, which is mcDeepGEMM's shape. Two things `build.sh` does that
+mcDeepGEMM's does not, both recorded in its header: it removes the stale
 in-place `.so` first, and its default is one target per family this tree names
-(`xcore1000,xcore1500,xcore1600`) rather than the host default verbatim — the
-host list's `xcore1008`/`xcore1502`/`xcore1520`/`xcore1610`/`xcore1620` are
+(`xcore1000,xcore1500,xcore1600`) rather than mcDeepGEMM's default verbatim — that
+list's `xcore1008`/`xcore1502`/`xcore1520`/`xcore1610`/`xcore1620` are
 **aliases of a family already in the list**, and this `setup.py` names the
 extension after the *family*, so two targets in one family build the same
 extension twice while `mxcc` rejects several of those spellings outright.
@@ -81,8 +81,8 @@ CUCC_TARGETS=xcore1600 ./install.sh           # for another architecture
 ```
 
 `install.sh` additionally installs into the active environment
-(`pip install <wheel> --force-reinstall --no-deps`, matching the host repo's
-`install.sh`). One thing it has to do that the host one does not:
+(`pip install <wheel> --force-reinstall --no-deps`, matching mcDeepGEMM's
+`install.sh`). One thing it has to do that mcDeepGEMM's does not:
 
 - **Build the wheel by a single `bdist_wheel` run, then hand pip the file.**
   `pip install .` cannot work here (see below); building first keeps `setup.py`
@@ -92,7 +92,7 @@ CUCC_TARGETS=xcore1600 ./install.sh           # for another architecture
 **The wheel is left in `dist/` and nowhere else — there is no `BUILDROOT`
 export.** That is a decision, not an omission: a `${BUILDROOT}/wheel/` export
 landed once (`761edc0`) and was dropped along with the flag parsing it shipped
-with when these three scripts were rewritten to the host repo's shape
+with when these three scripts were rewritten to mcDeepGEMM's shape
 (`9a6105b`, "the target list is an env var, not four flags"). If a packaging
 step needs the wheel somewhere else, `dist/*.whl` is what to collect; do not
 re-introduce a second output path or an env var that only some callers set.
@@ -108,20 +108,20 @@ CUCC_TARGETS=xcore1000,xcore1600 python setup.py build_ext --inplace   # both
 ```
 
 ```bash
-./clean.sh                             # remove build artifacts (host clean.sh's default)
+./clean.sh                             # remove build artifacts (mcDeepGEMM clean.sh's default)
 ./clean.sh --dry-run                   # list what would go, remove nothing
 ```
 
 Removes `build/ dist/ *.egg-info/ __pycache__/` and friends plus loose `*.pyc`
 and every `*.so` in the tree (all build products — there is no vendored binary
 here). It deliberately does **not** touch `$HOME/.deep_gemm`, `~/.triton`,
-`~/.tilelang` or `~/.metax`, unlike the host script: nothing here writes them, so
+`~/.tilelang` or `~/.metax`, unlike mcDeepGEMM's script: nothing here writes them, so
 that would be deleting another project's cache. Its only option is `--dry-run`;
 `--yes` was its first spelling and is gone — a flag that is accepted and ignored
 is a flag a caller believes did something. `./clean.sh && ./build.sh` is the
 supported full-rebuild chain.
 
-`CUCC_TARGETS` is the same variable and meaning as the host repo's `build.sh`,
+`CUCC_TARGETS` is the same variable and meaning as mcDeepGEMM's `build.sh`,
 and **neither script here sets it** — an unset variable stays unset and
 `setup.py` applies `deep_select/_arch.py::DEFAULT_TARGETS`
 (`xcore1000,xcore1500,xcore1600`, one per family), so the scripts cannot drift
@@ -431,7 +431,7 @@ on time today).
 
 Upstream's algorithm is kept (threshold-and-compact scan in a random block order, one global read per element); only its device-side dependencies were replaced: TMA tensor-map loads → cooperative `ldg`, mbarriers → a single buffer with `__syncthreads`, inline PTX → MACA builtins/plain C++. Config tuples were re-derived for 128 KiB (upstream's are sized for an H100's 227 KiB). `v3_cluster` was **deleted**, not ported — MACA has no cluster launch — and those shapes fall through to the general kernel with no dispatch arm.
 
-**The config table has two halves that must be edited together**: `scripts/generate_instantiations.py` (the table, its arithmetic, and the `check_fits_maca` refusal) and the `TopkSelectConfig<...>` call sites in `csrc/xcore1600/api.cu`. A mismatch is a **link error**, not a runtime one. Note also that `deep_select/_arch.py` duplicates the host repo's `deep_gemm/utils/arch_config.py` `XcoreFamily` rows (capacity + family spelling) by hand — it cannot import that package, so a change to either belongs in the same review.
+**The config table has two halves that must be edited together**: `scripts/generate_instantiations.py` (the table, its arithmetic, and the `check_fits_maca` refusal) and the `TopkSelectConfig<...>` call sites in `csrc/xcore1600/api.cu`. A mismatch is a **link error**, not a runtime one. Note also that `deep_select/_arch.py` duplicates the `deep_gemm` package's `utils/arch_config.py` `XcoreFamily` rows (capacity + family spelling) by hand — it cannot import that package, so a change to either belongs in the same review.
 
 Consequences of the port, all deliberate:
 
@@ -873,7 +873,7 @@ against the contract on **bf16** cells.  Do not gate on `maca_c == torch`.
 
 ## Tests
 
-There is **no pytest suite and no `conftest.py` here** (unlike the host repo). The suite is upstream's, driven by its own `__main__`.
+There is **no pytest suite and no `conftest.py` here** (unlike mcDeepGEMM). The suite is upstream's, driven by its own `__main__`.
 
 **"Unmodified" is not accurate and this line said it until 2026-09-15**, which made the delta look smaller than it is. `git diff --numstat upstream/main HEAD -- tests/` is the authority: six files changed (`test.py` +231/−119, `lib.py` +42/−38, `kernelkit/build.py` +118, `kernelkit/platform.py` +79/−6, `kernelkit/stress.py` +7/−1, `kernelkit/__init__.py` +1/−1). Two of them are reworks, not portability patches, and both are described below: `test.py`'s extraction and `kernelkit/build.py`'s MACA stack check. The *method* is upstream's throughout — nothing here replaces a checker, and `test.py`'s assertion set is provably unchanged (6 unique `check_is_bitwise_equal` labels, 7 call sites, identical to upstream).
 
@@ -881,6 +881,7 @@ There is **no pytest suite and no `conftest.py` here** (unlike the host repo). T
 PYTHONPATH=. python tests/test.py --perf-only              # performance grid, 95 cases
 PYTHONPATH=. python tests/test.py --perf-only -nc          # skip the inter-case cooldowns
 PYTHONPATH=. python tests/test.py --perf-only --dtype bf16 # 90 of them, ~1 min on C500
+PYTHONPATH=. python tests/test.py --perf-only --no-deep-gemm-shapes   # force them out
 
 PYTHONPATH=. python scripts/official_slice.py              # correctness, 200/200 sampled
 PYTHONPATH=. python scripts/official_slice.py                    # the default (torch)
@@ -890,6 +891,7 @@ PYTHONPATH=/path/to/mcDeepGEMM:. python scripts/official_slice.py --backend deep
 
 - `tests/test.py` builds a correctness table (105,138 cases, hours) and a performance grid, and runs both through the same `run_testcase`. Its checks are the contract's own — index range, uniqueness, `value_i == input[index_i]`, the definitional `min(selected) >= max(unselected)`, the NaN guard, the orderings. **No reference implementation is computed anywhere**, so nothing can drift from the contract it checks. Every perf case is checked first and timed second, so a case that selects wrong is reported as a failure rather than as a time.
 - `scripts/official_slice.py` drives a seeded uniform sample of the same table through the same official `run_testcase`, capped at `batch_size * vocab_size <= 2**28`.
+- **The `deep_gemm` rows are capability-gated, and the gate is a package question.** `deep_select.deep_gemm_available()` is `import deep_gemm` succeeding *and* the package carrying the entry that backend calls (`fp32_indexer_topk_selector`), cached per process. It is asked by `tests/test.py` (`--deep-gemm-shapes`), `scripts/perf_snapshot.py` (`--deep-gemm-axes`), `scripts/official_slice.py` and `run_bench.sh`; all four take `BooleanOptionalAction`-style tri-states, so `--no-…` forces the arm out and an unset flag takes the probe's answer. **This replaced a `DEEP_GEMM_REPO` path resolution** (2026-09-15): which checkout `import deep_gemm` lands on is not this repository's business, only whether the call will work. Neither the tree's location nor its git commit is recorded any more — `perf_snapshot`'s manifest carries `deep_gemm_package` + `deep_gemm_version` instead. The gate count is therefore **95 cells where the package is absent and 120 where it is present**, on one unmodified tree.
 - `run_test.sh` is the entry point that wraps both arms, records the extension md5 + the `CUDA_VISIBLE_DEVICES` in force + an `mx-smi` snapshot beside each log, and reports a stale extension rather than refusing to run:
 
   ```bash
@@ -920,13 +922,13 @@ done
 ```bash
 CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \
   python3 scripts/perf_snapshot.py                       # the official grid
-  ... --deep-gemm-axes                                   # + the host repo's fp32 grid
+  ... --deep-gemm-axes                                   # + the fp32 selector grid
   ... --dry-run                                          # print the plan, measure nothing
   ... --cases-file extra.json                            # add cases, no code change
 ./run_bench.sh [--set-baseline] [--compare-only] [--list] [--arms LIST]
 ```
 
-Writes `perf_data/<device>/<YYYYmmdd_HHMMSS>/` — following the host repository's
+Writes `perf_data/<device>/<YYYYmmdd_HHMMSS>/` — following mcDeepGEMM's
 `deep_gemm/tests/perf_data/` layout — with `manifest.json` plus
 `deepselect_perf.csv`, **one row per (cell, backend)**. Three backends:
 `maca_c`, `torch`, and `deep_gemm`. `run_bench.sh` is the orchestrator; it keeps
@@ -1038,7 +1040,7 @@ Facts the CSV records and the traps in reading it:
 
 ## Performance-change discipline
 
-Beyond the host repo's general rules (state the principle and the magnitude; keep rejected experiments out of commits), this repo's rules are in the handover §7 and ledger §7. Every performance or dataflow commit message is this skeleton, and a missing item means it is not a record:
+Beyond mcDeepGEMM's general rules (state the principle and the magnitude; keep rejected experiments out of commits), this repo's rules are in the handover §7 and ledger §7. Every performance or dataflow commit message is this skeleton, and a missing item means it is not a record:
 
 - A one-line imperative title stating the **principle**, not "optimized X".
 - Why: the old approach's cost, with measured numbers.
@@ -1233,7 +1235,7 @@ source line numbers — so "the md5 moved" is not evidence of a behaviour change
   `b4096-v16384-k512`, `b512-v262144-k512`, all bf16 — all die with `device-side assert` before a single timing is
   taken. So this tree cannot be benchmarked against the rerouted one cell for cell; there is no before to put beside the
   after.
-- `backend="deep_gemm"`'s host kernel collects the members of the threshold *coarse* bin (half-precision ordered key `>> 6`) before refining, and the chunked kernel silently drops members past its staging capacity. A row with more than 4096 values in one such bucket gets a top-k of an arbitrary subset, varying run to run. Filed as a strict `xfail` in the host repo: `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`. **`maca_c` has no such hole** — but note the xcore1600 hole above is a `maca_c` hole, so this sentence is about the `deep_gemm` backend only.
+- `backend="deep_gemm"`'s kernel collects the members of the threshold *coarse* bin (half-precision ordered key `>> 6`) before refining, and the chunked kernel silently drops members past its staging capacity. A row with more than 4096 values in one such bucket gets a top-k of an arbitrary subset, varying run to run. Filed as a strict `xfail` in mcDeepGEMM: `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`. **`maca_c` has no such hole** — but note the xcore1600 hole above is a `maca_c` hole, so this sentence is about the `deep_gemm` backend only.
 - The `radix_topk_row_bf16_k` static-k row used by the chunked path still runs the 8-bit coarse level and the 3,514-slot arena; it has not received coarse12.
 - The fp32 row is a separate codebase path whose overflow handling is multi-round full-row rescan (up to 8 trips). Same "coarse level too coarse" disease, different cure — a 32-bit key cannot be resolved in two levels the way a 16-bit one can. Retesting fp32 cells is mandatory when touching it.
 
