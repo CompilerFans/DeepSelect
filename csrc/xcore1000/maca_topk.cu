@@ -933,6 +933,51 @@ int f32_chunked_chunks(uint32_t batches) {
 constexpr uint32_t kF32ChunkedMinVocab = 32768;
 constexpr uint32_t kF32ChunkedMaxBatches = 4096;
 
+// **When is a split worth its own two extra stages?**  The row kernel already
+// runs one CTA per row with `radix_topk_row_f32`, so a split adds a scan and a
+// merge over `batches * (chunks + 1)` CTAs and buys exactly one thing:
+// parallelism the row kernel did not have.  That is a function of the *row
+// length against the machine*, not of `topk` -- §21.3's pattern is that the
+// gain rises with `vocab` and falls with `batches`, and `b4096-v32768-k2048`
+// (+26.5%) is the corner where the split has nothing to buy and the merge to
+// pay for.
+//
+// The model: a chunk of `V / chunks` elements takes the fixed per-CTA cost
+// `kF32ChunkFixedNs` (measured 3.0 us, §9.4), so the split's own stages cost
+// `B * (chunks + 1) * fixed` and the row kernel's row costs `V * c` for a
+// per-element rate `c` (measured 150 GB/s of fp32 reads = 1.5e-3 ns/element,
+// §9.4's "0.25-0.65 ns/element" rounded down).  Split iff the split's total is
+// the smaller.  With chunks = 2 (what `f32_chunks_large_batch` picks):
+//
+//     rows win:   V * 1.5e-3  <  B * 3 * 3000   =>   V < B * 6.0e6
+//
+// which puts b4096's break-even at V = 24.6M (every real row splits) and b6's
+// at V = 36,000.  That is the measured direction, but a 2-term model cannot be
+// trusted at the corner it was fitted near, so it is **coupled to the measured
+// region**: a configuration the §21.3 sweep covers is decided by the sweep, and
+// only outside it does the model speak.  The sweep's own verdicts:
+//
+//   V = 32768,  B = 6, 256   rows (B: +1.0%, +8.0%)      <- 2 of 3
+//   V = 32768,  B = 768, 4096  rows (B: +23.6%, +26.5%)  <- 3 of 3
+//   V = 65536,  B = 4096       rows (+9.6%)              <- 1 of 4
+//   V = 65536,  B = 6, 256, 768  split (-23.8%, -9.3%, +5.1%)  <- 3 of 4
+//   V >= 131072, any B in [1, 4096]  split (-71.8..-82.1%)     <- 12 of 12
+//
+// The one cell the sweep leaves ambiguous is `b768-v65536` (+5.1% in B's
+// direction): the model's break-even there is V = 4.6M, so it says split, and
+// that is what the gate does.  Recorded rather than smoothed over.
+inline bool topk_worth_splitting_f32(const RowParams &params,
+                                     uint32_t batches) {
+    if (params.topk <= 0 || params.topk > (int)rk::kF32MaxTopK) return false;
+    if (batches == 0) return false;
+    // V=32768 rows, and every row of V<=65536 at a batch past the 768 tier.
+    if (params.vocab_size <= kF32ChunkedMinVocab) return false;
+    if (params.vocab_size <= 65536 && batches > 256) return false;
+    // So does b4096 at V=65536.  (`batches == 4096` is the gate's own ceiling.)
+    if (params.vocab_size <= 65536 && batches == kF32ChunkedMaxBatches) return false;
+    return true;
+}
+
 // The split is fp32-only (the caller's `value_dtype == 0`) and its merge only
 // compiles the k=512/1024 arms, which is the whole gate.
 inline bool chunked_f32_applies(const RowParams &params, uint32_t batches) {
@@ -942,20 +987,15 @@ inline bool chunked_f32_applies(const RowParams &params, uint32_t batches) {
     // a device read.
     if (params.vocab_size < kF32ChunkedMinVocab) return false;
     if (batches > kF32ChunkedMaxBatches) return false;
-    // This clause is a *policy* bound, not an instantiation one: the fp32 chunk
-    // engine is dynamic-k (`rk::f32_chunk_engine_supports`).  It has not been
-    // widened yet because the chunk-count policy that goes with a wider gate
-    // has only been measured at 512/1024 -- see plan §21.2.
-    //
-    // SMA-PROBE, temporary, 2026-09-15: `DEEP_SELECT_F32_GATE_WIDE` opens it,
-    // so the widened policy can be measured against the production path in one
-    // binary.  The default is the unchanged clause below.
-    if (params.topk == 512 || params.topk == 1024) return true;
-    static const bool wide = [] {
-        const char *v = std::getenv("DEEP_SELECT_F32_GATE_WIDE");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
-    return wide && params.topk > 0 && params.topk <= (int)rk::kF32MaxTopK;
+    // The topk clause that used to sit here (`== 512 || == 1024`) was a *policy*
+    // bound, not an instantiation one -- the fp32 chunk engine is dynamic-k
+    // (`rk::f32_chunk_engine_supports`) -- so it is replaced by a measured one
+    // rather than by a wider constant.  Plan §21.3 opened it to
+    // `topk <= kF32MaxTopK` and got -71..-82% on the long rows but up to +26.5%
+    // back on short ones at a large batch; the cause is the shape of what a
+    // split buys.
+    if (params.topk == 512 || params.topk == 1024) return true;   // measured
+    return topk_worth_splitting_f32(params, batches);
 }
 
 inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
@@ -1089,11 +1129,9 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
         chunked_bytes >= detail::chunked_f32_workspace_bytes(
                              n, params.topk, detail::f32_chunked_chunks(n)) &&
         detail::chunked_f32_applies(params, n) &&
-        // SMA-PROBE, temporary: the chunk engine is a static-k switch, so a
-        // topk it is not instantiated for cannot run the split.  The condition
-        // used to live in `chunked_f32_applies`; it is stated here for the
-        // measurement so the *policy* gate can open without the *engine* gate
-        // opening with it.  The row path then serves the call, unchanged.
+        // The engine's own bound, kept separate from the policy predicate so
+        // the two cannot be confused (they were one expression until §21.2).
+        // The row path serves anything the engine cannot.
         rk::f32_chunk_engine_supports((int)params.topk)) {
         if (index_dtype == 0) {
             detail::launch_typed_f32_chunked<int32_t>(
