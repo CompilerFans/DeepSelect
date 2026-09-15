@@ -16,7 +16,9 @@ This directory is **its own git repository** (`origin` = `git@github.com:Compile
 
 `deep_select.topk` — row-wise top-K, the DSA (DeepSeek Sparse Attention) indexer selector and the sampler. Two supported scenarios: bf16 "Lightning Indexer" (any batch, any vocab, `topk <= 4096`) and fp32 "Sampling" (`vocab_size ~128K`). No floating-point math: TopK's currency is **effective memory bandwidth**, not FLOPs.
 
-Public entry point is `deep_select.topk` (`deep_select/interface.py`). Three backends, which name **implementations, not architectures** (the same vocabulary as the host repo's `backend=`):
+Public entry point is `deep_select.topk` (`deep_select/interface.py`). **Its signature is upstream's, parameter for parameter** — the same 14 positional-or-keyword arguments in the same order with the same defaults (`input … abort_when_nan_found`) — plus exactly one added keyword, `backend: Optional[str] = None`, appended last. That is checkable rather than asserted: `git diff upstream/main HEAD -- deep_select/interface.py` shows the `def topk(` block unchanged apart from the added parameter, and `upstream/main` is a direct ancestor of this branch. An upstream call site works here unchanged, including one that passes every argument positionally. Upstream exports `topk` and `get_stride_requirement`; this tree adds `UnsupportedByBackend`, `topk_torch` and `topk_deep_gemm`.
+
+Three backends, which name **implementations, not architectures** (the same vocabulary as the host repo's `backend=`):
 
 - `"torch"` (**the default**) — reference implementation built from torch ops; runs on any device/dtype, including where no kernel is built. Also the differential-check arm.
 - `"maca_c"` — the MACA kernel this device has: the **production path** and the fast one. Which kernel that is is a property of the device, not a call-site choice.
@@ -114,9 +116,10 @@ Removes `build/ dist/ *.egg-info/ __pycache__/` and friends plus loose `*.pyc`
 and every `*.so` in the tree (all build products — there is no vendored binary
 here). It deliberately does **not** touch `$HOME/.deep_gemm`, `~/.triton`,
 `~/.tilelang` or `~/.metax`, unlike the host script: nothing here writes them, so
-that would be deleting another project's cache. `--yes` is accepted and ignored
-(it was this script's first spelling, when the default was to remove nothing).
-`./clean.sh && ./build.sh` is the supported full-rebuild chain.
+that would be deleting another project's cache. Its only option is `--dry-run`;
+`--yes` was its first spelling and is gone — a flag that is accepted and ignored
+is a flag a caller believes did something. `./clean.sh && ./build.sh` is the
+supported full-rebuild chain.
 
 `CUCC_TARGETS` is the same variable and meaning as the host repo's `build.sh`,
 and **neither script here sets it** — an unset variable stays unset and
@@ -870,7 +873,9 @@ against the contract on **bf16** cells.  Do not gate on `maca_c == torch`.
 
 ## Tests
 
-There is **no pytest suite and no `conftest.py` here** (unlike the host repo). The suite is upstream's, landed unmodified under `tests/`, driven by its own `__main__`.
+There is **no pytest suite and no `conftest.py` here** (unlike the host repo). The suite is upstream's, driven by its own `__main__`.
+
+**"Unmodified" is not accurate and this line said it until 2026-09-15**, which made the delta look smaller than it is. `git diff --numstat upstream/main HEAD -- tests/` is the authority: six files changed (`test.py` +231/−119, `lib.py` +42/−38, `kernelkit/build.py` +118, `kernelkit/platform.py` +79/−6, `kernelkit/stress.py` +7/−1, `kernelkit/__init__.py` +1/−1). Two of them are reworks, not portability patches, and both are described below: `test.py`'s extraction and `kernelkit/build.py`'s MACA stack check. The *method* is upstream's throughout — nothing here replaces a checker, and `test.py`'s assertion set is provably unchanged (6 unique `check_is_bitwise_equal` labels, 7 call sites, identical to upstream).
 
 ```bash
 PYTHONPATH=. python tests/test.py --perf-only              # performance grid, 95 cases
@@ -896,7 +901,8 @@ PYTHONPATH=/path/to/mcDeepGEMM:. python scripts/official_slice.py --backend deep
 
   It has **no exclusivity gate** on purpose: `pgrep` cannot see device pinning, and `mx-smi` was measured on this box lying both ways (`--show-process` said "no process found" while a job ran; `--show-all-process` put a process holding 4 GB on device 3 under GPUs 0–2). Pick the device with `CUDA_VISIBLE_DEVICES`, run, and read the recorded md5 before comparing two runs.
 - `--backend` is the one thing the official suite cannot express (its call site passes no `backend=`), so the driver rebinds `deep_select.topk` for the run rather than editing the official file.
-- Two edits under `tests/kernelkit/` are the whole delta from upstream there, both required to run on MACA at all: `platform.py` asks torch whether it can see a device instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA controller), and one PEP 701 f-string at `stress.py:292` is rewritten for Python 3.10. `tests/lib.py` carries two more of the same kind, about this torch's missing UInt kernels: `torch.randint(...).to(torch.uint16)` and `result.view(uint).copy_(...)` both raise `NotImplementedError: "copy_" not implemented for 'UInt16'` under `torch.set_default_device("cuda")`, which with the default device set is *every* `randint` in the distributions — the harness could not generate a case at all. `Distribution.as_uint` casts on the CPU and moves the result; `Distribution.put_uint_bits` writes through the equal-width **signed** view. Both are bit-exact; neither changes what a case contains.
+- **`test.py`'s delta is an extraction, not a rewrite.** The inline checks of `run_testcase` became `check_result` and `check_call_contract`, so `scripts/perf_snapshot.py` runs *that* code instead of a copy of it — the docstring says so where they are defined. The evidence that this is a refactor and not a behaviour change is mechanical: the `check_is_bitwise_equal` label set and call-site count are identical to upstream's (6 and 7), so no correctness assertion was added, dropped or reworded. A `perf_snapshot` that checked a copy would be free to drift from the gate it claims to mirror.
+- Two edits under `tests/kernelkit/` are for MACA portability: `platform.py` asks torch whether it can see a device instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA controller), and one PEP 701 f-string at `stress.py:292` is rewritten for Python 3.10. A third, `kernelkit/build.py` (+118), is *ours*: `check_maca_stack_frame`, the `--resource-usage` stand-in for upstream's `cuobjdump` spill gate (see the resource-audit section). `tests/lib.py` carries two more of the same kind, about this torch's missing UInt kernels: `torch.randint(...).to(torch.uint16)` and `result.view(uint).copy_(...)` both raise `NotImplementedError: "copy_" not implemented for 'UInt16'` under `torch.set_default_device("cuda")`, which with the default device set is *every* `randint` in the distributions — the harness could not generate a case at all. `Distribution.as_uint` casts on the CPU and moves the result; `Distribution.put_uint_bits` writes through the equal-width **signed** view. Both are bit-exact; neither changes what a case contains.
 - Not covered by either arm, recorded rather than papered over: the contract rejections (strided row, wrong dtype, `topk` out of range, undersized output buffer) — the official table asserts on values and has no exception cases — and `begin` / `hint` / caller-allocated `output_idx`, which the official call site always passes as `None`.
 
 ### Full-table correctness gate (C500, ~17.5 min)
@@ -917,7 +923,7 @@ CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \
   ... --deep-gemm-axes                                   # + the host repo's fp32 grid
   ... --dry-run                                          # print the plan, measure nothing
   ... --cases-file extra.json                            # add cases, no code change
-./run_bench.sh [--full] [--quick] [--set-baseline] [--compare-only] [--list]
+./run_bench.sh [--set-baseline] [--compare-only] [--list] [--arms LIST]
 ```
 
 Writes `perf_data/<device>/<YYYYmmdd_HHMMSS>/` — following the host repository's
