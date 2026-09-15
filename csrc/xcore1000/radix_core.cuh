@@ -2461,6 +2461,21 @@ inline cudaError_t launch_topk_f32_chunks_stage2(
 // columns per row.  They are separate arguments because the caller keeps its
 // own state (the row-length table, the per-row NaN flags) in front of the
 // arena, so the arena is not at the base of the caller's workspace.
+// The chunk engine's own topk gate: `switch (topk)` below is the static-k
+// dispatch the merge and the row entry are instantiated for.  Named so the
+// *policy* gate (`chunked_f32_applies`) and the *engine* gate can be stated
+// separately -- they were the same expression until 2026-09-15, which made the
+// policy look more expensive than it is (see plan §21.2).
+inline bool f32_chunk_engine_supports(int topk) {
+    // The fp32 split is dynamic-k: stage1/stage2 are templated on `kBlockSize`
+    // alone and take `topk` as an argument (`radix_topk_row_f32`'s `topk` is a
+    // runtime parameter too), so the engine's bound is the array limit, not a
+    // switch.  The `512 || 1024` that used to sit in `chunked_f32_applies` was
+    // a *policy* bound from where the split was measured, not an instantiation
+    // one -- which is what plan §21.2 says and this makes explicit.
+    return topk > 0 && topk <= (int)kF32MaxTopK;
+}
+
 inline cudaError_t launch_topk_f32_chunked(
     const float *scores, const int32_t *lengths, void *cols_base, int32_t *out,
     int B, int L, int topk, int num_chunks, cudaStream_t stream,

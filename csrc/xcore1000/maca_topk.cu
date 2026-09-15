@@ -800,14 +800,27 @@ namespace {
 // property of the machine.  Against the fixed 16 the losses were 21.0% at
 // b24-v65536, 26.9% at b48-v65536 and **31.0% at b64-v65536** -- all on shapes
 // whose gate was already open, so this costs no new path.
-constexpr int f32_chunks_for(uint32_t batches) {
+// SMA-PROBE, temporary, 2026-09-15: `DEEP_SELECT_F32_CHUNK32` raises the
+// ceiling from 16 to 32 for the b6/V=1M cell the V-sweep flagged (plan §17.3).
+// It is a ceiling, not a count, so b32/b64 -- which the sweep says are already
+// at their optimum -- are unaffected: `f32_chunks_for` returns min(ceiling, K/b)
+// and K/b < 16 for them either way.  Remove with the campaign.
+inline bool f32_chunk_ceiling_32() {
+    static const bool on = [] {
+        const char *v = std::getenv("DEEP_SELECT_F32_CHUNK32");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return on;
+}
+inline constexpr int kF32ChunkCeiling = 16;
+constexpr int f32_chunks_for(uint32_t batches, int ceiling) {
     const uint32_t b = batches == 0 ? 1u : batches;
     int c = 2;
-    while (c < 16 && (uint64_t)(c * 2) * b <= NATIVE_F32_CHUNK_WORK_TARGET) c *= 2;
+    while (c < ceiling && (uint64_t)(c * 2) * b <= NATIVE_F32_CHUNK_WORK_TARGET) c *= 2;
     return c;
 }
-constexpr int f32_chunks_small_batch(uint32_t batches) {
-    return f32_chunks_for(batches);
+constexpr int f32_chunks_small_batch(uint32_t batches, int ceiling) {
+    return f32_chunks_for(batches, ceiling);
 }
 constexpr int f32_chunks_large_batch() { return 2; }
 
@@ -829,8 +842,10 @@ int f32_chunked_chunks(uint32_t batches) {
         return 0;
     }();
     if (override_n != 0) return override_n;   // A/B knob; does not change default
-    return batches <= kF32ChunksFewBatches ? f32_chunks_small_batch(batches)
-                                           : f32_chunks_large_batch();
+    const int ceiling = f32_chunk_ceiling_32() ? 32 : kF32ChunkCeiling;
+    return batches <= kF32ChunksFewBatches
+               ? f32_chunks_small_batch(batches, ceiling)
+               : f32_chunks_large_batch();
 }
 
 // The batch bound has no single value, because what the split costs is a merge
@@ -927,7 +942,20 @@ inline bool chunked_f32_applies(const RowParams &params, uint32_t batches) {
     // a device read.
     if (params.vocab_size < kF32ChunkedMinVocab) return false;
     if (batches > kF32ChunkedMaxBatches) return false;
-    return params.topk == 512 || params.topk == 1024;
+    // This clause is a *policy* bound, not an instantiation one: the fp32 chunk
+    // engine is dynamic-k (`rk::f32_chunk_engine_supports`).  It has not been
+    // widened yet because the chunk-count policy that goes with a wider gate
+    // has only been measured at 512/1024 -- see plan §21.2.
+    //
+    // SMA-PROBE, temporary, 2026-09-15: `DEEP_SELECT_F32_GATE_WIDE` opens it,
+    // so the widened policy can be measured against the production path in one
+    // binary.  The default is the unchanged clause below.
+    if (params.topk == 512 || params.topk == 1024) return true;
+    static const bool wide = [] {
+        const char *v = std::getenv("DEEP_SELECT_F32_GATE_WIDE");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return wide && params.topk > 0 && params.topk <= (int)rk::kF32MaxTopK;
 }
 
 inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
@@ -1060,7 +1088,13 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
         params.end_ptr != nullptr &&
         chunked_bytes >= detail::chunked_f32_workspace_bytes(
                              n, params.topk, detail::f32_chunked_chunks(n)) &&
-        detail::chunked_f32_applies(params, n)) {
+        detail::chunked_f32_applies(params, n) &&
+        // SMA-PROBE, temporary: the chunk engine is a static-k switch, so a
+        // topk it is not instantiated for cannot run the split.  The condition
+        // used to live in `chunked_f32_applies`; it is stated here for the
+        // measurement so the *policy* gate can open without the *engine* gate
+        // opening with it.  The row path then serves the call, unchanged.
+        rk::f32_chunk_engine_supports((int)params.topk)) {
         if (index_dtype == 0) {
             detail::launch_typed_f32_chunked<int32_t>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block,
