@@ -138,6 +138,37 @@ lie in two of the three images — and the two numbers the kernel sizes its grid
 against arrive as arguments from `_arch.py`. See "the arch constants are
 arguments" below.
 
+**What the wheel carries, and what the target machine must provide.** The
+images for every target are inside, so a C600U loads the `xcore1600` one — but
+*subject to the packaging note above*: build the wheel with `CUCC_TARGETS`
+unset. A wheel built with `CUCC_TARGETS=native` carries one image and will fail
+on another family. Measured on the distribution artifact:
+
+| | |
+| --- | --- |
+| tags | `cp310-cp310-linux_x86_64` — Python 3.10 AND linux x86_64. `no_python_abi_suffix` does not take effect through `BuildExtension`, so the tag is real and pip enforces it. |
+| `Requires-Dist` | **none.** `torch` and `tvm_ffi` are not declared; the caller installs them. |
+| `DT_NEEDED` | `libtvm_ffi.so` + the MACA set (`libmcruntime`, `libToolsExt_cu`, `libruntime_cu`, `libmcToolsExt`, `libmccompiler`, `libmaca_mathlib_host`). |
+| `DT_RUNPATH` | `/opt/maca/lib:/opt/maca/mxgpu_llvm/lib` — MACA conventions, and overridable (see trap 8). |
+| build-machine paths | only as `__FILE__` literals inside error-message strings (six of them, all `DS_HOST_CHECK` sites). Zero in `.dynamic`, so nothing load-bearing. |
+
+Two consequences worth stating rather than discovering:
+
+- **`libtvm_ffi.so` is resolved by `_binding.py`, not by the loader.**
+  `_preload_tvm_ffi()` `dlopen`s it from the installed `tvm_ffi` package with
+  `RTLD_GLOBAL` before the extension is loaded, so the `DT_NEEDED` is satisfied
+  by soname. An rpath would have been the alternative and it is the wrong one:
+  it bakes *this build machine's* `site-packages` into every wheel.
+- **MACA is a prerequisite of torch, not only of this kernel.** `import torch`
+  alone dies with `OSError: libmxomp.so: cannot open shared object file` when
+  the toolkit's libs are off the loader path, so a target machine needs a
+  working MACA install before `deep_select` is in the picture.
+
+Verified out of the repo: the wheel unpacked to `/tmp`, `PYTHONPATH` pointed at
+the unpacked directory, `backend="maca_c"` run from `/tmp` — correct. That
+proves the package is self-contained apart from torch/MACA/tvm_ffi; it was taken
+on the build machine, so it is **not** a second-machine test.
+
 **The stale `.so` must be deleted before rebuilding** — `build.sh` does this for
 you, but a bare `setup.py build_ext --inplace` does not (see the handover §4):
 
@@ -984,7 +1015,7 @@ Facts the CSV records and the traps in reading it:
 5. **Alignment**: rows whose length is a multiple of 8 and offset-16 B-aligned take the vector path, otherwise a scalar fallback (`bf16x8_is_aligned`). Mixed vector + tail was intermittently racy on a 1024-thread block, so odd-length rows uniformly use one load mode.
 6. **mxcc's compile cache** is `~/.deep_gemm/cache` (keyed by entry name + source digest); a source edit recompiles only the affected entry. Counting `kernel.*` dirs under a fresh `DG_JIT_CACHE_DIR` is how you check a routing change did not grow the compiled-kernel count.
 7. `NormalFloatDistribution` (the official table's data) is **not** bit-pattern uniform — many elements per row crowd into one high byte. This is the fact every optimization here is organized around.
-8. **A toolkit mismatch at *run* time reports as `mcErrorInvalidDeviceFunction`, and it looks exactly like a kernel defect.** The extension is linked against `libmcruntime.so` by soname, and torch's `-Wl,-rpath` becomes a `DT_RUNPATH`, which `LD_LIBRARY_PATH` **overrides**. Measured 2026-09-15 on this box, the *same* `deep_select_xcore1600*.so` (the per-architecture name the build used until `5f5a93c`; it is `deep_select_maca*.so` now, and the trap is about the library a loaded artifact resolves, so the name is incidental), device 1, one variable changed:
+8. **A toolkit mismatch at *run* time reports as `mcErrorInvalidDeviceFunction`, and it looks exactly like a kernel defect.** The extension is linked against `libmcruntime.so` by soname, and the loader finds it through the rpath baked at link time — `/opt/maca/lib:/opt/maca/mxgpu_llvm/lib`. Whether `LD_LIBRARY_PATH` can *override* that depends on the ELF tag, and the two tags differ only in order: **`DT_RPATH`** (0xf) is searched **before** `LD_LIBRARY_PATH`, **`DT_RUNPATH`** (0x1d) **after** it. This file asserted "torch's `-Wl,-rpath` becomes a `DT_RUNPATH`, which `LD_LIBRARY_PATH` overrides" until 2026-09-15; measured at `48611b9` the shipped artifact was **`DT_RPATH`**, and a decoy `libtvm_ffi.so` placed on `LD_LIBRARY_PATH` was **ignored** in favour of the baked path. The trap's own numbers are still explained — both runs named `/opt/maca/lib`, and the symlink at `/opt/maca` is what moved — but the "overrides" half was wrong, and it mattered: with `RPATH` a target machine whose `/opt/maca` is the same path but a different SDK generation **cannot be rescued by the environment**. `setup.py` now passes `-Wl,--enable-new-dtags` and the artifact measures `DT_RUNPATH` with the decoy winning, so the sentence above is true of the build it describes. cucc emits `RUNPATH` on its own (measured on a plain `cucc -shared` link); this link did not, which is why the flag is explicit. Measured 2026-09-15 on this box, the *same* `deep_select_xcore1600*.so` (the per-architecture name the build used until `5f5a93c`; it is `deep_select_maca*.so` now, and the trap is about the library a loaded artifact resolves, so the name is incidental), device 1, one variable changed:
 
    | `MACA_PATH` (and the `LD_LIBRARY_PATH` it derives) | result |
    | --- | --- |

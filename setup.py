@@ -182,15 +182,24 @@ def build_for_maca():
                 # The MACA catalogue, the tvm-ffi headers the binding edge
                 # needs, and torch's own paths.
                 include_dirs=include_dirs + [os.path.join(tvm_ffi_root, "include")],
-                library_dirs=[os.path.join(tvm_ffi_root, "lib")],
+                library_dirs=[os.path.join(tvm_ffi_root, lib_subdir)],
                 libraries=["tvm_ffi"],
                 extra_link_args=[
+                    # No rpath for `libtvm_ffi.so`: it lives in a python
+                    # package, so an rpath would bake this build machine's
+                    # `site-packages` into every wheel.  `_binding.py` loads it
+                    # by SONAME before the extension instead.
                     f"-L{maca_root}/lib",
                     f"-Wl,-rpath,{maca_root}/lib",
-                    # `libtvm_ffi.so` lives in the tvm_ffi python package, so
-                    # the loader resolves it through that package, not
-                    # LD_LIBRARY_PATH.
-                    f"-Wl,-rpath,{os.path.join(tvm_ffi_root, lib_subdir)}",
+                    # `DT_RUNPATH`, not `DT_RPATH`: the two differ in *order*
+                    # -- RPATH is searched before `LD_LIBRARY_PATH` and RUNPATH
+                    # after it -- and that order is what decides whether a
+                    # machine with a different toolkit at the same path can
+                    # override this one.  With RPATH it cannot, and the failure
+                    # is the `mcErrorInvalidDeviceFunction` whose cause looks
+                    # like a kernel defect.  cucc emits RUNPATH on its own;
+                    # this link does not, so ask for it explicitly.
+                    "-Wl,--enable-new-dtags",
                 ],
             ))
     ]
