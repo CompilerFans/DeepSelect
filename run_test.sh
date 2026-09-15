@@ -85,6 +85,9 @@ Options:
   -nc, --no-cooldown   forwarded to tests/test.py; skip the per-case sleeps
   --sample N           correctness suite: how many cases (default 200; the
                        table is 105,138, which is hours)
+  --seed S             seed the table before it is drawn (default 20260911, so
+                       `--sample 200` is the same 200 every run).  Pass it
+                       after `--` to override.
   --backend NAME       correctness suite: maca_c (the default), torch, or
                        deep_gemm.  Passed to `deep_select.topk` at the call site,
                        so the default tests the kernel rather than the reference.
@@ -113,11 +116,20 @@ allow_build=0
 dtype=""
 declare -a perf_args=()      # --dtype, -nc/-rf: tests/test.py knows these
 # The correctness suite's defaults are the ones the deleted driver applied:
+# the fixed seed it defaulted to (`official_slice.py:144`, default 20260911),
 # 200 cases rather than the whole 105,138-case table, and `-rf` so a case that
-# goes wrong is recorded and the run still reaches its summary.  A caller's
-# own `--sample` / `--backend` is appended after these and argparse keeps the
-# last occurrence, so the caller wins.
-declare -a test_args=(--sample 200 -rf)
+# goes wrong is recorded and the run still reaches its summary.  The seed is
+# the part that is easy to drop by accident and expensive to lose: without it
+# `--sample 200` draws a **different** 200 every run, so "200/200" stops being
+# a receipt anyone can re-run -- this tree's evidence is a command plus the
+# number it printed, and an unseeded draw makes the two unrelated.
+#
+# It lives here and not in `tests/test.py`, whose `--seed` unset must stay "the
+# table upstream builds", i.e. unseeded, for the same reason `--backend` unset
+# is upstream's call site.  A caller's own `--sample` / `--backend` is appended
+# after these and argparse keeps the last occurrence, so the caller wins;
+# `--seed` is reached the same way, after `--`.
+declare -a test_args=(--seed 20260911 --sample 200 -rf)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
