@@ -88,7 +88,7 @@ def build_for_maca():
     import torch.utils.cpp_extension as cpp_extension
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-    from deep_select._arch import family_of_target, resolve_targets
+    from deep_select._arch import resolve_targets
 
     maca_root = _maca_root()
     this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -146,7 +146,10 @@ def build_for_maca():
         # One comma-separated list: mxcc compiles each architecture into its
         # own image of the same source, in one extension.
         f"-offload-arch={','.join(targets)}",
-    ] + [f"-I{d}" for d in include_dirs]
+    ]
+    # No `-I` here: `include_dirs=` above/below is what carries them, and torch
+    # already turns that into `-I` on the device pass.  Spelling them in both
+    # places put every one of them on the command line twice.
 
     def strip_torch_libs(ext):
         # `CUDAExtension`'s constructor auto-appends c10/torch/torch_cuda, and
@@ -191,9 +194,7 @@ def build_for_maca():
                 ],
             ))
     ]
-    print(f"deep_select: building {','.join(targets)} "
-          f"({', '.join('xcore' + str(family_of_target(t)) for t in targets)}) "
-          f"from csrc/xcore1000/maca_topk.cu")
+    print(f"deep_select: compiling {', '.join(SOURCES)} for {','.join(targets)}")
 
     return (ext_modules, BuildExtension.with_options(use_ninja=True))
 
