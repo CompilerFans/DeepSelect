@@ -49,11 +49,9 @@ Passing both is refused rather than silently reported as one.
 ## Build
 
 ```bash
-./build.sh                             # this device (CUCC_TARGETS=native)
-./build.sh --all                       # xcore1000,xcore1500,xcore1600
-./build.sh --targets xcore1000,xcore1600
-./build.sh --clean                     # rm -rf build first
-./build.sh --list                      # print resolved targets, exit
+./build.sh                                    # CUCC_TARGETS=xcore1000,xcore1500,xcore1600 (default)
+CUCC_TARGETS=native          ./build.sh       # just this device
+CUCC_TARGETS=xcore1600       ./build.sh       # one architecture
 ```
 
 `build.sh` is the entry point; it wraps the same `setup.py` calls shown below.
@@ -61,44 +59,37 @@ It mirrors the host `build.sh` in shape but deliberately does **not** run
 `bdist_wheel` — see the `pip install .` note below for why `--inplace` is the
 working path — and it removes the stale in-place `.so` before building rather
 than trusting `build_ext`'s timestamp comparison. It resolves targets through
-`deep_select/_arch.py` so the script and `setup.py` cannot disagree, and fails
-loudly if a requested architecture produced no extension. `MACA_PATH` and
-`MAX_JOBS` are honored; `CUCC_TARGETS` from the environment always wins over
-the default.
+`deep_select/_arch.py` so the script and `setup.py` cannot disagree, and an
+unrecognized target fails the build rather than being skipped. `MACA_PATH`
+(default `/opt/maca`) and `MAX_JOBS` are honored.
+
+**There is no argument parsing — the target list is `CUCC_TARGETS` and nothing
+else**, which is the host repository's shape. Two things `build.sh` does that
+the host one does not, both recorded in its header: it removes the stale
+in-place `.so` first, and its default is one target per family this tree names
+(`xcore1000,xcore1500,xcore1600`) rather than the host default verbatim — the
+host list's `xcore1008`/`xcore1502`/`xcore1520`/`xcore1610`/`xcore1620` are
+**aliases of a family already in the list**, and this `setup.py` names the
+extension after the *family*, so two targets in one family build the same
+extension twice while `mxcc` rejects several of those spellings outright.
 
 ```bash
-./install.sh                           # build a wheel and install it
-./install.sh --targets xcore1600       # for another architecture
-./install.sh --all                     # xcore1000,xcore1500,xcore1600
-./install.sh --build-only              # leave the wheel in dist/, install nothing
+./install.sh                                  # build a wheel and install it
+CUCC_TARGETS=xcore1600 ./install.sh           # for another architecture
 ```
 
 `install.sh` additionally installs into the active environment
 (`pip install <wheel> --force-reinstall --no-deps`, matching the host repo's
-`install.sh`). Two things it has to do that the host one does not:
+`install.sh`). One thing it has to do that the host one does not:
 
 - **Build the wheel by a single `bdist_wheel` run, then hand pip the file.**
   `pip install .` cannot work here (see below); building first keeps `setup.py`
-  to one invocation.
-- **Symlink the installed extension back under `deep_select/` as a last step.**
-  Every suite here is run as `PYTHONPATH=. python tests/...` from the repo root,
-  which resolves `deep_select` to the *repo* copy first — so an installed wheel
-  alone leaves the suites exercising nothing. The link is created after the
-  install, from `pip show`'s `Location` (asking `import deep_select` from the
-  repo root would report the repo back and produce a symlink onto itself). A
-  symlink rather than a copy, so re-running `build.sh` overwrites the target
-  instead of racing it. Skip it with `--no-link`.
-- **Export the wheel to `${BUILDROOT}/wheel/` when `BUILDROOT` is set** — the
-  host repo's `build.sh` destination and variable, so one packaging step can
-  collect both wheels with a single `BUILDROOT`. It happens after the
-  target-presence check and before the `--build-only` exit, so
-  `BUILDROOT=... ./install.sh --build-only` is the "give me the artifact,
-  install nothing" path. An earlier revision also renamed the wheel here to
-  reconcile a version-field mismatch; that branch was unreachable (see
-  `install.sh`'s note — PEP 440 normalization leaves the local segment as one
-  dashed field) and is gone.
+  to one invocation. One run cannot straddle the second boundary; the split is
+  what `pip install .` creates.
 
-The underlying call, if you need it directly:
+The underlying call, if you need it directly (this bypasses the scripts' env
+derivation, so export `MACA_PATH`/`CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`
+yourself — see the build-change discipline section for why):
 
 ```bash
 CUCC_TARGETS=xcore1000 python setup.py build_ext --inplace             # C500
@@ -182,10 +173,22 @@ The kernel tree is split **by per-SM shared memory**, because that is what a top
 
 | tree | parts | kernel |
 | --- | --- | --- |
-| `csrc/xcore1000/` | C500 (64 KiB/SM) | `maca_topk.cu`, hand-written for MACA |
-| `csrc/xcore1600/` | C600, C600U (128 KiB/SM) | the upstream kernels, ported — **currently not built by default** |
+| `csrc/xcore1000/` | C500 (64 KiB/SM), **and C600 / C600U** | `maca_topk.cu`, hand-written for MACA — **what every family builds** |
+| `csrc/xcore1600/` | C600, C600U (128 KiB/SM) | the upstream kernels, ported — **reserved, not built, not reachable** |
 
-**A 128 KiB family builds `csrc/xcore1000/` by default right now**, because `csrc/xcore1600/` selects wrong on a C600U (see Known holes). This is *confirmed as the right containment*, not merely an unrefuted default: `csrc/xcore1000/` is 1.5-2.9x faster than the port on the C600U (4096x16384 k=512: 1413.8us / 94.9 GB/s vs 4146.8us / 32.4 GB/s) and passes `check_result` on every cell the port fails. Nothing in that tree is C500-specific code, and the capacity gate cannot fire in this direction -- see "Can a C600U run the C500 kernel" below. `deep_select/_arch.py`'s `DEEP_SELECT_128KIB_KERNEL` chooses the source tree — `xcore1000` (default) or `xcore1600` for working the 32-lane audit — and it never changes the extension's name, so `backend="maca_c"` cannot see which one backed it. Delete the override once the port passes `scripts/official_slice.py` on a C600U.
+**Every family this tree builds compiles `csrc/xcore1000/`, and there is no
+switch that says otherwise.** `setup.py`'s source selection is one
+unconditional `sources = XCORE1000_SOURCES` line, and `_xcore1600_sources()`
+sits beside it **uncalled** as the reserved implementation: it is complete and
+compiling, and nothing reaches it. Wiring it back is that one line, deliberately
+a source change rather than an environment variable — a switch that could put
+the broken kernel back is a switch that can be left on.
+
+The reason is not only that the port selects wrong on a C600U (see Known holes);
+it is that the C500 kernel is the **better** artifact there: 1.5–2.9x faster,
+and passing `check_result` on every cell the port fails. Nothing in that tree is
+C500-specific code, and the capacity gate cannot fire in this direction — see
+"Can a C600U run the C500 kernel" below.
 
 `csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel), `TopkSelectArgs` — and the per-SM capacity constant `NATIVE_SHARED_MEMORY_PER_SM_BYTES`, selected by `-DDEEP_SELECT_NATIVE_ARCH` (set by `setup.py` from the same `CUCC_TARGETS` entry as `--offload-arch`). Both kernels reject a config that cannot fit that capacity **at compile time**, so upstream's 227 KiB-sized tuples cannot ride into a 64 KiB build and fail at launch instead.
 
@@ -303,18 +306,23 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
   accepted here. Neither limit is reached by the official grid.
 
 So the default is not a workaround standing in for a broken kernel: it is the
-shipping kernel, on a part it is correct and faster on. `DEEP_SELECT_128KIB_KERNEL`
-exists to reach the port while it is being debugged, not because the C500 tree
-is a second-best on a C600U.
+shipping kernel, on a part it is correct and faster on. There is no override to
+reach the port — it is a one-line source change in `setup.py`, and that is the
+point: a switch that could put the broken kernel back is a switch that can be
+left on.
 ### xcore1600 — the ported upstream kernels
 
-**This tree does not currently pass on a C600U and is not built by default** — see Known holes for the measurement, the reproduction, and the 32-lane suspect list. Everything below describes it as written; treat it as unvalidated until the audit is done and re-run `scripts/official_slice.py --backend maca_c` on a C600U with `DEEP_SELECT_128KIB_KERNEL=xcore1600`.
+**This tree does not currently pass on a C600U and is not built at all** — see
+Known holes for the measurement, the reproduction, and the 32-lane suspect list.
+Everything below describes it as written; treat it as unvalidated. To work on
+it, point `setup.py`'s `sources =` line at `_xcore1600_sources()` and re-run
+`scripts/official_slice.py --backend maca_c` on a C600U.
 
-**A C600U pass is necessary but not sufficient to switch the default back**: the
-128 KiB family currently builds `csrc/xcore1000/` on purpose, so flipping
-`DEFAULT_128KIB_KERNEL` to `xcore1600` also changes which kernel serves C600 and
-C600U production traffic at every shape — that is a routing change, not just an
-audit milestone, and it needs the perf arm too.
+**A C600U pass is necessary but not sufficient to wire it back in**: switching
+the source tree also changes which kernel serves C600 and C600U production
+traffic at every shape — that is a routing change, not just an audit milestone,
+and it needs the perf arm too (the C600U measurements say the port also *loses*
+on time today).
 
 `api.cu` is the host dispatch + pybind11 module; `v3/` (bf16) and `v3_fp32/` (fp32) each hold `topk_select.cuh` + a generated `instantiations/` directory. `common_parts.cuh`, `bit_utils.cuh`, `utils.cuh`, `config.h`, `dispatch_utils.h` are shared.
 
@@ -906,6 +914,14 @@ Facts the CSV records and the traps in reading it:
 5. **Alignment**: rows whose length is a multiple of 8 and offset-16 B-aligned take the vector path, otherwise a scalar fallback (`bf16x8_is_aligned`). Mixed vector + tail was intermittently racy on a 1024-thread block, so odd-length rows uniformly use one load mode.
 6. **mxcc's compile cache** is `~/.deep_gemm/cache` (keyed by entry name + source digest); a source edit recompiles only the affected entry. Counting `kernel.*` dirs under a fresh `DG_JIT_CACHE_DIR` is how you check a routing change did not grow the compiled-kernel count.
 7. `NormalFloatDistribution` (the official table's data) is **not** bit-pattern uniform — many elements per row crowd into one high byte. This is the fact every optimization here is organized around.
+8. **A toolkit mismatch at *run* time reports as `mcErrorInvalidDeviceFunction`, and it looks exactly like a kernel defect.** The extension is linked against `libmcruntime.so` by soname, and torch's `-Wl,-rpath` becomes a `DT_RUNPATH`, which `LD_LIBRARY_PATH` **overrides**. Measured 2026-09-15 on this box, the *same* `deep_select_xcore1600*.so`, device 1, one variable changed:
+
+   | `MACA_PATH` (and the `LD_LIBRARY_PATH` it derives) | result |
+   | --- | --- |
+   | `/opt/maca-3.8.1` — `libmcruntime.so` md5 `2da1af3a95a81929bbf301324fb5fe66` | **202/202** |
+   | `/opt/maca` — `libmcruntime.so` md5 `9f7a96f64abc67c6ae52ab0001ea5bc5` | **0/202**, every case `StatGetFunc error` + `mcErrorInvalidDeviceFunction` |
+
+   `/opt/maca` is a symlink that was re-pointed on 2026-09-15 05:10 to `maca-3.5.3.17-20260915`, a different SDK generation **that has no `tools/cu-bridge` at all** — so it is the wrong root for both building *and* running a 3.8.1-built artifact, and it is what the shell's profile exports. The tell that it is not a kernel bug: the count is 0/202 rather than a plausible partial, and *every* cell fails identically including `vocab_size=1`, which launches no meaningful work. Before blaming a kernel for a device-function or device-side-assert failure, print the resolved `libmcruntime.so` path and md5. Both `build.sh` and `install.sh` derive `CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH` from `MACA_PATH` for this reason and `run_test.sh` derives `LD_LIBRARY_PATH` from it, so passing `MACA_PATH=<a working toolkit>` to all three is the whole fix.
 
 ## Performance-change discipline
 
@@ -988,12 +1004,13 @@ it removes the seeding that made an earlier reading of this look deterministic w
 ## Known holes (recorded, not hidden)
 
 - **`csrc/xcore1600/` selects wrong on a C600U. This is measured, not suspected, and it is the first thing to
-  fix.** It is *contained* for now — a 128 KiB family builds `csrc/xcore1000/` by default
-  (`DEEP_SELECT_128KIB_KERNEL`, see Kernel architecture above), which passes 200/200 on a C600U — and is not merely
+  fix.** It is *contained* — every family builds `csrc/xcore1000/`, unconditionally and with no override
+  (see Kernel architecture above), which passes 200/200 on a C600U — and that is not merely
   correct there but **faster**: see "Can a C600U run the C500 kernel", which measures 1.5-2.9x against the port and
-  records why the containment is the right answer rather than a fallback. Setting that variable
-  to `xcore1600` puts the broken kernel back, which is how the audit is done.
-  On a `MetaX C600-U` (reports `sm89` → family 1600, so `backend="maca_c"` resolved *here*, not to `maca_topk.cu`):
+  records why the containment is the right answer rather than a fallback. The port is still in the tree and
+  compiling; building it is a one-line source change in `setup.py`, which is how the audit is done.
+  On a `MetaX C600-U` (reports `sm89` → family 1600, so `backend="maca_c"` resolved *here*, not to `maca_topk.cu`;
+  that measurement was taken with the port built, which is no longer what a build produces):
   a monotonic row of `0..511` with `topk=8` returns indices like `[448..455]` where the answer is `[511..504]`, and
   **the wrong answer varies run to run**: eight consecutive invocations of the identical command on identical input
   produced **eight distinct** index sets, all wrong, each a different mix of indices scavenged from the middle of the row.
@@ -1030,7 +1047,8 @@ it removes the seeding that made an earlier reading of this look deterministic w
   `:1440`/`:1469` (`__reduce_add_sync(0xFFFFFFFF, …)`), `v3/topk_select.cuh:54` (`threadIdx.x % 32`), and the `0xFFFFFFFF`
   mask in `utils.cuh:7-12`, whose own comment says the mask's validity rests on "**前提是 MACA 的 warp 宽度确为 32**" —
   which it is not. On a 64-lane wave `0xFFFFFFFF` names the low half, so every one of those under-counts silently.
-  **It is worse than "wrong": it does not run.** With `DEEP_SELECT_128KIB_KERNEL=xcore1600` built and *correct* inputs
+  **It is worse than "wrong": it does not run.** With the port built (the `setup.py` source line pointed at
+  `_xcore1600_sources()`) and *correct* inputs
   (`torch.set_default_device("cuda")` set, per the environment traps below), three cells — `b4096-v1024-k512`,
   `b4096-v16384-k512`, `b512-v262144-k512`, all bf16 — all die with `device-side assert` before a single timing is
   taken. So this tree cannot be benchmarked against the rerouted one cell for cell; there is no before to put beside the

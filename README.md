@@ -35,16 +35,17 @@ buffer with `__syncthreads`, inline PTX MACA builtins. Its config tuples are
 re-derived for 128 KiB, since upstream's are sized for an H100's 227 KiB.
 `v3_cluster` was deleted rather than ported: MACA has no cluster launch.
 
-> **A 128 KiB part does not currently build this tree by default.** The port
-> selects wrong on a MACA C600U -- an `arange` row of 0..511 with `topk=8`
-> returns indices like `[448..455]` where the answer is `[511..504]`, and
-> differently on every run; the official slice scored 4/200. Until the audit in
-> CLAUDE.md's "Known holes" is done, `deep_select/_arch.py` routes the 128 KiB
-> families to `csrc/xcore1000/maca_topk.cu` as well, which passes 200/200 on a
-> C600U. `DEEP_SELECT_128KIB_KERNEL=xcore1600` builds the port anyway, for
-> working on it. The extension is still named `deep_select_xcore<N>`, so
-> nothing outside the build can tell which tree backed it. Everything below in
-> this section describes `csrc/xcore1600/` as it stands, port bugs included.
+> **Nothing builds this tree, on any part.** The port selects wrong on a MACA
+> C600U -- an `arange` row of 0..511 with `topk=8` returns indices like
+> `[448..455]` where the answer is `[511..504]`, and differently on every run;
+> the official slice scored 4/200. So every family builds
+> `csrc/xcore1000/maca_topk.cu` instead, which passes 200/200 on a C600U **and
+> is 1.5-2.9x faster there** (CLAUDE.md, "Can a C600U run the C500 kernel").
+> The port stays in the tree complete and compiling as the reserved
+> implementation; it is reached by pointing `setup.py`'s `sources =` line at
+> `_xcore1600_sources()`, not by an environment variable, and
+> `deep_select/_arch.py` has no switch for it. Everything below in this section
+> describes `csrc/xcore1600/` as it stands, port bugs included.
 
 Consequences:
 
@@ -251,14 +252,13 @@ family: two targets in one family would overwrite each other, and `mxcc` rejects
 `xcore1610`/`xcore1620` outright). `CUCC_TARGETS=native` is the shortcut for
 "just this device", and `CUCC_TARGETS=xcore1600 ./build.sh` for one family.
 
-Each target builds the kernel its capacity selects -- `csrc/xcore1000/` for a
-64 KiB part, `csrc/xcore1600/` for a 128 KiB one -- producing
-`deep_select/deep_select_xcore<N>*.so`. A 128 KiB part currently gets
-`csrc/xcore1000/` too (`deep_select/_arch.py`'s `DEEP_SELECT_128KIB_KERNEL`),
-because the ported kernel selects wrong on a C600U. That is a deliberate
-containment and not a fallback: the C500 kernel is correct on a C600U and
-1.5-2.9x faster than the port there (see CLAUDE.md, "Can a C600U run the C500
-kernel").
+Each target builds `csrc/xcore1000/maca_topk.cu` -- the hand-written MACA
+kernel, for every capacity, 64 KiB and 128 KiB alike -- producing
+`deep_select/deep_select_xcore<N>*.so`. The ported kernels under
+`csrc/xcore1600/` are reserved and unbuilt: they select wrong on a C600U, and
+the C500 kernel is both correct there and 1.5-2.9x faster (see CLAUDE.md, "Can a
+C600U run the C500 kernel"). Wiring the port back is a one-line source change in
+`setup.py`, deliberately not an environment variable.
 
 Both scripts derive `CUDA_HOME`/`CUDA_PATH`/`CUCC_PATH` from `MACA_PATH`: torch's
 `_find_cuda_home()` reads the first two before its `${MACA_PATH}/tools/cu-bridge`

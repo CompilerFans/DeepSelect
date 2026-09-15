@@ -344,6 +344,9 @@ and it uses `0xffffffffffffffffull` masks) — slow, but not part of this bug.
 
 ### 8.4 Containment
 
-`deep_select/_arch.py`'s `DEEP_SELECT_128KIB_KERNEL` routes a 128 KiB part to
-the hand-written 64-lane kernel instead (`xcore1000`), which passes the slice
-200/200. Set it to `xcore1600` to work this tree, and re-run the slice when done.
+Nothing routes to this tree any more: `setup.py` builds
+`csrc/xcore1000/maca_topk.cu` for every family, and that is the hand-written
+64-lane kernel, which passes the slice 200/200 on a C600U (and is faster there).
+To work this tree, point `setup.py`'s `sources =` line at
+`_xcore1600_sources()` and re-run the slice when done -- there is no environment
+variable for it, by design.

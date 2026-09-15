@@ -10,10 +10,15 @@ repository (``deep_gemm/utils/arch_config.py``, ``XcoreFamily``).  This
 repository is standalone and cannot import that package, so the table is
 duplicated here and the two are kept in sync by hand; a change to either
 belongs in the same review.
+
+Which *source tree* a family builds is deliberately **not** part of this
+vocabulary.  Every family builds the same one, it is one line in `setup.py`,
+and it cannot be reached from an environment variable -- see the note at that
+selection site and CLAUDE.md's "Kernel architecture".  A switch that could put
+the broken kernel back is a switch that can be left on.
 """
 
 from typing import Optional
-import os
 
 # Compiler target spelling (`--offload-arch=xcore<N>`) -> family base.  The
 # sub-variants (1008, 1502, 1520, 1610, 1620) are members of the family whose
@@ -46,11 +51,6 @@ SM_COUNT = {
     1500: 28,    # C600
     1600: 32,    # C600U / C600-UL
 }
-
-# The capacity the ported kernel's tuples were re-derived against
-# (`scripts/generate_instantiations.py`, which refuses to emit a tuple whose
-# `occupancy * shared_memory_bytes()` exceeds it).
-XCORE1600_KERNEL_CAPACITY_BYTES = 128 * 1024
 
 # The CUDA-compat sm spelling torch reports -> family base.  Which of the three
 # xcore1600 spellings a part reports depends on the SDK generation, so the
@@ -105,78 +105,6 @@ def native_target() -> str:
     return f"xcore{family}"
 
 
-# ── which kernel a 128 KiB part builds -- switch, and why the default flipped ─
-#
-# `csrc/xcore1600/` (the ported upstream kernels) selects **wrong** on a MACA
-# C600U.  Measured, not suspected: an `arange` row of 0..511 with topk=8 returns
-# indices like [448..455] where the answer is [511..504], and it differs on
-# every run -- eight runs, eight distinct wrong answers.  A random row returns
-# 1.5e+37 for a row whose true max is 3.3.  On the official slice
-# (`scripts/official_slice.py --backend maca_c`) it scored 4/200 against
-# 200/200 for the hand-written kernel.
-#
-# The prime suspect is CUDA's 32-lane model on MACA's 64-lane wave (see
-# CLAUDE.md, "Known holes").  It is a real kernel bug, not a build one: the
-# pre-cu-bridge artifact is wrong too, and wrong differently each run.
-#
-# So the default for a 128 KiB family is `csrc/xcore1000/maca_topk.cu` -- the
-# hand-written kernel CLAUDE.md calls "the shipping C500 kernel", which is
-# correct on every slice it is run against and has no capacity gate (a 128 KiB
-# SM runs it with room to spare).
-#
-#     DEEP_SELECT_128KIB_KERNEL=xcore1600     # back to the ported kernel, for
-#                                             # debugging the 32-lane audit
-#     DEEP_SELECT_128KIB_KERNEL=xcore1000     # the default, spelled out
-#
-# The switch chooses a *source tree*, never an extension name: the extension is
-# still `deep_select_xcore<N>` and a caller cannot tell from the outside which
-# one it is.  That is deliberate -- the operator's behavior is the contract, and
-# the ported kernel does not currently meet it on this hardware.
-#
-# Delete this override (and the `DEEP_SELECT_128KIB_KERNEL` branch in
-# `kernel_directory`) once the port passes the official slice on a C600U.
-DEFAULT_128KIB_KERNEL = "xcore1000"
-
-_KERNEL_CHOICES = ("xcore1000", "xcore1600")
-
-
-def kernel_for_128kib() -> str:
-    """The tree a 128 KiB family builds, from the environment or the default.
-
-    Read at call time rather than cached, so a debugging session can flip it
-    between builds without a fresh interpreter.
-    """
-    choice = os.environ.get("DEEP_SELECT_128KIB_KERNEL", DEFAULT_128KIB_KERNEL)
-    if choice not in _KERNEL_CHOICES:
-        raise ValueError(
-            f"DEEP_SELECT_128KIB_KERNEL={choice!r} is not a kernel tree; "
-            f"expected one of {', '.join(_KERNEL_CHOICES)}"
-        )
-    return choice
-
-
-def kernel_directory(family: int) -> str:
-    """Which kernel tree under `csrc/` serves this family.
-
-    The split is by capacity, not by name: a part with 128 KiB of shared memory
-    per SM would run `csrc/xcore1600/`, whose config tuples were re-derived for
-    exactly that figure, and the 64 KiB part runs `csrc/xcore1000/`, the
-    hand-written MACA kernel, which has no capacity gate to satisfy.
-
-    A 128 KiB family currently defaults to `csrc/xcore1000/` as well -- see the
-    note above `DEFAULT_128KIB_KERNEL`, and `DEEP_SELECT_128KIB_KERNEL` to
-    build the port instead while it is being debugged.
-
-    The directory name is the same string the build names the extension after
-    (`deep_select_xcore<N>`), so one name covers the tree and the module; it is
-    also what `topk(backend="maca_c")` resolves to on a device of this family,
-    though that resolution names no architecture at the call site.
-    """
-    if CAPACITY_BYTES.get(family, 0) < XCORE1600_KERNEL_CAPACITY_BYTES:
-        return "xcore1000"
-    return kernel_for_128kib()
-
-
 def resolve_targets(spec: Optional[str]) -> list:
     """Expand a ``CUCC_TARGETS`` value into concrete target spellings.
 
@@ -197,3 +125,59 @@ def resolve_targets(spec: Optional[str]) -> list:
     for target in targets:
         family_of_target(target)
     return targets
+
+
+# ── which kernel a family builds -- a build-side note, not this module's ──
+#
+# **Every family this tree builds runs `csrc/xcore1000/maca_topk.cu`** -- the
+# hand-written kernel CLAUDE.md calls "the shipping C500 kernel".  The ported
+# upstream kernels under `csrc/xcore1600/` are kept in the tree, complete and
+# compiling, as the reserved implementation: they are **not reachable from a
+# build**, and reaching them is a source change in `setup.py` rather than an
+# environment variable.  A switch that could put the broken kernel back is a switch that can
+# be left on.
+#
+# Why the port is not the default, measured on a C600U (MACA 3.8.1, device 1;
+# both artifacts built for the same extension name, official cases and checks --
+# CLAUDE.md has the full table):
+#
+#     cell                        csrc/xcore1000        csrc/xcore1600
+#     4096 x   16384 k=512 bf16    1413.8 us   94.9 GB/s   4146.8 us  32.4 GB/s  FAIL
+#     4096 x    1024 k=512 bf16     477.4 us   17.6 GB/s    997.3 us   8.4 GB/s  FAIL
+#     512 x  262144 k=512 bf16    1793.1 us  149.7 GB/s   2721.2 us  98.6 GB/s  FAIL
+#       8 x    4096 k=512 fp32      16.7 us    7.9 GB/s     16.4 us   8.0 GB/s  FAIL
+#
+# `check_result` passes every one of those cells on `csrc/xcore1000/` and fails
+# every one on the port.  So this is not a fallback that happens to be correct:
+# the shipping kernel is **1.5-2.9x faster on the parts in question as well**.
+#
+# Two reasons that is possible at all, both checkable rather than assumed:
+#
+#   * Nothing in `csrc/xcore1000/` is C500-specific code -- no `__MACA_ARCH__`
+#     branch anywhere in the tree, every cross-lane primitive already 64-lane
+#     (`radix_core.cuh`'s `kWarpSize = 64` under `__MACACC__`), and integer key
+#     ranking with no float math to differ per part.
+#   * **Capacity cannot fire in this direction.**  `csrc/structs.h` picks
+#     `NATIVE_SHARED_MEMORY_PER_SM_BYTES` (64 KiB for family 1000, 128 KiB for
+#     1500/1600) from `-DDEEP_SELECT_NATIVE_ARCH`, which `setup.py` passes from
+#     the target, so a C600/C600U build gets the 128 KiB constant.  The
+#     compile-time gate exists to reject an *oversized* config; a 64 KiB-sized
+#     one in a 128 KiB SM cannot trip it.
+#
+# The one real cost is that the SM-count-sensitive constants (`wave_filled_chunks`
+# and `NATIVE_F32_CHUNK_WORK_TARGET`, both keyed on `NATIVE_SM_COUNT`) carry the
+# C500 values' arithmetic to 28 and 32 SMs rather than being re-measured there;
+# the source marks them as such, and the table above bounds the error.
+#
+# What a caller gets on a 128 KiB part, from `maca_topk.cu` rather than the port:
+# `topk` in `(1024, 4096]` is answerable (the port refuses it), `vocab_size >=
+# 2^23` is not a limit (it is the port's fp32-simulated census), and bf16
+# `sorted_value` works (the port, as upstream, rejects it).
+#
+# To work on the port: build it by hand, naming its sources --
+#
+#     CUCC_TARGETS=xcore1600 python setup.py build_ext --inplace   # after
+#     # pointing `setup.py`'s source selection at `_xcore1600_sources()`
+#
+# -- and expect `scripts/official_slice.py --backend maca_c` to fail on a
+# C600U.  It is unvalidated, not merely unused: see CLAUDE.md, "Known holes".

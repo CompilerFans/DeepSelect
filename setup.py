@@ -12,13 +12,15 @@ exec(open("deep_select/__version__.py").read())
 #
 #   csrc/xcore1000/   the hand-written MACA kernel (`maca_topk.cu`).  No
 #                     capacity gate and no architecture-specific code; this is
-#                     what a 64 KiB part runs.
+#                     what **every** family this tree builds runs, 64 KiB and
+#                     128 KiB alike.
 #   csrc/xcore1600/   the ported kernel (TMA -> cooperative `ldg`, mbarrier ->
 #                     single buffer + `__syncthreads`, inline PTX -> MACA
 #                     builtins).  Its config tuples are re-derived for 128 KiB
 #                     by `scripts/generate_instantiations.py` and checked
 #                     against that capacity at compile time.  xcore1500 shares
-#                     this tree: same capacity, same table.
+#                     this tree: same capacity, same table.  **Reserved and
+#                     not built** -- see `_xcore1600_sources` below.
 #
 # `csrc/structs.h` stays at the top: both halves include it.
 # `csrc/xcore1600/v3_cluster` was deleted with the cluster variant -- MACA has
@@ -26,6 +28,14 @@ exec(open("deep_select/__version__.py").read())
 XCORE1000_SOURCES = [
     "csrc/xcore1000/maca_topk.cu",
 ]
+
+# Reserved, and deliberately **not called**: the ported upstream kernels under
+# `csrc/xcore1600/` are kept in the tree complete and compiling, but no
+# architecture builds them.  `build_for_maca` below is the only caller there
+# would be, and it selects `XCORE1000_SOURCES` unconditionally -- see the note
+# at that site for why, and CLAUDE.md's "Known holes" for the measurement.
+# Wiring the port back in is this one line; making it an environment variable
+# again is what this deliberately is not.
 
 
 def _xcore1600_sources():
@@ -105,18 +115,25 @@ def build_for_maca():
     """Build one extension per architecture, each holding that architecture's
     kernel.
 
-    Which kernel an architecture gets is a property of the architecture, not a
-    build-time choice: 64 KiB parts run `csrc/xcore1000/`, 128 KiB parts run
-    `csrc/xcore1600/`.  Each is built as its own extension, named for the
-    architecture it serves -- `deep_select.deep_select_xcore<N>` -- because a
-    config's shared memory footprint is only valid for the architecture it was
-    sized for, and because `topk(backend="maca_c")` resolves to one of them by
-    exactly that name -- the architecture is named here, in the build, and not
-    in the public `backend=`.
+    **Every architecture is built from `csrc/xcore1000/`.**  That tree is the
+    hand-written MACA kernel CLAUDE.md calls the shipping C500 kernel, and it
+    is what a C600 and a C600U run as well: measured on a C600U it is 1.5-2.9x
+    faster than the ported kernels under `csrc/xcore1600/` and passes
+    `check_result` on every cell the port fails (CLAUDE.md, "Can a C600U run
+    the C500 kernel").  The port is kept in the tree and compiling as the
+    reserved implementation; it is not reachable from this build, and reaching
+    it is an edit to the one `sources =` line below rather than an environment
+    variable -- a switch that could put the broken kernel back is a switch that
+    can be left on.
 
-    Which architectures get built comes from `CUCC_TARGETS` (default
-    `native`), the same variable and meaning as the host repository's
-    `build.sh`.
+    Each architecture still gets its own extension, named for the architecture
+    it serves -- `deep_select.deep_select_xcore<N>` -- because a config's
+    shared memory footprint is only valid for the architecture it was sized
+    for, and because `topk(backend="maca_c")` resolves to one of them by
+    exactly that name: the architecture is named here, in the build, and not in
+    the public `backend=`.  Which architectures get built comes from
+    `CUCC_TARGETS` (default `native`), the same variable and meaning as the
+    host repository's `build.sh`.
 
     Device code is compiled by `mxcc`, reached through cu-bridge's `cucc`: torch
     drives its device compiler as `$CUDA_HOME/bin/nvcc`, `_join_cuda_home`
@@ -143,7 +160,7 @@ def build_for_maca():
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
     from deep_select._arch import (CAPACITY_BYTES, family_of_target,
-                                   kernel_directory, resolve_targets)
+                                   resolve_targets)
 
     maca_root = _maca_root()
     this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -248,15 +265,10 @@ def build_for_maca():
     for target in targets:
         family = family_of_target(target)
         capacity_kib = CAPACITY_BYTES[family] // 1024
-        # Every architecture gets the kernel that was built for its capacity,
-        # so there is no opt-in and no skip: an architecture with no kernel
-        # would be a hole in `backend="maca_c"`, not a smaller build.
-        if kernel_directory(family) == "xcore1000":
-            sources = XCORE1000_SOURCES
-            which = "the MACA-native kernel"
-        else:
-            sources = _xcore1600_sources()
-            which = "the ported kernel"
+        # One source tree for every family, and no branch -- see the docstring
+        # above.  `_xcore1600_sources()` is the reserved other answer; swapping
+        # it in here is the whole of "build the port".
+        sources = XCORE1000_SOURCES
         ext = CUDAExtension(
                 # The tvm-ffi artifact has no `PyInit` and is NOT an
                 # importable python module -- it is loaded through
@@ -306,7 +318,8 @@ def build_for_maca():
         ]
         ext_modules.append(ext)
         print(f"deep_select: building xcore{family} "
-              f"({capacity_kib} KiB shared memory) for {target}: {which}")
+              f"({capacity_kib} KiB shared memory) for {target}: "
+              f"csrc/xcore1000 (maca_topk.cu)")
 
     return (ext_modules, BuildExtension.with_options(use_ninja=True))
 
