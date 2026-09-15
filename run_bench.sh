@@ -31,14 +31,17 @@
 #
 # No exclusivity gate: nothing can see which device a process is pinned to, so
 # pick one with `CUDA_VISIBLE_DEVICES`.  `mx-smi` is snapshotted for forensics,
-# never trusted to decide.  `--full` is a LONG run.
+# never trusted to decide.
+#
+# There is no `--full`: the host repo's selector shapes are ON by default, and
+# the switch for them is `--no-host-shapes`.  `--full` used to be documented as
+# the thing that added them, and had not done so since the default inverted --
+# it appended `_full` to the output directory name and nothing else.
 #
 # Usage:
 #     ./run_bench.sh                          # snapshot + the official gate
 #     ./run_bench.sh --set-baseline           # ... and repoint baseline at it
 #     ./run_bench.sh --compare-only           # no measurement; latest vs baseline
-#     ./run_bench.sh --full                   # + the host repo's selector grid
-#     ./run_bench.sh --quick                  # snapshot only, one arm
 #     ./run_bench.sh --arms maca_c,torch      # a subset of the three
 #     ./run_bench.sh --list                   # print the plan and exit
 #     ./run_bench.sh --baseline-dir 20260801  # repoint, do not measure
@@ -51,6 +54,8 @@
 #     MACA_PATH             MACA toolkit root (default /opt/maca)
 #
 set -euo pipefail
+# `set -e` with `[[ ]] && cmd` as a statement exits when the test is false, so
+# every conditional in this script is spelled as an `if`.
 
 original_dir=$(pwd)
 script_dir=$(realpath "$(dirname "$0")")
@@ -60,14 +65,10 @@ usage() {
     cat >&2 <<'EOF'
 Usage: run_bench.sh [options]
 
-  --full              also snapshot the host repo's selector grid (~1.8 GB cells),
-                      and run the same shapes through the official gate
-  --quick             snapshot only, and only the maca_c arm
   --arms LIST         comma-separated subset of maca_c,torch,deep_gemm
   --device N          shorthand for CUDA_VISIBLE_DEVICES=N
   --set-baseline      repoint <chip>/baseline at this run (only if all arms pass)
   --baseline-dir DIR  repoint the baseline at DIR and exit without measuring
-  --no-compare        measure, but do not compare against the baseline
   --compare-only      compare the latest run against the baseline, measure nothing
   --no-host-shapes    do not add the host repo's selector shapes to the
                       snapshot (by default they ARE added; the deep_gemm
@@ -85,13 +86,10 @@ EOF
 export MACA_PATH="${MACA_PATH:-/opt/maca}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
-full=0
 host_shapes=1
-quick=0
 arms="maca_c,torch,deep_gemm"
 set_baseline=0
 baseline_dir=""
-no_compare=0
 compare_only=0
 skip_gate=0
 list_only=0
@@ -100,9 +98,7 @@ timeout_s="${DS_BENCH_TIMEOUT:-5400}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --full)             full=1; shift ;;
         --no-host-shapes)   host_shapes=0; shift ;;
-        --quick)            quick=1; arms="maca_c"; shift ;;
         --arms)             [[ $# -ge 2 ]] || { echo "run_bench.sh: --arms needs a value" >&2; exit 2; }
                             arms="$2"; shift 2 ;;
         --arms=*)           arms="${1#*=}"; shift ;;
@@ -113,7 +109,6 @@ while [[ $# -gt 0 ]]; do
         --baseline-dir)     [[ $# -ge 2 ]] || { echo "run_bench.sh: --baseline-dir needs a value" >&2; exit 2; }
                             baseline_dir="$2"; shift 2 ;;
         --baseline-dir=*)   baseline_dir="${1#*=}"; shift ;;
-        --no-compare)       no_compare=1; shift ;;
         --compare-only)     compare_only=1; shift ;;
         --skip-gate)        skip_gate=1; shift ;;
         --results)          [[ $# -ge 2 ]] || { echo "run_bench.sh: --results needs a value" >&2; exit 2; }
@@ -124,9 +119,6 @@ while [[ $# -gt 0 ]]; do
         *)                  echo "run_bench.sh: unknown argument: $1" >&2; usage; exit 2 ;;
     esac
 done
-# `set -e` with `[[ ]] && cmd` as a statement exits when the test is false, so
-# every conditional in this script is spelled as an `if`.
-if [[ ${quick} -eq 1 ]]; then full=0; fi
 
 # ── the extension under test ────────────────────────────────────────────────
 # The **device's** family -- see the same block in `run_test.sh` for why the
@@ -244,8 +236,6 @@ if [[ ${compare_only} -eq 1 ]]; then
 fi
 
 stamp=$(date +%Y%m%d_%H%M%S)
-if [[ ${quick} -eq 1 ]]; then stamp="${stamp}_quick"; fi
-if [[ ${full} -eq 1 ]]; then stamp="${stamp}_full"; fi
 out="${chip_dir}/${stamp}"
 mkdir -p "$out"
 
@@ -291,8 +281,8 @@ snapshot_failed=0
 # still pass).
 snap_args=(scripts/perf_snapshot.py --arms "${arms}" --out-dir "${results_dir}"
            --tag "${stamp}")
-# The host shapes ride in the SNAPSHOT whenever they are on, not only under
-# `--full`: without them the `deep_gemm` column compares nothing.
+# Without the host shapes the `deep_gemm` column compares nothing, so they ride
+# in the SNAPSHOT whenever they are on (which is the default).
 if [[ ${host_shapes} -eq 1 ]]; then snap_args+=(--deep-gemm-axes); fi
 if ! run_arm snapshot python "${snap_args[@]}"; then
     snapshot_failed=1
@@ -334,9 +324,10 @@ fi
 } >> "${out}/run_header.txt"
 
 # ── compare against the baseline (before --set-baseline moves it) ───────────
-if [[ ${no_compare} -eq 1 ]]; then
-    echo "run_bench.sh: skipping baseline comparison (--no-compare)"
-elif [[ ! -d "${chip_dir}/baseline" ]]; then
+# Unconditional when a baseline exists: the comparator is a local script over
+# two CSVs, it never fails the run, and against a missing baseline it is a
+# no-op -- so there was nothing for a "do not compare" switch to gate.
+if [[ ! -d "${chip_dir}/baseline" ]]; then
     echo "run_bench.sh: no baseline at ${chip_dir}/baseline, skipping comparison"
     if [[ ${set_baseline} -eq 0 ]]; then
         echo "run_bench.sh: run with --set-baseline to create one"

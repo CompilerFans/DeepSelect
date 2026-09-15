@@ -32,9 +32,14 @@
 #
 #   * `pgrep -af python` cannot see which device a process is pinned to -- it
 #     fires on a neighbour pinned elsewhere, and the box is shared.  A gate that
-#     is wrong most of the time trains people to pass `--force` without reading
-#     it, which is worse than no gate.
+#     is wrong most of the time trains people to stop reading it, which is worse
+#     than no gate.
 #   * `mx-smi` is not a gate either; measured here lying in both directions.
+#
+# The consequence for the CLI is that there is no `--force`/`--strict` to
+# override a gate, and asking for one is an unknown argument rather than a
+# silent success: a flag that *asserts* a check ran when there is no check is
+# the failure mode this section is about, so it is not kept for compatibility.
 #
 # The md5 is recorded because this tree's `.so` is gitignored, so "what did I
 # measure" is not implied by the source -- and it has already been the thing
@@ -125,9 +130,6 @@ while [[ $# -gt 0 ]]; do
         -nc|--no-cooldown|-rf|--run-to-finish) perf_args+=("$1"); shift ;;
         --allow-build)      allow_build=1; shift ;;
         --list)             list_only=1; shift ;;
-        # Kept so a script or a habit written against the earlier revision does
-        # not die on an unknown flag.  Both are no-ops now: there is no gate.
-        --force|--strict)   shift ;;
         -h|--help)          usage; exit 0 ;;
         --)                 shift
                             # After `--`, split on what the flag is: the two
@@ -148,11 +150,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 arm="${arm:-perf}"
-
-if [[ -n "${DS_ALLOW_BUSY:-}" ]]; then
-    echo "run_test.sh: note: DS_ALLOW_BUSY is obsolete and ignored -- there is no" >&2
-    echo "             busy check to override; see the header." >&2
-fi
 
 # ── the extension: which one, and is it the one the sources describe ────────
 # The **device's** family, not the build list's first entry: a tree built for

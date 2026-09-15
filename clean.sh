@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #
-# Remove this tree's generated build, test, and Python artifacts.  Mirrors the
-# host repository's `clean.sh` in shape, and is a superset of what `build.sh
-# --clean`/`install.sh --clean` clear.
+# Remove this tree's generated build, test, and Python artifacts.
 #
-#     ./clean.sh               # remove the artifacts (same as the host's)
+#     ./clean.sh               # remove the artifacts
 #     ./clean.sh --dry-run     # print what would go, remove nothing
 #     ./clean.sh --help
 #
-# ── Why `--dry-run` is opt-in ───────────────────────────────────────────────
+# ── Why the listing rides with `--dry-run` ──────────────────────────────────
 #
 # Do not put a confirmation gate back: `./clean.sh && ./build.sh` then prints
 # nothing alarming, the build succeeds anyway (build.sh does its own `rm`), and
 # the full rebuild silently does not happen.  A listing would not have caught
 # this tree's real mistakes either -- those were wrong *content* at a correct
-# path.  So the listing is on request, and the default is what it says.
+# path.  So the default is what it says, and the listing is on request: it is a
+# second traversal, and paying for it on every run is the kind of cost that gets
+# a script replaced by `rm -rf build dist` in someone's shell history.
 #
 # ── What this deliberately does NOT do ──────────────────────────────────────
 #
@@ -25,7 +25,6 @@
 #
 set -euo pipefail
 
-# ── project root ────────────────────────────────────────────────────────────
 original_dir=$(pwd)
 script_dir=$(realpath "$(dirname "$0")")
 cd "$script_dir"
@@ -42,10 +41,6 @@ loose *.pyc /*.pyo, and every *.so in the tree (all of which are build
 products -- checked, there is no vendored binary here).
 Leaves: the installed site-packages copy, and ~/.deep_gemm, ~/.triton,
 ~/.tilelang, ~/.metax (this tree writes none of them).
-
-`--yes` is accepted and ignored: it was this script's first spelling, when the
-default was to remove nothing.  The default is now to remove, so there is
-nothing left for it to answer.
 EOF
 }
 
@@ -53,90 +48,64 @@ dry_run=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) dry_run=1; shift ;;
-        # Redundant now that removing is the default.  Accepted so an older
-        # invocation still works and is visibly ignored rather than mistyped.
-        --yes)     echo "clean.sh: note: --yes is redundant (removing is the" >&2
-                   echo "          default now); ignoring it.  Use --dry-run to" >&2
-                   echo "          preview instead." >&2
-                   shift ;;
         -h|--help) usage; exit 0 ;;
         *)         echo "clean.sh: unknown argument: $1" >&2; usage; exit 2 ;;
     esac
 done
 
 echo "clean.sh: ${script_dir}"
+
+# ── what counts as an artifact ──────────────────────────────────────────────
+# One copy of each predicate list, shared by the listing and the removal below.
+# This file used to carry the same two lists four times (a pass to collect and a
+# pass to delete, twice over), which is four places for one of them to be edited.
+dir_pred=(
+    -name '__pycache__' -o -name '.pytest_cache' -o -name '.mypy_cache'
+    -o -name '.ruff_cache' -o -name '.tox' -o -name '.nox'
+    -o -name '.hypothesis' -o -name 'build' -o -name 'dist'
+    -o -name '*.egg-info'
+)
+# `-type l` as well as `-type f`: `-type f` is false for a symlink (find lstats),
+# so a hand-made `deep_select/deep_select_maca.so -> build/lib.../...so` would
+# survive a clean and shadow the next build.  Nothing here creates one.
+file_pred=(
+    -name '*.pyc' -o -name '*.pyo' -o -name '.coverage' -o -name '.coverage.*'
+    -o -name 'coverage.xml' -o -name '*.so'
+)
+# `-prune` first, so the 3rdparty subtree is neither descended into nor matched.
+dirs_find=( . \( -path './csrc/3rdparty' -o -path './.git' \) -prune -o
+            -type d \( "${dir_pred[@]}" \) )
+files_find=( . \( -path './csrc/3rdparty' -o -path './.git' \) -prune -o
+             \( -type f -o -type l \) \( "${file_pred[@]}" \) )
+
 if [[ "$dry_run" == 1 ]]; then
     echo "clean.sh: dry run -- nothing will be removed."
-fi
-
-# ── directories ─────────────────────────────────────────────────────────────
-# `-prune` first, so the 3rdparty subtree is neither descended into nor matched.
-dirs=$(find . \
-    \( -path './csrc/3rdparty' -o -path './.git' \) -prune -o \
-    -type d \( \
-        -name '__pycache__' \
-        -o -name '.pytest_cache' \
-        -o -name '.mypy_cache' \
-        -o -name '.ruff_cache' \
-        -o -name '.tox' \
-        -o -name '.nox' \
-        -o -name '.hypothesis' \
-        -o -name 'build' \
-        -o -name 'dist' \
-        -o -name '*.egg-info' \
-    \) -print | sort)
-
-# ── loose files ─────────────────────────────────────────────────────────────
-# `-type l` as well as `-type f`: `install.sh` links the wheel's extension back
-# under `deep_select/`, and `-type f` does not match a symlink.  Removing the
-# link does not touch its target in site-packages.
-files=$(find . \
-    \( -path './csrc/3rdparty' -o -path './.git' \) -prune -o \
-    \( -type f -o -type l \) \( \
-        -name '*.pyc' \
-        -o -name '*.pyo' \
-        -o -name '.coverage' \
-        -o -name '.coverage.*' \
-        -o -name 'coverage.xml' \
-        -o -name '*.so' \
-    \) -print | sort)
-
-count_dirs=$(printf '%s' "$dirs" | grep -c . || true)
-count_files=$(printf '%s' "$files" | grep -c . || true)
-
-if [[ "$count_dirs" == 0 && "$count_files" == 0 ]]; then
-    echo "clean.sh: nothing to remove."
-else
-    echo "clean.sh: directories ($count_dirs):"
-    printf '%s\n' "$dirs" | sed 's/^/    /'
-    echo "clean.sh: files ($count_files):"
-    printf '%s\n' "$files" | sed 's/^/    /'
-
-    if [[ "$dry_run" == 0 ]]; then
-        # Re-run the finds with -exec rather than deleting the captured paths,
-        # so a path already removed by an earlier pass does not error here.
-        #
-        # `-prune` is a no-op under `-delete` (which implies `-depth`), so the
-        # directory pass cannot use `-delete`: the 3rdparty subtree would be
-        # descended into, and `dist/`/`build/` are plain names it could carry.
-        find . \
-            \( -path './csrc/3rdparty' -o -path './.git' \) -prune -o \
-            -type d \( \
-                -name '__pycache__' -o -name '.pytest_cache' \
-                -o -name '.mypy_cache' -o -name '.ruff_cache' \
-                -o -name '.tox' -o -name '.nox' -o -name '.hypothesis' \
-                -o -name 'build' -o -name 'dist' -o -name '*.egg-info' \
-            \) -prune -exec rm -rf -- {} +
-        # The same prune is unavailable with `-delete` here, so the subtree is
-        # excluded with an explicit `! -path` guard instead, which -delete honors.
-        find . \
-            ! -path './csrc/3rdparty/*' ! -path './.git/*' \
-            \( -type f -o -type l \) \( \
-                -name '*.pyc' -o -name '*.pyo' -o -name '.coverage' \
-                -o -name '.coverage.*' -o -name 'coverage.xml' -o -name '*.so' \
-            \) -delete
-        echo "clean.sh: removed."
+    dirs=$(find "${dirs_find[@]}" -print | sort)
+    files=$(find "${files_find[@]}" -print | sort)
+    count_dirs=$(printf '%s' "$dirs" | grep -c . || true)
+    count_files=$(printf '%s' "$files" | grep -c . || true)
+    if [[ "$count_dirs" == 0 && "$count_files" == 0 ]]; then
+        echo "clean.sh: nothing to remove."
+    else
+        echo "clean.sh: directories ($count_dirs):"
+        printf '%s\n' "$dirs" | sed 's/^/    /'
+        echo "clean.sh: files ($count_files):"
+        printf '%s\n' "$files" | sed 's/^/    /'
     fi
+else
+    # The removal is a second traversal rather than a replay of the listing, so
+    # a path already gone between the two cannot error here.
+    #
+    # `-prune` is a no-op under `-delete` (which implies `-depth`), so the
+    # directory pass cannot use `-delete`: the 3rdparty subtree would be
+    # descended into, and `dist/`/`build/` are plain names it could carry.
+    find "${dirs_find[@]}" -prune -exec rm -rf -- {} +
+    # The same prune is unavailable with `-delete`, so the subtree is excluded
+    # with an explicit `! -path` guard instead, which `-delete` honors.
+    find . \
+        ! -path './csrc/3rdparty/*' ! -path './.git/*' \
+        \( -type f -o -type l \) \( "${file_pred[@]}" \) -delete
+    echo "clean.sh: removed."
 fi
 
 # ── what the environment still resolves ─────────────────────────────────────
