@@ -1,0 +1,46 @@
+# run_bench.sh    device_dir=MetaX_C600-U  chip=metax_xcore1600
+# timestamp_utc   2026-09-15T07:50:59Z
+# host            mx-cjxu-ws-cr-20260915131045
+# extension       deep_select/deep_select_xcore1600.cpython-310-x86_64-linux-gnu.so
+# extension_md5   727b6c4ef538e42e0467832e97c2457c
+# cuda_visible_devices 1
+# arms            maca_c,torch
+# STALE           no
+# ---
+# mx-smi
+mx-smi  version: 2.3.4
+
+=================== MetaX System Management Interface Log ===================
+Timestamp                                         : Tue Sep 15 07:50:59 2026
+
+Attached GPUs                                     : 2
++---------------------------------------------------------------------------------+
+| MX-SMI 2.3.4                       Kernel Mode Driver Version: 3.10.11          |
+| MACA Version: 3.8.1.3              BIOS Version: 1.1.7.0                        |
+|------------------+-----------------+---------------------+----------------------|
+| Board       Name | GPU   Persist-M | Bus-id              | GPU-Util      sGPU-M |
+| Pwr:Usage/Cap    | Temp       Perf | Memory-Usage        | GPU-State            |
+|==================+=================+=====================+======================|
+| 0   MetaX C600-U | 0           Off | 0000:a4:00.0        | 0%          Disabled |
+| 121W / 520W      | 32C          P0 | 524/73728 MiB       | Available            |
+|                  |-----------------|---------------------|----------------------|
+|                  | 1           Off | 0000:a5:00.0        | 0%          Disabled |
+|                  | 37C          P0 | 524/73728 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+
++---------------------------------------------------------------------------------+
+| Process:                                                                        |
+|  GPU                    PID         Process Name                 GPU Memory     |
+|                                                                  Usage(MiB)     |
+|=================================================================================|
+|  no process found                                                               |
++---------------------------------------------------------------------------------+
+
+End of Log
+# pgrep -af python
+#   (none)
+# run_bench.sh: finished rc=0
+# snapshot_failed 0
+# extension_md5   727b6c4ef538e42e0467832e97c2457c   (deep_select/deep_select_xcore1600.cpython-310-x86_64-linux-gnu.so)
+# cuda_visible_devices 1
+# out             perf_data/MetaX_C600-U/20260915_075059
