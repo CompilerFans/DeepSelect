@@ -393,6 +393,41 @@ repository's suite,
 `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`;
 `maca_c` has no such hole.
 
+### Call logging
+
+Every public entry point can record the shapes and dtypes it was called with,
+and the ones it returned -- which is what makes a shape mismatch readable after
+the fact instead of only as a contract rejection. It is off unless `DS_LOG`
+names a target:
+
+```bash
+DS_LOG=1                  # stderr
+DS_LOG=run.log            # that file, appended
+DS_LOG=/tmp/logs/         # /tmp/logs/deep_select_<date>_<time>.log
+DS_LOG=file               # ./deep_select_<date>_<time>.log
+```
+
+```
+# ============== deep_select run log ==============
+# version : 1.0.0 (git 0742ebc)
+# device  : xcore1000 (MetaX C500, 104 SMs)
+# env     : DS_LOG=1, DS_TOPK_BACKEND=maca_c
+# started : 2026-09-15T23:53:42
+# ================================================
+[23:53:42.474] topk(input=Tensor[4, 204800] torch.bfloat16 (cuda:0), topk=1024, backend='maca_c') -> (Tensor[4, 1024] torch.bfloat16 (cuda:0), Tensor[4, 1024] torch.int64 (cuda:0)) [38.537 ms]
+```
+
+A tensor is recorded as shape/dtype/device and **its values are never read**,
+so logging cannot change what a call computes. A call that is rejected is
+recorded too, with its reason. A call into one backend through `topk` is one
+record, not two. When `DS_LOG` is unset the decorator returns each function
+unwrapped, so there is no wrapper on the hot path at all.
+
+Two things to know before using it on a benchmark: every record synchronizes
+the device (that is the only way its elapsed time means anything), and the
+switch is read when `deep_select` is first imported, so it has to be set before
+then.
+
 ### Variable-length rows
 
 `end` sets a per-row upper bound (exclusive). Rows shorter than `topk` are padded with

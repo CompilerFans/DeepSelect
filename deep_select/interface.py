@@ -6,22 +6,19 @@ from typing import Optional, Tuple
 
 from . import _binding
 from ._arch import native_sm_count
+from ._log import log, log_call
 
 
-# The public backend names: implementations, not architectures.  `maca_c` is
-# whatever kernel this device has; `torch` is a reference implementation of the
-# contract; `deep_gemm` is the host repository's selector (a subset).
+# The backend names.  `maca_c` is the kernel this device has, `torch` is a
+# reference implementation of the contract, `deep_gemm` the host repository's
+# selector.
 _BACKENDS = ("maca_c", "torch", "deep_gemm")
 
-# What `topk` runs when the caller does not choose.  `torch` is deliberate: the
-# kernel path is validated *against* it, so defaulting to it costs no coverage
-# and keeps a caller who asked for nothing from reaching a kernel defect.
+
 def _default_backend() -> str:
     """`DS_TOPK_BACKEND` if it names a backend, else `"torch"`.
 
-    Stated because the default route and the production route differ: `maca_c`
-    is asked for by name.  An unrecognized value is ignored rather than raised
-    -- a typo in the environment must not break every call.
+    An unrecognized value is ignored rather than raised.
     """
     v = os.environ.get("DS_TOPK_BACKEND")
     if v and v in _BACKENDS:
@@ -32,49 +29,31 @@ def _default_backend() -> str:
 class UnsupportedByBackend(ValueError):
     """This backend does not implement this part of the contract.
 
-    Distinct from the `ValueError` a bad argument gets: the request is valid,
-    the operator offers it, and this implementation is simply narrower --
-    `deep_gemm` is float32-only, for instance, while the operator takes
-    bfloat16 too.  Still a `ValueError`, so a caller that only cares that the
-    call was refused need not know the difference.
+    Raised when the request is valid and the backend is simply narrower --
+    `deep_gemm` ranks float32 only, where the operator also takes bfloat16.
+    Still a `ValueError`, so a caller that only cares that the call was
+    refused need not tell the two apart.
     """
 
-# The kernel the build produces: one extension, `deep_select.deep_select_maca`,
-# carrying every architecture's image.  Internal: the build's vocabulary.
+# The extension the build produces.
 _KERNEL_NAME = "deep_select_maca"
 
 
 @functools.lru_cache(maxsize=1)
 def _backend_for():
-    """The loaded tvm-ffi extension implementing `maca_c`.
-
-    Loaded on demand and cached (here and in `_binding`): the module holds a
-    device binary, and a process that never calls `topk` on a kernel should
-    not load one.
-    """
+    """The loaded tvm-ffi extension implementing `maca_c`."""
     return _binding.load(_KERNEL_NAME)
 
 
 @functools.lru_cache(maxsize=1)
 def _sm_count() -> int:
-    """SM count of this process's device, from the architecture torch reports.
-
-    Cached at the same granularity as the module above, and for the same
-    reason: it is a property of the process, not of the call.  `topk` would
-    otherwise ask torch for the device capability on every invocation -- not
-    free, and not something a caller can make vary between two calls that
-    cross the same artifact.
-
-    Resolved through the architecture and not by asking the driver for
-    `multiProcessorCount`: the device already reports which part it is, and a
-    family is what the number is a property of.
-    """
+    """SM count of this process's device, cached: a property of the process,
+    not of the call."""
     return native_sm_count()
 
 
-# `structs.h`'s INPUT_/OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT, which a built kernel
-# exports through `get_alignment_requirement()`.  These are the same numbers for
-# when none is built: the alignment is the contract's, not a build's.
+# `structs.h`'s INPUT_/OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT, for when no kernel
+# is built.
 _ALIGNMENT_REQUIREMENT_BYTES = (1024, 32)
 
 
@@ -91,6 +70,7 @@ def get_stride_requirement() -> Tuple[int, int]:
         return _ALIGNMENT_REQUIREMENT_BYTES
 
 
+@log_call
 def topk(
     input: torch.Tensor,
     topk: int,
@@ -127,18 +107,12 @@ def topk(
         return_value: bool. If False, only return indices without values to accelerate the kernel. The return value is still a Tuple, but the first element will be None.
         abort_when_nan_found: bool. When a NaN is found, if True, aborts the whole kernel; if False, writes 0x3F3F3F3F to the corresponding output_idx[batch_idx][0] and exits.
                 The NaN check itself is always enabled. Exception: when the row's length <= topk, it is skipped.
-        backend: str. Which implementation to run.  `"torch"` (the default) is
-                a reference implementation of the contract in torch ops: any
-                device, any dtype, including where no kernel is built, and the
-                arm to trust when the question is what the *answer* should be.
-                `"maca_c"` is this device's MACA kernel -- the production path
-                and the fast one.  `"deep_gemm"` is the host repository's
-                selector, a subset of the contract (see `topk_deep_gemm`).
-
-                **The default is correctness-first, not speed-first**: the
-                kernel path is validated *against* the reference, so defaulting
-                to it costs no coverage and the kernel must be asked for by
-                name.  `DS_TOPK_BACKEND` overrides it for a whole process.
+        backend: str. Which implementation to run: `"torch"` (the default), a
+                reference implementation built from torch ops that runs on any
+                device and dtype; `"maca_c"`, this device's MACA kernel; or
+                `"deep_gemm"`, the host repository's selector, which implements
+                a subset of the contract (see `topk_deep_gemm`).
+                `DS_TOPK_BACKEND` overrides the default for a whole process.
 
     Return:
         output_val: (b, topk), dtype=input.dtype.
@@ -150,6 +124,8 @@ def topk(
     # per call so a process that sets the variable late still gets it.
     if backend is None:
         backend = _default_backend()
+        # The call record shows `backend=None`; this is the arm it became.
+        log("backend resolved", backend=backend)
     # Checked before anything is read off `input`, so a mistyped backend name
     # is reported as such rather than as whatever a None tensor does next.
     if backend not in _BACKENDS:
@@ -258,6 +234,7 @@ def _deep_gemm():
     return deep_gemm
 
 
+@log_call
 def topk_deep_gemm(
     input: torch.Tensor,
     topk: int,
@@ -272,32 +249,23 @@ def topk_deep_gemm(
     return_value: bool = True,
     abort_when_nan_found: bool = True,
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
-    """`topk` served by the host repository's indexer selector.
+    """`topk` served by the host repository's indexer selector
+    (`deep_gemm.fp32_indexer_topk_selector`).
 
-    That kernel (`deep_gemm.fp32_indexer_topk_selector`) solves the same problem
-    and is faster on long rows, but it implements a strict subset of this
-    contract, so it is a backend rather than a replacement.  What it cannot
-    serve raises `UnsupportedByBackend` instead of answering something narrower:
+    It implements a subset of this contract, and what it cannot serve raises
+    `UnsupportedByBackend` rather than answering something narrower:
 
         * float32 scores only (no bfloat16);
         * `topk <= 2048`;
         * an unordered selection (`sorted_value` / `sorted_index` need the
-          kernels).
+          MACA kernel).
 
     `end`, `output_idx`, `output_idx_offset`, the out-of-band fills,
-    `return_value` and the NaN contract are all implemented here, on top of it.
+    `return_value` and the NaN contract are implemented here, on top of it.
 
-    Exactness is the host kernel's, and it has one known hole: it collects the
-    members of the threshold *coarse* bin (ordered key >> 6, a bucket a row of
-    near-tied scores fills end to end) before refining, and its chunked kernel
-    silently drops members past its staging capacity instead of re-scanning --
-    so a row with more than 4096 values in one such bucket can get an arbitrary
-    subset, varying run to run.  `maca_c` has no such hole.  Filed upstream as a
-    strict `xfail`, `test_selector_candidate_overflow`.
-
-    The window maps directly: the selector's per-row `seq_lens` is an exclusive
-    upper bound (`torch_topk_selector.py:23`), i.e. `end`, and its indices are
-    already absolute, so only its `-1` padding needs translating.
+    Known limitation: a row holding more than 4096 values in one threshold
+    bucket can select an arbitrary subset of them, varying from run to run.
+    `maca_c` does not have this limitation.
     """
     try:
         module = _deep_gemm()
@@ -392,6 +360,7 @@ def topk_deep_gemm(
     return out_val, out_idx
 
 
+@log_call
 def topk_torch(
     input: torch.Tensor,
     topk: int,
