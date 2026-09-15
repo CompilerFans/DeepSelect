@@ -1,25 +1,22 @@
 #!/usr/bin/env bash
 #
-# Build the DeepSelect MACA kernels in place.  The host repository's `build.sh`
-# shape (script_dir cd, MACA_PATH/LD_LIBRARY_PATH, `CUCC_TARGETS`), plus:
+# Build the DeepSelect MACA kernels in place.
 #
-#   * no `bdist_wheel` -- `setup.py` stamps its version with `datetime.now()` and
-#     a wheel run executes it twice (metadata, then wheel), so the two can
-#     straddle a second boundary and be rejected as misnamed (`Wheel has
-#     unexpected file name`).  `build_ext --inplace` runs it once.
-#   * the stale in-place `.so` is removed first -- `build_ext --inplace` copies
-#     out of `build/lib` by timestamp and the in-place `.so` is gitignored, so a
-#     stale one measures the previous binary against the new source.
-#   * `CUCC_TARGETS` is not defaulted here.  The default is
-#     `deep_select/_arch.py::DEFAULT_TARGETS` (one target per family this tree
-#     names) and `setup.py` applies it, so the scripts cannot drift from it --
-#     an unset variable is simply an unset variable, all the way down.
-#
-# Env: CUCC_TARGETS (default: `_arch.DEFAULT_TARGETS`), MACA_PATH (default
-#      /opt/maca), MAX_JOBS (ninja's -j).
-#
+#     ./build.sh                              # every family
 #     CUCC_TARGETS=xcore1000,xcore1600 ./build.sh
 #     CUCC_TARGETS=native ./build.sh          # just this device
+#
+# Env:
+#     CUCC_TARGETS  targets to compile.  Unset means
+#                   `deep_select/_arch.py::DEFAULT_TARGETS`, one per family;
+#                   `setup.py` applies that default, so the scripts do not
+#                   repeat the literal.  An unrecognized target fails the build.
+#     MACA_PATH     MACA toolkit root (default /opt/maca)
+#     MAX_JOBS      ninja's -j
+#
+# `build_ext --inplace` rather than `bdist_wheel`: a wheel run executes
+# `setup.py` twice, and `setup.py` stamps its version with `datetime.now()`.
+# `install.sh` does the wheel and carries that workaround.
 #
 set -euo pipefail
 
@@ -38,22 +35,22 @@ export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
 export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
 export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
-# `CUCC_TARGETS` is deliberately not set: `setup.py` defaults it through
-# `_arch.resolve_targets`, which is also the authority on which spellings exist
-# (an unrecognized one fails the build by name).
-
 rm -rf build dist
 rm -rf ./*.egg-info
+# The in-place `.so` is gitignored, and `build_ext --inplace` copies out of
+# `build/lib` by timestamp: left in place, a stale one would measure the
+# previous binary against the new source.
 rm -f deep_select/deep_select_*.so
 
 which python
-python -c 'import sys, torch
+# `-W` drops torch's own "flash_attn is not installed" import warning (nothing
+# here uses it); every other warning still prints.
+python -W "ignore:Could not find flash_attn:UserWarning" -c 'import sys, torch
 print(f"build.sh: python {sys.version.split()[0]}, torch {torch.__version__}")'
 echo "build.sh: CUCC_TARGETS=${CUCC_TARGETS:-<unset: setup.py takes _arch.DEFAULT_TARGETS>}"
 
-# `CUCC_TARGETS` becomes one `-offload-arch` list in setup.py: every target is
-# an image of the same source in the one extension, so a single build serves
-# every family it names.
+# `CUCC_TARGETS` becomes one `-offload-arch` list: every target is an image of
+# the same source in the one extension, so a single build serves every family.
 python setup.py build_ext --inplace
 
 echo "build.sh: done"

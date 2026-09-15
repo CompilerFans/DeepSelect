@@ -1,9 +1,17 @@
 import os
 import subprocess
+import warnings
 from datetime import datetime
 from pathlib import Path
 
 from setuptools import setup, find_packages
+
+# torch's MACA build warns at import that `flash_attn` is not installed.  This
+# package uses none of it -- the kernels are this repository's own -- so the
+# warning is noise in every build log.  Matched by message, not by category:
+# torch also warns there when `MACA_PATH` is unset or wrong, and that one is
+# worth reading.
+warnings.filterwarnings("ignore", message=".*flash_attn.*")
 
 exec(open("deep_select/__version__.py").read())
 
@@ -41,16 +49,14 @@ def _maca_root() -> str:
 # The device compiler is cu-bridge's `cucc`, and this file does not reimplement
 # it.  torch's MACA build is written *against* cu-bridge: `_find_cuda_home`
 # lands on `${MACA_PATH}/tools/cu-bridge`, and `_join_cuda_home` drives the
-# device compiler as `$CUDA_HOME/bin/nvcc`, falling back to `bin/cucc` -- this
-# install's case.  `cucc` is the whole CUDA-dialect adapter (the macro header
-# turning `__MACACC__` into `__CUDACC__`, `-gencode` -> `-D__CUDA_ARCH__=`,
-# `-lcudart` -> `-lmcruntime`, the MACA include catalogue) and forwards the rest
-# to mxcc unchanged, which is how the mxcc-dialect flags in `compile_args` below
-# reach the compiler.
+# device compiler as `$CUDA_HOME/bin/nvcc`, falling back to `bin/cucc`.  `cucc`
+# is the whole CUDA-dialect adapter (the macro header turning `__MACACC__` into
+# `__CUDACC__`, `-gencode` -> `-D__CUDA_ARCH__=`, `-lcudart` -> `-lmcruntime`,
+# the MACA include catalogue) and forwards the rest to mxcc unchanged, which is
+# how the mxcc-dialect flags in `compile_args` below reach the compiler.
 #
-# Do not write a shim over mxcc and point `CUDA_HOME` at it: that home must also
-# provide `bin/gnu`, which torch asks it for unconditionally
-# (`get_wcuda_gnu_path`).  An earlier shim dropped it; every build died with
+# A synthesized `CUDA_HOME` must also provide `bin/gnu`, which torch asks it for
+# unconditionally (`get_wcuda_gnu_path()`); without it every build dies with
 # `no cu-bridge gnu found`.
 
 
@@ -61,29 +67,24 @@ def build_for_maca():
     everything under `deep_select/` is Python and reaches the artifact through
     `tvm_ffi.load_module`.
 
-    `CUCC_TARGETS` (same variable and meaning as the host repository's
-    `build.sh`) becomes one comma-separated `-offload-arch`, which mxcc takes
-    as a set of images of the same source in one file -- measured, three
-    targets, 3.7 MB for one image against 11.07 MB for three.  Unset means
+    `CUCC_TARGETS` becomes one comma-separated `-offload-arch`, which mxcc takes
+    as a set of images of the same source in one file.  Unset means
     `_arch.DEFAULT_TARGETS`, one target per family, so a build host needs no
     MACA card to produce a shippable wheel; `native` is the one-image shortcut.
+    An unrecognized target fails the build by name.
 
     Nothing is specialized per architecture at compile time, and nothing can
     be: a family macro would be a lie in two of the three images.  The two
-    numbers the kernel sizes its grids against travel as arguments instead --
-    see CLAUDE.md, "the arch constants are arguments".
+    numbers the kernel sizes its grids against travel as arguments instead.
 
-    `csrc/xcore1600/` is not built, and cannot be from here: its source is off
-    `SOURCES` and its `kerutils` include is off `include_dirs` below.  It is
-    the ported upstream kernel, which fails `check_result` on a C600U where
-    `maca_topk.cu` passes and runs 1.5-2.9x faster (CLAUDE.md).  Re-adding
-    both lines is how the audit would be done; a switch that could put it back
-    is a switch that can be left on.
+    `csrc/xcore1600/` is not built: its source is off `SOURCES` and its
+    `kerutils` include is off `include_dirs` below.  Re-adding both is what
+    building it would take.
 
-    `CUDA_HOME` is deliberately left alone -- see the cu-bridge note above.
     Every source is a `.cu`, so the device compiler is the only compiler this
     build invokes (torch would route a `.cpp` to `$cxx`, meaning a second flag
-    list and a second kerutils mode macro).
+    list and a second kerutils mode macro).  `CUDA_HOME` is deliberately left
+    alone -- see the cu-bridge note above.
     """
     import torch.utils.cpp_extension as cpp_extension
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
@@ -121,8 +122,7 @@ def build_for_maca():
         # `csrc/3rdparty/kerutils/include`, which only its kernels include
         # (`csrc/ffi/` names kerutils once, in a comment, and includes nothing
         # from it).  Both trees stay in the repo as source; neither is compiled.
-        # Re-adding these two paths is the first half of building the port
-        # again -- see CLAUDE.md, "the port is not built".
+        # Re-adding these two paths is the first half of building it again.
     ]
 
     # In mxcc's dialect.  cucc forwards what it does not recognize, so these
@@ -164,15 +164,14 @@ def build_for_maca():
 
     ext_modules = [
         strip_torch_libs(CUDAExtension(
-                # The tvm-ffi artifact has no `PyInit` and is NOT an importable
-                # python module -- `_binding.py` loads it through
-                # `tvm_ffi.load_module`.  A cpython tag would be a claim about
-                # an ABI nothing here uses, so it comes off both names: the
-                # `.so` filename through `no_python_abi_suffix` on the **build
-                # command** (not on this Extension -- torch reads that flag out
-                # of the command's kwargs, so an attribute here does nothing)
-                # and the wheel through `_BdistWheel` at the bottom.  The floor
-                # is then `python_requires` in `setup()`.
+                # The artifact has no `PyInit` and is NOT an importable python
+                # module -- `_binding.py` loads it through `tvm_ffi.load_module`.
+                # So the cpython tag comes off both names: the `.so` filename
+                # through `no_python_abi_suffix` on the **build command** (not
+                # on this Extension -- torch reads that flag out of the
+                # command's kwargs, so an attribute here does nothing) and the
+                # wheel through `_BdistWheel` at the bottom.  The floor is then
+                # `python_requires` in `setup()`.
                 #
                 # Named for the *package*, not for an architecture: there is
                 # one of these and it serves every family it carries an image
@@ -193,10 +192,7 @@ def build_for_maca():
                     # inside the `tvm_ffi` *python package*, so any rpath would
                     # bake this build machine's `site-packages` into the wheel.
                     # The soname is satisfied at run time by `import tvm_ffi`,
-                    # which `_binding.load` does -- no rpath, no ctypes preload,
-                    # and upstream's `auditwheel --exclude libtvm_ffi.so` says
-                    # the same thing from the packaging side.  See that function
-                    # before adding either back.
+                    # which `_binding.load` does.
                     f"-L{maca_root}/lib",
                     f"-Wl,-rpath,{maca_root}/lib",
                     # `DT_RUNPATH`, not `DT_RPATH`: the two differ in *order*
@@ -222,12 +218,11 @@ def build_for_maca():
             BuildExtension.with_options(use_ninja=True, no_python_abi_suffix=True))
 
 
-# --- stack-frame check (the MACA counterpart of upstream's spill gate) ------
+# --- stack-frame check ------------------------------------------------------
 #
-# Upstream scans every extension with `cuobjdump -res-usage` and fails on a
-# kernel that spills; there is no `cuobjdump` on MACA, so mxcc's
-# `--resource-usage` stands in, through
-# `tests.kernelkit.build.check_maca_stack_frame`.
+# Reads mxcc's `--resource-usage` over the sources, through
+# `tests.kernelkit.build.check_maca_stack_frame`; a device function above the
+# baseline is one that spills.
 #
 # Opt-in rather than wired into `build_ext`, because the flag recompiles the TU
 # it is asked about (~60 s for `maca_topk.cu`).  Over a named subset of sources:
@@ -236,9 +231,8 @@ def build_for_maca():
 #     DEEP_SELECT_MACA_STACK_CHECK=csrc/xcore1000/maca_topk.cu ./build.sh
 #     DEEP_SELECT_MACA_STACK_BASELINE=64 DEEP_SELECT_MACA_STACK_CHECK=1 ./build.sh
 #
-# The baseline is bytes, per toolchain: on this one, 50 of `maca_topk.cu`'s 78
-# devices floor at 48, so 48 is the only value separating the toolchain's floor
-# from a real spill (upstream's 8 predates a nonzero floor).
+# The baseline is bytes and is per toolchain: 48 is what this one reports for a
+# device with no spill, so it is the value that separates a floor from a leak.
 DEFAULT_MACA_STACK_BASELINE = 48
 
 
@@ -305,16 +299,13 @@ _maca_stack_check(ext_modules, _maca_root())
 # --- wheel tag --------------------------------------------------------------
 #
 # `bdist_wheel` derives the tag from the *build* interpreter, which would stamp
-# `cpython-310-cp310-linux_x86_64` on a wheel whose extension exports
-# `__tvm_ffi_*` symbols and no `PyInit` -- an ABI the artifact does not use and
-# a python version it does not care about.  `py3-none-<plat>` is upstream's
-# spelling of the same thing (`wheel.py-api = "py3"` in scikit-build-core), and
-# it is the honest one: what is version-sensitive here is the *platform*, and
-# what is not is the interpreter.
+# `cpython-310-cp310-linux_x86_64` on a wheel whose extension has no `PyInit`.
+# `py3-none-<plat>` is the honest one: what is version-sensitive here is the
+# *platform*, and what is not is the interpreter.
 #
 # The floor that remains real is `python_requires` below, which is about the
-# runtime prerequisites rather than the extension: torch 2.6 requires >= 3.9
-# and `apache-tvm-ffi` >= 3.8, so this package's floor is the higher of the two.
+# runtime prerequisites rather than the extension: torch requires >= 3.9 and
+# `apache-tvm-ffi` >= 3.8, so this package's floor is the higher of the two.
 try:
     # Canonical since setuptools 70.1; the `wheel` package's copy still works
     # but prints a FutureWarning on every command, including `--version`.

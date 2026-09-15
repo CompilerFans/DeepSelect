@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 #
 # Build a wheel and install it into the active environment.  Same build as
-# `./build.sh` (same variable, same default, the same one extension),
-# producing a wheel instead of an in-place extension.  Two departures from the
-# host repository's `install.sh`:
+# `./build.sh`, producing a wheel instead of an in-place extension.
 #
-#   * `pip install .` is avoided: a PEP 517 install runs `setup.py` twice
-#     (metadata, then wheel) and it stamps its version with `datetime.now()`, so
-#     the runs straddle a second boundary and pip rejects the result as misnamed
-#     (`Wheel has unexpected file name`).  Build isolation adds a second failure
-#     (no torch in pip's isolated env).
-#   * `CUCC_TARGETS` is not defaulted here either -- same reason as `build.sh`,
-#     and the same single source for the default.
+#     ./install.sh                            # every family
+#     CUCC_TARGETS=xcore1600 ./install.sh     # for another architecture
+#     CUCC_TARGETS=native    ./install.sh     # just this device
 #
-# Env: CUCC_TARGETS (default: `_arch.DEFAULT_TARGETS`), MACA_PATH
-#      (default /opt/maca), MAX_JOBS (torch reads it for ninja's -j).
+# Env:
+#     CUCC_TARGETS  targets to compile; unset means
+#                   `deep_select/_arch.py::DEFAULT_TARGETS`, one per family
+#     MACA_PATH     MACA toolkit root (default /opt/maca)
+#     MAX_JOBS      ninja's -j
 #
-#     CUCC_TARGETS=xcore1600 ./install.sh
-#     CUCC_TARGETS=native    ./install.sh         # just this device
+# `pip install .` is not used: a PEP 517 install runs `setup.py` twice
+# (metadata, then wheel), and `setup.py` stamps its version with
+# `datetime.now()`, so the two runs can straddle a second boundary and pip
+# rejects the result as misnamed (`Wheel has unexpected file name`).  Building
+# first keeps `setup.py` to one invocation.
 #
 set -euo pipefail
 
@@ -47,8 +47,9 @@ python setup.py bdist_wheel
 pip install dist/*.whl --force-reinstall --no-deps
 
 # From outside the repo on purpose: run from here and the check reports the
-# repo's own package, passing even when the install did nothing.
-( cd /tmp && python -c '
+# repo's own package, passing even when the install did nothing.  `-W` drops
+# torch's "flash_attn is not installed" warning (see build.sh).
+( cd /tmp && python -W "ignore:Could not find flash_attn:UserWarning" -c '
 import deep_select, os
 print("install.sh: installed", deep_select.__version__)
 print("install.sh: from     ", os.path.dirname(deep_select.__file__))

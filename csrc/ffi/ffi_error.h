@@ -14,9 +14,12 @@
 //   DS_CUDA_RUNTIME_CHECK(cmd)      a CUDA runtime call that returned != success
 //   DS_HOST_UNREACHABLE(reason)     a case the dispatch cannot represent
 //
-// The message carries `__FILE__:__LINE__` deliberately: that is the
-// diagnostic the pybind11 build got from c10's `TORCH_CHECK`, and losing it
-// would make a rejected call noticeably harder to place.
+// The message carries `__FILE_NAME__:__LINE__` -- the file, not the path.
+// torch passes sources to the compiler as absolute paths, so `__FILE__` would
+// put *this build machine's* checkout directory into an error a caller reads;
+// mxcc accepts no `-ffile-prefix-map` to strip it (measured: rejected both
+// bare and through `-Xclang`), and the basename is what the diagnostic needs
+// anyway.
 
 #pragma once
 
@@ -37,14 +40,24 @@ inline void raise(const std::string &message) {
     throw tvm::ffi::Error("Internal", message, "");
 }
 
+// The operands of a check are a comma-separated *list* at most call sites
+// (`DS_HOST_CHECK(cond, what, ".stride(1) must be 1")`), so they reach the
+// stream through this rather than through chained `<<`.  Chained, they parse
+// as a comma *operator*: the whole `<<` chain becomes the discarded left
+// operand, so everything past the first argument is dropped from the message
+// and `-Wunused-value` fires once per remaining argument.
+template <typename... Args>
+std::string concat(const Args &...args) {
+    std::ostringstream oss;
+    (oss << ... << args);
+    return oss.str();
+}
+
 }  // namespace deep_select::ffi
 
 #define DS_RAISE_AT(file, line, ...)                                            \
-    do {                                                                        \
-        std::ostringstream _ds_oss;                                             \
-        _ds_oss << (file) << ":" << (line) << ": " << __VA_ARGS__;              \
-        ::deep_select::ffi::raise(_ds_oss.str());                               \
-    } while (0)
+    ::deep_select::ffi::raise(::deep_select::ffi::concat(                       \
+        (file), ":", (line), ": ", __VA_ARGS__))
 
 // A caller-visible contract violation.  Every use carries the condition's own
 // spelling so the message says what was required, not just that something was
@@ -52,25 +65,25 @@ inline void raise(const std::string &message) {
 #define DS_HOST_ASSERT(cond)                                                    \
     do {                                                                        \
         if (!(cond)) {                                                          \
-            DS_RAISE_AT(__FILE__, __LINE__, "assertion failed: " #cond);        \
+            DS_RAISE_AT(__FILE_NAME__, __LINE__, "assertion failed: " #cond);   \
         }                                                                       \
     } while (0)
 
 #define DS_HOST_CHECK(cond, ...)                                                \
     do {                                                                        \
         if (!(cond)) {                                                          \
-            DS_RAISE_AT(__FILE__, __LINE__, __VA_ARGS__);                       \
+            DS_RAISE_AT(__FILE_NAME__, __LINE__, __VA_ARGS__);                  \
         }                                                                       \
     } while (0)
 
 #define DS_HOST_UNREACHABLE(...)                                                \
-    DS_RAISE_AT(__FILE__, __LINE__, __VA_ARGS__)
+    DS_RAISE_AT(__FILE_NAME__, __LINE__, __VA_ARGS__)
 
 #define DS_CUDA_RUNTIME_CHECK(cmd)                                              \
     do {                                                                        \
         const cudaError_t _ds_err = (cmd);                                      \
         if (_ds_err != cudaSuccess) {                                           \
-            DS_RAISE_AT(__FILE__, __LINE__, #cmd " failed: ",                   \
+            DS_RAISE_AT(__FILE_NAME__, __LINE__, #cmd " failed: ",              \
                         cudaGetErrorString(_ds_err));                           \
         }                                                                       \
     } while (0)
