@@ -1,36 +1,28 @@
 """Drive a slice of upstream DeepSelect's own test suite against this port.
 
-`tests/test.py` builds its case table inside `__main__` and runs it in full --
-105,138 correctness cases, hours of GPU time, much of it spent in the reference
-`torch.topk` on tensors of several GB.  This driver reuses the official pieces
-unchanged -- `lib.generate_testcase` for the input, the module-level
-`run_testcase` from `tests/test.py` for the checks -- over a slice of that same
-table:
+`tests/test.py` builds its case table inside `__main__` and runs all of it
+(105,138 correctness cases, hours of GPU time).  This driver reuses the official
+pieces unchanged -- `lib.generate_testcase` for the input, its module-level
+`run_testcase` for the checks -- over a slice: the table loops verbatim,
+restricted to `batch_size * vocab_size <= 2**28`, then uniformly sampled to
+`--sample` cases with a fixed seed (the official table uses an unseeded
+`random`, so seeding it is the only change to how the table is produced).
 
-    * the table is built by the loops in `tests/test.py` verbatim;
-    * restricted to `batch_size * vocab_size <= 2**28`, which bounds the
-      reference's cost without excluding any shape family;
-    * uniformly sampled to `--sample` cases with a fixed seed (the official
-      table itself uses an unseeded `random`, so it is not reproducible as
-      written; seeding it is the only change to how the table is produced).
-
-Nothing under `tests/` is modified: the table construction is copied into
-`cases()` below, and the checks are the official ones, imported by path.  The
-one thing the official suite cannot express is a backend choice -- it calls
-`deep_select.topk(...)` with no `backend=` -- so `--backend` pins that call here
-instead of editing the official file (see `_bind_backend`).
+Nothing under `tests/` is modified: the construction is copied into `cases()`
+below and the checks are imported by path.  The one thing the official suite
+cannot express is a backend choice -- it calls `deep_select.topk(...)` with no
+`backend=` -- so `--backend` pins that call instead of editing the official file
+(see `_bind_backend`).
 
     PYTHONPATH=. python scripts/official_slice.py [--sample N] [--seed S]
                                                  [--backend {maca_c,torch,deep_gemm}]
                                                  [--default-arm NAME]
 
-`--backend` and `--default-arm` are different questions and the harness asks
-both.  `--backend` pins the call and is the differential check: "is the kernel
-right?"  `--default-arm` leaves `tests/test.py` calling `deep_select.topk(...)`
-exactly as written -- no rebinding -- and only changes what that bare call
-resolves to, i.e. it exercises the path a caller who names no backend actually
-takes.  Run both when the default changes; a pinned `--backend maca_c` pass
-says nothing about the default, because it is not the default that answered.
+`--backend` pins the call -- "is the kernel right?" -- and therefore says
+nothing about the default.  `--default-arm` leaves the official call site
+unmodified and changes only what a bare call resolves to (DS_TOPK_BACKEND): the
+path a caller who names no backend actually takes.  Run both when the default
+changes.
 """
 
 import argparse
@@ -126,9 +118,8 @@ def _bind_backend(original, backend):
     """Pin every `deep_select.topk` the official suite makes to one backend.
 
     `tests/test.py` resolves the name at call time, so rebinding the module
-    attribute is enough -- no official file changes, and the default (no
-    `--backend`) leaves the library's own choice, i.e. exactly what the official
-    suite runs with unmodified.
+    attribute is enough -- no official file changes.  Without `--backend` the
+    library's own choice stands, exactly as the official suite runs it.
     """
     def bound(*a, **kwargs):
         kwargs.setdefault("backend", backend)
@@ -139,12 +130,9 @@ def _bind_backend(original, backend):
 def _set_default_backend(backend):
     """Point the *unpinned* call at a backend, through the library's own knob.
 
-    The counterpart of `_bind_backend`, and deliberately not the same
-    mechanism: this one sets `DS_TOPK_BACKEND`, which is how a process is
-    supposed to choose the default, and it leaves `deep_select.topk` alone --
-    so `tests/test.py`'s call site is the unmodified one and what is exercised
-    is the real default path (the resolution in `_default_backend`, the lazy
-    `deep_gemm` import, everything).
+    The counterpart of `_bind_backend` and deliberately not the same mechanism:
+    this sets `DS_TOPK_BACKEND` and leaves `deep_select.topk` alone, so the
+    official call site is unmodified and what runs is the real default path.
     """
     os.environ["DS_TOPK_BACKEND"] = backend
 
@@ -174,10 +162,9 @@ def main():
     args = parser.parse_args()
 
     if args.backend is not None and args.default_arm is not None:
-        # They answer different questions and combining them would report one
-        # answer under the other's name: `--backend` pins the call, so the
-        # process default would never be consulted and the `--default-arm`
-        # result would be a lie.
+        # Combining them would report one answer under the other's name:
+        # `--backend` pins the call, so the process default is never consulted
+        # and the `--default-arm` result would be a lie.
         raise SystemExit("official_slice.py: --backend pins the call and "
                          "--default-arm sets what an unpinned call resolves "
                          "to; pass one, not both")
@@ -191,9 +178,8 @@ def main():
     random.seed(args.seed)
     # The host repo's own correctness shapes come first and are not sampled:
     # they are the rows the `deep_gemm` backend has a kernel for, so without
-    # them a `--backend deep_gemm` run is 200 unsupported and nothing is
-    # compared (the same reason `perf_snapshot.py` carries the host perf
-    # shapes).  Bounded by the element budget like every other case.
+    # them a `--backend deep_gemm` run compares nothing (same reason
+    # `perf_snapshot.py` carries the host perf shapes).  Still element-budgeted.
     host = [p for p in official.host_selector_correctness_cases()
             if p.batch_size * p.vocab_size <= ELEM_BUDGET]
     table = host + cases()
@@ -217,10 +203,9 @@ def main():
         try:
             ok = official.run_testcase(p)
         except deep_select.UnsupportedByBackend as exc:
-            # A backend whose service range is narrower than the operator's
-            # (the deep_gemm one answers fp32 only) says so explicitly; that is
-            # a gap in its coverage, not a wrong answer, so it does not fail
-            # the run.
+            # A backend narrower than the operator (deep_gemm answers fp32 only)
+            # says so explicitly; that is a coverage gap, not a wrong answer, so
+            # it does not fail the run.
             skipped += 1
             print(f"    unsupported: {exc}", flush=True)
             continue

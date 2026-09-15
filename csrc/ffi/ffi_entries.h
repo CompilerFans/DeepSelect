@@ -1,12 +1,10 @@
 // 2026 - Modified for DeepSelect.  The tvm-ffi entry points, one function per
-// architecture extension.
+// architecture extension -- the torch-free replacement for the pybind11 `topk`
+// entry that used to live at the bottom of `maca_topk.cu`.
 //
-// This is the torch-free replacement for the pybind11 `topk` entry that used
-// to live at the bottom of `maca_topk.cu`.  The signature is all-DLTensor and
-// all-positional (this tvm-ffi build has no kwargs or defaults), and the
-// output buffers are caller-allocated -- the FFI layer cannot return new
-// tensors, and a python-side `torch.empty` costs the same as the torch-side
-// one it replaces.
+// The signature is all-DLTensor and all-positional (this tvm-ffi build has no
+// kwargs or defaults), and output buffers are caller-allocated: the FFI layer
+// cannot return new tensors.
 //
 // Contract, exactly as the pybind11 entry enforced it (`TORCH_CHECK`, now
 // `DS_HOST_ASSERT`):
@@ -18,8 +16,8 @@
 //   end                (b,) contig   int32, optional
 //   output_idx_offset  (b,) contig   int32, optional
 //
-// `begin` and `hint` are not accepted: the public interface rejects them
-// before this layer is reached (`deep_select/interface.py`).
+// `begin` and `hint` are rejected by the public interface before this layer is
+// reached (`deep_select/interface.py`).
 
 #pragma once
 

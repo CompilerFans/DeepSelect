@@ -1,22 +1,14 @@
 """
-Generate explicit template instantiation .cu files for a topk kernel template
+Generate explicit template instantiation .cu files for a topk kernel template.
 
-Usage:
-    Run from the root directory:
-        python3 scripts/generate_instantiations.py <relative/path/to/the/instantiations/directory>
+Usage, from the repo root:
+    python3 scripts/generate_instantiations.py <instantiation_dir>
+    # e.g. csrc/xcore1600/v3/instantiations
+    #      csrc/xcore1600/v3_fp32/instantiations
+    # [MACA] the old v3_cluster/instantiations went with cluster and TMA.
 
-    For example,
-        python3 scripts/generate_instantiations.py csrc/xcore1600/v3/instantiations
-        python3 scripts/generate_instantiations.py csrc/xcore1600/v3_fp32/instantiations
-        # [MACA] There was also a v3_cluster/instantiations; the variant is
-        #   gone with cluster and TMA.
-
-    The script will:
-    1. Create .cu files in the target directory, one per config
-    2. Print the paths (relative to repo root) for inclusion in setup.py's
-       `sources` list
-
-    After running, manually copy the printed paths into `setup.py`.
+Creates one .cu per config, then prints the paths (repo-root relative) to copy
+into `setup.py`'s `sources`.
 """
 
 import dataclasses
@@ -26,15 +18,12 @@ import sys
 from typing import List
 
 
-# [MACA] The largest shared memory per SM any MACA part has (xcore1500,
-# xcore1600).  Upstream's tables are sized for 227 KiB -- an H100's -- so most
-# of its tuples describe a launch that no MACA part can perform, and the port
-# turns that into a compile error (`topk_select.cuh`: the static_assert beside
-# the capacity KU_ASSERT).  This constant is the same number `structs.h` gets
-# through `-DDEEP_SELECT_NATIVE_ARCH`, and it is used here to refuse to
-# generate a tuple that cannot fit -- so a table edit fails at generation time
-# with the arithmetic, not at compile time on the one architecture that
-# happens to be building.
+# [MACA] The largest shared memory per SM any MACA part has.  Upstream's tables
+# are sized for an H100's 227 KiB, so most of its tuples describe a launch no
+# MACA part can perform -- this lets the generator refuse one at generation time
+# with the arithmetic, instead of failing at compile time on whichever
+# architecture happens to be building.  The same number `structs.h` gets through
+# `-DDEEP_SELECT_NATIVE_ARCH`.
 MACA_SMEM_CAPACITY_BYTES = 128 * 1024
 
 
@@ -56,15 +45,12 @@ class TopkSelectConfigs:
     def shared_memory_bytes(self) -> int:
         """`sizeof(SharedMemoryPlan)` for this config, in bytes.
 
-        A transcription of `SharedMemoryPlanBase` (common_parts.cuh) and the
-        constants that size it.  Verified against two values the compiler
-        produced for this port: 125952 B for (bf16, 512t, B2=4096) and 84992 B
-        for (bf16, 256t, B2=4096).
+        A hand-kept transcription of `SharedMemoryPlanBase` (common_parts.cuh)
+        and the constants that size it -- keep the two in step.
 
-        Note what does *not* appear: `tma_buffer_depth`.  The MACA port has no
-        TMA and no pipelining, so `NUM_TMA_LOAD_BUFS` is pinned to 1
-        (common_parts.cuh) and the parameter survives only as a record of
-        upstream's tuning.
+        `tma_buffer_depth` deliberately does not appear: the MACA port has no
+        TMA and no pipelining, so `NUM_TMA_LOAD_BUFS` is pinned to 1 and the
+        parameter survives only as a record of upstream's tuning.
         """
         elem = 2 if self.ValueT == "nv_bfloat16" else 4
         num_warps = self.num_threads // 32
@@ -112,11 +98,9 @@ class TopkSelectConfigs:
 
 
 def generate_instantiation_file(instantiation_dir: str, namespace: str, config: TopkSelectConfigs) -> str:
-    # The config vocabulary above is upstream's (and the CUDA build's); the
-    # emitted source spells the bf16 value type the way MACA's headers declare
-    # it.  `nv_bfloat16` is not a type on MACA -- `structs.h` includes
-    # `<maca_bfloat16.h>` -- so emitting the upstream spelling verbatim
-    # produces a TU that does not compile.
+    # The config vocabulary is upstream's; the emitted source uses MACA's
+    # spelling.  `nv_bfloat16` is not a type on MACA (`structs.h` includes
+    # `<maca_bfloat16.h>`), so the upstream spelling verbatim does not compile.
     emitted_value_t = {"nv_bfloat16": "maca_bfloat16", "float": "float"}[config.ValueT]
     file_content = \
 f"""#include "../topk_select.cuh"
@@ -169,30 +153,18 @@ def main(instantiation_dir: str):
             (True, False),
             (True, True),
         ]
-        # [MACA] These are upstream's tuples, re-derived for the 128 KiB a MACA
-        # SM has instead of the 227 KiB upstream sized them for.  The edits are
-        # the smallest ones that make each tuple fit; the thread count, B and
-        # the `wave1`/flagship split are upstream's, because a MACA part has no
-        # hardware here to re-tune against (see the header comment of
-        # `deep_select/_arch.py` for what this project can and cannot measure).
+        # [MACA] Upstream's tuples, re-derived for the 128 KiB a MACA SM has
+        # instead of the 227 KiB they were sized for.  Both flagship tuples drop
+        # target_occupancy 2 -> 1 (two CTAs do not fit, and there is no TMA
+        # pipelining here to overlap anyway); the mk=1024 wave1 tuple drops B2
+        # 4096 -> 3584 to fit.  There is no mk=4096 tuple and cannot be:
+        # `surviving_topk_pairs` alone is 2 * MAX_TOPK * 8 = 65536 B and the
+        # extra-pairs region at least (MAX_TOPK + B) * 8 = 65536 B, which fills
+        # the SM before a single input element is staged.  `topk` in
+        # (1024, 4096] is served by `csrc/xcore1000/maca_topk.cu` instead.
         #
-        #   - Both flagship tuples drop target_occupancy 2 -> 1.  Two CTAs of
-        #     84992 B is 169984 B, which is more than any MACA SM has, so the
-        #     occupancy-upstream-used-to-hide-latency is simply not available
-        #     here; the port has no pipelining to overlap anyway, since TMA and
-        #     its mbarriers were removed with the device-side changes.
-        #   - The mk=1024 wave1 tuple drops B2 4096 -> 3584; 134144 B does not
-        #     fit (131072 does).
-        #   - There is no mk=4096 tuple at all, and there cannot be one:
-        #     `surviving_topk_pairs` alone is 2 * MAX_TOPK * 8 = 65536 B, and
-        #     the extra-pairs region is at least (MAX_TOPK + B) * 8 = 65536 B,
-        #     so those two members already fill the SM before a single element
-        #     of input is staged.  Upstream carries that tuple because 227 KiB
-        #     has room to spare.  `topk` in (1024, 4096] on a 128 KiB part is
-        #     therefore not served by this kernel -- `csrc/xcore1000/maca_topk.cu`,
-        #     the MACA-native one, covers it (kMaxTopK = 4096).
-        #
-        # TMA4 costs 109.6 KB of smem per CTA, which fits twice per SM only for max_topk <= 512.
+        # TMA4 costs 109.6 KB of smem per CTA, so occupancy 2 only fits at
+        # max_topk <= 512.
         fast_path_tuples_by_max_topk = {
             512:  [(256, 1, 4096, 4096, 4),     # flagship (num_waves >= 2)
                    (512, 1, 8192, 4096, 5)],    # wave1
@@ -216,10 +188,9 @@ def main(instantiation_dir: str):
             (False, True, True),
             (True, False, True),
         ]
-        # [MACA] B2 lowered from 4096 to fit 128 KiB; see the bf16 table above.
-        # fp32 pays more than bf16 for the same B2, because `tma_load_buf`
-        # holds B elements of the value type: 32768 B here against 16384 B.
-        # The mk=4096 entry is gone for the same reason it is gone there.
+        # [MACA] B2 lowered and mk=4096 dropped, both for the reasons in the
+        # bf16 table above.  fp32 pays more than bf16 for the same B2, because
+        # `tma_load_buf` holds B elements of the value type.
         tuple_by_max_topk = {
             512: (512, 1, 8192, 2560, 3),
             1024: (512, 1, 8192, 1536, 3),
@@ -230,10 +201,8 @@ def main(instantiation_dir: str):
                 for max_topk, (num_threads, occ, b, b2, tma) in tuple_by_max_topk.items():
                     configs.append(TopkSelectConfigs("float", out_idx_t, sv, si, rv, max_topk, num_threads, occ, b, b2, tma))
         generate_instantiations(instantiation_dir, "topk_select_fp32", configs)
-    # [MACA] Upstream also had a `csrc/cuda_kernels/v3_cluster/instantiations`
-    #   branch (bf16 + mk1024 + a 16-CTA cluster, `topk_select_bf16_cluster`).
-    #   MACA has no cluster and no TMA, so that directory and its variant were
-    #   deleted wholesale and the branch with them.
+    # [MACA] Upstream's `v3_cluster` branch (bf16 + mk1024 + a 16-CTA cluster)
+    # is gone: MACA has no cluster and no TMA, so the variant went with them.
     else:
         raise ValueError(f"Invalid `instantiation_dir: {instantiation_dir}")
 

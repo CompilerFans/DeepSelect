@@ -1,36 +1,26 @@
 #!/usr/bin/env python3
 """Compare two `perf_snapshot.py` runs, cell by cell.
 
-Rows are matched on the *measured* cell, not on their position:
-`(case_source, family, n_rows, n_cols, top_k, sorted_value, input_dtype,
-index_dtype)`.  A cell that appears in one run and not the other is reported as
-added/removed rather than silently dropped -- a run that measured fewer cells
-must not read as "no change".
+Rows are matched on the *measured* cell (the `KEY` tuple below), not on their
+position.  A cell present in one run and not the other is reported as
+added/removed -- a run that measured fewer cells must not read as "no change".
 
-The comparison is per backend, and only for rows that are *measured on both
-sides with the same status*.  An empty `time(us)` is "not measured", never
-zero: `deep_gemm` is `unsupported` on every bf16 cell, and `torch` is untimed
-where no kernel name matched, so comparing those against a number would
-manufacture a win out of a refusal.  A `status` that changed between the two
-runs is called out separately -- `pass` -> `fail` is a regression whatever the
-clock says, and it is not a timing row.
+Only cells measured on BOTH sides with the same `status` are compared: an empty
+`time(us)` is "not measured", never zero, so a refusal is never turned into a
+win.  A `status` that changed is called out separately -- `pass` -> `fail` is a
+regression whatever the clock says.
 
-The reference is this repository's own kernel: `relative_pct_vs_maca_c` is
-defined there as 100%, so **>100% means that backend is faster than `maca_c`**
-(`maca_c_us / that_us * 100`).  A `torch` row moving is informative; a `maca_c`
-row moving is the regression the exit status reports.
+`relative_pct_vs_maca_c` puts this repository's own kernel at 100%, so **>100%
+means that backend is faster than `maca_c`**.  A `torch` row moving is
+informative; a `maca_c` row moving is the regression the exit status reports.
 
-What the exit status means: **1** when a `maca_c` cell moved beyond `--tol` or a
-`maca_c` cell's `status` changed (either direction -- `unsupported` -> `pass` is
-an improvement worth seeing, `pass` -> `fail` is a regression); **0** otherwise,
-including when a `torch` or `deep_gemm` row moved.
+Exit status: **1** when a `maca_c` cell moved beyond `--tol` or its `status`
+changed (either direction); **0** otherwise, including when `torch` or
+`deep_gemm` moved.
 
 Usage:
     tools/compare_snapshots.py <candidate_dir> --base <baseline_dir>
                                [--tol 0.03] [--top 25]
-
-Exit status: 0 when every backend is within tolerance, 1 when `maca_c` has at
-least one regression or one status change.
 """
 
 from __future__ import annotations
@@ -43,9 +33,8 @@ from typing import Dict, List, Optional, Tuple
 
 KEY = ("case_source", "family", "n_rows", "n_cols", "top_k", "sorted_value",
        "input_dtype", "index_dtype")
-# The column a run is compared on.  `relative_pct_vs_maca_c` is a derived
-# number and `speedup_vs_torch` depends on another backend's row, so both are
-# recomputed from the raw times rather than diffed.
+# The column a run is compared on.  `relative_pct_vs_maca_c` is derived and
+# `speedup_vs_torch` depends on another backend's row -- recomputed, not diffed.
 REQUIRED = "time(us)"
 
 
@@ -53,9 +42,8 @@ def load(directory: str) -> Dict[Tuple, Dict[str, Dict[str, str]]]:
     """Every row of every CSV in the directory, keyed by (cell, backend).
 
     A CSV that predates the `case_source` column keys its rows by an empty
-    source rather than failing: this tool's job is to compare two runs, and an
-    older run is the most useful baseline there is.  Keys are read with `setdefault`,
-    so an older file is matched on the columns it does have.
+    source rather than failing -- an older run is the most useful baseline there
+    is -- and `setdefault` matches it on the columns it does have.
     """
     files = sorted(f for f in os.listdir(directory) if f.endswith(".csv"))
     if not files:

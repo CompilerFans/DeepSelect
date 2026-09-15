@@ -1,67 +1,30 @@
-// MACA-native row-wise top-K for DeepSelect.
+// MACA-native row-wise top-K for DeepSelect -- the shipping backend.
 //
-// Reimplements the DeepSelect `topk` operator (`deep_select.interface.topk`)
-// using only primitives that exist on the MetaX MACA platform.
+// Implements the `topk` contract (`deep_select.interface.topk`) on primitives
+// that exist on MACA.  One contract layer is shared by every mode: the
+// `length <= topk` shortcut, the NaN bit-pattern check, the index offsets, the
+// out-of-band fills, and the optional ordered emit.  One selection dataflow
+// feeds it for both dtypes -- the ported radix core in `radix_core.cuh` (see
+// its provenance banner): one histogram pass over the high key byte plus one
+// vectorized collect pass that refines the threshold bin in shared memory, so
+// two passes over the row whatever the key width.  The 16-bit row walks a bf16
+// key, the 32-bit row an fp32 one; the dtype picks the row entry, not the
+// dataflow.
 //
-// Relationship to the upstream `csrc/cuda_kernels/` trees as of 2026-09-11:
-//   * `v3` (bf16) and `v3_fp32` have since been ported to MACA — TMA tensor-map
-//     loads -> all-thread cooperative `ldg` + `__syncthreads`, mbarrier
-//     pipeline -> single buffer, inline PTX -> MACA builtins/plain C++.  Both
-//     now compile for xcore1000, but `setup.py` still builds neither: this file
-//     is the shipping backend.  See `csrc/cuda_kernels/common_parts.cuh`.
-//   * `v3_cluster` is deleted outright (MACA has no cluster launch and no TMA).
+// Two things to know before editing:
 //
-// ── the contract layer, and the one dataflow under it ───────────────────────
+//   * Portable primitives only: `__shfl_down_sync`, `atomicAdd`, `__ldg`,
+//     `__syncthreads`, `__syncthreads_or`.  No inline asm, no TMA, no mbarrier,
+//     no cluster.
+//   * The wave is 64 lanes, not 32.  Any mask or `/ 32` inherited from the
+//     CUDA-era kernels is suspect -- see `csrc/xcore1600/` for what that looks
+//     like when it is wrong.
 //
-// Every mode shares one contract layer: the `length <= topk` shortcut, the NaN
-// bit-pattern check (`abort_when_nan_found` / the 0x3F3F3F3F guard), the index
-// offsets, the out-of-band fills, and the optional ordered emit.  One selection
-// dataflow feeds it for both dtypes: the ported radix core
-// (`radix_core.cuh`, provenance banner in that file) -- one histogram pass over
-// the high key byte plus one vectorized collect pass that refines the threshold
-// bin in shared memory, so two passes over the row whatever the key width.
-// The 16-bit row walks a bf16 key, the 32-bit row a fp32 one; the dtype picks
-// the row entry, not the dataflow.
-//
-// What that replaced, for the record: this file used to walk the key one byte
-// at a time (most significant first).  Each round histogrammed the current byte
-// over the elements still matching the confirmed prefix, suffix-scanned it, and
-// took the bin the k-th remaining element fell in as the pivot, appending
-// everything strictly above it to the answer.  The pivot bin was not carried
-// between rounds -- the next round rescanned the row under the extended prefix,
-// which is what makes the refine exact (carrying only the ties that fit would
-// discard precisely the values the next byte has to rank).  That is 2*R passes
-// over the row, R = 4 for fp32 and 2 for bf16, against the ported core's 2, and
-// it was element-at-a-time with no vectorized body.  The ported core keeps the
-// same no-truncation rule in a different shape: a threshold bin too large for
-// the candidate arena falls back to a full-row rescan.
-//
-// Portable primitives only: `__shfl_down_sync`, `atomicAdd`, `__ldg`,
-// `__syncthreads`, `__syncthreads_or`.  No inline asm, no TMA, no mbarrier,
-// no cluster.
-//
-// The wave width is MACA's 64 lanes, matching the in-tree reference.  The
-// CUDA-era code in this repo assumed 32, which does not hold on this target.
-//
-// ── coverage: the `v3_cluster` dispatch arm is dropped ──────────────────────
-// The original dispatch (`csrc/xcore1600/api.cu`) sends
-//     batch_size <= 6 && vocab_size >= 512K && topk <= 1024
-// bf16 shapes to `topk_select_bf16_cluster`, a cluster-cooperative kernel.
-// MACA has no cluster launch (mcErrorInvalidConfiguration for any cluster
-// dim; see deep_jit/backend/maca/kernel.hpp), so that kernel and its dispatch
-// arm have been deleted, and
-// those shapes fall through to this single general kernel -- the same path
-// every other shape takes.  They are NOT a hole: `topk <= 1024 <= 4096` holds
-// and vocabulary is unbounded here (the kernel makes 2 passes over the row
-// regardless of length), so the arm's shapes are served, only without the
-// cluster-specific scheduling the original gave them.  Covered by the official
-// performance grid's indexer cases (`tests/test.py --perf-only`: bf16,
-// `topk` 512 and 1024, `vocab` up to 1M, `batch` 6..4096), which check the
-// selection before they time it.
-//
-// The other CUDA-era dispatch arms keep their behaviour: `v3` (bf16) and
-// `v3_fp32` both become this kernel, with the fp32/bf16 split now a template
-// parameter rather than a separate source tree.
+// The upstream `v3` (bf16) and `v3_fp32` trees are ported under `csrc/xcore1600/`
+// and are NOT built; `v3_cluster` is deleted (MACA has no cluster launch), so
+// the shapes it served fall through to this kernel -- the same path every other
+// shape takes, with `topk <= 1024 <= 4096` and no vocabulary bound, so they are
+// served, only without the cluster-specific scheduling.
 
 #include <cuda_runtime.h>
 // [MACA] 数据类型取 MACA 原生头，不经过 cu-bridge 的 <cuda_bf16.h> 兼容层
@@ -145,16 +108,14 @@ __device__ __forceinline__ maca_bfloat16 float_to_value<maca_bfloat16>(float x) 
 
 // ── NaN test ────────────────────────────────────────────────────────────────
 //
-// NaN is NOT the all-ones key.  The order-preserving encode sends the two
-// signed NaNs to opposite ends of the key space (fp32 0x7FFFFFFF -> 0xFFFFFFFF,
-// but 0xFFFFFFFF -> 0x00000000), and a bf16 key is only 16 bits wide, so it can
-// never equal a 32-bit all-ones constant at all.  Comparing keys therefore
-// catches nothing but the single fp32 encoding 0x7FFFFFFF.
+// Test the raw BIT PATTERN, not the key.  The order-preserving encode sends the
+// two signed NaNs to opposite ends of the key space, so key comparison catches
+// only the single encoding 0x7FFFFFFF; a 16-bit bf16 key cannot even equal a
+// 32-bit all-ones constant.  Exponent all-ones with a non-zero payload is
+// exactly the NaN set, either sign, quiet or signaling.
 //
-// Test the raw bit pattern instead: exponent all ones with a non-zero payload
-// is exactly the set of NaNs, either sign, quiet or signaling -- the same set
-// upstream detects with `set.nan.f32.f32` / `set.nan.bf16x2.bf16x2`.  (`v != v`
-// would be the obvious spelling, but the build enables `--use_fast_math`.)
+// (`v != v` would be the obvious spelling but the build enables
+// `--use_fast_math`.)
 template <typename ValueT>
 static __device__ __forceinline__ bool is_nan_value(ValueT v);
 
@@ -194,17 +155,16 @@ static __device__ __forceinline__ void bitonic_sort_u64(uint64_t *data, int n) {
 
 // ── ordered emit ────────────────────────────────────────────────────────────
 //
-// Emits the first `n_out` slots of `selected` in the order the caller asked
-// for, by packing each one with its sort key and running the CTA-wide bitonic
-// network over the packed words.  The low 12 bits carry the slot, so ties keep
-// a deterministic order and a value - index pair can be recovered exactly
-// (`cmp` is always < vocab, so it never reaches those 12 bits).
+// Sorts the first `n_out` slots of `selected` by packing each with its sort key
+// and running the CTA-wide bitonic network over the packed words.  The low 12
+// bits carry the slot, so ties get a deterministic order and the value/index
+// pair stays recoverable (`cmp` is always < vocab and never reaches those bits):
 //
 //   SI: index ascending  -> (index << 12) | slot
 //   SV: value descending -> ((~key) << 12) | slot
 //
-// `n_pad` is `topk` rounded up to a bitonic power of two; the tail is padded
-// with `~0ull`, which sorts past every real key and is never emitted.
+// `n_pad` is `topk` rounded up to a bitonic power of two; the tail is `~0ull`,
+// which sorts past every real key and is never emitted.
 //
 // `sort_buf` comes from the caller: the two selection kernels place it
 // differently in dynamic shared memory (see `radix_layout`).
@@ -245,19 +205,14 @@ static __device__ __forceinline__ void emit_ordered(
 
 // ── the operator kernel (one row per CTA) ───────────────────────────────────
 //
-// The contract layer -- the `length <= topk` shortcut, the NaN path, the fills,
-// the offsets, the ordered emit -- over the ported radix selection
-// (`radix_core.cuh`): two passes over the row (a histogram of the high key
-// byte, then one vectorized collect that writes everything above the threshold
-// bin straight to the output and refines that bin in shared memory), whatever
-// the key width.
+// The contract layer over the ported radix selection: two passes over the row,
+// whatever the key width.
 //
 // Dynamic shared memory starts with the core's arena -- `s_input_flat` is an
-// `extern __shared__` array inside the header, so it can only sit at the base --
-// and is followed by the staging buffer the emit reads.  The ordered emit's
-// scratch is only live after the arena is dead, so it aliases it; the worst
-// case (topk = kMaxTopK, sorted) is 48 KB, the same budget as the retired
-// byte-wise path's `Arena` (and what `kSmemBudgetBytes` reserves).
+// `extern __shared__` array in the header, so it can only sit at the base --
+// followed by the staging buffer the emit reads.  The ordered emit's scratch is
+// only live after the arena is dead, so it aliases it; the worst case
+// (topk = kMaxTopK, sorted) is 48 KB, what `kSmemBudgetBytes` reserves.
 constexpr size_t kRadixArenaBytes =
     (size_t)rk::kSmemInputSize * sizeof(uint32_t);
 
@@ -304,16 +259,14 @@ static __device__ __forceinline__ void radix_select_row(
 
 // ── the NaN scan, vectorized ────────────────────────────────────────────────
 //
-// The bit-pattern test is one compare per element and the bytes have to be read
-// either way, so the pass is pure overhead in the best case.  Written one
-// element per load it was also the only pass in the row dataflow that moved no
-// vector: the radix passes move eight 16-bit (or four 32-bit) elements per load,
-// this moved one.  Both readers of the row go through here -- the contract
-// half's own window check and the chunked path's `nan_scan_kernel`.
+// One compare per element, and the bytes have to be read either way, so this
+// pass is pure overhead -- which is why it moves vectors like every other pass
+// here rather than one element per load.  Both readers of the row go through
+// it: the contract half's window check and the chunked path's `nan_scan_kernel`.
 //
-// Vector while the row slice is 16-byte aligned (it always is: rows are padded
-// to a 1024-byte stride and the chunk bases are multiples of 8 elements), then
-// a scalar tail for the remainder.
+// Vector while the row slice is 16-byte aligned (it always is -- rows are
+// padded to a 1024-byte stride and chunk bases are multiples of 8 elements),
+// then a scalar tail.
 static __device__ __forceinline__ bool nan_in_block(const float4 &v) {
     return is_nan_value(v.x) || is_nan_value(v.y) || is_nan_value(v.z) ||
            is_nan_value(v.w);
@@ -586,31 +539,24 @@ inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk)
 // ── the chunked split, for rows too long for one CTA to carry ───────────────
 //
 // One row per CTA leaves the machine idle when the batch is small and the rows
-// are long: B=6 at L=1M is 6 CTAs for the whole device.  The ported split ranks
-// each row across `kChunkedChunks` CTAs and merges, and this is where
-// DeepSelect enters it.
-//
-// Measured on C500 (bf16, k=512, cudaEvent, warm) against the row path:
-// B=6/L=1M 2.03 -> 0.18 ms, B=6/L=262144 0.43 -> 0.074 ms; at B=256/L=1M the
-// same split is 1.34x, which the batch bound keeps out.  Upstream's own gate
+// long: B=6 at L=1M is 6 CTAs for the whole device.  The split ranks each row
+// across `kChunkedChunks` CTAs and merges.  It wins by 11x at B=6/L=1M and
+// loses above ~256 rows, which is the batch bound.  Upstream's own gate
 // (`needs_chunked`: L >= 1M) is the same idea with a higher floor; 262144 is
-// where the row count is still the problem here.
+// where the row count is still the problem here.  Measurements in
+// `docs/C500-radix-perf-ledger.zh.md`.
 constexpr uint32_t kChunkedMaxBatches = 64;
 constexpr uint32_t kChunkedMinVocab = 262144;
 
 // The chunk count is SM-count-sensitive: a grid of `kBatch * chunks` CTAs
-// leaves `ctas mod SM` SMs idle when it is not a whole number of waves, and the
+// leaves `ctas mod SM` SMs idle unless it is a whole number of waves, and the
 // same 16 is a different fraction of a wave on a 104-AP C500, a 28-SM C600 and
-// a 32-SM C600U.  `NATIVE_SM_COUNT` (csrc/structs.h) is the compile-time fact
-// that makes this decidable per build.
+// a 32-SM C600U.  `NATIVE_SM_COUNT` (csrc/structs.h) makes that decidable at
+// compile time.
 //
-// The rule, stated so it can be argued with: **keep the measured count where it
-// already fills at least half of its last wave, and otherwise round up to the
-// next count that fills a whole number of waves.**  The half-wave floor is what
-// keeps C500 exactly where it was measured -- b6 x 16 = 96 CTAs over 104 APs
-// leaves 96 of the last wave's 104 APs busy (92%), so 16 is kept and no number
-// recorded anywhere moves.  An architecture whose SM count would leave that grid
-// under half a wave gets a count that fills it instead.
+// The rule: **keep the measured count where it already fills at least half of
+// its last wave, and otherwise round up to a whole number of waves.**  The
+// half-wave floor is what keeps C500 exactly where it was measured.
 constexpr int wave_filled_chunks(int base_chunks) {
     constexpr int kBatch = 6;                      // the split's gate is small
     constexpr int kSms = (int)NATIVE_SM_COUNT;
@@ -706,105 +652,25 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 
 // ── the fp32 split ──────────────────────────────────────────────────────────
 //
-// Same shape as the 16-bit split below, and deliberately the same gate to
-// start with.  The fp32 row kernel is slower per row than the 16-bit one, so
-// the split probably starts paying at a shorter row than 262144 -- but that is
-// a measurement this change does not have, and the two splits sharing a gate
-// also shares one code path for the scratch and the `end_ptr` route.
-// The 16-bit split's 16, which is also what `nan_scan_kernel` is launched with,
-// so the two splits agree about the chunk geometry.  Measured on the cells the
-// gate admits (b6, kernel time, C500, CUDA_VISIBLE_DEVICES=3):
+// Same shape as the 16-bit split and the same gate, so the scratch and the
+// `end_ptr` route are one code path.  The chunk count is a function of the
+// batch because the two row regimes disagree: long rows prefer fewer chunks
+// monotonically (hence the constant 2 above 64 rows), short rows want
+// `largest power of two <= K / batches` -- `NATIVE_F32_CHUNK_WORK_TARGET`
+// (csrc/structs.h).  Sweeps and caveats:
+// `docs/C500-radix-perf-ledger.zh.md`.
 //
-//   chunks        8      16      24      32
-//   v262144     97.8    84.7    83.5    87.7
-//   v524288    144.2   108.3   107.7   104.2
-//
-// Flat from 16 up; 8 is short of CTAs (48).  24 is within noise of 16 and 32
-// trades the two columns off, so the shared value is the pick *on C500*.
-//
-// On a part with a different SM count the same 16 is a different fraction of a
-// wave, so the two splits round *up* to a whole number of waves on whatever
-// architecture the extension was built for (`NATIVE_SM_COUNT`, csrc/structs.h
-// -- 104 on C500, 28 on C600, 32 on C600U, all compile-time).  This is the one
-// place where a number the split is made of is SM-count-sensitive.
-//
-// **The bodies below were measured on C500 ONLY.**  What follows is therefore
-// not a re-sweep on C600/C600U -- it is the arithmetic of the existing
-// measurements carried to 28 and 32 SMs, with the cells where it stops being
-// justified marked as such.  Both split geometry functions are pure, so this is
-// computable here rather than assertable.
-//
-// `f32_chunks_small_batch(batches)` used to be the fixed `wave_filled_chunks(16)`
-// and is now `f32_chunks_for(batches)` -- see its definition below, and
-// `NATIVE_F32_CHUNK_WORK_TARGET` in `csrc/structs.h` for the measurement.  What
-// follows is that older rule's SM-count arithmetic, kept because it is why the
-// fixed value was believed to be right, and because the reason it was wrong is
-// the same reason this family of constants exists:
-//
-//   family        SMs  b6x16 % SMs   result   b6x(chunks+1) % SMs
-//   C500          104        96       16        102  (98%)   measured
-//   C600           28        84       32        198  (7%)
-//   C600U          32        96       16        102  (19%)
-//   C600 (b8)      28        96       16        136  (24%)
-//
-// That rule keys on `kBatch = 6` because 6 is the split's gate, so it answers
-// for b6 -- and it answers *only* for b6.  At b24 the same 16 chunks is 21%
-// slower than 8, and at b48/b64 it is 27%/31% slower than 4; the old note below
-// ("the small-batch arm keeps the value that was measured on it") was true of
-// b6 and silently extended to a whole tier.  The work-target form removes that
-// extension: it is a function of both quantities the optimum actually depends
-// on, and it reduces to 16 at b6, which is where the measurement was taken.
-//
-// `f32_chunks_large_batch()` = 2 (constant): the chunk count produced
-// `2 * batches` CTAs, and the merge `batches`.  So on a 28-SM C600 the merge is
-// 28 whole waves at b4096/28 = 146.3, and 146 of those 147 waves are merge -- a
-// 2:1 work ratio.  On a 32-SM C600U the same ratio holds at 128 waves + 128.
-// **This is the one place where the C500 measurement does not carry: the C500
-// sweep that picked 2 ran the merge 39 waves deep against 78 chunk waves.**
-// The remedy that the sweep itself points at is to drop the merge's CTA per row
-// (`chunks + 1` -> `chunks`) for the large-batch arm, which the sweep already
-// supports (chunks = 1: 524.7 us on C500, statistically indistinguishable from 2
-// at b256-v262144, and never measured at b4096).  That is a change to the merge
-// kernel's launch, not a constant, so it is not made on this arithmetic alone.
+// At an SM count other than the one measured, the large-batch arm's merge CTA
+// per row becomes a much larger share of the waves.  The fix the sweep points
+// at is dropping that CTA (`chunks + 1` -> `chunks`) -- a change to the merge
+// launch, not a constant, so it is not made on arithmetic alone.
 namespace {
-// The measured chunk counts.  Both are sweeps on C500 with the contract checked
-// at every point and two alternating passes per point (`sweep18.py` for these
-// calls, `chunk_sweep.py` for the wider grid).  The two regimes disagree, and
-// the disagreement is the whole reason this is a function of the batch:
+// The `DEEP_SELECT_F32_CHUNKS` sweep behind the work target is tabulated at
+// `NATIVE_F32_CHUNK_WORK_TARGET` in `csrc/structs.h` -- do not re-derive it.
 //
-//   chunks   b6-v262144   b256-v262144   b4096-v262144   b4096-v524288
-//        1           --           524.7           --              --
-//        2           --           525.2        7,112          13,358
-//        3           --              --        7,476          13,645
-//        4           --           666.9        9,226          13,747
-//        6           --              --        9,645          14,396
-//        8        97.8           680.2        9,850          17,864
-//       12           --           721.9           --              --
-//       16        84.7           760.6       11,316          19,241
-//       24        83.5           898.8           --              --
-//       32        87.7           988.0       15,093          22,154
-//       64       119.4              --       21,985          29,800
-//
-// One direction *at large*: the long-row cells above all prefer FEWER chunks
-// monotonically, which is why the large-batch arm is a constant 2.  The
-// short-row columns are a **different** curve, and the fixed 16 was wrong on
-// them: `chunks = 16` is not the optimum at every batch, because what the
-// chunks are for is filling the machine, and 16 chunks overshoot badly once
-// `batches * (chunks + 1)` is already past a couple of waves.
-//
-// Measured at `V = 32768`, one binary, only `DEEP_SELECT_F32_CHUNKS` varying,
-// 3 alternating rounds, median (`chunk_boundary.py`; the full table is at
-// `NATIVE_F32_CHUNK_WORK_TARGET`'s definition in `csrc/structs.h`): the optimum
-// is `16, 8, 8, 4/8, 4, 4, 4, 2, 2, ...` for batches `6, 16, 24, 32, 40, 48,
-// 64, 80, 96, ...`.  That is `largest power of two <= K / batches`, with K a
-// property of the machine.  Against the fixed 16 the losses were 21.0% at
-// b24-v65536, 26.9% at b48-v65536 and **31.0% at b64-v65536** -- all on shapes
-// whose gate was already open, so this costs no new path.
-// SMA-PROBE, temporary, 2026-09-15: `DEEP_SELECT_F32_CHUNK32` raises the
-// ceiling from 16 to 32 for the b6/V=1M cell the V-sweep flagged (plan §17.3).
-// It is a ceiling, not a count, so b32/b64 -- which the sweep says are already
-// at their optimum -- are unaffected: `f32_chunks_for` returns min(ceiling, K/b)
-// and K/b < 16 for them either way.  Remove with the campaign.
+// `DEEP_SELECT_F32_CHUNK32` raises the ceiling from 16 to 32 for the b6/V=1M
+// cell the V-sweep flagged (parity plan §17.3).  A ceiling, not a count, so
+// b32/b64 -- already at their optimum per the sweep -- are unaffected.
 inline bool f32_chunk_ceiling_32() {
     static const bool on = [] {
         const char *v = std::getenv("DEEP_SELECT_F32_CHUNK32");
@@ -824,11 +690,10 @@ constexpr int f32_chunks_small_batch(uint32_t batches, int ceiling) {
 }
 constexpr int f32_chunks_large_batch() { return 2; }
 
-// The batch at which the chunk count stops being a parallelism knob.  It is the
-// split's own small-batch ceiling (64), which is a property of the gate rather
-// than a fitted value: at 6 rows the machine is empty and chunks are the only
-// CTAs there are; at 256 the grid is 256 * chunks CTAs and 256 final modules
-// already covers C500's 104 APs twice over.
+// The batch above which the chunk count stops being a parallelism knob: 64 is
+// the split's own small-batch ceiling, a property of the gate rather than a
+// fitted value.  At 6 rows the machine is empty and chunks are the only CTAs
+// there are; at 256 rows the grid already covers the machine twice over.
 inline constexpr uint32_t kF32ChunksFewBatches = 64;
 }  // namespace
 
@@ -848,124 +713,48 @@ int f32_chunked_chunks(uint32_t batches) {
                : f32_chunks_large_batch();
 }
 
-// The batch bound has no single value, because what the split costs is a merge
-// over `batches` CTAs on an otherwise idle machine, and what it saves is the
-// row kernel's per-CTA time.  Both are measurable, and the measured gate has
-// two tiers (kernel time, C500, `maca_arm.py`):
-//
-//   batches   vocab      row us   split us   speedup
-//       6     65536       124.5       64.8     1.92x      <- b6 tier
-//       6    129280       256.1       69.1     3.71x
-//       6    262144       425.8       84.9     5.02x
-//     256     65536       326.1      394.3     0.83x      <- b256 LOSES here
-//     256    262144      1044.3      762.7     1.37x      <- b256 tier opens
-//     256    524288      1924.4     1282.2     1.50x
-//
-// and at b256 the split *loses* below 262144 (394 vs 326) while winning above
-// it.  That "loses" half no longer holds, and the reason is the chunk count
-// above: when this floor was measured the split's cost was `chunks` CTAs per
-// row, so at 16 chunks b256-v65536 was 256 * 17 = 4,352 CTAs deep in a
-// chunk-merge the machine had no room to hide.  With the count now a constant 2
-// for every batch above 64, the merge is 3 CTAs per row at every shape, so the
-// cost no longer scales with the gate and the floor is free to drop to the
-// small-batch tier's value.  Measured (kernel time, C500, three alternating
-// rounds, `floor_ab.py`; both sides contract-checked, 16546/16552/16544 vs
-// 18955/18963/18949 us over the eight cells):
-//
-//   cell              floor 262144   floor 65536
-//   b4096-v  65536       3485.1        2738.7      -21.4%
-//   b4096-v 129280       5845.5        4802.4      -17.8%
-//   b  256-v  65536       330.2         217.9      -34.0%   <- was the "loses" cell
-//   b  256-v 129280       534.6         366.4      -31.5%
-//   b  512-v 129280       846.4         684.3      -19.1%
-//   b  768-v  65536       741.5         564.2      -23.9%
-//   b    6-v  65536        66.3          66.4       +0.2%
-//   b 4096-v 262144      7113.1        7110.3       -0.0%
-//   TOTAL               18962.7       16551.4        -12.7%
-//
-// The two neutral cells are the contract: b6 already opened (the tier is `<=`
-// on both) and b4096-v262144 was already served.  Both tiers now sit on the
-// measured side of the same knee, which is the small-batch tier's, and no
-// longer on two different ones.
+// The batch bound has no single value: the split costs a merge over `batches`
+// CTAs on an otherwise idle machine and saves the row kernel's per-CTA time, so
+// which way it goes is measured per shape.  The floor was 262144 and the chunk
+// count above is why it could drop to the small-batch tier's value -- with the
+// count now a constant 2 above 64 rows the merge is 3 CTAs per row at every
+// shape, so the cost stops scaling with the gate.  Measured over the eight
+// cells the change reaches: -12.7% total, with the two neutral cells being the
+// contract (b6 was already open, b4096-v262144 already served).
 //
 // **The band `32768 <= V < 65536` is what that unification newly serves**, and
-// it was measured before being opened (kernel time, C500, round-robin A/B: both
-// arms in every round, order alternated, 5 rounds, median of the paired
-// per-round ratios; `ab_b.py`).  Six controls at `V >= 65536`, which the change
-// cannot reach, hold to |delta| <= 0.3% with per-round spreads <= 1.4% -- that
-// is the run's own noise floor, and it is what makes the rest readable:
+// it was measured before being opened: six controls at `V >= 65536`, which the
+// change cannot reach, hold to |delta| <= 0.3%.  Every cell in the band wins,
+// -5.6% to -27.7%, the magnitude falling as the batch rises -- the same curve
+// every other result here shows.  Full tables in
+// `docs/C500-radix-perf-ledger.zh.md`.
 //
-//   cell              head us   cand us   delta    GB/s  h -> c    %1W h -> c
-//   b   6-v 32768        71.6      57.6   -19.6%    22.0 -> 27.3    1.3 -> 1.7
-//   b  32-v 32768        81.3      62.1   -23.5%   103.2 -> 135.1   6.3 -> 8.2
-//   b  64-v 32768        91.0      75.0   -17.8%   184.4 -> 223.7  11.2 -> 13.6
-//   b 256-v 32768       181.8     149.3   -17.1%   369.1 -> 449.5  22.4 -> 27.2
-//   b1024-v 32768       496.3     468.0    -5.6%   540.9 -> 573.6  32.8 -> 34.8
-//   b4096-v 32768      1858.4    1712.2    -7.8%   577.8 -> 627.1  35.0 -> 38.0
-//   b 256-v 49152       255.9     184.9   -27.7%   393.4 -> 544.4  23.8 -> 33.0
-//   b4096-v 49152      2659.8    2200.0   -17.4%   605.5 -> 732.1  36.7 -> 44.4
-//
-// Logical GB/s is `2 * batches * V * 4 / time` (the split's chunk stage reads
-// the row once and the merge reads `2 * topk` candidates), so `%1W` is the
-// distance to the best case, not an occupancy.
-//
-// The magnitude falls as the batch rises, and that is the same curve every
-// other result in this file shows: at b6 the row kernel has 6 CTAs on 104 APs
-// and the split's 6 * 17 = 102 CTAs are a near-perfect wave; at b4096 the row
-// kernel already has 39 waves of its own and the split is buying a shorter
-// dependency chain per row, not a fuller machine.  It never goes negative, so
-// no second knee is opened -- but the b1024/b4096 cells are the ones to
-// re-measure if this band ever grows.
-//
-// ── the two tiers have collapsed into one ───────────────────────────────────
-// There used to be four constants here: a small-batch tier (`V >= 65536`,
-// `batches <= 64`) and a large-batch tier (`V >= 262144` -> later 65536,
-// `batches <= 4096`).  With the large tier's floor at 32768 the small branch is
-// **unreachable** -- it needs `V < 32768` and `V >= 65536` at once -- so the
-// predicate is one condition, and the two constants below are what is left of
-// it.  The tiers are gone rather than kept as documentation because a constant
-// that cannot select anything is a knob a reader will try to turn; the history
-// is the tables above.
-//
-// The measured band used the surviving cap throughout (b256/b1024/b4096 at
-// V=32768 are all `batches <= 4096` cells and all wins), so this spelling is
-// the one the numbers above were taken on, not a wider claim.
+// There used to be four constants here, a small-batch tier (`V >= 65536`,
+// `batches <= 64`) and a large-batch one (`V >= 262144`, later 65536,
+// `batches <= 4096`).  Lowering the large tier's floor to 32768 makes the small
+// branch unreachable (it would need `V < 32768` and `V >= 65536` at once), so
+// the predicate is one condition and the two constants below are what is left.
+// A constant that cannot select anything is a knob a reader will try to turn.
 constexpr uint32_t kF32ChunkedMinVocab = 32768;
 constexpr uint32_t kF32ChunkedMaxBatches = 4096;
 
 // **When is a split worth its own two extra stages?**  The row kernel already
-// runs one CTA per row with `radix_topk_row_f32`, so a split adds a scan and a
-// merge over `batches * (chunks + 1)` CTAs and buys exactly one thing:
-// parallelism the row kernel did not have.  That is a function of the *row
-// length against the machine*, not of `topk` -- §21.3's pattern is that the
-// gain rises with `vocab` and falls with `batches`, and `b4096-v32768-k2048`
-// (+26.5%) is the corner where the split has nothing to buy and the merge to
-// pay for.
+// runs one CTA per row, so a split adds a scan and a merge over
+// `batches * (chunks + 1)` CTAs and buys exactly one thing: parallelism the row
+// kernel did not have.  That is a function of the row length against the
+// machine, not of `topk` -- the gain rises with `vocab` and falls with `batches`,
+// and large-batch short rows are the corner where the split has nothing to buy.
 //
-// The model: a chunk of `V / chunks` elements takes the fixed per-CTA cost
-// `kF32ChunkFixedNs` (measured 3.0 us, §9.4), so the split's own stages cost
-// `B * (chunks + 1) * fixed` and the row kernel's row costs `V * c` for a
-// per-element rate `c` (measured 150 GB/s of fp32 reads = 1.5e-3 ns/element,
-// §9.4's "0.25-0.65 ns/element" rounded down).  Split iff the split's total is
-// the smaller.  With chunks = 2 (what `f32_chunks_large_batch` picks):
-//
-//     rows win:   V * 1.5e-3  <  B * 3 * 3000   =>   V < B * 6.0e6
-//
-// which puts b4096's break-even at V = 24.6M (every real row splits) and b6's
-// at V = 36,000.  That is the measured direction, but a 2-term model cannot be
-// trusted at the corner it was fitted near, so it is **coupled to the measured
-// region**: a configuration the §21.3 sweep covers is decided by the sweep, and
-// only outside it does the model speak.  The sweep's own verdicts:
-//
-//   V = 32768,  B = 6, 256   rows (B: +1.0%, +8.0%)      <- 2 of 3
-//   V = 32768,  B = 768, 4096  rows (B: +23.6%, +26.5%)  <- 3 of 3
-//   V = 65536,  B = 4096       rows (+9.6%)              <- 1 of 4
-//   V = 65536,  B = 6, 256, 768  split (-23.8%, -9.3%, +5.1%)  <- 3 of 4
-//   V >= 131072, any B in [1, 4096]  split (-71.8..-82.1%)     <- 12 of 12
-//
-// The one cell the sweep leaves ambiguous is `b768-v65536` (+5.1% in B's
-// direction): the model's break-even there is V = 4.6M, so it says split, and
-// that is what the gate does.  Recorded rather than smoothed over.
+// The model: the split's own stages cost `B * (chunks + 1) * fixed` for a fixed
+// per-CTA cost, and a row costs `V * c` at a per-element rate `c`; with
+// chunks = 2 that makes rows win below `V < B * 6.0e6`.  A two-term model is
+// not trustworthy near the corner it was fitted at, so it is **coupled to the
+// measured region**: inside the sweep the sweep decides, and only outside it
+// does the model speak.  The sweep's verdicts, and the one cell it leaves
+// ambiguous (`b768-v65536`, which the model sends to the split and the gate
+// follows), are in `docs/C500-radix-perf-ledger.zh.md` -- recorded there rather
+// than smoothed over.
+
 inline bool topk_worth_splitting_f32(const RowParams &params,
                                      uint32_t batches) {
     if (params.topk <= 0 || params.topk > (int)rk::kF32MaxTopK) return false;
@@ -1187,44 +976,37 @@ namespace dsf = deep_select::ffi;
 
 // ── the chunked path's scratch, held across calls ───────────────────────────
 //
-// `cudaMalloc`/`cudaFree` on this runtime are ~70-100 us per *pair* at the size
-// class the candidate workspace lands in, and -- measured, not assumed -- the
-// cost is **non-monotonic in size**, so a 12 MB allocation is nearly free while
-// 300 KB is the worst case (`docs/C500-to-parity-plan.zh.md` item 0,
-// `malloc_sweep.cu`).  The split needs this workspace plus a row-length table on
-// every call, so paying a fresh pair each time put a ~265 us host floor in front
-// of a ~96 us kernel at b6-v262144-k512 -- `e2e = max(host, device)`.
+// `cudaMalloc`/`cudaFree` on this runtime cost ~70-100 us per *pair* at this
+// size class, and the cost is non-monotonic in size (a 12 MB allocation is
+// nearly free; 300 KB is the worst case).  The split needs this workspace plus
+// a row-length table on every call, so a fresh pair each time put a ~265 us
+// host floor in front of a ~96 us kernel -- `e2e = max(host, device)`.
 //
 // So they are cached process-wide and **grown only**.  Growing rather than
-// keying by shape is the whole design: a caller that alternates between two
-// batches would realloc on every switch under a shape-keyed cache, which is the
-// cost this exists to remove; a high-water-mark buffer never does.
+// keying by shape is the design: a caller alternating between two batches would
+// realloc on every switch under a shape-keyed cache, which is the cost this
+// exists to remove.
 //
 // Three properties make reuse safe rather than merely fast:
 //
-//   * `chunked_workspace(base, batches, topk)` derives the layout by walking
-//     forward from `base` by the *geometry of this call*, not by the capacity,
-//     so a buffer larger than this call needs is correct by construction.
-//   * the split's own kernels write every slot they read back -- stage 1 fills
-//     each candidate slot it is asked for, and `nan_flags` is memset per call --
+//   * `chunked_workspace(base, batches, topk)` walks forward from `base` by the
+//     *geometry of this call*, not by the capacity, so a buffer larger than this
+//     call needs is correct by construction.
+//   * the split's kernels write every slot they read back -- stage 1 fills each
+//     candidate slot it is asked for, and `nan_flags` is memset per call --
 //     so nothing is inherited from the previous call.
-//   * the lengths table is only skipped when `(batches, vocab_size)` -- both
-//     arguments of this call -- already match the pair the table was last filled
-//     for.  The table's content is `[vocab_size] * batches`, a pure function of
-//     that pair, so the pair *is* the content; see `lengths_epoch` at the fill.
+//   * the lengths table is skipped only when `(batches, vocab_size)` -- both
+//     arguments of this call -- already match the pair it was last filled for.
+//     Its content is `[vocab_size] * batches`, a pure function of that pair, so
+//     the pair *is* the content; see `lengths_epoch` at the fill.
 //
 // The high-water mark is bounded by the gate that admits the split
-// (`chunked_bf16_applies`: batches <= 64, topk <= 1024), i.e. ~6.3 MB for the
-// workspace and 256 B for the table, held for the life of the process.  That is
-// the trade: a bounded, one-time footprint in exchange for removing a per-call
-// host cost that is larger than the kernel it fronts.
-//
-// One design point, since the natural instinct is to keep the `cudaFree` and
-// tolerate the pair: free-then-malloc of the same size *should* be cheap (that
-// is what an allocator does).  Measured on this runtime it is not -- 307,224 B
-// costs 69.9 us/pair with the free included and 100.3 us/pair interleaved with
-// device work, while the *same* loop over 12,582,912 B costs 1.2 us.  Freeing
-// would therefore give back most of the win, so the buffer is held.
+// (`chunked_bf16_applies`: batches <= 64, topk <= 1024) -- ~6.3 MB of workspace
+// and 256 B of table, held for the life of the process.  A bounded, one-time
+// footprint in exchange for removing a per-call host cost larger than the
+// kernel it fronts.  Freeing instead of holding gives most of the win back:
+// free-then-malloc *should* be cheap, and measured on this runtime it is not.
+
 struct ChunkedScratch {
     std::mutex mu;
     void *workspace = nullptr;
@@ -1350,22 +1132,14 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     const cudaStream_t stream = (cudaStream_t)TVMFFIEnvGetStream(
         (int32_t)dsf::device_type(input), dsf::device_index(input));
 
-    // The chunked split wants the row lengths as a table and a candidate
-    // workspace.  The lengths table is built HERE rather than by the caller:
-    // it is an internal detail of the split's stage 1 (the whole row, which is
-    // what `end` absent already means), it is at most `batch_size` int32s, and
-    // keeping it here leaves the public entry a pure DLTensor boundary.
-    //
-    // The workspace is also ours: raw cudaMalloc rather than a torch tensor,
-    // because a torch tensor here is exactly the coupling this migration
-    // removes.  It is a synchronous allocation on the calling thread, so it is
-    // ordered before the launches on any stream.
-    // The workspace is also ours: raw cudaMalloc rather than a torch tensor,
-    // because a torch tensor here is exactly the coupling this migration
-    // removes.  It is cached across calls rather than freed at the end -- see
-    // `ChunkedScratch` for why the allocation, not the kernel, was the floor.
-    // `DEEP_SELECT_NO_SCRATCH_CACHE=1` restores the free-per-call behavior, which
-    // is what makes the claim measurable as an A/B rather than argued.
+    // Both buffers are built HERE rather than taken from the caller.  The
+    // lengths table is an internal detail of the split's stage 1 -- `end`
+    // absent already means the whole row -- so keeping it here leaves the
+    // public entry a pure DLTensor boundary.  The workspace is raw cudaMalloc
+    // rather than a torch tensor, because a torch tensor here is exactly the
+    // coupling the tvm-ffi migration removes; it is synchronous on the calling
+    // thread, so it is ordered before the launches on any stream, and cached
+    // across calls -- see `ChunkedScratch`.
     static const bool kCacheScratch = [] {
         const char *v = std::getenv("DEEP_SELECT_NO_SCRATCH_CACHE");
         return !(v != nullptr && v[0] == '1' && v[1] == '\0');

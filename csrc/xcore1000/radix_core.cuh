@@ -1,38 +1,26 @@
 // ── provenance ──────────────────────────────────────────────────────────────
-// Ported from the standalone C500 radix-TopK project at
-//   /home/compiler_gfx/dsa_topk, csrc/radix_topk.cuh
-//   commit 61ab380c77b81669718bfb11b95a583b0e661001  (blob 75af81c7ae1e44cc0b5baf8f8dd02a75ea1aa4dd)
+// Ported from the standalone C500 radix-TopK project (`dsa_topk`,
+// `csrc/radix_topk.cuh`, commit 61ab380c77b81669718bfb11b95a583b0e661001).
+// Two passes over the row: one histogram, one collect-and-stage that refines
+// the threshold bin in shared memory.
 //
-// Why it is here: this is a two-pass dataflow (one histogram pass, one
-// collect-and-stage pass, with the low bits refined inside a shared-memory
-// arena) where the incumbent `maca_topk.cu` re-walks the row twice per key
-// byte -- 8 passes for a 4-byte key, 4 for a 2-byte one.  Same operator, same
-// hardware, 158..280 GB/s measured there against ~21 GB/s here.
+// Three deviations from that source:
 //
-// ── the one deviation from that file: the 16-bit path speaks bf16, not fp16 ──
-// DeepSelect has no fp16: its two dtypes are bf16 and fp32, and the 16-bit
-// path here serves bf16.  The retarget is a type substitution and nothing
-// else -- `half_to_uintN` -> `bf16_to_uintN` reading the value's own bit
-// pattern (`__bfloat16_as_ushort`, a reinterpret) instead of fp16's, and the
-// `f16`-named symbols renamed to `bf16`.  The key transform is unchanged: it
-// only depends on the sign bit being bit 15, which holds for both.
-// Deliberately NOT copied from `float_to_uint8`: that one rounds fp32 through
-// fp16 before binning, which a bf16 input has no source for.
-// The fp32 half of the file (`float_to_uint*`, `radix_topk_row_f32*`, the
-// k2048 family) is otherwise verbatim and is what fp32 is built on, with one
-// deliberate addition: `radix_topk_row_f32_rescan`, called from
-// `radix_topk_row_f32` when its coarse bin does not fit the candidate arena.
-// Upstream that case ranks the members it managed to stage and mis-answers
-// quietly -- a uniform L=129280 k=512 row puts 8025 members in the bin against
-// an arena of 1757, and 391 of the 512 picks land below the row's true k-th
-// largest.  The addition applies the no-truncation rule the 16-bit path
-// already follows; nothing else in that half is touched.
-//
-// A third, smaller deviation: the two chunked launchers take the row stride
-// (defaulting to `L`, i.e. upstream's packed-row assumption).  The stage-1
-// kernels have always taken `score_stride` -- the launchers were the only
-// place that assumed `L`; DeepSelect's callers hand over padded rows
-// (`get_stride_requirement()` is 1024 bytes), so the split needs it.
+//   1. The 16-bit path speaks bf16, not fp16.  DeepSelect's dtypes are bf16
+//      and fp32, so `half_to_uintN` became `bf16_to_uintN`, reading the
+//      value's own bit pattern (`__bfloat16_as_ushort`) instead of fp16's.
+//      The key transform is otherwise unchanged -- it only needs the sign bit
+//      at bit 15, which both formats have.  This is NOT the same as
+//      `float_to_uint8`, which rounds fp32 through fp16 before binning and so
+//      has no bf16 counterpart.
+//   2. `radix_topk_row_f32_rescan` is added, called from
+//      `radix_topk_row_f32` when its coarse bin does not fit the candidate
+//      arena.  Without it that case ranks only the members it managed to
+//      stage and mis-answers quietly -- see its own comment.  The rest of the
+//      fp32 half is verbatim.
+//   3. The two chunked launchers take the row stride.  The stage-1 kernels
+//      always did; only the launchers assumed a packed row, and DeepSelect's
+//      callers hand over padded rows (`get_stride_requirement()` is 1024 B).
 //
 // ────────────────────────────────────────────────────────────────────────────
 /*
@@ -129,26 +117,16 @@ __device__ __forceinline__ uint8_t bf16_to_uint8(maca_bfloat16 x) {
 // 向量化直方图 (smem atomicAdd)
 // ============================================================
 
-// `hist_add_f32`'s call sites walk `input + tx*4`, i.e. one thread takes FOUR
-// CONSECUTIVE float4 per leg.  That is not "four loads in flight": it puts
-// adjacent lanes of each individual load instruction 64 bytes apart, so a
-// 128-byte segment carries 32 useful bytes.  Measured on exactly pass 1's shape
-// (4096 rows x 262144 fp32, 4.295 GB, C500, `/tmp/dsab/kt7.cu`+`kt9.cu`) with
-// the same bytes, the same instruction count and the same atomics:
+// `hist_add_f32`'s call sites walk `input + tx*4`: one thread takes four
+// CONSECUTIVE float4 per leg, so adjacent lanes of a single load instruction
+// are 64 bytes apart and a 128-byte segment carries 32 useful bytes.
 //
-//   float4 per leg:  row + tx*4 + q      998.7 GB/s   (60.5% of 1650)
-//   float4 per leg:  row + tx + q*BS    1650.9 GB/s  (100.1% of 1650)
-//
-// The pattern is real.  **It is NOT the cause of pass 1's deficit** -- the plan
-// note section 15 records both halves, and reading only the first is the
-// mistake it was written to prevent.  Propagated into the real kernel (pass 1
-// only, the other two `tx*4` walks left alone) the change is worth **-1.4% on
-// pass 1 in isolation** (6,843.3 -> 6,765.2 us) and **-0.7% on the fp32 grid**
-// (43,456 -> 43,146, two alternating rounds).  The microbench walk has no
-// shared-write contention; pass 1 issues one shared-bucket atomic per element
-// and sits at 3 CTAs/SM (2,596 B static + 14,056 B dynamic of 64 KiB), and at
-// that occupancy the coalesced and strided walks are 7% apart, not 65% (kt12).
-// The atomic is the candidate cause, and it is unmeasured.
+// That stride is real and deliberate -- but it is NOT why pass 1 is short of
+// the wall.  Coalescing this walk is a 65% win in a microbench and -0.7% in
+// the kernel: at the kernel's occupancy the two patterns are 7% apart, not
+// 65%, because pass 1 issues one shared-bucket atomic per element and that is
+// what it is waiting on.  See `docs/C500-radix-perf-ledger.zh.md` before
+// changing it.
 __device__ __forceinline__ void hist_add_f32(
     uint32_t* s_histogram, const float* input, uint32_t idx)
 {
@@ -159,18 +137,17 @@ __device__ __forceinline__ void hist_add_f32(
     atomicAdd(&s_histogram[float_to_uint8(v.w)], 1u);
 }
 
-// One element of the fp32 row's second pass.  Both walkers below ask the same
-// question of every element -- `float_to_uint8(raw) > threshold_bin` -- and both
-// are read-bound, so both move four elements per load the way pass 1's
-// `hist_add_f32` does.  Written one element per load, this pass ceilinged at the
-// 4-byte streaming rate (~1244 GB/s, `readwall2.cu`) against the 16-byte
-// 1650 GB/s wall every other pass in this file reaches; more importantly it
-// spent four times as many dependent load stalls per row.
+// One element of the fp32 row's second pass.  Both walkers ask every element
+// the same question -- `float_to_uint8(raw) > threshold_bin` -- and both are
+// read-bound, so both move four elements per load exactly as pass 1 does:
+// one element per load tops out at the 4-byte streaming rate, well under the
+// 16-byte wall every other pass here reaches, and costs four times the
+// dependent load stalls per row.
 //
-// The arena write stays capacity-limited while `s_num_input[0]` counts every
-// member of the bin -- that is what makes the overflow test below sound, and
-// the rescan rebuilds the fine histogram it discards, so the clamped
-// histogram add inside the same branch is deliberate, not an oversight.
+// The arena write stays capacity-limited while `s_num_input[0]` counts EVERY
+// member of the bin.  That split is what makes the overflow test sound, and
+// the rescan rebuilds the fine histogram it discards -- so the clamped
+// histogram add inside the same branch is deliberate.
 __device__ __forceinline__ void stage_f32_lane(
     float raw, uint32_t idx, uint32_t threshold_bin, int32_t* output,
     uint32_t* s_counter, uint32_t* s_input_flat, uint32_t* s_num_input0,
@@ -223,14 +200,13 @@ __device__ __forceinline__ void hist_add_bf16(
 // ============================================================
 
 /*
- * 设计思路:
- *   - 每个 warp 维护一个独立的寄存器直方图 (256 bins)
- *   - 每个线程持有 256/kWarpSize 个 bin
- *   - 读取元素后, 用 __shfl_sync 将 bin 发给 owner 线程
- *   - owner 线程在寄存器中累加
- *   - 最后 warp 内归约, 写入 smem
+ * Intended design: one register histogram per warp (256 bins), 256/kWarpSize
+ * bins per thread, each element's bin shuffled to its owner thread, reduced
+ * within the warp and written to smem once -- no shared atomicAdd at all.
  *
- * 优势: 避免 smem atomicAdd 竞争, 寄存器访问零延迟
+ * NOT IMPLEMENTED.  The bodies below move one element per shuffle, so each
+ * warp records about 1/64 of what it reads.  They are kept as the shape of the
+ * idea, not as a working histogram; see `docs/C500-radix-handover.zh.md` §9.
  */
 
 #ifdef __MACACC__
@@ -256,14 +232,15 @@ constexpr uint32_t kSmemStaticBytes = 2 * (kRadix + 32) * sizeof(uint32_t)
 static_assert(kSMEM >= kSmemStaticBytes, "KSMEM_BYTES is smaller than static shared state");
 constexpr uint32_t kSmemInputSize = (kSMEM - kSmemStaticBytes) / sizeof(int32_t);
 
-// The 16-bit row resolves its coarse level at 12 bits rather than 8, over the
-// same 16 KB the 8-bit level used for its candidate arena: the histogram is
-// dead by the time the arena is written, so one region carries both.  The 12
-// bits leave 4, which is exactly the rest of a bf16 key, so the two levels
-// together determine the key and the refine never ranks beyond the fine ties.
-// Measured on the perf table's own generator: at 8 bits the threshold bin holds
-// 4,686 of a 16,384-element row (over the 3,514-slot arena, so every row
-// overflows and pays a third row walk); at 12 bits the widest is 516.
+// The 16-bit row resolves its coarse level at 12 bits, not 8, over the same
+// 16 KB the 8-bit level used for its candidate arena -- the histogram is dead
+// by the time the arena is written, so one region carries both.  Twelve bits
+// leave four, which is exactly the rest of a bf16 key: the two levels together
+// determine the key, so the refine never ranks past the fine ties.
+//
+// The 8-bit level made the threshold bin wider than the arena on ordinary rows,
+// so every one of them paid a third row walk.  See
+// `docs/C500-radix-perf-ledger.zh.md` §2.3.
 constexpr uint32_t kKeyBits = 16;
 constexpr uint32_t kCoarse12Bits = 12;
 constexpr uint32_t kCoarse12Shift = kKeyBits - kCoarse12Bits;      // 4
@@ -354,20 +331,14 @@ __device__ __forceinline__ void run_cumsum(
 }
 
 /*
- * run_cumsum_warp: 256 元素 reverse inclusive scan (warp shuffle)
+ * run_cumsum_warp: 256-element reverse inclusive scan, one buffer, warp
+ * shuffles.  Each warp scans its own 32 elements, the warp totals go to
+ * s_histogram_buf[0][257..264] (256 stays a sentinel), warp 0 scans those
+ * eight, and each warp adds its offset -- two __syncthreads, against eight in
+ * the naive form.  Returns the calling thread's bin suffix so the caller can
+ * avoid reading a neighbouring bin before another barrier.
  *
- * 方案B: 单缓冲 warp scan
- *   - 8 个 warp 各处理 32 元素, warp 内用 __shfl_down_sync
- *   - warp 总和写入 s_histogram_buf[0][257..264] (保留 256 作为哨兵)
- *   - __syncthreads
- *   - warp 0 对 8 个总和做 scan
- *   - __syncthreads
- *   - 各 warp 加偏移
- *   → 2 次 __syncthreads (vs 原来 8 次)
- *   - 返回当前线程 bin 的 inclusive/exclusive suffix，调用方可避免
- *     在额外 barrier 前读取相邻 bin。
- *
- * 注意: FP32 使用 run_cumsum, FP16 使用 run_cumsum_warp
+ * fp32 uses this; the 16-bit path uses run_cumsum.
  */
 __device__ __forceinline__ uint32_t run_cumsum_warp(
     uint32_t s_histogram_buf[2][256 + 32], uint32_t tx, uint32_t& exclusive_suffix)
@@ -430,14 +401,14 @@ __device__ __forceinline__ uint32_t run_cumsum_warp(
 // FP32 radix topk row
 // ============================================================
 
-// The fp32 row's dynamic shared-memory requirement, as seen from a launch site.
-// `radix_topk_row_f32` derives the same number from `kSMEM`; both callers (the
-// row entry and the chunked split's stage kernels) must request exactly this,
-// so it lives here rather than being re-spelled at each `<<<>>>`.
+// The fp32 row's dynamic shared-memory requirement, as seen from a launch
+// site.  `radix_topk_row_f32` derives the same number from `kSMEM`, and both
+// callers (the row entry and the chunked split's stage kernels) must request
+// exactly it -- so it lives here rather than being re-spelled at each launch.
 //
-// The static half is `s_histogram_buf[2][256+32]` plus `s_counter`,
-// `s_threshold_bin_id`, `s_high_threshold_bin_id`, `s_num_input[2]` and
-// `s_last_remain` -- 6 words, not the 4 an earlier expression charged.
+// The static half is `s_histogram_buf[2][256+32]` plus the six words
+// `s_counter`, `s_threshold_bin_id`, `s_high_threshold_bin_id`,
+// `s_num_input[2]` and `s_last_remain`.
 constexpr uint32_t kF32StaticBytes =
     2 * (kRadix + 32) * sizeof(uint32_t) + 6 * sizeof(uint32_t);
 // Two of these tiles the dynamic region, one for the arena and one for the
@@ -448,25 +419,23 @@ constexpr uint32_t kF32SmemInputSize =
 constexpr size_t kF32RowSmemBytes =
     2 * (size_t)kF32SmemInputSize * sizeof(uint32_t);
 
-// [DeepSelect] Overflow resolution for the fp32 row below.
+// Overflow resolution for the fp32 row below.  Do not remove this path.
 //
 // The staging pass of `radix_topk_row_f32` keeps only the first
-// `SMEM_INPUT_SIZE` members of the coarse (half-rounded) threshold bin and
-// drops the rest silently, after which the refinement ranks that subset -- not
-// the bin.  The answer is still `topk` indices wide and still distinct, so
-// nothing looks wrong at the boundary: the values are simply from the wrong
-// place.  Measured on a uniform row of L=129280, k=512 the bin holds 8025
-// members against an arena of 1757, and 391 of the 512 picks land below the
-// row's true k-th largest.
+// `SMEM_INPUT_SIZE` members of the coarse threshold bin and drops the rest,
+// after which the refinement ranks that subset rather than the bin.  The
+// answer still has `topk` distinct indices, so nothing looks wrong: the values
+// are simply from the wrong place.  Measured on a uniform row of L=129280,
+// k=512, the bin holds 8025 members against an arena of 1757 and **391 of the
+// 512 picks land below the row's true k-th largest** -- which is why this path
+// is not a fallback but part of the answer for that shape.
 //
-// Upstream the 16-bit path handles the same situation by re-walking the row
-// (see the `overflow` branch of `radix_topk_row_bf16_b`); this is that rule for
-// a four-byte key: the members of the coarse bin are ranked by the exact fp32
-// key bytes, one level per round, each round one histogram pass and one
-// emit-and-narrow pass over the row.  The candidate set shrinks by construction
-// (the pivot bin always holds enough -- the coarse histogram said so), so the
-// tail slots are filled by the last byte's ties exactly as the arena path fills
-// them, and the caller can still rely on `topk` written indices.
+// The 16-bit path handles the same case by re-walking the row -- see the
+// `overflow` branch of `radix_topk_row_bf16_b`.  For a four-byte key that
+// becomes: rank the members of the coarse bin by the exact fp32 key bytes, one
+// level per round, each round a histogram pass and an emit-and-narrow pass.
+// The candidate set shrinks by construction, so the tail slots fill from the
+// last byte's ties exactly as the arena path fills them.
 //
 // `excess_coarse` members above the coarse bin are already emitted and
 // `s_counter` counts them; `remain` are still needed, all from inside the bin.
@@ -2144,13 +2113,10 @@ inline size_t topk_bf16_chunked_workspace_bytes(int B, int topk, int num_chunks)
 // 配置驱动 dispatch
 // ============================================================
 //
-// 推荐编译配置:
-//   搜广推 (B≤6000, L=10K, k≤1024):  -DKSMEM_BYTES=16384  (16KB, 高 occupancy)
-//   DSA (B=4096, L=50K, k=512~2048): -DKSMEM_BYTES=49152  (48KB, 大候选缓冲)
-//   dsv4 decode (B≤64, L≥1M):        -DKSMEM_BYTES=49152  (48KB, chunked 路径)
-//   dsv4 prefill (B=128~1K, L≤128K): -DKSMEM_BYTES=49152  (48KB)
+// The `-DKSMEM_BYTES=` size per workload is now decided by the launchers, not
+// by the caller: see `radix_smem_bytes()` in `maca_topk.cu`.
 //
-// chunked 路径需要额外 workspace: B * chunks * topk * (4 + 2) bytes
+// The chunked path needs extra workspace: B * chunks * topk * (4 + 2) bytes.
 //
 struct TopKConfig {
     int B;
@@ -2363,20 +2329,21 @@ __global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage2_kernel(
 // ── the fp32 chunked split ──────────────────────────────────────────────────
 //
 // The 16-bit split above ranks each chunk with `radix_topk_row_bf16_k`, whose
-// answer is a *value* and whose `output` is a position inside the chunk, so the
-// merge can rank `chunks * topk` candidate values and map positions back
-// through the candidate arrays.  The fp32 row entry writes *row columns*
-// instead (its `chunk_begin` argument is the chunk's column offset), so the
+// output is a position *inside the chunk*, so its merge ranks `chunks * topk`
+// candidate values and maps positions back.  The fp32 row entry writes row
+// columns instead (its `chunk_begin` is the chunk's column offset), so the
 // split carries the columns alongside the values:
 //
 //   cols[batches * chunks * topk]  int32  the row columns stage 1 selected
 //   vals[batches * chunks * topk]  float  their values, -inf for an empty slot
 //   out [batches * topk]           int32  the merge's answer, one column each
 //
-// stage 2 ranks `vals` (so its answer is a position into the candidate arrays)
-// and maps that position through `cols`.  Everything else -- the grid, the
-// `-1` sentinel for a slot the merge could not fill, the contract half's
-// `rerank` fallback -- is the 16-bit split's, unchanged.
+// Stage 2 ranks `vals` and maps the resulting position through `cols`.
+// Everything else -- the grid, the `-1` sentinel, the contract half's `rerank`
+// fallback -- is the 16-bit split's.
+//
+// The chunk count, the work target behind it and the reason a short batch is
+// split at all are in `csrc/structs.h` (NATIVE_F32_CHUNK_WORK_TARGET).
 constexpr size_t kF32ChunkBlocks = kBlockSize;   // `radix_topk_row_f32`'s width
 // The split's chunk count is the caller's (`deep_select_maca::kChunkedChunks`,
 // currently 16, which is also what `nan_scan_kernel` is launched with).  It is
@@ -2461,11 +2428,11 @@ inline cudaError_t launch_topk_f32_chunks_stage2(
 // columns per row.  They are separate arguments because the caller keeps its
 // own state (the row-length table, the per-row NaN flags) in front of the
 // arena, so the arena is not at the base of the caller's workspace.
-// The chunk engine's own topk gate: `switch (topk)` below is the static-k
-// dispatch the merge and the row entry are instantiated for.  Named so the
-// *policy* gate (`chunked_f32_applies`) and the *engine* gate can be stated
-// separately -- they were the same expression until 2026-09-15, which made the
-// policy look more expensive than it is (see plan §21.2).
+//
+// This is the *engine* bound, not the policy one: `chunked_f32_applies` (in
+// `maca_topk.cu`) decides whether to split and calls this to find out whether
+// the split can serve the topk.  Keeping them separate is what stops the policy
+// from looking more expensive than the engine actually is.
 inline bool f32_chunk_engine_supports(int topk) {
     // The fp32 split is dynamic-k: stage1/stage2 are templated on `kBlockSize`
     // alone and take `topk` as an argument (`radix_topk_row_f32`'s `topk` is a

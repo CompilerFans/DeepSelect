@@ -1,56 +1,36 @@
 #!/usr/bin/env python3
 """Run the official performance grid for every backend and write it as a CSV.
-This is a *thin* recorder: the cases, the data, the checks and the timings are
-all `tests/test.py`'s own, called rather than re-implemented.  Per cell the body
-is `run_testcase`'s, line for line:
-    t = lib.generate_testcase(p)
-    value, index = deep_select.topk(...)         # backend=<arm>
-    check_result(p, t, value, index)
-    kk.bench(...) -> one matching kernel's time, else the span
-and the reference arm is literally `torch.topk(t.input, p.topk, dim=1,
-sorted=p.sorted_value)` under the same eligibility guard the official runner
-uses, timed with the same rule.  The only thing added is the axis the official
-harness cannot express: **which backend answered**, one row per (cell, backend),
-with a `status` of `pass` / `fail` / `unsupported`.
-Three backends:
-  maca_c     this repository's kernel (the DEFAULT is `torch` now; this arm
-             names what it wants explicitly, as the recorder always has)
-  torch      the official reference -- a bare `torch.topk`, as `tests/test.py`
-             times it (NOT `backend="torch"`, which pads, masks and converts
-             around the same call and measures something else entirely)
-  deep_gemm  the host repository's `fp32_indexer_topk_selector`, through
-             `backend="deep_gemm"`.  It ranks float32 only, so it is
-             `unsupported` on the whole bf16 grid -- which is why
-             `--deep-gemm-axes` adds the host repo's own fp32 selector grid:
-             without it the `deep_gemm` column has no number in it at all.
-Cases: the official grid by default (`tests/test.py::performance_cases()`), plus
-extra ones from `--cases-file`, a JSON list of `lib.TestParam` fields:
-    [{"batch_size": 6, "vocab_size": 32768, "topk": 1024},
-     {"batch_size": 256, "vocab_size": 131072, "topk": 2048,
-      "dtype": "fp32", "num_runs": 20}]
-Only `batch_size`, `vocab_size` and `topk` are required; the rest default to the
-Lightning Indexer's configuration (sorted and return_value off, bf16, int32).
-`dtype` / `out_idx_dtype` take the short names bf16, fp32, int32, int64; an
-unknown one is an error rather than a default.
+A *thin* recorder: the cases, the data, the checks and the timings are all
+`tests/test.py`'s own, called rather than re-implemented.  The one axis added is
+the one the official harness cannot express: **which backend answered**, one row
+per (cell, backend), each with a `status` of `pass` / `fail` / `unsupported`.
+A cell a backend cannot serve states its reason there, and is never dropped.
+Backends: `maca_c` -- this repository's kernel, the production arm (the DEFAULT
+is `torch`, so it is asked for by name); `torch` -- the official reference, a
+bare `torch.topk`, NOT `backend="torch"`, which pads, masks and converts around
+the same call and measures something else entirely; `deep_gemm` -- the host
+repo's `fp32_indexer_topk_selector`, float32 only, hence `unsupported` on the
+whole bf16 official grid.  `--deep-gemm-axes` adds the host fp32 grid it answers.
+Cases: the official grid (`tests/test.py::performance_cases()`) plus
+`--cases-file`, a JSON list of `lib.TestParam` fields, e.g.
+`{"batch_size": 6, "vocab_size": 32768, "topk": 1024}`.  Those three are the
+required keys; the rest default to the Lightning Indexer's configuration, and
+`dtype` / `out_idx_dtype` take bf16 / fp32 / int32 / int64 -- an unknown name is
+an error, not a default.
 
-Output, following the host repository's `deep_gemm/tests/perf_data/` layout:
-    perf_data/<device>/<YYYYmmdd_HHMMSS>/deepselect_perf.csv
-    perf_data/<device>/<YYYYmmdd_HHMMSS>/manifest.json
-
+Output, following the host repo's `deep_gemm/tests/perf_data/` layout:
+`perf_data/<device>/<YYYYmmdd_HHMMSS>/` (`deepselect_perf.csv`, `manifest.json`).
 `<device>` is the **device name torch reports** (`MetaX C500` -> `MetaX_C500`),
-not the arch family: the folder answers "which board did I measure on", and the
-part identity is what makes two records comparable.  Two boards of one family
-(`MetaX C600` and `MetaX C600-U`, both xcore1600) share an ISA but not a clock,
-a wall or an SM count, so a family-named folder would silently stack them.  The
-arch family is still recorded per row (`chip`) and never inferred back out of
-the folder name.  A stale empty directory left by the arch spelling
-(`perf_data/metax_xcore1000/`) is skipped by the baseline scan below, so an
-untouched one is inert rather than misleading.
+never the arch family: the folder answers "which board did I measure on", and two
+boards of one family (both xcore1600) share an ISA but not a clock, a wall or an
+SM count.  The family is recorded per row (`chip`), never inferred from it.
 Usage:
     CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \\
         python3 scripts/perf_snapshot.py
+    ... --arms a,b                # subset of the backends (default: all three)
     ... --deep-gemm-axes          # + the host repo's fp32 selector grid
     ... --cases-file extra.json   # + your own cases
+    ... --out-dir DIR --tag NAME  # where the record lands / its timestamp
     ... --dry-run                 # print what would run, measure nothing
     ./run_bench.sh                # the orchestrator: this + the official gate
 """
@@ -118,14 +98,12 @@ def measure(p, t, backend: str) -> Dict[str, Any]:
     """One (cell, backend) result: status first, then the numbers."""
     row: Dict[str, Any] = {"status": "pass", "error_type": "", "error_message": ""}
     if backend == "torch":
-        # The reference is checked by nothing, here as in `tests/test.py`: it is
-        # a speed baseline, and the contract's own arm is `maca_c`.
+        # Nothing checks the reference, here as in `tests/test.py`: a speed
+        # baseline, not a correctness arm.
         if t.end is not None or t.output_idx_offset is not None or p.vocab_size < p.topk:
-            # `run_testcase`'s own eligibility guard, carried as the reason so
-            # the gap is stated rather than looking like a missing measurement.
-            # A bare `torch.topk(x, k)` with `k > x.shape[1]` raises (measured:
-            # "selected index k out of range"), which is why the guard exists --
-            # the windowed operator answers such a row with its whole prefix.
+            # `run_testcase`'s own eligibility guard, carried as the reason so an
+            # absent number is not read as a missing measurement.  A bare
+            # `torch.topk` with `k > x.shape[1]` raises, hence the guard.
             row["error_message"] = ("not applicable: the reference arm needs "
                                     "vocab_size >= topk, no window, no offset "
                                     "(tests/test.py's own guard)")
@@ -157,8 +135,8 @@ def measure(p, t, backend: str) -> Dict[str, Any]:
         row["error_message"] = str(exc)[:200]
     row["Byte(MB)"] = round(official.topk_total_size(p, t, value, index) / 1e6, 3)
     del value, index
-    # A failing case is still timed when it can be: which of "selects wrong" and
-    # "slow" it is matters, and hiding the measurement answers neither.
+    # Still timed when it can be: "selects wrong" and "slow" are different
+    # defects; dropping the time answers neither.
     try:
         row["time(us)"] = _us(time_operator(p, t, backend))
     except Exception as exc:
@@ -167,23 +145,18 @@ def measure(p, t, backend: str) -> Dict[str, Any]:
     return row
 def _us(seconds: Optional[float]) -> Any:
     """Seconds -> microseconds, or "" when the arm did not apply / was not timed.
-    Empty rather than 0: a 0 us cell reads as an implausible win, and the
-    reference arm is legitimately absent where the guard excludes it.
+    Empty rather than 0: a 0 us cell reads as an implausible win.
     """
     return round(seconds * 1e6, 3) if seconds else ""
-# ── cases ───────────────────────────────────────────────────────────────────
+# ── cases ──
 def deep_gemm_cases() -> List[Any]:
     """The host repo's selector perf shapes, from `tests/test.py`.
 
-    The table lives in `tests/test.py` (`HOST_SELECTOR_PERF_SHAPES`), not here,
-    because the official perf grid drives the *same* shapes via
-    `--host-shapes`: a second copy is a copy that can drift from the gate, and
-    the whole point of these rows is that the `deep_gemm` backend has a cell on
-    them (every official cell is bf16 and `unsupported`).
-
-    `note` marks the rows whose host `seq_len` is narrower than `n_cols`: those
-    are windows in the host grid and whole-row rankings here, so the two are not
-    numerically comparable at the same shape.
+    The table lives there (`HOST_SELECTOR_PERF_SHAPES`), not here: the official
+    grid drives the *same* shapes via `--host-shapes`, and a second copy drifts
+    from the gate meant to check it.  `note` marks the rows whose host `seq_len`
+    is narrower than `n_cols` -- windows there, whole-row rankings here, so the
+    two are not comparable at the same shape.
     """
     return [(_deep_gemm_note(b, v, seq),
              lib.TestParam(b, v, official.HOST_SELECTOR_PERF_TOPK, False, False,
@@ -198,10 +171,7 @@ def _deep_gemm_note(b: int, v: int, seq: int) -> str:
             f"ranks the whole row")
 
 
-# `lib.TestParam` has four required fields beyond the shape; a `--cases-file`
-# entry that omits them gets the Lightning Indexer's own configuration, which is
-# also what the official grid uses.  Spelled out rather than relying on
-# `TestParam`'s defaults because those fields have none.
+# `lib.TestParam`'s four non-shape fields have no defaults, so spell them out.
 PARAM_DEFAULTS = {"sorted_value": False, "sorted_index": False,
                   "return_value": False, "dtype": "bf16", "out_idx_dtype": "int32"}
 
@@ -209,12 +179,9 @@ PARAM_DEFAULTS = {"sorted_value": False, "sorted_index": False,
 def cases_from_file(path: str) -> List[Any]:
     """`--cases-file`: a JSON list of `lib.TestParam` fields.
 
-    `batch_size`, `vocab_size` and `topk` are required.  The four configuration
-    fields `TestParam` requires (`sorted_value`, `sorted_index`, `return_value`,
-    `out_idx_dtype`) and the `dtype` default to `PARAM_DEFAULTS` -- the Lightning
-    Indexer's configuration, which is what the official grid uses.  `dtype` /
-    `out_idx_dtype` take the short names above and an unknown one is an error: a
-    typo should not become a different case.
+    `batch_size` / `vocab_size` / `topk` are required, everything else comes from
+    `PARAM_DEFAULTS`.  An unknown `dtype` / `out_idx_dtype` is an error: a typo
+    must not become a different case.
     """
     with open(path) as f:
         specs = json.load(f)
@@ -240,7 +207,7 @@ def cases_from_file(path: str) -> List[Any]:
     return out
 
 
-# ── provenance ──────────────────────────────────────────────────────────────
+# ── provenance ──
 
 def _run(cmd: List[str], cwd: str) -> str:
     try:
@@ -249,13 +216,8 @@ def _run(cmd: List[str], cwd: str) -> str:
     except Exception:
         return ""
 def device_dir_name() -> str:
-    """`perf_data/`'s directory, named after the **device**, not the arch.
-
-    `MetaX C500` -> `MetaX_C500`: the folder this run's record lives in should
-    answer "which board was measured", because that is what makes two records
-    comparable.  The arch family is not enough -- two parts of one family can
-    differ in clocks, wall and SM count while sharing an ISA -- so it is
-    recorded per row (`chip`) rather than used to name the directory.
+    """`perf_data/`'s directory, named after the **device** (see the module
+    docstring): `MetaX C500` -> `MetaX_C500`.
 
     Falls back to the arch spelling only when torch reports no device name at
     all (a driver quirk, not a normal case).
@@ -268,14 +230,12 @@ def device_dir_name() -> str:
 
 def provenance(sm_count: int) -> Dict[str, Any]:
     here = REPO
+    # The host repo the `deep_gemm` arm comes from; `DEEP_GEMM_REPO` overrides.
     host = os.environ.get("DEEP_GEMM_REPO", "/home/compiler_gfx/tilelang/mcDeepGEMM")
-    # The extension the *device* loads, which is the one every number below came
-    # from -- `_binding.load(native_target())`, the same name `run_bench.sh`
-    # resolves its md5 through.  Deliberately not "the `.so` in `deep_select/`":
-    # a tree with several architectures built (the default `CUCC_TARGETS`, one
-    # extension per family) has three of them, and taking the first names the
-    # C500 artifact in a C600U record.  The manifest is the record of which
-    # artifact was measured, so naming the wrong one is worse than naming none.
+    # The extension the *device* loads -- `_binding.load(native_target())`, the
+    # same name `run_bench.sh` resolves its md5 through.  Never "the first `.so`
+    # in deep_select/": with several families built it names the C500 artifact in
+    # a C600U record, and naming the measured one is the manifest's whole job.
     target = _arch.native_target()
     sos = sorted(os.path.basename(p) for p in glob.glob(
         os.path.join(here, "deep_select", f"deep_select_{target}*.so")))
@@ -287,11 +247,9 @@ def provenance(sm_count: int) -> Dict[str, Any]:
         if os.path.isdir(os.path.join(host, ".git")) else ""
     dg_lines = dg.splitlines()
     return {
-        # The arch family, per row: `metax_xcore<N>`, derived from the device
-        # rather than from the directory name (the directory is the device's).
-        # This is the column a reader filters on to find same-ISA records.
+        # Arch family per row (`metax_xcore<N>`), from the device, not the
+        # directory name: the column to filter on for same-ISA rows.
         "chip": f"metax_{target}",
-        # The `perf_data/` directory this run belongs in -- the device's name.
         "device_dir": device_dir_name(),
         "device_name": torch.cuda.get_device_name(0),
         "sm_count": sm_count,
@@ -306,11 +264,9 @@ def provenance(sm_count: int) -> Dict[str, Any]:
         "deep_gemm_commit_date": dg_lines[1] if len(dg_lines) > 1 else "",
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
     }
-# ── writing ─────────────────────────────────────────────────────────────────
-# The cell's shape and configuration, then the backend and its status, then the
-# measurement.  `relative_pct_vs_maca_c` is maca_c = 100%, so >100% means that
-# backend is faster than this repository's own kernel; it is repeated on every
-# row of a cell so a row reads on its own.
+# ── writing ──
+# `relative_pct_vs_maca_c` is maca_c = 100%, so >100% means that backend is
+# faster than this repository's own kernel; repeated per row so a row stands alone.
 COLUMNS = ["chip", "device_name", "sm_count", "git_commit", "extension_md5",
            "case_source", "family", "n_rows", "n_cols", "top_k",
            "sorted_value", "return_value", "input_dtype", "index_dtype",
@@ -321,11 +277,9 @@ COLUMNS = ["chip", "device_name", "sm_count", "git_commit", "extension_md5",
 
 def rows_for(p, source: str, note: str, got: Dict[str, Dict[str, Any]],
              prov: Dict[str, Any]) -> List[Dict[str, Any]]:
-    # The operator's own traffic, the same figure `tests/test.py:138` prints:
-    # the input read plus the outputs written.  Computed from the shape rather
-    # than from one backend's buffers, so every row of a cell shares it and the
-    # bandwidths are comparable across backends (including `torch`, which
-    # allocates nothing through this operator).
+    # The operator's own traffic (input read + outputs written), the figure
+    # `tests/test.py:138` prints.  From the shape, not one backend's buffers, so
+    # every row of a cell shares it and bandwidths compare across backends.
     nbytes = (p.batch_size * p.vocab_size * p.dtype.itemsize
               + p.batch_size * p.topk
               * (p.dtype.itemsize * int(p.return_value)

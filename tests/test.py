@@ -30,30 +30,23 @@ def check_call_contract(p: TestParam, ans_topk_value, ans_topk_index):
 
 
 def check_result(p: TestParam, t: Testcase, ans_topk_value, ans_topk_index) -> bool:
-    """The official correctness assertions, as a predicate.
-
-    Extracted verbatim from `run_testcase` so that a second caller (the
-    performance snapshot, `scripts/perf_snapshot.py`) can check another backend
-    against **this** code rather than a re-derivation of it.  A copy would be
-    free to drift from the gate; one function cannot.
-
-    `ans_topk_value` / `ans_topk_index` are the caller's own clones: the sorted
-    assertions below index them, and the harness has always passed clones.
-    """
+    """The official correctness assertions, as a predicate.  Split out so
+    `scripts/perf_snapshot.py` checks other backends against this code, not a
+    copy of it; the two answers are the caller's clones."""
     is_correct = True
-    has_nan_mask = torch.zeros((p.batch_size,), dtype=torch.bool)   # Whether a batch contains NaN
+    has_nan_mask = torch.zeros((p.batch_size,), dtype=torch.bool)
     if t.input.isnan().any().item():
         has_nan_mask = t.input.isnan()
         if t.end is not None:
             lib.row_wise_masked_fill_(has_nan_mask, t.end, False)
-        has_nan_mask = has_nan_mask.any(dim=-1) # [batch_size]
+        has_nan_mask = has_nan_mask.any(dim=-1)  # [batch_size]
 
     selected_counts = (
         torch.full((p.batch_size,), min(p.vocab_size, p.topk), dtype=torch.int32)
         if t.end is None
         else torch.clamp(t.end, max=p.topk)
-    )   # How many numbers are selected for each batch
-    selected_mask = torch.arange(p.topk).unsqueeze(0) < selected_counts.unsqueeze(1)    # Whether a position should be a valid output number
+    )
+    selected_mask = torch.arange(p.topk).unsqueeze(0) < selected_counts.unsqueeze(1)
 
     # Assert: index[0] = 0x3F3F3F3F for rows contain NaN
     valid_nan_guard = ans_topk_index[has_nan_mask, 0] == 0x3F3F3F3F
@@ -118,31 +111,19 @@ def check_result(p: TestParam, t: Testcase, ans_topk_value, ans_topk_index) -> b
 
 
 def topk_total_size(p: TestParam, t: Testcase, ans_topk_value, ans_topk_index) -> int:
-    """The operator's own traffic in bytes, as `tests/test.py:138` computes it.
-
-    Split out because `bench_topk` is not the only caller that needs it: the
-    snapshot sizes a cell's outputs once and reuses the figure across backends.
-    An output may be `None` for a caller that has none (the reference arm).
-    """
+    """The operator's own traffic in bytes, as `run_testcase`'s TB/s line
+    computes it.  An output may be `None` for the reference arm, which writes
+    its own."""
     return (t.end.sum() if t.end is not None else p.batch_size * p.vocab_size) * t.input.element_size() \
         + (get_space(ans_topk_value) if ans_topk_value is not None else 0) \
         + (get_space(ans_topk_index) if ans_topk_index is not None else 0)
 
 
 def bench_topk(fn, p: TestParam, t: Testcase, ans_topk_value, ans_topk_index):
-    """The official timing rule, returning `(time_usage, total_size)` in seconds
-    and bytes.
+    """The official timing rule: `(time_usage, total_size)` in seconds and bytes.
 
-    `total_size` is the operator's own traffic -- the input it must read plus
-    the outputs it writes -- which is the quantity `tests/test.py` prints as
-    TB/s (`test.py:138`).  One matching kernel name is that kernel's time;
-    several is the span over all of them (they are one operator's phases, and
-    `mbtopk`/the chunked paths launch more than one).  Zero matches is `None`
-    rather than 0, because "0 us" reads as an implausibly good result.
-
-    An output may be `None` for a caller that has none (the reference arm writes
-    its own).
-    """
+    One matching kernel name is that kernel's time, several is the span over
+    them.  Zero matches is `None`, not 0 -- "0 us" reads as implausibly good."""
     total_size = topk_total_size(p, t, ans_topk_value, ans_topk_index)
     bench_result = kk.bench(fn, p.num_runs)
     kernel_names = [s for s in bench_result.get_kernel_names() if "topk" in s.lower()]
@@ -158,16 +139,10 @@ def bench_topk(fn, p: TestParam, t: Testcase, ans_topk_value, ans_topk_index):
 def bench_torch_reference(p: TestParam, t: Testcase):
     """The `torch.topk` reference arm, timed by the rule above.
 
-    A bare `torch.topk`, which is what `tests/test.py` times -- not
-    `deep_select.topk(backend="torch")`, whose reference implementation pads the
-    row, masks the window and converts the indices, so it launches some twenty
-    kernels where this launches one.
-
-    `None` when the arm does not apply.  The guard is the runner's own
-    (`run_testcase`: no window, no offset, `vocab_size >= topk`); it is repeated
-    here so the helper cannot be called on a row a bare `torch.topk` would raise
-    on.
-    """
+    A *bare* `torch.topk`, not `deep_select.topk(backend="torch")`: that one
+    pads, masks and converts, launching ~20 kernels where this launches one.
+    The guard is the runner's own, repeated so this is never called where a bare
+    `torch.topk` would raise."""
     if t.end is not None or t.output_idx_offset is not None or p.vocab_size < p.topk:
         return None
 
@@ -237,11 +212,8 @@ def run_testcase(p: TestParam):
     return is_correct
 
 def correctness_cases_() -> List[TestParam]:
-    """The official correctness table, verbatim (was inline in `__main__`).
-
-    A function so a script can prepend host-specific shapes to it -- the same
-    reason `performance_cases` is one.
-    """
+    """The official correctness table; a function so a caller can add to it,
+    the same reason `performance_cases` is one."""
     valid_sv_si_rv_combinations = [ # sv_si_rv: sorted_value, sorted_index, return_value
         (False, False, False),
         (False, False, True),
@@ -266,7 +238,7 @@ def correctness_cases_() -> List[TestParam]:
                         for topk in [
                             1, random.randint(2, 500), 512, 1024, 1231, 2048, 2132, 2333, 4096
                         ]:
-                            enable_end_position = topk%2 == 1   # Use this method instead of enumerating it to save testcase count
+                            enable_end_position = topk%2 == 1   # derived, not enumerated, to keep the case count down
                             for distrib in [
                                 NormalFloatDistribution(post_proc_func)
                                 for post_proc_func in [
@@ -295,17 +267,12 @@ def correctness_cases_() -> List[TestParam]:
 
 # ── the host repo's selector shapes ─────────────────────────────────────────
 # `deep_gemm/tests/test_indexer_topk_selector.py`'s `SELECTOR_PERF_SHAPES`
-# (= test-topk + sglang + dsa), all `top_k = 2048`, fp32.  Here as data because
-# four consumers need the *same* shapes and one of them is this grid: a grid
-# without them leaves the `deep_gemm` backend `unsupported` on every row, and a
-# column that is `unsupported` everywhere compares nothing.
+# (= test-topk + sglang + dsa), all `top_k = 2048`, fp32.  Without them the
+# `deep_gemm` backend is `unsupported` on every row, so nothing is compared.
+# `csrc/structs.h`'s `kHostSelectorPerfShapes` is the C++ copy -- edit together.
 #
-# (n_rows, n_cols, seq_len): `seq_len` is the window the host grid declares,
-# which this repository does not synthesize -- it ranks the whole row -- so the
-# two are NOT numerically comparable at the same shape even when `n_cols`
-# matches.  `table_len` equals `n_cols` in every host entry, so it is not a
-# separate axis here.  `csrc/structs.h`'s `kHostSelectorPerfShapes` carries the
-# same table for the C++ side; this is the Python copy.
+# (n_rows, n_cols, seq_len): `seq_len` is the host grid's window, this repo
+# ranks the whole row, so the two are NOT numerically comparable.
 HOST_SELECTOR_PERF_SHAPES = (
     [(b, 66551, 66551) for b in (1, 16, 132, 512)]                    # test-topk
     + [(b, 131072, s) for b in (1, 132, 256, 4096)                    # sglang
@@ -317,12 +284,8 @@ HOST_SELECTOR_PERF_TOPK = 2048
 
 
 def host_selector_perf_cases() -> List[TestParam]:
-    """`HOST_SELECTOR_PERF_SHAPES` as `TestParam`s: fp32, `top_k=2048`.
-
-    fp32 and 2048 because the host grid is, and because the `deep_gemm` backend
-    serves `topk <= 2048`, fp32 only -- a grid built otherwise has no
-    `deep_gemm` column to compare on these rows.
-    """
+    """`HOST_SELECTOR_PERF_SHAPES` as `TestParam`s: fp32, `top_k=2048` -- all the
+    `deep_gemm` backend serves (`topk <= 2048`, fp32 only)."""
     return [
         TestParam(b, v, HOST_SELECTOR_PERF_TOPK, False, False, False,
                   torch.float32, torch.int32, num_runs=10)
@@ -330,11 +293,9 @@ def host_selector_perf_cases() -> List[TestParam]:
     ]
 
 # The host grid's own correctness shapes (`SELECTOR_CORRECTNESS_SHAPES`):
-# (n_rows, n_cols, top_k).  The host declares `seq_lens` / `seq_starts` windows
-# on them; this repository does not synthesize a window, so these rank the whole
-# row -- a valid case for this contract, and deliberately not the host's own
-# semantics.  They are worth running because they are the shapes the host kernel
-# was built around, and they are where a `deep_gemm` column exists at all.
+# (n_rows, n_cols, top_k).  The host declares `seq_lens` / `seq_starts` windows;
+# this repository ranks the whole row instead -- valid here, deliberately not the
+# host's semantics, and the shapes a `deep_gemm` column exists on at all.
 HOST_SELECTOR_CORRECTNESS_SHAPES = (
     (16,  257,   31),     # host `chunks` kernel
     (512, 65536, 2048),   # host `coarse12` kernel
@@ -351,19 +312,11 @@ def host_selector_correctness_cases() -> List[TestParam]:
 
 
 def performance_cases() -> List[TestParam]:
-    """The official performance grid, `test.py`'s own case list.
+    """The official performance grid, `test.py`'s own case list.  A function so
+    `scripts/perf_snapshot.py` drives *these* cases, not a transcription.
 
-    A function rather than an inline literal so that a second entry point
-    (`scripts/perf_snapshot.py`) drives *these* cases rather than a transcription
-    of them: the axes, the dtypes, the index types, the data distribution
-    (`NormalFloatDistribution`) and `num_runs=10` are the measurement's
-    definition, and a copy of the list is a copy that can drift from the gate.
-
-    `seed=-1` is left as-is; each case takes its seed from the same
-    process-global counter the official run uses, so a snapshot's data differs
-    between runs exactly as two official runs do (see the environment traps:
-    seed the cases yourself when you want an A/B).
-    """
+    `seed=-1` is left as-is, so a snapshot's data differs between runs exactly
+    as two official runs do -- seed the cases yourself for an A/B."""
     return [
         # Lightning Indexer
         TestParam(b, compressed_seqlen, topk, False, False, False, torch.bfloat16, torch.int32, num_runs=10)
@@ -414,14 +367,8 @@ if __name__ == '__main__':
     if args.perf_only:
         testcases = [t for t in testcases if t.num_runs > 0]
 
-    # Use the following testcases to compare the kernel performance under different batch size & sequence lengths
-    # testcases = [
-    #     TestParam(b, l, topk, False, si, False, torch.bfloat16, torch.int32, num_runs=10, input_distrib=NormalFloatDistribution(lambda f: f*1000))
-    #     for topk in [1024]
-    #     for b in [6, 128, 256, 384, 512, 768, 1024, 4096]
-    #     for l in [2048, 4096, 6144] + list(range(8192, 262144+1, 8192))
-    #     for si in [True]
-    # ]
+    # To sweep batch x sequence length instead of the grid above, build the same
+    # list here (`num_runs=10`, `NormalFloatDistribution(lambda f: f*1000)`).
 
     failed_cases = []
     for test_idx, test in enumerate(testcases):

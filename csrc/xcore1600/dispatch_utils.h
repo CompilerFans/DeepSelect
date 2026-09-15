@@ -3,11 +3,10 @@
  * https://github.com/pytorch/pytorch/blob/v2.0.1/aten/src/ATen/Dispatch.h
  *
  * 2026 - Modified for DeepSelect: torch-free.  The switches read DLPack dtypes
- * through `ffi::same_dtype` rather than `torch::ScalarType` comparisons, and
- * their failure arms go through `DS_HOST_UNREACHABLE` rather than
- * `TORCH_CHECK`.  The arms are unreachable from `api.cu` today -- the entry
- * checks every dtype before dispatching -- but they stay spelled out so a new
- * call site cannot silently fall off the end.
+ * through `ffi::same_dtype` and their failure arms go through
+ * `DS_HOST_UNREACHABLE`.  Those arms are unreachable from `api.cu` today (the
+ * entry checks every dtype first) but stay spelled out so a new call site
+ * cannot silently fall off the end.
  */
 #pragma once
 
@@ -57,10 +56,9 @@
     }                                                                   \
   }()
 
-// Kept although nothing reaches it: the cluster variant is deleted on MACA
-// (no cluster launch, no distributed shared memory).  A dispatch arm that
-// still selects on `cluster_size` would find this, rather than a compile
-// error about an undefined macro.
+// Kept although nothing reaches it: the cluster variant is deleted on MACA (no
+// cluster launch, no distributed shared memory).  A dispatch arm still selecting
+// on `cluster_size` finds this rather than an undefined-macro compile error.
 #define CLUSTER_SIZE_SWITCH(cluster_size, ...)  \
   [&] {                                         \
     if (cluster_size == 1) {                    \

@@ -50,10 +50,10 @@ public:
         extern __shared__ CUTE_ALIGNAS(1024) char wksp_buf[];
         SharedMemoryPlan &smem = *reinterpret_cast<SharedMemoryPlan*>(wksp_buf);
 
-        // [MACA] 64-lane waves.  `canonical_warp_idx_sync()` is `threadIdx.x / 32u`
-        // in the vendored kerutils header, and `% 32` aliases lanes 32..63 onto
-        // 0..31 -- together they put the block's work on half-warp groups that
-        // no cross-lane primitive can address.  See utils.cuh.
+        // [MACA] 64-lane waves: kerutils' `canonical_warp_idx_sync()` is
+        // `threadIdx.x / 32u` and `% 32` aliases lanes 32..63 onto 0..31 -- both
+        // put work on half-warp groups no cross-lane primitive can address.
+        // See utils.cuh.
         uint32_t warp_idx = threadIdx.x / MACA_WARP_SIZE;
         uint32_t lane_idx = threadIdx.x % MACA_WARP_SIZE;
 
@@ -114,11 +114,9 @@ public:
     }
 };
 
-// [MACA] 原本还有一个 `__grid_constant__ const TmaParams tma_params` 形参（TMA 的
-//   CUtensorMap 需要通过 grid constant 传入），随 TMA 一并删除。
-// [MACA] 原为 `__grid_constant__ const TopkSelectArgs args`。MACA 无该限定符
-//   （cu-bridge 不提供），而这里它带来的只是「按值传入、内核内只读」的约束，
-//   普通按值形参在 MACA 上同样是 kernarg 直传，语义足够。
+// [MACA] 上游是 `__grid_constant__ const TopkSelectArgs args`（TMA 的 CUtensorMap
+//   还需要一个 TmaParams）。MACA 无该限定符；普通按值形参同样是 kernarg 直传，
+//   「按值传入、内核内只读」的语义足够。
 template<typename Kernel>
 __launch_bounds__(Kernel::NUM_THREADS, Kernel::TARGET_OCCUPANCY, 1)
 __global__ void topk_kernel(const TopkSelectArgs args) {
@@ -139,11 +137,9 @@ void run_topk_select_kernel(const TopkSelectArgs &args) {
 
     auto kernel = topk_kernel<Kernel>;
     constexpr size_t smem_size = sizeof(typename Kernel::SharedMemoryPlan);
-    // [MACA] `--offload-arch` pins one target per build, so this config's
-    // footprint is checked against that target's capacity while compiling.
-    // Upstream sizes these tables for 227 KiB; a tuple that cannot fit the
-    // architecture being built is a build error here, not a launch that fails
-    // with mcErrorInvalidValue on the device.
+    // [MACA] `--offload-arch` pins one target per build, so the footprint is
+    // checked against that target's capacity at compile time: a tuple that cannot
+    // fit is a build error here, not a launch failing with mcErrorInvalidValue.
     static_assert(smem_size * Kernel::TARGET_OCCUPANCY <= NATIVE_SHARED_MEMORY_PER_SM_BYTES,
                   "config does not fit one SM of the architecture being built "
                   "(TARGET_OCCUPANCY CTAs of `smem_size` each): it needs a 128 KiB "

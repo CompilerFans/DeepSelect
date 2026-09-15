@@ -1,75 +1,37 @@
 #!/usr/bin/env bash
 #
-# Run the whole performance grid and write it out as CSVs, then compare the
-# result against the baseline.  This is the "how is this tree doing" entry
-# point; `run_test.sh` is the correctness/gating one.
+# Run the whole performance grid, write it out as CSVs, and compare against the
+# baseline.  The "how is this tree doing" entry point; `run_test.sh` is the
+# correctness/gating one.
 #
 # ── The three arms ──────────────────────────────────────────────────────────
 #
-#   1. perf_snapshot.py -- the OFFICIAL grid (`tests/test.py`'s own
-#      `performance_cases()`, called, not restated), optionally plus the host
-#      repository's own selector grid, for three backends: this tree's kernel,
-#      `torch.topk`, and `deep_gemm.fp32_indexer_topk_selector`.  This is what
-#      lands in perf_data/<chip>/<stamp>/ as one CSV, one row per (cell,
-#      backend).  It is the arm that answers "what is our performance, against
-#      what".
+#   1. `perf_snapshot.py` -- writes the CSV: the OFFICIAL grid (`tests/test.py`'s
+#      own `performance_cases()`, called not restated), plus the host repo's
+#      selector grid, for the backends named in `--arms`.
+#   2. `tests/test.py --perf-only` -- the same grid driven by upstream's own file
+#      in one process.  Redundant with (1) on purpose: it is the gate.
+#   3. `tests/test.py --perf-only --dtype fp32` -- the fp32 Sampler cells.
 #
-#   2. tests/test.py --perf-only -- the official grid AGAIN, but driven by
-#      upstream's own file, in one process, with its own cooldowns and its own
-#      assertions (`95/95`).  Redundant with (1) on purpose: it is the run whose
-#      output other tools and humans already know how to read, and it is the
-#      gate.  It writes no CSV; its log is kept beside the CSV.  The two agree
-#      cell for cell at a median 0.25% / max 1.3% above 100us (measured, same
-#      binary and device), so a disagreement is a signal, not noise.
+# Nothing here re-implements a measurement -- every arm is upstream's file, and
+# `tests/test.py` can neither select a backend nor emit a CSV, which is why the
+# snapshot is its own arm rather than a mode of it.
 #
-#   3. tests/test.py --perf-only --dtype fp32 -- the official grid's fp32 arm.
-#      `tests/test.py` filters its own `performance_cases`, which are bf16, so
-#      this selects the handful of fp32 rows it does carry (the Sampler cells;
-#      `All 5 cases passed` is the shape of a healthy run).  Cheap, and it is
-#      the other dtype the operator serves.
+# ── Failure, and the baseline ───────────────────────────────────────────────
 #
-# Nothing here re-implements a measurement: every arm is upstream's file, and
-# the snapshot calls upstream's `performance_cases` / `check_result` /
-# `bench_topk` rather than a copy of them.
+# The FIRST failing arm stops the run: a comparison against a baseline whose
+# grid was not fully measured is not a comparison.  The verdict is written to
+# `compare_result.txt` before the baseline moves.
 #
-# ── Why the snapshot is its own arm and not a mode of arm 2 ─────────────────
+# `--set-baseline` repoints when every ARM passed (the host repository's rule,
+# not the comparator's exit status); REGRESSED does not block it but is printed
+# loudly, so repointing past a regression is a decision someone made.
 #
-# `tests/test.py` has no way to select a backend (its call site passes no
-# `backend=`), no way to emit a CSV, and no way to add cases -- and the whole
-# point of `perf_data/` is a per-cell, per-backend record with the chip and the
-# artifact identity attached.  So the snapshot drives the same cases through the
-# same primitives and reports `unsupported` / `fail` per backend, while arm 2
-# stays the untouched gate.
+# ── What this deliberately does NOT do ──────────────────────────────────────
 #
-# ── Failure, and the baseline ──────────────────────────────────────────────
-#
-# The arms run in order and the FIRST failing arm stops the run: a comparison
-# against a baseline whose grid was not fully measured is not a comparison.
-# The comparison verdict is always written into the result directory
-# (`compare_result.txt`) before the baseline moves, so a perf commit can cite
-# it.
-#
-# `--set-baseline` repoints when every ARM passed -- the same rule the host
-# repository's `run_bench.sh` uses (`BENCH_STATUS -eq 0`, not the comparator's
-# exit status).  A comparator verdict of REGRESSED does not block the repoint,
-# because a baseline is a record of what the tree does now; blocking it would
-# leave the tree with no baseline at all after a real, accepted regression.  It
-# is printed loudly instead, so repointing past a regression is a decision
-# someone made rather than something that happened.
-#
-# ── Recording, and what this deliberately does NOT do ──────────────────────
-#
-# Same posture as `run_test.sh`: no exclusivity gate (there is no way to see
-# which device a process is pinned to; see that script's header for the two
-# measurements that settled it), device chosen with `CUDA_VISIBLE_DEVICES`, and
-# everything a later reader needs is recorded next to the numbers.  `mx-smi` is
-# snapshotted for forensics and never trusted to decide.
-#
-# The measurement is a LONG run -- the official grid's largest cell is 4096 x
-# 1048576 (an 8 GiB bf16 input, and `test.check_result` needs a same-size clone
-# plus a boolean mask of it, so the peak is 16.1 GiB, measured on a free 64 GiB
-# C500), and the host grid adds ~1.8 GB cells.  Budget a mostly-idle device for
-# `--full`; the default is the cheaper official grid only.
+# No exclusivity gate: nothing can see which device a process is pinned to, so
+# pick one with `CUDA_VISIBLE_DEVICES`.  `mx-smi` is snapshotted for forensics,
+# never trusted to decide.  `--full` is a LONG run.
 #
 # Usage:
 #     ./run_bench.sh                          # snapshot + the official gate
@@ -120,11 +82,9 @@ Env: CUDA_VISIBLE_DEVICES, DS_BENCH_DIR, DS_BENCH_TIMEOUT, MACA_PATH
 EOF
 }
 
-# ── environment ─────────────────────────────────────────────────────────────
 export MACA_PATH="${MACA_PATH:-/opt/maca}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
-# ── arguments ───────────────────────────────────────────────────────────────
 full=0
 host_shapes=1
 quick=0
@@ -178,12 +138,9 @@ print(family_of_target(targets[0]) if targets else "")
 PY
 ) || { echo "run_bench.sh: could not resolve the target architecture" >&2; exit 1; }
 
-# The results directory is named after the **device**, not the arch family: the
-# folder answers "which board did I measure on", and `perf_data/MetaX_C600` and
-# `perf_data/MetaX_C600-U` are two different machines that share xcore1600.
-# The arch family is still recorded in every row (`chip`) and in the manifest.
-# `perf_snapshot.py` derives this the same way from the same call, so the two
-# cannot land in different directories.
+# Named after the **device**, not the arch family: two boards can share one
+# family, and the family is recorded per row (`chip`) anyway.  `perf_snapshot.py`
+# derives the name from the same call, so the two cannot land in different dirs.
 device_dir=$(python - <<'PY'
 import torch
 print((torch.cuda.get_device_name(0) or "").strip().replace(" ", "_"))
@@ -203,9 +160,8 @@ if [[ -z "$so" ]]; then
     exit 1
 fi
 
-# A header newer than the .so means the extension is probably not what the
-# sources describe (`radix_core.cuh` is the whole row kernel).  Reported, not
-# enforced -- the md5 is the record either way, as in run_test.sh.
+# A header newer than the .so means the extension may not match the sources.
+# Reported, not enforced -- the md5 is the record either way, as in run_test.sh.
 stale_note="# STALE           no"
 if [[ -n "$(find csrc -newer "$so" \( -name '*.cu' -o -name '*.cuh' \) 2>/dev/null | head -1)" ]]; then
     newest_src=$(find csrc -newer "$so" \( -name '*.cu' -o -name '*.cuh' \) | head -1)
@@ -248,9 +204,8 @@ fi
 mkdir -p "$chip_dir"
 
 # ── --baseline-dir: repoint and exit, measuring nothing ─────────────────────
-# Same affordance as the host repository's run_bench.sh, and for the same
-# reason: moving a baseline back or forward to re-read an old verdict must not
-# cost a full re-measure.
+# The host repository's affordance: moving a baseline back or forward to re-read
+# an old verdict must not cost a full re-measure.
 if [[ -n "$baseline_dir" ]]; then
     target="${baseline_dir}"
     if [[ ! -d "${chip_dir}/${target}" ]]; then target="${target##*/}"; fi
@@ -286,7 +241,6 @@ if [[ ${compare_only} -eq 1 ]]; then
     exit 0
 fi
 
-# ── measure ─────────────────────────────────────────────────────────────────
 stamp=$(date +%Y%m%d_%H%M%S)
 if [[ ${quick} -eq 1 ]]; then stamp="${stamp}_quick"; fi
 if [[ ${full} -eq 1 ]]; then stamp="${stamp}_full"; fi
@@ -330,15 +284,13 @@ run_arm() {
 bench_status=0
 snapshot_failed=0
 
-# arm 1 -- the snapshot.  This is the one that writes the CSVs the user asked
-# for, so its failure is reported as its own thing rather than as "a bench
-# failure" (it can fail on memory, where the gate below would still pass).
+# arm 1 -- the snapshot.  It writes the CSVs, so its failure is reported as its
+# own thing rather than "a bench failure" (it can fail on memory; the gate may
+# still pass).
 snap_args=(scripts/perf_snapshot.py --arms "${arms}" --out-dir "${results_dir}"
            --tag "${stamp}")
 # The host shapes ride in the SNAPSHOT whenever they are on, not only under
-# `--full`: the official grid has no cell any backend but `maca_c` can be
-# compared on, so a snapshot without them writes 190 `unsupported`/duplicate
-# rows and compares nothing about `deep_gemm`.
+# `--full`: without them the `deep_gemm` column compares nothing.
 if [[ ${host_shapes} -eq 1 ]]; then snap_args+=(--deep-gemm-axes); fi
 if ! run_arm snapshot python "${snap_args[@]}"; then
     snapshot_failed=1
@@ -351,27 +303,22 @@ fi
 # (which reads as a bench failure but is a launcher mistake).
 gate_host=()
 if [[ ${host_shapes} -eq 1 ]]; then gate_host+=(--host-shapes); fi
-# `DS_TOPK_BACKEND=maca_c` pins the DEFAULT, not the call -- `tests/test.py`'s
-# call site is unmodified, so what runs is the path a caller who names no
-# backend takes, with the kernel behind it.  Without this the library default
-# (`torch`, see `deep_select/interface.py`) would serve these arms and the gate
-# would time the reference.  (`perf_snapshot.py` needs nothing: it passes
-# `backend=` per arm by construction.)
+# `DS_TOPK_BACKEND=maca_c` pins the DEFAULT, not the call: `tests/test.py`'s call
+# site is unmodified, so what runs is the path a caller who names no backend
+# takes.  Without it the library default (`torch`, see `deep_select/interface.py`)
+# serves these arms and the gate times the reference.  (`perf_snapshot.py` needs
+# nothing -- it passes `backend=` per arm.)
 #
-# The prefixed `env` is load-bearing and applies to arm 3 too.  Arm 3 is
-# `--dtype fp32` over the same `performance_cases()`, whose last five rows are
-# the Sampler (fp32, `sorted_value=True`, int64 indices) -- fp32 cells, not the
-# host shapes.  Those are exactly where `deep_gemm` raises `UnsupportedByBackend`
-# ("returns an unordered selection"), so an unpinned arm 3 would be five cells of
-# reference and no kernel measurement at all.
+# The `env` prefix is load-bearing for arm 3 too: its fp32 Sampler cells are where
+# `deep_gemm` raises `UnsupportedByBackend`, so unpinned it would measure no
+# kernel at all.
 gate_env=(env DS_TOPK_BACKEND=maca_c)
 if [[ ${skip_gate} -eq 0 ]]; then
     run_arm official "${gate_env[@]}" python tests/test.py --perf-only -nc "${gate_host[@]}" || bench_status=1
 fi
 
-# arm 3 -- the official grid's fp32 arm (`tests/test.py` filters its own
-# `performance_cases`, which are bf16, so this is the Sampler cells, plus the
-# host selector shapes when they are on).
+# arm 3 -- the official grid's fp32 arm: `tests/test.py` filters its own
+# `performance_cases` (bf16), so this is the Sampler cells plus the host shapes.
 if [[ ${skip_gate} -eq 0 ]]; then
     run_arm official_fp32 "${gate_env[@]}" python tests/test.py --perf-only -nc --dtype fp32 "${gate_host[@]}" || bench_status=1
 fi

@@ -11,9 +11,8 @@ Usage caveats:
 #include "topk_select.h"
 
 #include <cutlass/kernel_launch.h>
-// [MACA] 原为 <cute/arch/copy_sm90_tma.hpp>：MACA 无 TMA（无 tensor map、无
-//   mbarrier、无 elect 发射流水线）。数据装载已改为全线程协作的
-//   `Base::load_round_for_round`（见 common_parts.cuh），此处不再需要该头。
+// [MACA] 原为 <cute/arch/copy_sm90_tma.hpp>：MACA 无 TMA / mbarrier，数据装载
+//   改为全线程协作的 `Base::load_round_for_round`（见 common_parts.cuh）。
 #include <kerutils/kerutils.cuh>
 
 #include "structs.h"
@@ -67,12 +66,8 @@ public:
 
     struct SharedMemoryPlanFP32 : SharedMemoryPlanBase {};
     
-    // [MACA] 原为「把 shared 地址当整数收进来、`__cvta_shared_to_generic` 转回指针再写」，
-    //   且用 `__float_as_uint(__uint_as_float(dst_ptr) + __uint_as_float(8u))` 以浮点加法
-    //   代替整数加法（上游 :206-207 的说明：整数加法与比较/位运算争用同一发射端口，
-    //   浮点加法走另一条流水线；取值 < 2^23 时 fp32 可精确表示该整数）。
-    //   MACA 上这既是不可移植的假设（`__cvta_shared_to_generic` 与 PTX 绑定），
-    //   其收益也从未在 MACA 上测过，故按 common_parts.cuh 的统一做法改为真指针 + 整数加法。
+    // [MACA] 上游用 `__cvta_shared_to_generic` + 浮点加法迭代指针；前者绑定 PTX，
+    //   后者的收益在 MACA 上从未测过。改为真指针 + 整数加法。
     static __device__ __forceinline__
     void append_pair_at(uint64_t *&dst, uint32_t index, uint32_t val_bits) {
         // pair(64b) 布局：低 32 位 = index，高 32 位 = value
@@ -86,10 +81,10 @@ public:
         extern __shared__ CUTE_ALIGNAS(1024) char wksp_buf[];
         SharedMemoryPlanFP32 &smem = *reinterpret_cast<SharedMemoryPlanFP32*>(wksp_buf);
 
-        // [MACA] 64-lane waves.  `canonical_warp_idx_sync()` is `threadIdx.x / 32u`
-        // in the vendored kerutils header, and `% 32` aliases lanes 32..63 onto
-        // 0..31 -- together they put the block's work on half-warp groups that
-        // no cross-lane primitive can address.  See utils.cuh.
+        // [MACA] 64-lane waves: kerutils' `canonical_warp_idx_sync()` is
+        // `threadIdx.x / 32u` and `% 32` aliases lanes 32..63 onto 0..31 -- both
+        // put work on half-warp groups no cross-lane primitive can address.
+        // See utils.cuh.
         uint32_t warp_idx = threadIdx.x / MACA_WARP_SIZE;
         uint32_t lane_idx = threadIdx.x % MACA_WARP_SIZE;
 
@@ -131,12 +126,10 @@ public:
                 should_select_whole_bucket_shared = should_select_whole_bucket;
             }
         };
-        // First radix pass: histogram the most significant byte of each distorted
-        // fp32 value. Used to locate the top-k bucket prefix.
+        // First radix pass: histogram the most significant byte of each distorted fp32
+        // value, to locate the top-k bucket prefix.
         uint32_t *hist_base = smem.reconstruct_bucket_counter[0];
-        // [MACA] 原为一条内联 PTX：`mad.lo.u32` 直接算出桶地址、`red.shared.add.u32` 原地加一
-        //   （无返回值，省一次地址加法）。MACA 汇编器不认 PTX；这里等价写成
-        //   `atomicAdd(桶指针, 1)`，桶指针的缩放交给编译器。
+        // [MACA] 上游是 `mad.lo.u32` + `red.shared.add.u32` 的内联 PTX，此处等价写成 atomicAdd.
         auto histogram_radix_msb_one = [&](uint32_t value_bits) {
             atomicAdd(hist_base + (topk_select_common::distort(value_bits) >> 24), 1u);
         };
@@ -160,8 +153,9 @@ public:
             }
             __syncthreads();
             // `pivot_prefix` tracks the pivot's leading bits in the *undistorted* (raw) domain.
-            // Inside a round every element that survived the previous round must has the pivot's sign, so the distortion rule (to xor what) is the same.
-            // So we can optimize scanning & picking & distorting into "comparing the raw leading bits" and "xor-ing `neg_mask`"
+            // Every element surviving the previous round shares the pivot's sign, so the
+            // distortion (what to xor) is the same for all of them -- hence scanning, picking
+            // and distorting collapse into "compare raw leading bits" + "xor `neg_mask`".
             uint32_t pivot_prefix_dist = smem.reconstruct_pivot_bucket;    // distorted top 8 bits
             bool pivot_negative = pivot_prefix_dist < 0x80u;               // distorted >= 0x80 <=> positive
             uint32_t neg_mask = pivot_negative ? 0xFFu : 0u;
@@ -179,8 +173,7 @@ public:
                 for_each_value([&](uint32_t value_bits) {
                     // Elements whose prefix differs from the pivot still add, but to this warp's own sink slot. This let PTXAS generate ATOMS.INC instructions which is faster
                     bool match = (value_bits >> (32 - 8 * r)) == pivot_prefix;
-                    // [MACA] 原为 `bfe.u32`（一条指令取出下一个原始字节）+ `mad.lo.u32` /
-                    //   `red.shared.add.u32`。MACA 汇编器不认 PTX；等价写成移位掩码 + atomicAdd。
+                    // [MACA] 上游是 `bfe.u32` + `red.shared.add.u32` 的内联 PTX。
                     uint32_t bucket_raw = (value_bits >> (24 - 8 * r)) & 0xFFu;
                     uint32_t bucket = match ? (bucket_raw ^ neg_mask) : NUM_RECONSTRUCT_BUCKETS;
                     atomicAdd(dst + bucket, 1u);
@@ -211,15 +204,10 @@ public:
             }
             float pivot_value = __uint_as_float(pivot_value_bits);
 
-            // set.xx.f32.f32 yields 1.0/0.0, so the counts accumulate on the FP pipe instead of the
-            // (busiest) integer pipe; the counts stay exact because FP32 can represent every integer within 0 ~ 2**23
-            // [MACA] 原为三条 `set.gt/.eq/.nan.f32.f32` + `add.f32` 的内联 PTX。MACA 汇编器
-            //   不认 PTX；这里等价写成三目表达式——语义逐条对齐：
-            //     * set.gt  = 有序的 (v > pivot)，NaN 参与时为假
-            //     * set.eq  = 有序的 (v == pivot)，NaN 参与时为假
-            //     * set.nan = 任一操作数为 NaN（此处两侧同为 v，即 isnan(v)）
-            //   浮点累加器保留（计数精确：0 ~ 2^23 内的整数 fp32 可精确表示），
-            //   比较结果由编译器生成谓词 + 选择，仍是"1.0/0.0 加到 fp32 累加器"的形状。
+            // Counts accumulate on the FP pipe instead of the (busiest) integer pipe; they stay
+            // exact because FP32 represents every integer up to 2**23.  Upstream's PTX
+            // (`set.gt/.eq/.nan.f32.f32` + `add.f32`) is written here as ternaries:
+            // `.gt`/`.eq` are ordered (false when an operand is NaN), `.nan` is isnan(v).
             float gt_accum = 0.0f, eq_accum = 0.0f, nan_accum = 0.0f;
             for_each_value([&](uint32_t value_bits) {
                 float v = __uint_as_float(value_bits);
@@ -229,11 +217,8 @@ public:
             });
             uint32_t cnt_gt = (uint32_t)gt_accum;
             uint32_t cnt_eq = (uint32_t)eq_accum;
-            // [MACA] 上游此处为 `set.nan.f32.f32 nan_flag, nan_accum, nan_accum`：
-            //   它在循环里用 `min.NaN` 折叠、循环外一次 `set.nan` 判定，所以
-            //   `nan_accum` 只需是一个"沾到过 NaN"的累加器。MACA 无这两条指令，
-            //   上面按逐元素 `(v != v)` 累加，语义等价，这里同样收敛成 0/1 标志
-            //   （消费方一律按 `cnt_nan != 0` 使用）。
+            // [MACA] 上游用 `min.NaN` 折叠 + 一次 `set.nan` 判定；这里按逐元素 `(v != v)`
+            //   累加，同样收敛成 0/1 标志（消费方一律按 `cnt_nan != 0` 使用）。
             uint32_t cnt_nan = nan_accum > 0.0f ? 1u : 0u;
 
             static_assert(NUM_WARPS <= NUM_RECONSTRUCT_BUCKETS);
@@ -257,8 +242,7 @@ public:
             uint32_t b128_base = tid * num_128b_per_thread;
             uint32_t num_my_128b = b128_base < num_128b ? min(num_128b_per_thread, num_128b - b128_base) : 0u;
 
-            // [MACA] 原返回 shared 地址整数（`cute::cast_smem_ptr_to_uint`），调用方再转回
-            //   指针；改成直接返回真指针（common_parts.cuh 的统一做法）。
+            // [MACA] 返回真指针，而非上游的 shared 地址整数（common_parts.cuh 的统一做法）。
             auto b128_to_pair_addr = [&](uint32_t u) -> const uint64_t * {
                 // The first MAX_TOPK/2 b128 words live in the current candidate buffer, the rest in the incoming region
                 return u < MAX_TOPK / 2
@@ -312,13 +296,8 @@ public:
             return pivot_value_bits;
         };
 
-        // [MACA] 原为 TMA 发射侧：由 `cute::elect_one_sync()` 选出一条 lane，用
-        //   `issue_tma_loads_for_round` 把 init 各轮与 TMA_PREFETCH_DEPTH 个 main 轮
-        //   一次性发出去，消费侧逐轮等 `init_full_bar` / `tma_load_full_bar`。
-        //   MACA 无 TMA / mbarrier / 跨轮预取，且置换状态机（next_tma_permuted_segment /
-        //   tma_permuted_segment_stride）原先只有那条 elect lane 有效。装载改为
-        //   全线程协作的 ldg（`Base::load_round_for_round`），轮次之间无依赖，
-        //   该状态机与预取深度整体删除。
+        // [MACA] 上游由此处的 elect lane 预取 TMA 各轮、消费侧等 mbarrier；这里改为
+        //   全线程协作的 ldg（`Base::load_round_for_round`），轮次之间无依赖。
         (void)NUM_ISSUE_WARPS;
         (void)TMA_PREFETCH_DEPTH;
 
@@ -331,10 +310,9 @@ public:
             uint32_t num_my_elems = NUM_UINT32_PER_128b * cnt_floor + (threadIdx.x < cnt_rem ? NUM_UINT32_PER_128b : 0u);
             uint32_t num_local_tail_elems = end_vocab_idx - num_perm_elems;
 
-            // [MACA] 装载 init window（尾段 + 头若干置换段）。全线程协作 ldg，
-            //   init 各轮写 incoming_topk_pairs 的不同区段、互不覆盖，故一次
-            //   __syncthreads() 即完成发布，随后才开始消费。
-            //   `local_start_seg_idx` 取 0：本变体非 cluster，本地段号即全局段号。
+            // [MACA] 装载 init window（尾段 + 头若干置换段）：各 init 轮写
+            //   incoming_topk_pairs 的不同区段、互不覆盖，一次 __syncthreads() 即完成发布。
+            //   `local_start_seg_idx` 取 0：本变体非 cluster。
             if (num_local_tail_elems_padded != 0) {
                 Base::template load_round_for_round<true, true>(
                     smem, args, batch_idx, end_vocab_idx, num_perm_segs,
@@ -361,9 +339,8 @@ public:
             CUTE_UNROLL
             for (uint32_t i = 0; i < NUM_INIT_ROUNDS_MAX; i++) {
                 if (i == num_init_rounds) break;
-                // [MACA] 原为 `smem.init_full_bar[i].wait(0)`（等该轮 TMA 事务完成）。
-                //   装载已改为前面那次全线程协作 ldg + 一次 __syncthreads()，
-                //   所有 init 轮在此处都已可见，无需逐轮等待。
+                // [MACA] 上游在此等该轮的 TMA 事务，现在所有 init 轮已由上面那次 ldg +
+                //   __syncthreads() 发布完毕。
                 if (num_local_tail_elems % NUM_ELEMS_PER_SEG != 0 && i == num_local_tail_elems / NUM_ELEMS_PER_ROUND) {
                     uint32_t box_end = ku::ceil_div(num_local_tail_elems, (uint32_t)NUM_ELEMS_PER_SEG) * NUM_ELEMS_PER_SEG;
                     for (uint32_t e = num_local_tail_elems + threadIdx.x; e < box_end; e += NUM_THREADS) {
@@ -428,10 +405,8 @@ public:
                             }
                         }
                     }
-                    // [MACA] 原为「把整数索引伪装成 fp32 次正规数再用浮点加法求
-                    //   index = base + element offset」——两个次正规数相加是精确的，
-                    //   结果与整数加法逐位相同，但那是上游为躲开整数管线竞争而依赖的
-                    //   浮点语义。C++ 里直接用整数：语义等价，且不依赖次正规数舍入前提。
+                    // [MACA] 上游把整数索引伪装成 fp32 次正规数、用浮点加法求
+                    //   index = base + offset；这里直接用整数加法，语义等价。
                     uint32_t index0 = index_base + (i % NUM_ELEMS_PER_128b);
                     uint32_t index1 = index0 + 1;
                     float v0 = __uint_as_float(init_values[i]);
@@ -458,22 +433,20 @@ public:
         uint32_t permuted_segment_stride_per_round = NUM_SEGS_PER_ROUND % perm_len * perm_mul % perm_len;
 
         uint32_t num_main_rounds = num_rounds - num_init_rounds;
-        // [MACA] 原为跨轮维护的 TMA 缓冲下标与相位（tma_buf_idx / tma_buf_phase）。
-        //   单缓冲 + 无 TMA，这两项与 NUM_TMA_LOAD_BUFS 的翻转一起删除。
+        // [MACA] 上游跨轮维护 TMA 缓冲下标与相位；单缓冲 + 无 TMA 后一并删除。
         for (uint32_t main_round_idx = 0; main_round_idx < num_main_rounds; ++main_round_idx) {
             // This thread's contiguous chunk starts at logical_elem_offset in this round.
             uint32_t logical_elem_offset = threadIdx.x * NUM_ELEMS_PER_THREAD_PER_ROUND;
             // Offset inside the 512-element segment; used later to rebuild original indices.
             uint32_t offset_in_segment = logical_elem_offset % NUM_ELEMS_PER_SEG;
-            // TMA stores the round data in a swizzled layout. swizzle_mask describes how the
+            // The round data is stored in a swizzled layout; swizzle_mask describes how the
             // logical element offset is mapped to the actual shared-memory offset.
             uint32_t swizzle_mask = Base::sw_msk(logical_elem_offset);
             uint32_t chunk_swizzle_mask = swizzle_mask & ELEMS_PER_THREAD_PER_ROUND_MASK;
             uint32_t smem_read_offset = logical_elem_offset ^ (swizzle_mask & ~ELEMS_PER_THREAD_PER_ROUND_MASK);
 
-            // [MACA] 原为「elect 一条 lane 预取 main_round_idx + TMA_PREFETCH_DEPTH 轮，
-            //   本轮消费等 tma_load_full_bar」。单缓冲 + 无 TMA：改成
-            //   「全线程协作装载本轮 → __syncthreads() → 全线程消费本轮」。
+            // [MACA] 上游 elect 一条 lane 预取 + 消费侧等 mbarrier；这里是
+            //   「全线程协作装载 → __syncthreads() → 全线程消费」。
             //   轮索引用绝对编号（init 轮在前），置换线性位置的推导才与消费端一致。
             Base::template load_round_for_round<false, false>(
                 smem, args, batch_idx, end_vocab_idx, num_perm_segs,
@@ -495,11 +468,9 @@ public:
                 Base::template load_swizzled_slice<NUM_128b_PER_THREAD_PER_ROUND>(values, buf, smem_read_offset, chunk_swizzle_mask);
 
                 float threshold = __uint_as_float(threshold_bits);
-                // [MACA] 原为一条内联 PTX：`setp.gtu.f32`（greater-than-or-**unordered**，
-                //   任一操作数为 NaN 即真）+ 谓词化的 `or.b32` 置位。
-                //   `.gtu` 就是"NaN 一律接受"：命中的 NaN 交给后面 have_nan 检查兜底。
-                //   MACA 汇编器不认 PTX；等价写成 C++ —— 由于 threshold 永远不是 NaN，
-                //   "无序"只剩 isnan(value) 一支，但两支都保留以免语义依赖该前提。
+                // [MACA] 上游是 `setp.gtu.f32`（greater-than-or-**unordered**）+ 谓词化
+                //   `or.b32` 的内联 PTX；`.gtu` 即"NaN 一律接受"，命中的 NaN 交后面
+                //   have_nan 兜底。threshold 永不为 NaN，但两支都保留以免语义依赖该前提。
                 CUTE_UNROLL
                 for (uint32_t j = 0; j < NUM_ELEMS_PER_THREAD_PER_ROUND; ++j) {
                     float v = (float)values[j];
@@ -516,9 +487,8 @@ public:
             __syncthreads();
 
             uint32_t seg_elem_base = current_permuted_segment * NUM_ELEMS_PER_SEG + offset_in_segment;
-            // Element e of this thread's slice lives at smem_read_offset + (e ^ chunk_swizzle_mask)
-            // [MACA] 原先把该地址经 cast_smem_ptr_to_uint 变成整数再做 ld.shared/st.shared；
-            //   改成真指针 + 普通 shared 访存（common_parts.cuh 的统一做法）。
+            // Element e of this thread's slice lives at smem_read_offset + (e ^ chunk_swizzle_mask).
+            // [MACA] 真指针 + 普通 shared 访存，而非上游的 cast_smem_ptr_to_uint（见 common_parts.cuh）。
             const ValueT *elem_base = buf + smem_read_offset;
 
             // Start the first hit's smem load before the count exchange below, so that its latency
@@ -586,9 +556,8 @@ public:
 };
 
 
-// [MACA] 原为 `__grid_constant__ const TopkSelectArgs args, __grid_constant__ const typename
-//   Kernel::TmaParams tma_params`。MACA 无 `__grid_constant__`（该限定符是 sm70+ 的
-//   kernarg 常量化提示，去掉后按值传入的 kernarg 语义不变）；tensor map 参数随 TMA 一起删除。
+// [MACA] 上游的两个形参都是 `__grid_constant__`；MACA 无该限定符，而按值传入的
+//   kernarg 语义不变。tensor map 形参随 TMA 一起删除。
 template<typename Kernel>
 __launch_bounds__(Kernel::NUM_THREADS, Kernel::TARGET_OCCUPANCY, 1)
 __global__ void topk_kernel(const TopkSelectArgs args) {
@@ -618,7 +587,6 @@ void run_topk_select_kernel(const TopkSelectArgs &args) {
     KU_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
 
     KU_ASSERT(args.stride_input_batch % 4 == 0, "stride_input_batch must be 16B-aligned");
-    // [MACA] 原在此构造 TmaParams（CUtensorMap）；装载已改为 ldg，无 tensor map。
 
     ku::launch_kernel(ku::KernelLaunchConfig {
         dim3(args.batch_size),

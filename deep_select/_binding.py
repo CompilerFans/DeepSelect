@@ -1,32 +1,22 @@
 # 2026 - Modified for DeepSelect.  The tvm-ffi binding loader, modelled on the
-# host repository's `deep_gemm/maca_binding.py` (mcDeepGemm, branch
-# `dev_tvm_ffi`, commit 3a6e6ba3).
+# host repository's `deep_gemm/maca_binding.py`.
 """Load the torch-free kernel extensions through tvm-ffi.
 
-The artifacts (`deep_select_xcore<N>*.so`) are built at the Apache TVM FFI ABI
-and export `__tvm_ffi_*` symbols.  They have **no `PyInit`** and are not
-importable python modules: they are loaded with `tvm_ffi.load_module`, and that
-is deliberate.  The pybind11 artifacts this replaces linked libtorch/libc10 --
-six DT_NEEDED entries -- which tied the extension to the host's torch build
-(the `c10_cuda_check_implementation` trap) and to the cpython version its
-extension suffix was stamped with.  Neither is true of these.
+The artifacts (`deep_select_xcore<N>*.so`) are built at the Apache TVM FFI ABI,
+export `__tvm_ffi_*` symbols, have **no `PyInit`** and are not importable python
+modules -- they are loaded with `tvm_ffi.load_module`.  Deliberate: the pybind11
+artifacts this replaces linked libtorch/libc10, which tied the extension to the
+host's torch build (the `c10_cuda_check_implementation` trap) and to a cpython
+tag.
 
-What a caller still needs is stated rather than implied:
+A caller still needs **torch at the call site** (a `torch.Tensor` is what has
+the `__dlpack__` protocol; this module imports torch only in `launching()`) and
+**tvm_ffi to load the artifact at all**.
 
-* **torch, at the call site.**  Tensors cross as DLPack, so the extension does
-  not link or import torch -- but a `torch.Tensor` is what has the `__dlpack__`
-  protocol, and output buffers are allocated with `torch.empty`.  This module
-  does not import torch itself; only `launching()` does, and only for the
-  stream handoff below.
-* **tvm_ffi, to load at all.**  One extra run-time dependency, in exchange for
-  the two above.
-
-The stream handoff is the subtle part and the reason `launching()` exists: the
-C++ side reads its stream through `TVMFFIEnvGetStream`, which reports the null
-handle unless something has installed torch's current stream.  Launching
-without it lands every kernel on the legacy default stream, which does not
-synchronize with torch's non-blocking side streams.  `tvm_ffi.use_torch_stream()`
-is what installs it.
+The stream handoff is what `launching()` is for: the C++ side reads its stream
+through `TVMFFIEnvGetStream`, which reports the null handle -- the legacy
+default stream, which does not synchronize with torch's non-blocking side
+streams -- unless something installed torch's current stream.
 """
 
 from __future__ import annotations
@@ -38,20 +28,18 @@ from typing import Any
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# One artifact per architecture, named for the architecture it serves, exactly
-# as before the migration.  The loader resolves a backend by that name, so the
-# FFI change is invisible from `backend="maca_c"`.
+# One artifact per architecture, named for the architecture it serves.  The
+# loader resolves a backend by that name, which is what keeps the FFI change
+# invisible from `backend="maca_c"`.
 _LIBRARY_GLOB = "deep_select_{name}*.so"
 
 
 class _Module:
     """A loaded extension with the two entries this tree exports.
 
-    Functions are resolved through `get_function`, which *raises* rather than
-    returning None when the name is absent (this build takes only
-    `query_imports`), so the probe goes through `implements_function` first --
-    a module loaded from a stale or foreign `.so` should say so, not leak an
-    `AttributeError` out of the loader.
+    `get_function` *raises* rather than returning None when the name is absent,
+    so the probe goes through `implements_function` first -- a module loaded
+    from a stale or foreign `.so` should say so, not leak an `AttributeError`.
     """
 
     def __init__(self, handle: Any):
@@ -79,7 +67,7 @@ def load(name: str) -> Any:
     """The loaded tvm-ffi module for architecture extension ``name``.
 
     Cached: the module holds a device binary, and a process that never calls
-    `topk` on a kernel should not load one.
+    `topk` should not load one.
     """
     import tvm_ffi
 
@@ -90,19 +78,17 @@ def load(name: str) -> Any:
             f"CUCC_TARGETS={name} (setup.py builds one extension per "
             f"architecture, and only for the architectures it is asked for)"
         )
-    # Newest build wins on stale-cache ties -- the same rule the host
-    # repository's loader uses.
+    # Newest build wins on stale-cache ties -- the host repository's rule.
     return _Module(tvm_ffi.load_module(hits[-1]))
 
 
 def launching():
     """Context manager pinning the FFI env stream to torch's current stream.
 
-    Every kernel-launching call must run inside this.  Without it
-    `TVMFFIEnvGetStream` reports the null handle and the launch lands on the
-    legacy default stream, which does not synchronize with torch's non-blocking
-    side streams -- a producer on `torch.cuda.Stream()` followed by an
-    unwrapped call would race.  Entering costs a thread-local write.
+    Every kernel-launching call must run inside this: without it
+    `TVMFFIEnvGetStream` reports the null handle, the launch lands on the
+    legacy default stream, and a producer on `torch.cuda.Stream()` followed by
+    an unwrapped call races.  Entering costs a thread-local write.
     """
     import tvm_ffi
 

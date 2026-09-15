@@ -8,32 +8,21 @@
 #include "config.h"
 #include "bit_utils.cuh"
 
-// [MACA] 原头部还有两行 Hopper 专有依赖，已拆除：
-//   #include <cutlass/arch/barrier.h>        —— MACA 上无此文件（mctlass/arch 下没有 barrier.h）
-//   #include <cute/arch/copy_sm90_tma.hpp>   —— TMA，MACA 没有
-// 以及 `using transac_bar_t = kerutils::transac_bar_t;` —— 该别名已在
-// kerutils/device/cuda/common.h 中删除，依赖它的预取流水线在本文件中整段拆除。
-//
-// 原先 CUTE_ALIGNAS / cute::cast_smem_ptr_to_uint 是靠 cutlass/cutlass.h 顺带
-// 带进来的（它同时给出 `#define cutlass mctlass` 的别名）。这里只按名字取用，
-// 不再整包引入 cutlass，改为直接包含这两个符号所在的、mctlass 里真实存在的头。
+// [MACA] 上游的 Hopper 专有依赖已拆除：<cutlass/arch/barrier.h>（mctlass 下无此文件）、
+//   <cute/arch/copy_sm90_tma.hpp>（TMA）与 `transac_bar_t`（kerutils 已删该别名）。
+//   CUTE_ALIGNAS / cast_smem_ptr_to_uint 原先靠 cutlass/cutlass.h 顺带引入，这里直接取头。
 #include <cute/container/alignment.hpp>   // CUTE_ALIGNAS
 #include <cute/arch/util.hpp>             // cute::cast_smem_ptr_to_uint
 
 namespace topk_select_common {
 
-// [MACA] 原为 `#ifdef KERUTILS_ENABLE_SM100 -> 1 #else -> 0`。MACA 没有 256 位
-// 访存指令，恒为 0；保留这个宏名，是因为 st_global 等处按它做宽度分派，
-// 它是一个真实的配置轴而不是可以删掉的残留。
+// [MACA] 原为 `#ifdef KERUTILS_ENABLE_SM100`。MACA 无 256 位访存指令，恒为 0；
+//   保留宏名是因为 st_global 按它做宽度分派。
 #define IS_LDG_STG_256_AVAILABLE 0
 
-// [MACA] 原实现按 IS_LDG_STG_256_AVAILABLE（仅 SM100 为 1）在两组指令间选：
-//   LDG.256/STG.256（sm100+）与 LDG.128/STG.128（sm90 及以下），
-//   两者都是带 L1/L2 cache hint 的内联 PTX（.nc / L1::no_allocate / L2::256B）。
-//   MACA 汇编器只认 MACA ISA，也没有这些 cache hint 轴，故整组换成等宽的普通
-//   向量访存：128 位 = 16 字节，与上游在 sm90 及以下所选宽度一致，
-//   因此 NUM_BYTES_PER_GMEM_* 保持不变，下游的切分逻辑不受影响。
-//   （cache hint 在 MACA 上无对应物；流式/驱逐策略交由驱动默认。）
+// [MACA] 上游在 LDG/STG.256（sm100+）与 .128（sm90 及以下）两组带 cache hint 的内联
+//   PTX 间选。这里用 128 位（16 字节）普通向量访存 —— 与上游 sm90 分支同宽，
+//   故 NUM_BYTES_PER_GMEM_* 不变；cache hint 无对应物。
 static constexpr uint32_t NUM_BYTES_PER_GMEM_LOAD = 128 / 8;
 static constexpr uint32_t NUM_BYTES_PER_GMEM_STORE = 128 / 8;
 #define LOAD_FROM_GMEM(src_ptr, dst_reg)  (*(uint4 *)(dst_reg) = *(const uint4 *)(src_ptr))
@@ -49,10 +38,8 @@ void ld_shared(ValueT res[NUM_VALUES], const ValueT* ptr) {
     constexpr uint32_t NUM_BYTES_TO_LOAD = NUM_VALUES * sizeof(ValueT);
     static_assert(NUM_BYTES_TO_LOAD == 16 || NUM_BYTES_TO_LOAD == 8 || NUM_BYTES_TO_LOAD == 4 || NUM_BYTES_TO_LOAD == 2);
     uint32_t addr = cute::cast_smem_ptr_to_uint(ptr);
-    // [MACA] 原实现走 kerutils::ld_shared 与内联 PTX
-    //   (ld.weak.shared::cta.b64/b32/b16)。MACA 汇编器只认 MACA ISA 不认 PTX,
-    //   且 xcore1000 不支持 __int128;这里统一改成对 shared 指针的直接按字节搬运,
-    //   语义逐位等价(同一块 shared 内存、同样的字节数)。addr 保留供其他分支引用。
+    // [MACA] 上游是 ld.weak.shared::cta.bN 的内联 PTX；MACA 不认 PTX，xcore1000 也不支持
+    //   __int128。改成对 shared 指针的按字节搬运，语义逐位等价。addr 留供其他分支引用。
     (void)addr;
     if constexpr (NUM_BYTES_TO_LOAD == 16) {
         memcpy(res, ptr, 16);
@@ -89,10 +76,7 @@ void st_global(ValueT* ptr, ValueT src[NUM_VALUES]) {
     if constexpr (IS_LDG_STG_256_AVAILABLE && NUM_BYTES_TO_STORE == 32) {
         KU_STG_256(ptr, src, "no_allocate", "evict_first");
     } else if constexpr (NUM_BYTES_TO_STORE == 16) {
-        // [MACA] 原为 KU_STG_128(ptr, src, "no_allocate", "")——一条带
-        // L1::no_allocate cache hint 的内联 PTX st.global.v4。MACA 汇编器只认
-        // MACA ISA，且没有 cache hint 轴；此处用与 STORE_TO_GMEM 一致的普通
-        // 16 字节向量存储，宽度与对齐要求不变。
+        // [MACA] 上游是带 L1::no_allocate 的 st.global.v4；此处无 cache hint 轴。
         STORE_TO_GMEM(ptr, src);
     } else if constexpr (NUM_BYTES_TO_STORE == 8) {
         *(uint64_t*)ptr = *(uint64_t*)src;
@@ -148,18 +132,11 @@ struct EpilogueRunner {
         uint32_t warp_idx,
         BlockRadixSortTempStorageT &radix_sort_temp_storage
     ) {
-        // General epilogue for topk select
-        // This epilogue has two modes: shortcut mode and non-shortcut mode.
-        // In shortcut mode, it
-        //  - Generates indices
-        //  - Load values from global memory, if `Config::return_value` is `true`
-        //  - Perform sorting, if `Config::sorted_value` is `true`
-        //  - Save indices & values to global memory
-        // In non-shortcut mode, it
-        //  - Assume end_vocab_idx > topk holds, i.e. there are enough values for topk selection
-        //  - Assume topk indices locate at smem_index_buf[:topk] and topk values locate at smem_value_buf[:topk] (an extra `__syncthreads()` might be necessary)
-        //  - Perform sorting, if `Config::sorted_value` is `true`
-        //  - Save indices & values to global memory (values are un-distorted if `UNDISTORT_VALUES` is `true`)
+        // General epilogue, in two modes:
+        //  - IS_SHORTCUT: end_vocab_idx <= topk -- indices are generated, values read from gmem.
+        //  - otherwise: assumes end_vocab_idx > topk and the top-k already in
+        //    smem_index_buf[:topk] / smem_value_buf[:topk] (an extra `__syncthreads()` may be
+        //    necessary).  Both sort when `Config::sorted_value`, then write the results out.
 
         ValueT* input_values = Config::return_value ? (ValueT*)args.input + (uint64_t)batch_idx * args.stride_input_batch : nullptr;
         OutIdxT* result_indices = (OutIdxT*)args.output_index + (uint64_t)batch_idx * args.stride_output_index_batch;
@@ -169,7 +146,6 @@ struct EpilogueRunner {
 
         if constexpr (!Config::sorted_value) {
             if constexpr (IS_SHORTCUT) {
-                // Saves indices 0...end_vocab_idx (plus `output_idx_offset`) followed by (args.topk-end_vocab_idx) `args.idx_oob_fill_value` into `result_indices`
                 constexpr uint32_t NUM_OUTPUT_IDXS_PER_STORE = NUM_BYTES_PER_GMEM_STORE / sizeof(OutIdxT);
                 #pragma unroll 2
                 for (uint32_t i = threadIdx.x * NUM_OUTPUT_IDXS_PER_STORE; i < args.topk; i += NUM_THREADS * NUM_OUTPUT_IDXS_PER_STORE) {
@@ -180,7 +156,6 @@ struct EpilogueRunner {
                     STORE_TO_GMEM(result_indices + i, out);
                 }
 
-                // Save values into `result_values`, if `RETURN_VALUE` is `True`
                 if constexpr (Config::return_value) {
                     #pragma unroll 2
                     for (uint32_t i = threadIdx.x * NUM_VALUES_PER_LOAD_STORE; i < args.topk; i += NUM_THREADS * NUM_VALUES_PER_LOAD_STORE) {
@@ -195,7 +170,6 @@ struct EpilogueRunner {
                     }
                 }
             } else {
-                // Load & cast & save indices
                 constexpr uint32_t NUM_OUTPUT_IDX_PER_ROUND = cute::min(NUM_BYTES_PER_SMEM_STORE / sizeof(uint32_t), NUM_BYTES_PER_GMEM_STORE / sizeof(OutIdxT));
                 #pragma unroll 2
                 for (uint32_t i = threadIdx.x * NUM_OUTPUT_IDX_PER_ROUND; i < args.topk; i += NUM_THREADS * NUM_OUTPUT_IDX_PER_ROUND) {
@@ -209,7 +183,6 @@ struct EpilogueRunner {
                 }
 
                 if constexpr (Config::return_value) {
-                    // Load & store values
                     constexpr uint32_t NUM_VALUES_PER_ROUND = cute::min(NUM_BYTES_PER_SMEM_STORE, NUM_BYTES_PER_GMEM_STORE) / sizeof(ValueT);
                     #pragma unroll 2
                     for (uint32_t i = threadIdx.x * NUM_VALUES_PER_ROUND; i < args.topk; i += NUM_THREADS * NUM_VALUES_PER_ROUND) {
@@ -220,7 +193,6 @@ struct EpilogueRunner {
                 }
             }
         } else {
-            // Load indices & values into shared memory
             if constexpr (IS_SHORTCUT) {
                 if (warp_idx < NUM_WARPS/2) {
                     #pragma unroll 8
@@ -232,9 +204,7 @@ struct EpilogueRunner {
                     #pragma unroll 2
                     for (uint32_t i = (threadIdx.x-NUM_THREADS/2) * NUM_VALUES_PER_LDG128; i < end_vocab_idx; i += (NUM_THREADS/2) * NUM_VALUES_PER_LDG128) {
                         ValueT values[NUM_VALUES_PER_LDG128];
-                        // [MACA] 原为 KU_LDG_128(..., ".nc", "no_allocate", "256B")
-                        // 加 st_shared(ptr, __int128)。两者都换成 MACA 可用形式：
-                        // 宏走本文件顶部的 LOAD_FROM_GMEM，宽 128 位不变；
+                        // [MACA] 宏走本文件顶部的 LOAD_FROM_GMEM（宽度仍 128 位），
                         // st_shared 收 uint4（MACA 无 __int128）。
                         LOAD_FROM_GMEM(input_values + i, values);
                         ku::st_shared(smem_value_buf + i, *reinterpret_cast<const uint4 *>(values));
@@ -243,7 +213,6 @@ struct EpilogueRunner {
                 __syncthreads();
             }
 
-            // Sort
             UIntValueT local_values[NUM_VALUES_PER_THREAD_FOR_SORT];
             uint32_t local_indices[NUM_VALUES_PER_THREAD_FOR_SORT];
             uint32_t thread_offset = threadIdx.x * NUM_VALUES_PER_THREAD_FOR_SORT;
@@ -261,8 +230,8 @@ struct EpilogueRunner {
             __syncthreads();    // To allow `radix_sort_temp_storage` overlap with `smem_value_buf` and `smem_index_buf`
             BlockRadixSortT(radix_sort_temp_storage).SortDescending(local_values, local_indices);
 
-            // Store directly to gmem (no smem buffering)
-            // For common cases, our MAX_TOPK <= 1024 and NUM_THREADS >= 256, so we have NUM_VALUES_PER_THREAD_FOR_SORT <= 8, which means each thread only need to call STG once. So we don't use SMEM to buffer here
+            // Store directly to gmem: with MAX_TOPK <= 1024 and NUM_THREADS >= 256,
+            // NUM_VALUES_PER_THREAD_FOR_SORT <= 8, i.e. one STG per thread -- no smem buffer needed.
             if (thread_offset < args.topk) {
                 CUTE_UNROLL
                 for (uint32_t i = 0; i < NUM_VALUES_PER_THREAD_FOR_SORT; ++i)
@@ -293,9 +262,6 @@ struct EpilogueRunner {
     }
 };
 
-/*
-// TODO Give a brief introduction to the algorithm here
-*/
 template<typename Config>
 class TopkSelectKernelBase {
 public:
@@ -309,10 +275,9 @@ public:
     
     static constexpr uint32_t TARGET_OCCUPANCY = Config::target_occupancy;
     static constexpr uint32_t NUM_THREADS = Config::num_threads;
-    // [MACA] 64-lane waves: this was `/ 32`, which silently doubled every
-    // warp-indexed structure below (`warp_cnt[NUM_WARPS]`, the segment-per-warp
-    // map at :421, the lane-prefix exchange).  See utils.cuh and
-    // skills/maca-wave64-port/SKILL.md §3.
+    // [MACA] 64-lane waves.  A hardcoded `/ 32` here would silently double every
+    // warp-indexed structure below (`warp_cnt`, the segment-per-warp map, the
+    // lane-prefix exchange).  See utils.cuh.
     static constexpr uint32_t NUM_WARPS = NUM_THREADS / MACA_WARP_SIZE;
     static constexpr uint32_t MAX_TOPK = Config::max_topk;
     static_assert(NUM_THREADS == 256 || NUM_THREADS == 512);
@@ -320,13 +285,12 @@ public:
     static constexpr uint32_t NUM_ELEMS_PER_128b = 16 / sizeof(ValueT); 
     static constexpr uint32_t NUM_UINT32_PER_128b = 4;
     static constexpr uint32_t NUM_ELEMS_PER_ROUND = Config::elements_per_round;
-    static constexpr uint32_t NUM_ELEMS_PER_THREAD_PER_ROUND = NUM_ELEMS_PER_ROUND / NUM_THREADS;   // TODO Unify "values", "elements", and "elems" to "elems"
+    static constexpr uint32_t NUM_ELEMS_PER_THREAD_PER_ROUND = NUM_ELEMS_PER_ROUND / NUM_THREADS;
     static constexpr uint32_t NUM_128b_PER_THREAD_PER_ROUND = NUM_ELEMS_PER_THREAD_PER_ROUND / NUM_ELEMS_PER_128b;
     static_assert(NUM_ELEMS_PER_ROUND % (NUM_ELEMS_PER_128b * NUM_THREADS) == 0);
     static constexpr uint32_t ELEMS_PER_THREAD_PER_ROUND_MASK = NUM_ELEMS_PER_THREAD_PER_ROUND - 1;
-    // NUM_128b_PER_THREAD_PER_ROUND is the canonical name; no separate NUM_UNITS alias is kept.
 
-    static_assert(NUM_ELEMS_PER_THREAD_PER_ROUND == 16); 
+    static_assert(NUM_ELEMS_PER_THREAD_PER_ROUND == 16);
 
     // Each segment/window contains this many elements. It is the granularity used by both the
     // pseudo-random visit order and the sorted-index epilogue.
@@ -355,10 +319,8 @@ public:
     static_assert(NUM_TAIL_SEGS % NUM_ISSUE_WARPS == 0);   
     static_assert(NUM_WARPS >= NUM_ISSUE_WARPS);
 
-    // [MACA] 无流水线，单缓冲。原为 `NUM_TMA_LOAD_BUFS = Config::tma_buffer_depth`
-    // 与 `TMA_PREFETCH_DEPTH = NUM_TMA_LOAD_BUFS - 1`（>=2 缓冲 + 跨轮预取）。
-    // Config::tma_buffer_depth 仍保留在配置里（上游戏法与调参记录的一部分），
-    // 但 MACA 路径不再用它开多缓冲。
+    // [MACA] 无流水线，单缓冲。上游为 `tma_buffer_depth` 缓冲 + `TMA_PREFETCH_DEPTH`
+    // 跨轮预取；Config::tma_buffer_depth 仍留在配置里（上游戏法的一部分）但不再使用。
     static constexpr uint32_t NUM_TMA_LOAD_BUFS = 1;
     static constexpr uint32_t TMA_PREFETCH_DEPTH = 0;
     static_assert(NUM_TMA_LOAD_BUFS == 1);
@@ -387,9 +349,9 @@ public:
 
     static constexpr uint32_t NUM_RECONSTRUCT_RADIX_BITS = 8;
     static constexpr uint32_t NUM_RECONSTRUCT_BUCKETS = 1u << NUM_RECONSTRUCT_RADIX_BITS;
-    // Each row also holds one sink slot (index NUM_RECONSTRUCT_BUCKETS) that the LSB histogram sends the
-    // out-of-bucket elements to; the +4 rounds a row up to a multiple of 16 bytes so that both rows stay
-    // 16B-aligned, since the reader relies on for its 128-bit shared-memory loads.
+    // Each row also holds one sink slot (index NUM_RECONSTRUCT_BUCKETS) that the LSB histogram
+    // sends the out-of-bucket elements to; the +4 rounds a row up to a multiple of 16 bytes,
+    // which the reader's 128-bit shared-memory loads rely on.
     static constexpr uint32_t NUM_RECONSTRUCT_BUCKET_SLOTS = NUM_RECONSTRUCT_BUCKETS + 4;
     static_assert(sizeof(uint32_t) * NUM_RECONSTRUCT_BUCKET_SLOTS % 16 == 0);
     static_assert(MAX_TOPK + NUM_EXTRA_SLOTS <= 0xFFFF);
@@ -422,28 +384,18 @@ public:
     static_assert(NUM_ELEMS_PER_TMA_ROW == (1u << SWIZZLE_SHIFT) * NUM_ELEMS_PER_128b);
     static_assert(NUM_TMA_ROWS_PER_SEG % (1u << SWIZZLE_SHIFT) == 0);
 
-    // [MACA] 这不是可自由推导的量：`NUM_SEGS_PER_ROUND` 来自 ABI
-    // (`elements_per_round == NUM_THREADS * 16`, scripts/generate_instantiations.py:109)，
-    // 而 `NUM_WARPS` 是波前宽度导出的 —— 64 lane 下二者不再相等，见 load_round_for_round
-    // 的 SEGS_PER_WARP 与 max(1, ...) 处理。
+    // [MACA] 这两个量来自不同的地方：`NUM_SEGS_PER_ROUND` 来自 ABI
+    // (`elements_per_round == NUM_THREADS * 16`)，`NUM_WARPS` 由波前宽度导出 ——
+    // 64 lane 下二者不再相等，见 load_round_for_round 的 SEGS_PER_WARP 处理。
     static_assert(NUM_SEGS_PER_ROUND >= NUM_WARPS);
     static_assert(NUM_SEGS_PER_ROUND % NUM_WARPS == 0);
     static_assert(NUM_SEGS_PER_ROUND >= NUM_TAIL_SEGS);
-    // [MACA] 上游这条断言用的是「每 warp 的轮内元素数」（elements_per_round /
-    // NUM_WARPS），在 32-lane 下 NUM_WARPS == NUM_SEGS_PER_ROUND 时它就是 NUM_ELEMS_PER_SEG，
-    // 恒真。64-lane 下 NUM_WARPS 减半、该表达式变成 1024 > 512，断言不再表达
-    // 「段是轮内一单位」这件事 —— 真正要保证的是**段整除轮**，即下面这条。
+    // 真正要保证的不变量：**段整除轮**（上游那条等价断言在 32-lane 下恒真，64-lane 下不再表达这件事）。
     static_assert(NUM_ELEMS_PER_ROUND % NUM_ELEMS_PER_SEG == 0);
-    
-    // [MACA] 原为 TMA 张量映射：
-    //   struct TmaParams { CUtensorMap tensor_map; };
-    //   static CUtensorMap make_topk_tensor_map(const TopkSelectArgs &args) { ... }
-    //   它把 (vocab, batch) 拆成 3 维盒、声明 128B swizzle 与 L2 promotion，
-    //   供 SM90_TMA_LOAD_3D::copy 寻址。MACA 没有 TMA 也没有 CUtensorMap，
-    //   装载改为在 copy_one_seg 里用 args.input + batch_idx*stride_input_batch
-    //   直接算全局地址（段内连续，无需张量映射），故整块删除。
-    // 原 make_topk_tensor_map 内断言「行首对齐足以放下一个 TMA 行盒」；
-    // 装载改直连后仍需要这个对齐前提（段内 16B 块首地址对齐），保留。
+
+    // [MACA] 上游的 TmaParams（CUtensorMap）与 make_topk_tensor_map 整体删除：没有 TMA，
+    //   装载改为在 copy_one_seg 里直接算全局地址（段内连续，无需张量映射）。
+    //   原映射里的「行首对齐足以放下一个 TMA 行盒」这个前提仍然需要（段内 16B 块首对齐）。
     static_assert(INPUT_STRIDE_ALIGNMENT_REQUIREMENT >= NUM_ELEMS_PER_TMA_ROW * sizeof(ValueT));
 
     struct SharedMemoryPlanBase {
@@ -453,10 +405,8 @@ public:
         // incoming holds the pairs scanned since the last reconstruct.
         CUTE_ALIGNAS(1024) uint64_t surviving_topk_pairs[2][MAX_TOPK];
         CUTE_ALIGNAS(1024) uint64_t incoming_topk_pairs[NUM_EXTRA_SLOTS];
-        // [MACA] 单缓冲。原为 tma_load_buf[NUM_TMA_LOAD_BUFS] 加
-        // tma_load_full_bar / init_full_bar 两组事务屏障，配合跨轮预取。
-        // MACA 没有 TMA/mbarrier 也没有生产者-消费者 warp specialization，
-        // 流水线整段拆除：全线程装载本轮 → __syncthreads() → 全线程消费。
+        // [MACA] 单缓冲（上游为 tma_load_buf[NUM_TMA_LOAD_BUFS] + 两组 mbarrier）：
+        // 全线程装载本轮 → __syncthreads() → 全线程消费。
         CUTE_ALIGNAS(1024) ValueT tma_load_buf[NUM_ELEMS_PER_ROUND];
         uint32_t warp_cnt[NUM_WARPS];
         uint32_t reconstruct_pivot_bucket;
@@ -537,21 +487,18 @@ public:
         }
     }
 
-    // Find the bucket id that the topk-th element resides in, and get how many elements we should select from that bucket
-    // Save result to `smem.reconstruct_pivot_bucket` and `smem.reconstruct_num_should_select`
-    // If `CHECK_IF_SHOULD_SELECT_WHOLE_BUCKET`, return whether we should select all elements in that bucket.
+    // Find the bucket the topk-th element resides in and how many elements to select from it;
+    // writes `smem.reconstruct_pivot_bucket` / `smem.reconstruct_num_should_select`.
+    // With CHECK_IF_SHOULD_SELECT_WHOLE_BUCKET, also returns whether that whole bucket is selected.
     // Should be called by a whole warp
     template<bool CHECK_IF_SHOULD_SELECT_WHOLE_BUCKET>
     static __device__ __forceinline__
     bool find_pivot_in_histogram(SharedMemoryPlanBase &smem, const uint32_t *bucket_counter, uint32_t topk, uint32_t lane_idx) {
         bool should_select_whole_bucket = false;
-        // [MACA] 64-lane waves.  This mapping was "each of 32 lanes owns 8 of the
-        // 256 buckets": `bucket_ptr = bucket_counter + lane_idx * 8` with
-        // `lane_idx` 0..31.  `NUM_RECONSTRUCT_BUCKETS` is `1 << NUM_RECONSTRUCT_
-        // RADIX_BITS` -- it comes from the radix config, NOT the lane count -- so
-        // the fix is fewer buckets per lane, not a bigger histogram.  Widening
-        // `lane_idx` to 0..63 while keeping *8 walked `lane_idx * 8` to 504 on a
-        // 260-slot array: a shared-memory read past the end (trap 0x4).
+        // [MACA] 64-lane waves.  上游是「32 条 lane 各拥有 256 桶中的 8 个」
+        // (`bucket_ptr = bucket_counter + lane_idx * 8`)。`NUM_RECONSTRUCT_BUCKETS`
+        // 来自 radix 配置而非 lane 数，所以修法是减少每 lane 的桶数 —— 把 lane_idx
+        // 放宽到 0..63 而仍乘 8，会走到 260 槽数组的 504 号：共享内存越界读（trap 0x4）。
         static_assert(NUM_RECONSTRUCT_BUCKETS % MACA_WARP_SIZE == 0);
         constexpr uint32_t COUNTS_PER_LANE = NUM_RECONSTRUCT_BUCKETS / MACA_WARP_SIZE;
         static_assert(COUNTS_PER_LANE * sizeof(uint32_t) == 16);   // one 128b smem load
@@ -577,10 +524,9 @@ public:
             for (uint32_t k = 1; k < COUNTS_PER_LANE; ++k)
                 j += (uint32_t)(suffix_count[k] >= topk);
 
-            // A depth-2 SEL tree picking suffix_count[j+1] by the bits of j
-            // (j in 0..3).  Kept as SEL rather than `suffix_count[j + 1]`: the
-            // array is a local, and a dynamic index would spill it to local
-            // memory -- the reason upstream wrote the tree in the first place.
+            // A depth-2 SEL tree picking suffix_count[j+1] by the bits of j (j in 0..3).
+            // Kept as SEL rather than `suffix_count[j + 1]` because the array is a local
+            // and a dynamic index would spill it to local memory.
             // j is the bucket that contains the top-k element
             uint32_t b0 = (j & 1) ? suffix_count[2] : suffix_count[1];
             uint32_t b1 = (j & 1) ? suffix_count[4] : suffix_count[3];
@@ -609,9 +555,8 @@ public:
     static __device__ __forceinline__ 
     void clear_reconstruct_histograms(SharedMemoryPlanBase &smem, uint32_t thread_idx) {
         static_assert((2 * NUM_RECONSTRUCT_BUCKET_SLOTS) % 4 == 0);
-        // [MACA] 原用 __int128_t 清零（16 字节/次）。MACA 不支持 __int128
-        // （'Int128 or UInt128 is not supported on this target'），换成同样
-        // 16 字节的 uint4；下标的 /4 是「16 字节单元数」，两种写法一致。
+        // [MACA] 上游用 __int128_t 清零（16 字节/次）；MACA 无 __int128，换成同样
+        //   16 字节的 uint4。
         const uint4 zero = make_uint4(0, 0, 0, 0);
         for (uint32_t i = thread_idx; i < (2 * NUM_RECONSTRUCT_BUCKET_SLOTS) / 4; i += NUM_THREADS) {
             reinterpret_cast<uint4*>(smem.reconstruct_bucket_counter)[i] = zero;
@@ -631,10 +576,9 @@ public:
 
         clear_reconstruct_histograms(smem, threadIdx.x);
 
-        // [MACA] 原为单线程 elect 后初始化 tma_load_full_bar / init_full_bar 两组
-        // mbarrier，并用 cutlass::arch::fence_barrier_init() 发布。
-        // 屏障已随流水线拆除，这里只剩一个 __syncthreads() 让初始化对全 block 可见。
-        (void)init_extra_bar_func;   // 原供 cluster 变体追加屏障，MACA 无 cluster 变体
+        // [MACA] 上游此处初始化 tma_load_full_bar / init_full_bar 两组 mbarrier；
+        // 屏障随流水线拆除，只剩一个 __syncthreads() 让初始化对全 block 可见。
+        (void)init_extra_bar_func;   // 原供 cluster 变体追加屏障
         __syncthreads();
     }
 
@@ -643,17 +587,13 @@ public:
         init_shared_memory(smem, warp_idx, [] {});
     }
 
-    // Issue TMA loads for one round
-    // Use IS_INIT to control whether is the init round.
-    // For init round: copy the "tail" [num_perm_segs * NUM_ELEMS_PER_SEG, end_vocab_idx), if HAVE_TAIL is true, and also the first NUM_SEGS_PER_ROUND - NUM_TAIL_SEGS segments according to the perm generator
-    // For non-init round: copy the next NUM_SEGS_PER_ROUND segs according to the perm generator
-    // 装载一轮。MACA 版：无 TMA、无 mbarrier、无生产者-消费者 warp specialization。
-    //   * 全部 warp 参与，每个 warp 负责本轮内序号 ≡ warp_idx (mod NUM_WARPS) 的段
-    //     （NUM_SEGS_PER_ROUND == NUM_WARPS，故每人恰好一段）
-    //   * 段内 32 条 lane 按 16B 块协作 ldg 到 shared，目标地址不 swizzle
-    //   * 不返回任何完成标志：调用方紧随一个 __syncthreads()，按内建文档
-    //     「使用 __syncthreads() 保证完成时可省略返回值」，它同时是最省的正确做法
-    //   * 置换索引直接由线性位置算出，不再维护跨轮状态机
+    // 装载一轮。IS_INIT 选 init 轮（HAVE_TAIL 为真时连尾段一起，外加按置换序的前若干段）
+    // 或 main 轮（按置换序的下一轮各段）。
+    //
+    // [MACA] 无 TMA / mbarrier / warp specialization：每个 warp 负责本轮内序号
+    // ≡ warp_idx (mod NUM_WARPS) 的段（见 SEGS_PER_WARP），段内按 16B 块协作 ldg 到
+    // shared（不 swizzle），置换索引直接由线性位置算出；不返回完成标志，调用方紧随一个
+    // `__syncthreads()` 即可。
     template<bool IS_INIT, bool HAVE_TAIL>
     static __device__ __forceinline__
     void load_round_for_round(SharedMemoryPlanBase &smem, const TopkSelectArgs &args,
@@ -671,8 +611,8 @@ public:
         static_assert(NUM_SEGS_PER_ROUND >= NUM_WARPS);
         static_assert(NUM_SEGS_PER_ROUND >= NUM_TAIL_SEGS);
         // [MACA] 64-lane waves halve NUM_WARPS, so each warp takes more than one
-        // segment per round.  It must -- if the load side skipped the extra
-        // segments the consumer would read uninitialized shared memory.
+        // segment per round -- and it must: a skipped segment is read uninitialized
+        // by the consumer.
         constexpr uint32_t SEGS_PER_WARP = NUM_SEGS_PER_ROUND / NUM_WARPS;
         static_assert(SEGS_PER_WARP >= 1);
         static_assert(NUM_SEGS_PER_ROUND % NUM_WARPS == 0);
@@ -690,29 +630,23 @@ public:
         static_assert(CHUNK_ELEMS == NUM_ELEMS_PER_128b);
         static_assert(NUM_ELEMS_PER_ROUND % CHUNK_ELEMS == 0);
 
-        // 消费端的 swizzle 原点是它自己的缓冲区起点：main 轮是 tma_load_buf 起点，
-        // init 轮是 init_buf 起点。IS_INIT 时 dst_base 已经偏移了 round_idx 个轮长度，
-        // 这里把这段偏移补回去，保证产/消两侧算的是同一个 sw_b128 下标。
-        // 若不做这一步，init 轮的 XOR 掩码会整体错位 —— 静默的错误结果。
+        // 消费端的 swizzle 原点是它自己的缓冲区起点；IS_INIT 时 dst_base 已偏移
+        // round_idx 个轮长度，这里补回，保证产/消两侧算的是同一个 sw_b128 下标 ——
+        // 否则 init 轮的 XOR 掩码整体错位，静默的错误结果。
         const uint32_t dst_origin_elems = IS_INIT ? round_idx * NUM_ELEMS_PER_ROUND : 0u;
 
         const ValueT *gmem_row = (const ValueT *)args.input + (size_t)batch_idx * args.stride_input_batch;
         auto copy_one_seg = [&](uint32_t dst_seg_idx, uint32_t global_seg_idx, uint32_t num_valid_elems) {
             const ValueT *gmem_seg = gmem_row + (size_t)global_seg_idx * NUM_ELEMS_PER_SEG;
-            // 目标地址必须按消费端的 128B 行内 XOR 布局写（load_swizzled_slice 用
-            // smem_read_offset / chunk_swizzle_mask 读同一套映射）：源元素块 u 落到
-            // 目标块 sw_b128(u)。sw_b128 是自逆的，且 sw_msk 在 16B 块内恒为常量，
-            // 所以"整块搬"与逐元素搬等价。
+            // 目标地址必须按消费端的 128B 行内 XOR 布局写（load_swizzled_slice 读同一套
+            // 映射）：源元素块 u 落到目标块 sw_b128(u)。sw_b128 自逆，且 sw_msk 在 16B
+            // 块内恒为常量，故"整块搬"与逐元素搬等价。
             uint32_t dst_elems = dst_seg_idx * NUM_ELEMS_PER_SEG;
             uint32_t dst_unit_base = (dst_origin_elems + dst_elems) / NUM_ELEMS_PER_128b;
-            // TMA 会对越界元素补零、`mask` 又不支持部分搬运，所以这里自己界定边界：
-            // 尾段通常只装到 end_vocab_idx 为止，最后一块可能不满 16B。
+            // 尾段通常只装到 end_vocab_idx 为止，最后一块可能不满 16B，故自己界定边界。
             uint32_t num_chunks = min(NUM_CHUNKS_PER_SEG, ku::ceil_div(num_valid_elems, CHUNK_ELEMS));
-            // [MACA] stride = the wave width.  This was `+= 32u`, which covered only
-            // the first 32 of NUM_CHUNKS_PER_SEG (64 for bf16) chunks -- each chunk
-            // was copied twice by two aliasing lanes and the tail never at all, an
-            // idempotent copy that hid itself until `lane_idx` became a true 64-lane
-            // index, at which point the same loop would have skipped chunks.
+            // [MACA] stride = 波前宽度。写死 `+= 32u` 只覆盖前 32 个 chunk（bf16 的
+            // NUM_CHUNKS_PER_SEG 为 64），尾部整段漏拷。
             for (uint32_t c = lane_idx; c < num_chunks; c += MACA_WARP_SIZE) {
                 uint32_t dst_off = sw_b128(dst_unit_base + c) * NUM_ELEMS_PER_128b - dst_origin_elems;
                 __builtin_mxc_ldg_b128_bsm(dst_base + dst_off,
@@ -721,26 +655,16 @@ public:
             }
         };
 
-        // 本轮各 warp 负责本地段 [warp_idx * SEGS_PER_WARP, ...) 开区间，共 SEGS_PER_WARP 段。
-        // **消费端每次只处理一段（`linear_segment_start + warp_idx`），所以装载必须逐段配平**：
-        // 原来 `SEGS_PER_WARP == 1` 时二者是同一段，64-lane 波前把 NUM_WARPS 减半后不再成立，
-        // 消费端会按 `warp_idx` 去读 `warp_idx + s*NUM_WARPS` 之外那些段 —— 那些段现在由本
-        // 循环装载（少装一段就是读未初始化的共享内存，静默错）。
-        // 本轮的本地段分两区：前 NUM_TAIL_SEGS_THIS_ROUND 段整块预留给尾段（只有 init 轮带尾段），
-        // 其余按置换序装载。预留段中不含有效元素的位置不写，由 fill_padded_tail_segments 填 PLACEHOLDER。
+        // 本轮各 warp 负责 `warp_idx + s * NUM_WARPS`（s < SEGS_PER_WARP）这几个本地段；
+        // **必须与消费端逐段配平**（消费端每轮只处理一段且正好是这一族），少装一段就是
+        // 读未初始化的共享内存（静默错）。
+        // 前 NUM_TAIL_SEGS_THIS_ROUND 段预留给尾段（只有 init 轮带尾段），其余按置换序装载；
+        // 预留段中不含有效元素的位置不写，由 fill_padded_tail_segments 填。
         constexpr uint32_t NUM_TAIL_SEGS_THIS_ROUND = HAVE_TAIL ? NUM_TAIL_SEGS : 0;
         uint32_t num_tail_segs = ku::ceil_div(end_vocab_idx - num_perm_elems, (uint32_t)NUM_ELEMS_PER_SEG);
         uint32_t num_global_segs = ku::ceil_div(end_vocab_idx, (uint32_t)NUM_ELEMS_PER_SEG);
         CUTE_UNROLL
         for (uint32_t s = 0; s < SEGS_PER_WARP; ++s) {
-            // This 64-lane warp's s-th segment of the round.  On the 32-lane
-            // original a CTA had NUM_SEGS_PER_ROUND warps and each took one
-            // segment; a 64-lane CTA has half as many, so each takes
-            // SEGS_PER_WARP and the round is still covered exactly once.  The
-            // loader and the consumer agree because the consumer derives its
-            // segment from `linear_segment_start + warp_idx` and advances by
-            // `NUM_SEGS_PER_ROUND` per round -- i.e. it visits exactly the
-            // `warp_idx + s * NUM_WARPS` family this loop writes.
             uint32_t local_seg_idx = warp_idx + s * NUM_WARPS;
 
             if (local_seg_idx < NUM_TAIL_SEGS_THIS_ROUND) {
@@ -766,26 +690,21 @@ public:
         }
     }
 
-    // Fill the invalid (padded) tail segments with PLACEHOLDER (-INF).
-    // TMA only loads the real tail elements; the unused padded tail region must still be initialized as -INF
+    // Fill the invalid (padded) tail segments with PLACEHOLDER (-INF): only the real
+    // tail elements are loaded, but the unused padded region must still be initialized.
     static __device__ __forceinline__ void fill_padded_tail_segments(ValueT *init_buf, uint32_t num_tail_elems) {
         uint32_t tail_covered = ku::ceil(num_tail_elems, (uint32_t)NUM_ELEMS_PER_SEG);
-        // [MACA] 原为 constexpr __int128_t FILLER_128b = (PLACEHOLDER_B64 << 64) | PLACEHOLDER_B64
-        // 再 st_shared(ptr, FILLER_128b)。MACA 无 __int128，改由双 64 位重载写入
-        // 同样的 16 字节（低半字在前，与原构造顺序一致）。
+        // [MACA] 上游用 __int128_t 常量一次写 16 字节；MACA 无 __int128，
+        // 改由双 64 位重载写同样的 16 字节（低半字在前，顺序一致）。
         for (uint32_t i = tail_covered + threadIdx.x * NUM_ELEMS_PER_128b; i < NUM_TAIL_ELEMS; i += NUM_THREADS * NUM_ELEMS_PER_128b) {
             ku::st_shared(init_buf + i, PLACEHOLDER_B64, PLACEHOLDER_B64);
         }
     }
 
-    // Stage the final top-k candidates from the survivor buffer into a contiguous smem layout
-    // and run the epilogue.
-    //
-    // When SORT_BY_INDEX is true, each 512-element window is visited as a whole in the permuted
-    // order, so the survivors are already sorted inside each window. Only the window groups need
-    // to be reordered by their window id
-    //
-    // Input cannot contain NaN
+    // Stage the final top-k candidates from the survivor buffer into a contiguous smem
+    // layout and run the epilogue.  With SORT_BY_INDEX, each window is visited as a whole in
+    // the permuted order, so survivors are sorted inside a window and only the window
+    // *groups* need reordering.  Input cannot contain NaN.
     template<bool SORT_BY_INDEX>
     static __device__ __forceinline__
     void stage_output_and_epilogue(SharedMemoryPlanBase &smem, typename EpilogueT::BlockRadixSortTempStorageT &sort_temp_storage,
@@ -824,7 +743,6 @@ public:
             uint32_t w_hi = min(w_lo + windows_per_thread, num_windows);
             uint32_t my_cnt = 0;
             for (uint32_t i = w_lo; i < w_hi; ++i) {
-                // TODO Performance can be optimized by using wider reads (pay attn to alignment issues!)
                 my_cnt += window_scatter_delta[i];
             }
             uint32_t warp_total = __reduce_add_sync(MACA_FULL_MASK, my_cnt);
@@ -953,7 +871,8 @@ public:
     static constexpr uint16_t PLACEHOLDER = 0xff80; // -INF
     static constexpr uint32_t NEG_INF_X2_BITS = 0xFF80FF80u;
 
-    // Histogram pass 1 (MSB radix): for each distorted bf16x2 value, retrieve the upper 8 bits and performs atomicAdd on the bucket counter
+    // Histogram pass 1 (MSB radix): for each distorted bf16x2 value, retrieve the upper 8 bits
+    // and atomicAdd the bucket counter.
     // `num_packed_values` should be guaranteed to be aligned by `NUM_PACKED_VALUES_ALIGNMENT`
     template<uint32_t N, uint32_t NUM_PACKED_VALUES_ALIGNMENT = 1>
     static __device__ __forceinline__
@@ -964,11 +883,8 @@ public:
             uint32_t raw = bf16x2_to_u32(packed_values[i]);
             uint32_t distorted;
             distort_x2<uint16_t>((uint16_t*)&distorted, (const uint16_t*)&raw);
-            // [MACA] 原为内联 PTX：bfe.u32 取两个半字各高 8 位，mad.lo.u32 由桶号
-            //   算桶地址（*4），red.shared.add.u32 做共享内存原子加。
-            //   MACA 没有 bfe/mad/red 的 asm 拼写，但语义就是「取位段 + 指针寻址
-            //   + atomicAdd」，直接写普通 C++：shared 上的 atomicAdd 是 MACA 支持的
-            //   （已探针实测），编译器自行选指令。
+            // [MACA] 上游是 bfe.u32 + mad.lo.u32 + red.shared.add.u32 的内联 PTX；语义就是
+            //   「取位段 + 指针寻址 + atomicAdd」，直接写 C++（shared 上的 atomicAdd 可用）。
             uint32_t bucket_idx_0 = (distorted >> 8) & 0xFFu;
             uint32_t bucket_idx_1 = (distorted >> 24) & 0xFFu;
             atomicAdd(bucket_counter + bucket_idx_0, 1u);
@@ -976,9 +892,9 @@ public:
         }
     }
 
-    // Histogram pass 2 (LSB radix refinement): among values whose distorted MSB equals pivot_hi8, retrieve the lower 8 bits and performs atomicAdd on the bucket counter
+    // Histogram pass 2 (LSB radix refinement): among values whose distorted MSB equals
+    // pivot_hi8 (the highest 8 bits of the DISTORTED pivot), bucket the lower 8 bits.
     // `num_packed_values` should be guaranteed to be aligned by `NUM_PACKED_VALUES_ALIGNMENT`
-    // `pivot_hi8` is the highest 8 bit of the DISTORTED pivot
     template<bool USE_CLUSTER_ADDRESSING, uint32_t N, uint32_t NUM_PACKED_VALUES_ALIGNMENT = 1>
     static __device__ __forceinline__
     void histogram_radix_lsb_for_pivot_msb(uint32_t *bucket_counter, uint32_t pivot_hi8, const maca_bfloat162 (&packed_values)[N], uint32_t num_packed_values) {
@@ -992,41 +908,31 @@ public:
         CUTE_UNROLL
         for (uint32_t i = 0; i < N; i++) {
             if (i % NUM_PACKED_VALUES_ALIGNMENT == 0 && i == num_packed_values) break;
-            // [MACA] 原为一段内联 PTX，逐条等价改写如下（每条右侧注释即原指令语义）：
+            // [MACA] 上游是一段内联 PTX，逐条等价改写如下：
             uint32_t raw = bf16x2_to_u32(packed_values[i]);
-            // prmt.b32 hi, raw, 0, 0x5341 —— 取两半各自的**高字节**放到 0x00hh 形态
-            uint32_t hi = ((raw >> 8) & 0x000000FFu) | ((raw >> 16) & 0x00FF0000u);
-            // set.eq —— 高字节等于 pivot 的半字给 0xFFFF。
-            //   这里比的是**抽出来的高字节**（0x00hh 形态），不是 bf16 值，所以要的是
-            //   逐字节相等，`bf16x2_eq_mask` 的按位比较正是它；不能用 census 那个
-            //   浮点版（0x00hh 会被当成极小的 denormal 去比大小）。
+            uint32_t hi = ((raw >> 8) & 0x000000FFu) | ((raw >> 16) & 0x00FF0000u);   // 两半各自的高字节，0x00hh 形态
+            // 这里比的是**抽出来的高字节**（0x00hh 形态），不是 bf16 值，所以要逐字节
+            // 相等：`bf16x2_eq_mask` 的按位比较正是它。不能用 census 那个浮点版
+            // —— 0x00hh 会被当成极小的 denormal 去比大小。
             uint32_t sel = bf16x2_eq_mask(hi, raw_hi8_x2);
-            // lop3.b32 lo, raw, low_byte_xor, 0x00ff00ff, 0x28 —— lo = (raw ^ xor) & 0x00ff00ff
             uint32_t lo = (raw ^ low_byte_xor) & 0x00ff00ffu;
-            // lop3.b32 t, sel, lo, scratch, 0xca —— t = sel ? lo : scratch
             uint32_t t = (sel & lo) | (~sel & scratch_bucket_idx_x2);
-            // and/shr 拆两半 + mad.lo.u32 算桶地址（*4）+ red.shared.add 原子加
             atomicAdd(bucket_counter + (t & 0xFFFFu), 1u);
             atomicAdd(bucket_counter + (t >> 16), 1u);
         }
     }
 
-    // Count the number of elements that are 1) > pivot 2) = pivot 3) NaN in the given array
+    // Count the number of elements that are 1) > pivot 2) = pivot 3) NaN
     struct CensusCounts { uint32_t cnt_gt; uint32_t cnt_eq; uint32_t cnt_nan; };
     // `num_packed_values` should be guaranteed to be aligned by `NUM_PACKED_VALUES_ALIGNMENT`
     template<uint32_t N, uint32_t NUM_PACKED_VALUES_ALIGNMENT = 1>
     static __device__ __forceinline__
     CensusCounts get_census_counts(const maca_bfloat162 (&values)[N], uint32_t num_packed_values, uint32_t pivot_value_x2_bits) {
         static_assert(2 * N <= 256);    // Since we're going to use bf16 for accumulation
-        // [MACA] 原为三条内联 PTX（set.gt/.eq/.nan.bf16x2.bf16x2 + add.rn.bf16x2）。
-        //   语义要点：set 指令的**目标是 .bf16x2**，所以比较结果按 1.0bf16 / 0.0bf16
-        //   给出（不是掩码 —— 掩码形态只在目标为 .s32 时出现，例如上面的
-        //   histogram_radix_lsb_for_pivot_msb 里的 set.eq.s32.bf16x2）；再逐半字
-        //   用 bf16 加法累加计数。
-        //   这里改为逐半字判定 + float32 累加：2*N <= 256，计数始终是小整数，
-        //   float32 与 bf16 的累加在这些值上都是**精确**的，所以结果逐位相同，
-        //   而代码不再依赖 bf16 加法的舍入行为。
-        //   .gt / .eq 用的是**有符号**16 位比较（NaN 由 .nan 单独统计，不参与 gt）。
+        // [MACA] 上游用 `set.gt/.eq/.nan.bf16x2`（目标 .bf16x2，结果 1.0/0.0）+ bf16 加法
+        //   累加。这里改为逐半字判定 + float32 累加：计数始终是小整数，两种累加都精确，
+        //   结果逐位相同，且不再依赖 bf16 加法的舍入行为。
+        //   `.gt`/`.eq` 是浮点比较（NaN 由 .nan 单独统计，不参与 gt）。
         float cnt_gt_f = 0.0f, cnt_eq_f = 0.0f, cnt_nan_f = 0.0f;
         CUTE_UNROLL
         for (uint32_t i = 0; i < N; i++) {
@@ -1041,26 +947,19 @@ public:
         }
         uint32_t cnt_gt = (uint32_t)cnt_gt_f;
         uint32_t cnt_eq = (uint32_t)cnt_eq_f;
-        // [MACA] `cnt_nan` is a flag, not a count -- it is only ever consumed as
-        // `cnt_nan != 0` by the two callers.  Upstream reaches the same value
-        // with `min.NaN` folded into the census and one `set.nan` afterwards,
-        // which MACA has no instruction for; counting and collapsing here is
-        // the equivalent.
+        // [MACA] `cnt_nan` is a flag, not a count -- both callers only test it as
+        // `cnt_nan != 0`; upstream keys the same value off `min.NaN` + one `set.nan`.
         uint32_t cnt_nan = cnt_nan_f > 0.0f ? 1u : 0u;
         return {cnt_gt, cnt_eq, cnt_nan};
     }
 
-    // 判定一个 bf16 半字是否入选；等于 pivot 时按配额放行并消耗一份配额。
-    // 语义严格对应原先内联 PTX 的三条谓词逻辑：
-    //   setp.gt.bf16x2 g  —— **浮点**比较，NaN 参与时为假
-    //   setp.eq.bf16x2 e + setp.ne.and.u32 t, quota, 0, e  —— 浮点等值且配额还有
-    //   or.pred s = g | t
-    // 注意 `gt` 命中的元素**不**消耗配额（原 PTX 只在 t 为真时 sub）。
+    // 判定一个 bf16 半字是否入选；等于 pivot 时按配额放行并消耗一份配额（`gt` 命中的
+    // 元素**不**消耗配额）。上游对应三条谓词：`setp.gt.bf16x2`（**浮点**比较，NaN 参与
+    // 时为假）、`setp.eq.bf16x2` 且配额还有、两者相 or。
     //
-    // [MACA] 原为按位型做 int16 比较。逐半字的**等值**恰好与浮点等值同解（除 NaN
-    //   与 ±0），但**大小**不同解：+NaN 的位型作 int16 是最大的正数，于是
-    //   "+NaN > 任何正数" 为真，而浮点 `gt` 为假 —— 这会让排在 pivot 之后的 NaN
-    //   抢占配额。故一律经 `bf16_bits_to_float` 走真浮点比较。
+    // [MACA] 上游对位型做 int16 比较，**大小**不同解：+NaN 的位型作 int16 是最大的正数，
+    //   于是 "+NaN > 任何正数" 为真而浮点 `gt` 为假 —— 排在 pivot 之后的 NaN 会抢占配额。
+    //   故一律经 `bf16_bits_to_float` 走真浮点比较。
     static __device__ __forceinline__
     bool select_one_half(uint16_t value_half, uint32_t pivot_value_x2_bits, uint32_t &eq_quota) {
         uint16_t pivot_half = (uint16_t)(pivot_value_x2_bits & 0xFFFFu);
@@ -1074,15 +973,10 @@ public:
         return false;
     }
 
-    // Decide whether or not to accept an element in the old survivor buffer
-    // If taken, update relevant status (`dst_ptr` and `eq_quota`)
-    //
-    // [MACA] 形参由「shared 窗口地址(uint32)」改为真指针：原先的地址算术依赖
-    //   cute::cast_smem_ptr_to_uint 的返回值能被当作通用指针再解引用
-    //   （调用点确实这么做了），这在 MACA 上并不成立；改用指针后
-    //   ld/st 就是普通的 shared 访存，MACA 直接支持。
-    // 逐对处理：pair0 = {index0, value0}，pair1 = {index1, value1}（各 8 字节）。
+    // Decide whether to accept an element in the old survivor buffer; if taken, updates
+    // `dst` and `eq_quota`.  逐对处理：pair0 = {index0, value0}，pair1 = {index1, value1}。
     // 元素 1 的配额判定发生在元素 0 递减**之后**，这个顺序必须保持。
+    // [MACA] `src` 是真指针，而非上游可被当通用指针解引用的 shared 地址整数。
     template<bool USE_CLUSTER_ADDRESSING>
     static __device__ __forceinline__
     void copy_selected_pairs_to_survivor(
@@ -1101,16 +995,13 @@ public:
             dst[0] = src[1];
             dst += 1;
         }
-        // [MACA] 原 PTX 的非 cluster 分支用 `add.f32 %0, %0, 0f00000008` 把地址加 8
-        //   ——上游刻意借浮点管线做整数加法以免与比较/位运算争整数管线。C++ 里
-        //   没有这个约束，直接指针自增即可（微观调度不再由我们控制，语义不变）。
+        // [MACA] 上游用 `add.f32` 把地址加 8（借浮点管线避开整数管线），C++ 里直接
+        //   指针自增即可，语义不变。
     }
 
-    // The src-in-register version of `copy_selected_pairs_to_survivor`
-    //
-    // 与上者的差别只在数据来源：元素 0 的值字取 values_raw 整体（其低半字是
-    // 有效值），元素 1 的值字取 `values_raw >> 16`（干净的高半字），索引由调用方
-    // 以寄存器给出。对齐到 pair 布局的 64 位形式：低 32 位 = index，高 32 位 = value。
+    // The src-in-register version of `copy_selected_pairs_to_survivor`: 元素 0 的值字取
+    // values_raw 整体（低半字有效），元素 1 取 `values_raw >> 16`（干净的高半字），
+    // 索引由调用方以寄存器给出。pair 布局：低 32 位 = index，高 32 位 = value。
     template<bool USE_CLUSTER_ADDRESSING>
     static __device__ __forceinline__
     void append_selected_pairs_from_registers(
@@ -1133,9 +1024,9 @@ public:
         }
     }
 
-    // Get the pivot via a two-stage histogram and get PivotAndQuota
-    // The MSB histogram should be ready and all threads should be able to see it (e.g. via a `__syncthreads()`) before we call the function
-    // We don't absorb MSB histogram's logic inside since sometimes we'd like to overlap TMA load and MSB histogram's modification
+    // Get the pivot via a two-stage histogram, and the quota with it.
+    // The MSB histogram must be complete and visible (a `__syncthreads()`) before the call;
+    // the MSB histogram's own logic is kept outside so its computation can be overlapped.
     struct PivotAndQuota {
         uint32_t pivot_value_x2_bits;
         uint32_t start_pos_in_collector;
@@ -1173,15 +1064,14 @@ public:
         return {pivot_value_x2_bits, eqgt.start_pos_in_collector, eqgt.eq_quota, census.cnt_nan};
     }
 
-    // Main part of the normal kernel and phase A of the cluster kernel.
-    // The input is divided into:
-    //  - a "perm" prefix [0, num_perm_segs * NUM_ELEMS_PER_SEG), visited in pseudo-random order;
-    //  - a "tail" suffix [num_perm_segs * NUM_ELEMS_PER_SEG, end_vocab_idx), visited sequentially.
-    // The init phase loads the tail plus the first perm segments into one init window, selects
-    // the initial top-k from it, then the main loop continues over the remaining perm segments.
+    // Main part of the kernel.  The input is split into a "perm" prefix
+    // [0, num_perm_segs * NUM_ELEMS_PER_SEG) visited in pseudo-random order and a "tail"
+    // suffix [num_perm_segs * NUM_ELEMS_PER_SEG, end_vocab_idx) visited sequentially.
+    // The init phase loads the tail plus the first perm segments as one window and selects
+    // the initial top-k from it; the main loop then covers the remaining perm segments.
     //
-    // Returns the number of real selected pairs in the final survivor buffer; this is normally
-    // `topk`, but can be smaller in a cluster CTA whose local range has fewer real elements.
+    // Returns the real selected-pair count in the final survivor buffer: normally `topk`,
+    // but smaller for a CTA whose local range holds fewer real elements.
     template<bool USE_CLUSTER_ADDRESSING, typename IsWarpActiveF>
     static __device__ __forceinline__
     uint32_t scan_segs(const TopkSelectArgs &args, SharedMemoryPlanBase &smem,
@@ -1206,10 +1096,8 @@ public:
         uint32_t perm_mul = PERM_MUL_PRIME % perm_len;
         (void)NUM_ISSUE_WARPS;
 
-        // [MACA] 原为 TMA 发射侧跨轮维护的置换状态（next_tma_permuted_segment /
-        // tma_permuted_segment_stride）——只有 elect 出来的那一条 lane 有效。
-        // ldg 装载是全线程协作的，每轮直接由线性位置算出段号（load_round_for_round），
-        // 不再需要这份跨轮状态，故删除。
+        // [MACA] 上游在 TMA 发射侧跨轮维护置换状态（只有 elect 的那条 lane 有效）；
+        // 全线程协作的 ldg 每轮直接由线性位置算段号，无需这份跨轮状态。
 
         uint32_t threshold_x2_bits = NEG_INF_X2_BITS;
         uint32_t num_incomers = 0;
@@ -1217,10 +1105,9 @@ public:
 
         // Init phase
         if (num_local_elems_padded != 0) {
-            // 装载 init window（尾段 + 头若干置换段），落在 init_buf[0: NUM_ELEMS_IN_INIT_WINDOW]。
-            // MACA 无 TMA / mbarrier / 预取流水线：全线程协作 ldg，轮次之间无依赖
-            // （各 init 轮写 incoming_topk_pairs 的不同区段，互不覆盖），故一次
-            // __syncthreads() 即完成发布，随后才开始消费。
+            // 装载 init window（尾段 + 头若干置换段）到 init_buf[0: NUM_ELEMS_IN_INIT_WINDOW]。
+            // [MACA] 无 TMA / mbarrier：全线程协作 ldg，各 init 轮写 incoming_topk_pairs
+            // 的不同区段、互不覆盖，故一次 __syncthreads() 即完成发布。
             ValueT *init_buf = (ValueT*)smem.incoming_topk_pairs;
             if (num_local_tail_elems_padded != 0) {
                 Base::template load_round_for_round<true, true>(
@@ -1259,9 +1146,8 @@ public:
             CUTE_UNROLL
             for (uint32_t i = 0; i < NUM_INIT_ROUNDS_MAX; i++) {
                 if (i == num_init_rounds) break;
-                // [MACA] 原为 `smem.init_full_bar[i].wait(0)`（等该轮 TMA 事务完成）。
-                // 装载已改为前面那次全线程协作 ldg + 一次 __syncthreads()，
-                // 所有 init 轮在此处都已可见，无需逐轮等待。
+                // [MACA] 上游在此等该轮的 TMA 事务；装载已改为全线程协作 ldg + 一次
+                // __syncthreads()，所有 init 轮此处均已可见。
 
                 // Fill the incomplete segment with PLACEHOLDER (-INF)
                 if (num_local_tail_elems % NUM_ELEMS_PER_SEG != 0 && i == num_local_tail_elems / NUM_ELEMS_PER_ROUND) {
@@ -1295,10 +1181,9 @@ public:
             __syncthreads();    // publish the round-1 histogram
 
             static_assert(NUM_ELEMS_IN_INIT_WINDOW <= 0xFFFF);
-            // The CTA's init-window slice may contain fewer real elements than K (e.g. a cluster
-            // rank whose visit range mostly overlaps the padded tail). In that case the pivot
-            // selection must degrade to "select all real elements": cap the K used in the pivot /
-            // quota computation at the real count
+            // The init-window slice may contain fewer real elements than K (e.g. a cluster rank
+            // whose visit range mostly overlaps the padded tail); then the pivot selection must
+            // degrade to "select all real elements", so cap the K used at the real count.
             uint32_t effective_topk = min(topk, num_real_init_elems);
             auto [pivot_value_x2_bits, start_pos_in_collector, eq_quota, cnt_nan] = 
                 compute_pivot_and_quota<USE_CLUSTER_ADDRESSING, NUM_UINT32_IN_INIT_WINDOW_PER_THREAD, 4>(effective_topk, init_values, num_my_elems / 2, warp_idx, lane_idx, smem);
@@ -1327,10 +1212,9 @@ public:
                             }
                         }
                     }
-                    // [MACA] 原为「把整数索引伪装成 fp32 次正规数再用浮点加法求
-                    //   index = base + offset」——上游刻意走浮点管线避开整数管线竞争，
-                    //   因为两个次正规数相加是精确的，结果与整数加法逐位相同。
-                    //   C++ 里直接用整数：语义等价，且不必依赖次正规数的舍入前提。
+                    // [MACA] 上游把整数索引伪装成 fp32 次正规数、用浮点加法求
+                    //   index = base + offset 以避开整数管线；这里直接用整数加法 ——
+                    //   语义等价，且不依赖次正规数舍入的前提。
                     uint32_t index0 = unit_base + (i % 4) * 2;
                     uint32_t index1 = index0 + 1;
                     maca_bfloat162 cur_value = init_values[i];      // two bf16 payloads packed as bf16x2
@@ -1343,18 +1227,12 @@ public:
         __syncthreads();
     
 
-        // [MACA] The main loop consumes ONE segment per round per warp, so with
-        // 64-lane waves a round only covers NUM_WARPS of the NUM_SEGS_PER_ROUND
-        // segments that were loaded.  `linear_segment_start` is therefore an
-        // absolute linear visit index for this thread's first segment of the
-        // scan, and `advance_perm_state` below moves it forward by one SEGMENT
-        // per round (not by a whole round of them) -- otherwise segments
-        // NUM_WARPS..NUM_SEGS_PER_ROUND-1 of every round are loaded and never
-        // looked at, i.e. 4 of every 8 on a 256-thread tuple.
-        //
-        // The linear visit index also has to stay `% perm_len` inside
-        // `get_permuted_seg_idx`; `advance_perm_state` wraps it mod perm_len,
-        // which `linear_segment_start` must already respect to start with.
+        // [MACA] The main loop consumes ONE segment per round per warp, so with 64-lane waves
+        // a round only covers NUM_WARPS of the NUM_SEGS_PER_ROUND loaded segments.
+        // `linear_segment_start` is the absolute linear visit index of this thread's first
+        // segment, and `advance_perm_state` advances it by one SEGMENT per round -- not by a
+        // whole round of them, or segments NUM_WARPS..NUM_SEGS_PER_ROUND-1 would never be read.
+        // It must stay `% perm_len` for `get_permuted_seg_idx`, so it must already be reduced.
         uint32_t linear_segment_start =
             local_start_seg_idx
             + num_init_rounds * NUM_SEGS_PER_ROUND
@@ -1382,8 +1260,7 @@ public:
             uint32_t unit_base = tid * num_uint32_per_thread;
             uint32_t num_my_units = unit_base < num_uint32 ? min(num_uint32_per_thread, num_uint32 - unit_base) : 0u;
 
-            // [MACA] 原返回 shared 窗口地址(uint32)，调用方再把它当指针解引用；
-            //   MACA 上这个往返不成立，直接返回真指针。
+            // [MACA] 直接返回真指针，而非上游的 shared 地址整数（该往返在 MACA 上不成立）。
             auto unit_to_pair_addr = [&](uint32_t offset) -> const uint64_t * {
                 return offset < MAX_TOPK / 2
                      ? smem.surviving_topk_pairs[survivor_buf_idx] + 2 * offset
@@ -1396,8 +1273,8 @@ public:
                 if (m == num_my_units) break;
                 uint32_t pair2[4];
                 ld_shared<4>(pair2, (const uint32_t*)unit_to_pair_addr(unit_base + m));
-                // One b128 unit = 2 pairs {index0, value0, index1, value1}; pick the low halves of the
-                // two value words (the bf16 payloads) and pack them into one bf16x2 word.
+                // One b128 unit = 2 pairs {index0, value0, index1, value1}; pick the low halves
+                // of the two value words (the bf16 payloads) into one bf16x2 word.
                 values[m] = u32_to_bf16x2(__byte_perm(pair2[1], pair2[3], 0x5410));
             }
 
@@ -1430,18 +1307,15 @@ public:
         uint32_t chunk_swizzle_mask = swizzle_mask & ELEMS_PER_THREAD_PER_ROUND_MASK;
         uint32_t smem_read_offset = logical_elem_offset ^ (swizzle_mask & ~ELEMS_PER_THREAD_PER_ROUND_MASK);
 
-        // Track the TMA buffer index and its phase incrementally instead of dividing every round.
-        // On long rows the init window is a tiny fraction of the row, so its pivot stays far above the
-        // row's true one and the append rate (hence the store path) stays high for the whole scan:
-        // reconstruct early to tighten the pivot. Short rows would pay more for the reconstruct than the
-        // extra appends cost, so they keep the plain threshold.
+        // On long rows the init window is a tiny fraction of the row, so its pivot stays far
+        // above the row's true one and the append rate stays high: reconstruct early to tighten
+        // it.  Short rows would pay more for the reconstruct than the extra appends cost.
         uint32_t reconstruct_trigger = num_main_rounds > 16 ? RECONSTRUCT_THRESHOLD / 4 : RECONSTRUCT_THRESHOLD;
 
         for (uint32_t main_round_idx = 0; main_round_idx < num_main_rounds; ++main_round_idx) {
-            // [MACA] 原为「elect 一条 lane 预取 main_round_idx + TMA_PREFETCH_DEPTH，
-            // 本轮消费等 tma_load_full_bar」。单缓冲 + 无 TMA：改成
-            // 「全线程协作装载本轮 → __syncthreads() → 全线程消费本轮」。
-            // 轮索引用绝对编号（init 轮在前），置换线性位置的推导才与消费端一致。
+            // [MACA] 上游 elect 一条 lane 预取 + 消费侧等 mbarrier；这里是
+            //   「全线程协作装载 → __syncthreads() → 全线程消费」。
+            //   轮索引用绝对编号（init 轮在前），置换线性位置的推导才与消费端一致。
             Base::template load_round_for_round<false, false>(
                 smem, args, batch_idx, end_vocab_idx, num_perm_segs,
                 num_init_rounds + main_round_idx, local_start_seg_idx, warp_idx, lane_idx);
@@ -1458,26 +1332,15 @@ public:
             if (is_warp_active) {
                 ValueT values[NUM_ELEMS_PER_THREAD_PER_ROUND];
                 Base::template load_swizzled_slice<NUM_128b_PER_THREAD_PER_ROUND>(values, buf, smem_read_offset, chunk_swizzle_mask);
-                // [MACA] 原为一段内联 PTX：两条 set.gtu.s32.bf16x2 做**无符号**16 位比较
-                //   （"NaN 一律接受"——两个符号的 NaN 在位型上都大于任何有限值），
-                //   prmt 取每个半字的高字节拼成 ind，再用 dp4a 以带符号字节权重
-                //   {0xFF,-1},{0xFE,-2},{0xFC,-4},{0xF8,-8} 把 4 个 0x00/0xFF 字节
-                //   压成 4 位 nibble（每命中一位贡献 1/2/4/8），最后 mad 把 nibble
-                //   接到 hit_mask 低位并整体左移 4。
-                //   这里逐条等价改写：dp4a 在 MACA 上不可用，但它在此处只是"把 4 个
-                //   0x00/0xFF 字节各取 1 bit 打包"，直接用移位/或即可，不需要乘法。
+                // [MACA] 上游是一段内联 PTX（`set.gtu.s32.bf16x2` 判命中、`dp4a` 打包成
+                //   nibble）；dp4a 在 MACA 上不可用，而它在此处只是"每字节取 1 bit"。
+                //   `.gtu` = greater-than-unordered：NaN 一律算命中，于是每个 NaN 都落进
+                //   incoming buffer、由 census 报出 —— 这是 NaN 检测的唯一入口。
                 CUTE_UNROLL
                 for (int32_t j = NUM_ELEMS_PER_THREAD_PER_ROUND - 4; j >= 0; j -= 4) {
-                    // [MACA] 原为一条内联 PTX：两条 `set.gtu.s32.bf16x2` 判命中、
-                    //   `prmt` 抽位、`dp4a` 打包成 nibble、`mad.lo.u32` 接到 hit_mask。
-                    //   这里逐条等价改写（dp4a 在 MACA 上不可用，但它在此处只是"把 4 个
-                    //   0x00/0xFF 字节各取 1 bit 打包"，用移位/或即可）。
-                    //   `.gtu` = greater-than-unordered（浮点语义）：NaN 一律算命中，
-                    //   于是每个 NaN 都会落进 incoming buffer，由 census 报出来 ——
-                    //   这是 0f03b68 之后 NaN 检测的唯一入口，见 `bf16x2_gtu_mask_float`。
                     uint32_t gt0 = bf16x2_gtu_mask_float(*(const uint32_t*)(values + j),     threshold_x2_bits);
                     uint32_t gt1 = bf16x2_gtu_mask_float(*(const uint32_t*)(values + j + 2), threshold_x2_bits);
-                    // 逐半字命中 → 0xFFFF；取每个半字的 1 个 bit 组成 nibble
+                    // 逐半字命中 → 0xFFFF；每个半字取 1 个 bit 组成 nibble
                     uint32_t nib = ((gt0 & 0xFFFFu) ? 1u : 0u)
                                  | ((gt0 >> 16)     ? 2u : 0u)
                                  | ((gt1 & 0xFFFFu) ? 4u : 0u)
@@ -1499,9 +1362,8 @@ public:
             
             uint32_t seg_elem_base = current_permuted_segment * NUM_ELEMS_PER_SEG + offset_in_segment;
 
-            // Element e of this thread's slice lives at smem_read_offset + (e ^ chunk_swizzle_mask)
-            // [MACA] 原先把该地址经 cast_smem_ptr_to_uint 变成整数再做 ld.shared/st.shared；
-            //   改成真指针 + 普通 shared 访存。
+            // Element e of this thread's slice lives at smem_read_offset + (e ^ chunk_swizzle_mask).
+            // [MACA] 真指针 + 普通 shared 访存，而非上游的 cast_smem_ptr_to_uint。
             const ValueT *elem_base = buf + smem_read_offset;
 
             // Start the first hit's smem load before the prefix scan / count exchange below, so that its
@@ -1518,10 +1380,9 @@ public:
             uint32_t lane_prefix = 0;
             CUTE_UNROLL
             for (uint32_t k = 0; k < 5; ++k) {
-                // [MACA] 64-bit from end to end: the ballot is 64 lanes wide, so the
-                // prefix mask and its population count have to be too.  A 32-bit
-                // `1u << lane_idx` is UB above lane 31, and `__popc` truncates the
-                // wave in half silently.
+                // [MACA] 64-bit end to end: the ballot is 64 lanes wide, so the prefix
+                // mask and its population count must be too.  A 32-bit `1u << lane_idx`
+                // is UB above lane 31, and `__popc` silently truncates the wave in half.
                 unsigned long long bit = __ballot_sync(MACA_FULL_MASK, (num_new_incomers >> k) & 1u)
                                        & ((1ull << lane_idx) - 1ull);
                 lane_prefix += (uint32_t)__popcll(bit) << k;
@@ -1554,10 +1415,6 @@ public:
             // must not be overwritten while others read it.
             __syncthreads();
 
-            // On long rows the init window is a tiny fraction of the row, so its pivot stays far above the
-            // row's true one and the append rate (hence the store path) stays high for the whole scan:
-            // reconstruct early to tighten the pivot. Short rows would pay more for the reconstruct than
-            // the extra appends cost, so they keep the plain threshold.
             if (num_incomers >= reconstruct_trigger && main_round_idx + 1 < num_main_rounds) {
                 threshold_x2_bits = reconstruct(num_incomers);
                 num_incomers = 0;

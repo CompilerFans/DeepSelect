@@ -42,17 +42,13 @@ def get_fp_config(dtype: torch.dtype) -> FPConfig:
 
 
 class Distribution(abc.ABC):
-    """
-    Distribution - The base class for all distributions
-    """
+    """Base class for all distributions."""
 
     def __init__(self):
         pass
 
     def dtype2uint_dtype(self, dtype: torch.dtype):
-        """
-        Convert a dtype to its corresponding (equal-width) integer dtype
-        """
+        """Equal-width integer dtype for `dtype`."""
         return {
             torch.bfloat16: torch.uint16,
             torch.float: torch.uint32
@@ -61,29 +57,23 @@ class Distribution(abc.ABC):
     def as_uint(self, data: torch.Tensor, uint_dtype: torch.dtype) -> torch.Tensor:
         """`data.to(uint_dtype)`, spelled so it works on a CUDA device.
 
-        [MACA] `torch.randint(...).to(torch.uint16)` raises
-        `NotImplementedError: "copy_" not implemented for 'UInt16'` when the
-        source is a CUDA tensor -- the cast is dispatched through a device
-        `copy_`, and this torch build has no UInt16/UInt32 copy kernel.  With
-        `torch.set_default_device("cuda")` in force (which every suite here
-        requires; see README "Testing") that is *every* `randint` in these
-        distributions, so the harness could not generate a single case.
-
-        Doing the cast on the CPU and moving the result is the same integer
-        conversion bit for bit: the host->device move is supported even though
-        a device-side cast is not.
+        [MACA] `.to(torch.uint16)` on a CUDA tensor raises `NotImplementedError:
+        "copy_" not implemented for 'UInt16'` -- the cast dispatches through a
+        device `copy_`, and this torch has no UInt16/UInt32 copy kernel.  With
+        `torch.set_default_device("cuda")` in force (every suite here) that is
+        *every* `randint` in these distributions.  Casting on the CPU and moving
+        the result is the same bit for bit: the move is supported where the
+        device-side cast is not.
         """
         return data.cpu().to(uint_dtype).to(data.device)
 
     def put_uint_bits(self, result: torch.Tensor, data: torch.Tensor) -> None:
         """`result.view(uint).copy_(data)` where both are the same uint dtype.
 
-        [MACA] `copy_` is unimplemented for UInt16/UInt32 on this torch build --
-        the *destination* is what it objects to, so moving the cast to the CPU
-        above is not enough; this write still has to happen.  Copying through
-        the equal-width signed view is the same 16/32 bits and a supported
-        kernel, which is the whole workaround: `view` is free and bit-preserving
-        in both directions.
+        [MACA] `copy_` is unimplemented for UInt16/UInt32 here, and it is the
+        *destination* this torch objects to -- so the CPU cast above is not
+        enough.  Writing through the equal-width SIGNED view is the same bits and
+        a supported kernel (`view` is free and bit-preserving).
         """
         assert result.dtype.itemsize == data.dtype.itemsize
         signed = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}[
@@ -91,18 +81,12 @@ class Distribution(abc.ABC):
         result.view(signed).copy_(data.view(signed))
         
     def generate(self, result: torch.Tensor):
-        """
-        Generate the `input` for `deep_select.topk`, according to a specific distribution
-
-        `result` is a tensor of shape (batch_size, vocab_size).
-        """
+        """Fill `result` (batch_size, vocab_size) with this distribution's values."""
         raise NotImplementedError()
 
 
 class NormalFloatDistribution(Distribution):
-    """
-    A uniform distribution (in terms of floating datatype)
-    """
+    """Uniform in terms of floating-point value."""
 
     def __init__(self, post_proc_func: Optional[Callable] = None):
         self.post_proc_func = post_proc_func
@@ -120,9 +104,7 @@ class NormalFloatDistribution(Distribution):
 
 
 class UniformUIntDistribution(Distribution):
-    """
-    A uniform distribution (in terms of byte representation)
-    """
+    """Uniform in terms of byte representation."""
 
     def __init__(self, lower: int, upper: int):
         assert lower >= 0 and upper >= 0
@@ -139,11 +121,7 @@ class UniformUIntDistribution(Distribution):
 
 
 class UintDistributionWithHotspotAndSpecifiedPivot(Distribution):
-    """
-    A distribution that:
-    - Is able to specify hotspot ((number, frequency), which specifies numbers and their frequency)
-    - Is able to specify a particular k-th value
-    """
+    """Supports hotspots ((value, frequency) pairs) and an optional pivot pinned at the k-th value."""
 
     def __init__(self, pivot: int | None, topk: int, hotspots: list[tuple[int, int]], allow_nan: bool):
         self.pivot = pivot
@@ -164,13 +142,11 @@ class UintDistributionWithHotspotAndSpecifiedPivot(Distribution):
         result_as_signed = result.view(signed_dtype)
         batch_size, vocab_size = result.shape
 
-        indices_perm = torch.sort(torch.randn(batch_size, vocab_size, dtype=torch.float), dim=-1).indices   # A batched randperm of shape (batch_size, vocab_size)
+        indices_perm = torch.sort(torch.randn(batch_size, vocab_size, dtype=torch.float), dim=-1).indices   # batched randperm
 
         acc_freq = 0
         def put_values(freq: int, value: torch.Tensor | int):
-            """
-            Put `value` (can be a `torch.Tensor` or `int`) to `result_as_signed[:, indices[:, acc_freq: acc_freq + freq]]`
-            """
+            """Scatter `value` (a `torch.Tensor` or `int`) into the next `freq` permuted slots."""
             if freq == 0:
                 return
             assert freq > 0
@@ -183,14 +159,12 @@ class UintDistributionWithHotspotAndSpecifiedPivot(Distribution):
             result_as_signed.scatter_(dim=-1, index=cur_indices, src=value)
             acc_freq += freq
 
-        # Put `hotspots`
         for (value, freq) in self.hotspots:
             put_values(freq, value)
 
         if self.pivot is not None:
-            # Put values smaller / larger than pivot
-            larger_values_bound = [-1, fp_cfg.positive_nan if self.allow_nan else fp_cfg.positive_inf_as_int]  # Inclusive
-            smaller_values_bound = [-1, fp_cfg.negative_nan if self.allow_nan else fp_cfg.negative_inf_as_int] # Inclusive
+            larger_values_bound = [-1, fp_cfg.positive_nan if self.allow_nan else fp_cfg.positive_inf_as_int]  # inclusive
+            smaller_values_bound = [-1, fp_cfg.negative_nan if self.allow_nan else fp_cfg.negative_inf_as_int] # inclusive
             if (self.pivot & fp_cfg.negative_0_as_int) == 0:
                 # pivot >= 0
                 larger_values_bound[0] = self.pivot
@@ -263,9 +237,7 @@ def stick_unit_test_args(parser: argparse.ArgumentParser):
     parser.add_argument("-rf", "--run-to-finish", action="store_true", help="Don't exit when a testcase is failed")
 
 def row_wise_masked_fill_(tensor: torch.Tensor, bound: Optional[torch.Tensor], value):
-    """
-    tensor[:, bound:] = value
-    """
+    """tensor[:, bound:] = value"""
     if bound is None:
         return
     mask = torch.arange(0, tensor.shape[1]).unsqueeze(0).broadcast_to(tensor.shape) >= bound.unsqueeze(-1).broadcast_to(tensor.shape)

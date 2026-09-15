@@ -2,22 +2,13 @@
 #
 # Run this tree's tests the way upstream runs them.
 #
-# Two arms, both upstream's own, unmodified:
+# Two arms, both upstream's own, unmodified: `tests/test.py --perf-only` (the
+# whole performance grid in ONE process, every case checked before it is timed)
+# and `scripts/official_slice.py` (a seeded sample of the correctness table
+# through upstream's own `run_testcase`).
 #
-#   perf   `tests/test.py --perf-only` -- the whole performance grid in ONE
-#          process, exactly as upstream drives it: per case `kk.bench(fn, 10)`
-#          (kineto kernel time, L2 flushed) with a `time.sleep(0.2)` cooldown
-#          between cases.  Every case is checked before it is timed, so a case
-#          that selects wrong is reported as a failure, not as a time.
-#
-#   test   `scripts/official_slice.py` -- a seeded uniform sample of the same
-#          105,138-case correctness table driven through upstream's own
-#          `run_testcase`.  (Upstream's full table is hours of GPU time; the
-#          driver is this repo's addition, documented in README.)
-#
-# What this script adds over typing those in is *recording*, not gating:
-# whichever extension the run actually loaded, and what the box looked like
-# while it ran.  See "Recording" below for why that matters here specifically.
+# What this adds over typing those in is *recording*, not gating: whichever
+# extension the run actually loaded, and what the box looked like while it ran.
 #
 # Usage:
 #     ./run_test.sh --perf                    # the performance grid
@@ -29,54 +20,41 @@
 #     ./run_test.sh --list                    # print the plan and exit
 #
 # Anything after the known options is forwarded to the arm verbatim, so
-# upstream's own flags (`-nc`, `-rf`, `--dtype`) work without this script
-# knowing them all -- the ones listed above are only the ones it has to parse.
+# upstream's own flags (`-nc`, `-rf`, `--dtype`) work without this script knowing
+# them all -- the ones listed are only the ones it has to parse.
 #
 # ── Recording, and what this script deliberately does NOT do ────────────────
 #
-# It follows the host repository's model (`mcDeepGEMM/run_ci.sh`: "GPU selection:
-# CUDA_VISIBLE_DEVICES applies to every stage"; `run_bench.sh`: snapshot mx-smi
-# into the log, `|| true`).  Pick the device with the environment, run, record
-# the context.  There is no exclusivity gate, and that is on purpose:
+# Follows the host repository's model (`mcDeepGEMM/run_ci.sh`: "GPU selection:
+# CUDA_VISIBLE_DEVICES applies to every stage").  Pick the device with the
+# environment, run, record the context.  There is no exclusivity gate, on
+# purpose:
 #
-#   * `pgrep -af python` is what README suggests to a human ("a timing run needs
-#     the device to itself: `pgrep -f tests/test.py` first"), but it cannot see
-#     which device a process was pinned to.  On this box it fires on a neighbour
-#     pinned to device 0 even when the run is on device 3, and the box is
-#     shared.  A gate that is wrong most of the time trains people to pass
-#     --force without reading it, which is worse than no gate.
-#   * `mx-smi` is not a gate either.  Measured here (2026-09-12, MACA 3.7.0.36):
-#     `--show-process` printed "no process found" three times while a pytest job
-#     was running on device 0, and `--show-all-process` labelled a process
-#     holding 4 GB on device 3 as running on GPUs 0, 1 and 2.  It is recorded
-#     for forensics, exactly as run_bench.sh records it, not trusted to decide.
+#   * `pgrep -af python` cannot see which device a process is pinned to -- it
+#     fires on a neighbour pinned elsewhere, and the box is shared.  A gate that
+#     is wrong most of the time trains people to pass `--force` without reading
+#     it, which is worse than no gate.
+#   * `mx-smi` is not a gate either; measured here lying in both directions.
 #
 # The md5 is recorded because this tree's `.so` is gitignored, so "what did I
-# measure" is not implied by the source.  That is not hypothetical: a 620 us cell
-# here read 619.6 us in one run and 644-651 us in another, and the extension md5
-# was identical (40a2c663b88a) -- the difference turned out to be a *different
-# `TestParam`* (`return_value=False` in the official grid, `True` in the ad-hoc
-# harness), not the box.  The record is what made that findable.
-#
-# A stale extension is reported loudly but does not stop the run: the arm is
-# often being used to check correctness of a source tree whose build you just
-# want the *result* of, and refusing costs a round trip.  The md5 is recorded
-# either way, so a later reader is never misled about what was measured.
+# measure" is not implied by the source -- and it has already been the thing
+# that made a confusing timing difference findable.  A stale extension is
+# reported loudly but does not stop the run (the arm is often checking a source
+# tree whose build you only want the *result* of, and refusing costs a round
+# trip); the md5 is recorded either way, so a later reader is never misled.
 #
 # Env:
-#     CUDA_VISIBLE_DEVICES  device selection; applied to the arm, as run_ci.sh
-#                           does.  Default: unchanged (whatever the host set).
+#     CUDA_VISIBLE_DEVICES  device selection; applied to the arm.  Default:
+#                           unchanged (whatever the host set).
 #     DS_RESULTS_DIR        same as --results
 #     MACA_PATH             MACA toolkit root (default /opt/maca)
 #     DS_TOPK_BACKEND       which implementation a call with no `backend=` runs
-#                           (the library default is `torch`, the reference);
-#                           honoured by BOTH arms, since `tests/test.py`'s call
-#                           site names no backend.  `run_bench.sh` sets
-#                           `maca_c` for its gate arms for the same reason.
+#                           (the library default is `torch`, the reference),
+#                           honoured by BOTH arms; `run_bench.sh` sets `maca_c`
+#                           for its gate arms for the same reason.
 #
 set -euo pipefail
 
-# ── project root ────────────────────────────────────────────────────────────
 original_dir=$(pwd)
 script_dir=$(realpath "$(dirname "$0")")
 cd "$script_dir"
@@ -116,11 +94,9 @@ Env: CUDA_VISIBLE_DEVICES, DS_RESULTS_DIR, MACA_PATH
 EOF
 }
 
-# ── environment ─────────────────────────────────────────────────────────────
 export MACA_PATH="${MACA_PATH:-/opt/maca}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
-# ── arguments ───────────────────────────────────────────────────────────────
 arm=""
 results_dir="${DS_RESULTS_DIR:-results}"
 allow_build=0
@@ -201,9 +177,9 @@ if [[ -z "$so" ]]; then
 fi
 
 # A header newer than the .so usually means the extension is not what the
-# sources describe -- and this tree compiles the whole row kernel from one
-# header (`radix_core.cuh`), so it is the common case, not an exotic one.  It
-# is reported, not enforced: the md5 below is the record either way.
+# sources describe -- this tree compiles the whole row kernel from one header
+# (`radix_core.cuh`), so it is the common case.  Reported, not enforced: the md5
+# below is the record either way.
 stale_note="# STALE           no (extension is newer than every csrc source)"
 newest_src=$(find csrc -newer "$so" \( -name '*.cu' -o -name '*.cuh' \) 2>/dev/null | head -1 || true)
 if [[ -n "$newest_src" ]]; then
@@ -254,8 +230,8 @@ run_one() {
         echo "# argv            $*"
         echo "$stale_note"
         echo "# ---"
-        # Forensics, not a gate: the same thing run_bench.sh records.  `|| true`
-        # because a box without mx-smi must not fail a test run.
+        # Forensics, not a gate; `|| true` because a box without mx-smi must not
+        # fail a test run.
         echo "# mx-smi"
         mx-smi 2>/dev/null || echo "#   (mx-smi unavailable)"
         echo "# pgrep -af python"
@@ -264,7 +240,6 @@ run_one() {
         echo "# ---"
     } > "$log"
     echo "run_test.sh: [$name] -> ${log}"
-    # `tee` so a failure is visible live and still recorded.
     set +e
     PYTHONPATH=. python "$@" 2>&1 | tee -a "$log"
     local rc=${PIPESTATUS[0]}
@@ -279,7 +254,6 @@ IFS=',' read -ra arms <<<"$arm"
 for a in "${arms[@]}"; do
     case "$a" in
         perf)
-            # Upstream's own invocation, unchanged.
             run_one perf tests/test.py --perf-only "${perf_args[@]+"${perf_args[@]}"}" || rc=1
             ;;
         test)

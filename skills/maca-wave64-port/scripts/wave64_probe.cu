@@ -24,31 +24,25 @@
 //     __shfl_up_sync(0xFFFFFFFF, ...)  lane 32 gets its OWN value back
 //
 // The rule is uniform: EVERY one of them honors the mask.  `__ballot_sync(mask,
-// pred)` lowers to `__builtin_mxc_sicmp(pred, 0, ICMP_NE) & mask` -- ONE
-// comparison covering the whole 64-lane wave, then a bitwise AND.  A lane
-// outside the mask reads its own value back, for the shuffles as much as for
+// pred)` lowers to `__builtin_mxc_sicmp(pred, 0, ICMP_NE) & mask` -- one
+// comparison over the whole 64-lane wave, then a bitwise AND.  A lane outside
+// the mask reads its own value back, for the shuffles as much as for
 // ballot/reduce/any:
 //
-//     lane 32, __shfl_up_sync(0xFFFFFFFF,       v, 1)  -> own value (lane 31 is
-//                                                         not in the mask)
-//     lane 32, __shfl_up_sync(0xFFFFFFFFFFFFFFFF, v, 1) -> lane 31's value
-//     lane 63, __shfl_up_sync(0xFFFFFFFFFFFFFFFF, v, 1) -> lane 62's value
-//                                                          (the wave is 64 wide)
+//     lane 32, __shfl_up_sync(0xFFFFFFFF,         v, 1)  -> own value
+//     lane 32, __shfl_up_sync(0xFFFFFFFFFFFFFFFF, v, 1)  -> lane 31's value
 //
 // So a 32-bit mask means "throw away lanes 32..63" everywhere -- not "group the
 // wave by 32".  Grouping is separate and opt-in: pass `width` explicitly
 // (`__shfl_up_sync(full, v, d, /*width=*/32)`).
 //
 // READ THIS BEFORE TRUSTING A SHUFFLE PROBE: `v[lane] = 1000 + lane` is the only
-// form that can be read unambiguously -- a result of 999+lane means "read
-// lane-1" and 1000+lane means "kept my own".  An earlier version of this file
-// used a distinctive value on lane 31 only, and then could not tell "excluded by
-// the mask" from "included, but reading a lane whose value happens to be its own
-// id" -- and drew the opposite conclusion from the same hardware.
-// NB the srcLane-in-value form below is the only reliable way to read this off
-// a measurement.  Recording "what SHFL_DN_32[31] returned" tells you nothing,
-// because the value you are looking at is the one lane 31 already had.
-//
+// form that can be read unambiguously -- 999+lane means "read lane-1", 1000+lane
+// means "kept my own".  An earlier version of this file put a distinctive value
+// on lane 31 alone, could not tell "excluded by the mask" from "included, and
+// reading a lane whose value happens to be its own id", and drew the opposite
+// conclusion from the same hardware.
+
 // BUILD AND RUN
 // -------------
 //     scripts/run_probe.sh                  # on the native target

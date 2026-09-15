@@ -4,26 +4,17 @@
 
 // ── the wave ────────────────────────────────────────────────────────────────
 //
-// MACA's wave is 64 lanes.  This tree was ported from CUDA assuming 32 and ran
-// wrong *silently* as a result, so the width lives in one place and every site
-// that depends on it says so.
-//
-// History, because the old comment here was the origin of the bug: it asserted
-// that "C500's wave is 64 lanes, but ballot/reduce/shfl group by 32, so a scan
-// written for 32 has correct semantics".  Measured (`skills/maca-wave64-port/
-// scripts/wave64_probe.sh`), the opposite holds: every mask-based collective
-// honors its mask, and `0xFFFFFFFF` names physical lanes 0..31 of the wave and
-// nothing else.  A "logical group of 32" has no encoding on this hardware at
-// all -- see `skills/maca-wave64-port/SKILL.md` §3.
+// MACA's wave is 64 lanes, and every mask-based collective honors its mask:
+// `0xFFFFFFFF` names physical lanes 0..31 and nothing else.  There is no
+// "logical group of 32" on this hardware -- see
+// `skills/maca-wave64-port/SKILL.md` §3.
 #define MACA_WARP_SIZE 64u
-// Spell the type: MACA ships `__reduce_*_sync(uint64_t, ...)` AND
+// Spell the type: MACA ships `__reduce_*_sync(uint64_t, ...)` and
 // `__reduce_*_sync(unsigned, ...)`, so an unsuffixed literal is ambiguous and
-// fails to compile.  `unsigned long long` is a distinct type from `uint64_t`
-// (`unsigned long`) on this platform, hence the cast.
+// fails to compile; `uint64_t` is `unsigned long` here, a distinct type.
 #define MACA_FULL_MASK ((uint64_t)0xFFFFFFFFFFFFFFFFull)
 
-// Every site is written against these so the CUDA-era 32 is nowhere left.
-// `static_assert` in the kernels pins the launch config against them.
+// The kernels `static_assert` their launch config against these.
 template<typename T>
 __device__ __forceinline__ T warp_level_inclusive_prefix_sum(T x, uint32_t lane_idx) {
     static_assert(sizeof(T) == 4);

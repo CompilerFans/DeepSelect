@@ -1,5 +1,13 @@
-// cub_vs_builtin_probe -- can the port's cross-lane primitives be replaced by
-// CUB, or by a MACA builtin, and which is cheaper?
+// cub_vs_builtin_probe -- can the port's 32-lane cross-lane primitives be
+// replaced by CUB or by a MACA builtin, and which is cheaper?
+//
+// Three candidates, measured side by side on a 64-lane wave against a reference
+// computed with no cross-lane primitive at all, plus the port's current 32-lane
+// form so the failure is visible next to the fixes:
+//
+//   1. cub::WarpScan / cub::WarpReduce  -- MACA's CUB, which claims width 64
+//   2. a hand-written bsm_bpermute butterfly (the tree's own idiom)
+//   3. __builtin_mxc_mov_shfl / readlane / writelane
 //
 // MEASURED (MACA 3.8.1.3, MetaX C600-U, cucc/mxcc, 2026-09-12)
 // -----------------------------------------------------------
@@ -25,21 +33,7 @@
 //
 // BUILD: same toolchain as the build --
 //   cucc cub_vs_builtin_probe.cu -o probe --offload-arch=<target> -O3 -std=c++17
-// (the repo's skills/maca-wave64-port/scripts/run_probe.sh does this for
-// wave64_probe.cu; this file is compiled the same way.)
-
-// Can the port's cross-lane primitives be replaced by CUB / MACA builtins?
-//
-// Three candidate replacements for `csrc/xcore1600/utils.cuh`'s 32-lane scan,
-// measured side by side on a 64-lane wave against a reference computed with no
-// cross-lane primitive at all:
-//
-//   1. cub::WarpScan / cub::WarpReduce  -- MACA's CUB, which claims width 64
-//   2. a hand-written bsm_bpermute butterfly (the tree's own idiom)
-//   3. __builtin_mxc_mov_shfl / readlane / writelane
-//
-// plus the port's current 32-lane form, so the failure is visible next to the
-// fixes.
+// (run_probe.sh does this for wave64_probe.cu; this file is compiled the same way.)
 #include <cstdint>
 #include <cstdio>
 #include <cuda_runtime.h>
