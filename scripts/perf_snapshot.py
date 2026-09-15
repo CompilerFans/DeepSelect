@@ -263,7 +263,7 @@ def provenance(sm_count: int) -> Dict[str, Any]:
         **_deep_gemm_package(),
         # Arch family per row (`metax_xcore<N>`), from the device, not the
         # directory name: the column to filter on for same-ISA rows.
-        "chip": f"metax_{target}",
+        "chip": f"metax_{_arch.native_target()}",
         "device_dir": device_dir_name(),
         "device_name": torch.cuda.get_device_name(0),
         "sm_count": sm_count,
@@ -366,7 +366,11 @@ def main() -> int:
         cases += [("extra", note, p) for note, p in cases_from_file(args.cases_file)]
     torch.set_default_device("cuda")
     import deep_select  # noqa: E402  (after set_default_device)
-    target = _arch.native_target()
+    # `target` is deliberately not bound here: `chip` reads it in
+    # `provenance()`, from `_arch` directly, the way `device_dir_name()` does.
+    # It was a local here once and `provenance()` still named it -- a
+    # `NameError` at the first line of every run, and nothing caught it because
+    # this script had not been executed since that refactor.
     sm_count = _arch.native_sm_count()
     prov = provenance(sm_count)
     # `--out-dir` is the directory itself, not a root to hang a name under: a

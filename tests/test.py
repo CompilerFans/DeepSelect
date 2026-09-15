@@ -369,8 +369,6 @@ if __name__ == '__main__':
                              "0 or unset = the whole table.")
     args = parser.parse_args()
 
-    import deep_select
-
     # An explicit `--backend deep_gemm` on a box that cannot run it is refused
     # before anything is measured: otherwise every case reports a failure and
     # the run reads as a kernel defect rather than a missing package.
@@ -461,17 +459,17 @@ if __name__ == '__main__':
                                  f"same fault")
                 break
             if not args.run_to_finish:
-                stopped_early = (f"stopping at the first crash; `-rf` runs the "
-                                 f"whole table and reports every case")
+                stopped_early = ("stopping at the first crash; `-rf` runs the "
+                                 "whole table and reports every case")
                 break
             continue
         status["pass" if is_correct else "check_fail"].append((test, ""))
         if not is_correct:
             print("    SELECTED WRONG", flush=True)
             if not args.run_to_finish:
-                stopped_early = (f"stopping at the first case that selected "
-                                 f"wrong; `-rf` runs the whole table and reports "
-                                 f"every case")
+                stopped_early = ("stopping at the first case that selected "
+                                 "wrong; `-rf` runs the whole table and reports "
+                                 "every case")
                 break
 
     print(f"\n{'=' * 64}")
