@@ -129,12 +129,14 @@ done
 if [[ ${quick} -eq 1 ]]; then full=0; fi
 
 # ── the extension under test ────────────────────────────────────────────────
+# The **device's** family -- see the same block in `run_test.sh` for why the
+# build list is the wrong question (it answers "what did I build first", not
+# "what does this device load").
 family=$(python - <<'PY'
 import os, sys
 sys.path.insert(0, os.getcwd())
-from deep_select._arch import family_of_target, resolve_targets
-targets = resolve_targets(os.environ.get("CUCC_TARGETS"))
-print(family_of_target(targets[0]) if targets else "")
+from deep_select._arch import family_of_target, native_target
+print(family_of_target(native_target()))
 PY
 ) || { echo "run_bench.sh: could not resolve the target architecture" >&2; exit 1; }
 

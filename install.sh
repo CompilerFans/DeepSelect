@@ -10,10 +10,10 @@
 #     the runs straddle a second boundary and pip rejects the result as misnamed
 #     (`Wheel has unexpected file name`).  Build isolation adds a second failure
 #     (no torch in pip's isolated env).
-#   * `CUCC_TARGETS` defaults to this tree's list, not the host's `native`: this
-#     wheel is what a packaging step collects, so it carries every family.
+#   * `CUCC_TARGETS` is not defaulted here either -- same reason as `build.sh`,
+#     and the same single source for the default.
 #
-# Env: CUCC_TARGETS (default `xcore1000,xcore1500,xcore1600`), MACA_PATH
+# Env: CUCC_TARGETS (default: `_arch.DEFAULT_TARGETS`), MACA_PATH
 #      (default /opt/maca), MAX_JOBS (torch reads it for ninja's -j).
 #
 #     CUCC_TARGETS=xcore1600 ./install.sh
@@ -34,16 +34,14 @@ export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
 export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
 export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
-# Same default as this tree's `build.sh`; see its header for why the host's
-# alias spellings cannot be used.
-export CUCC_TARGETS="${CUCC_TARGETS:-xcore1000,xcore1500,xcore1600}"
+# `CUCC_TARGETS` is deliberately not set; see the header.
 
 rm -rf build dist
 rm -rf ./*.egg-info
 
 which python
 which pip
-echo "install.sh: CUCC_TARGETS=$CUCC_TARGETS"
+echo "install.sh: CUCC_TARGETS=${CUCC_TARGETS:-<unset: setup.py takes _arch.DEFAULT_TARGETS>}"
 
 python setup.py bdist_wheel
 pip install dist/*.whl --force-reinstall --no-deps

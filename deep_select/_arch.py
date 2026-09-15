@@ -12,19 +12,20 @@ in the same review.
 
 from typing import Optional
 
-# Compiler target spelling (`--offload-arch=xcore<N>`) -> family base.  The
-# sub-variants (1008, 1502, 1520, 1610, 1620) are members of the family whose
-# base they share.
+# Compiler target spelling (`--offload-arch=xcore<N>`) -> family base.  Only
+# what `mxcc` accepts: `xcore1008`, `xcore1610` and `xcore1620` are rejected
+# with `invalid target ID` (measured 2026-09-15), so they are not here.
 FAMILY_OF_TARGET = {
     "xcore1000": 1000,
-    "xcore1008": 1000,
     "xcore1500": 1500,
     "xcore1502": 1500,
     "xcore1520": 1500,
     "xcore1600": 1600,
-    "xcore1610": 1600,
-    "xcore1620": 1600,
 }
+
+# What the build does when `CUCC_TARGETS` says nothing: one target per family.
+# One source for it, so `build.sh`/`install.sh` do not repeat the literal.
+DEFAULT_TARGETS = "xcore1000,xcore1500,xcore1600"
 
 # Family base -> per-SM shared memory capacity in bytes: the number a kernel's
 # config table is valid against.
@@ -99,12 +100,14 @@ def native_target() -> str:
 def resolve_targets(spec: Optional[str]) -> list:
     """Expand a ``CUCC_TARGETS`` value into concrete target spellings.
 
-    Mirrors the host repository's meaning of the variable (its ``build.sh``
-    defaults it to ``native``); ``native`` resolves to the device this build
-    runs on.
+    **The default is the whole family list, not this device.**  A build host
+    need not have a MACA card in it at all, and a wheel that names only the
+    device it was built on is a wheel that cannot be shipped anywhere else --
+    so "no value" means every family this tree names, and ``native`` remains
+    available as an *explicit* spelling for a caller who wants exactly one.
     """
     if not spec:
-        spec = "native"
+        spec = DEFAULT_TARGETS
     targets = []
     for entry in spec.split(","):
         entry = entry.strip()
@@ -120,14 +123,13 @@ def resolve_targets(spec: Optional[str]) -> list:
 
 # ── which kernel a family builds -- a build-side note, not this module's ──
 #
-# **Every family this tree builds runs `csrc/xcore1000/maca_topk.cu`.**  The
-# ported upstream kernels under `csrc/xcore1600/` are kept in the tree,
-# complete and compiling, as the reserved implementation: they are not
-# reachable from a build, and reaching them is a source change in `setup.py`
-# rather than an environment variable -- a switch that could put the broken
-# kernel back is a switch that can be left on.
+# **Every family this tree builds runs `csrc/xcore1000/maca_topk.cu`, and that
+# is the only kernel the build knows about.**  The ported upstream kernels under
+# `csrc/xcore1600/` stay in the repo as source but are off the build entirely:
+# not a source in `setup.py`, and not on its include paths -- nor is
+# `csrc/3rdparty/kerutils`, which only they include.  There is no switch.
 #
-# The port is not merely unused, it is wrong: it fails `check_result` on every
+# The port is not merely disabled, it is wrong: it fails `check_result` on every
 # cell measured on a C600U and selects wrong on an `arange` row, while
 # `maca_topk.cu` passes all of them and is 1.5-2.9x faster besides.  That is
 # feasible because nothing in `csrc/xcore1000/` is C500-specific code (no
@@ -138,6 +140,6 @@ def resolve_targets(spec: Optional[str]) -> list:
 #
 # What a caller gets on a 128 KiB part from `maca_topk.cu` rather than the port:
 # `topk` in `(1024, 4096]` is answerable, `vocab_size >= 2^23` is not a limit,
-# and bf16 `sorted_value` works.  To work on the port, point `setup.py`'s source
-# selection at `_xcore1600_sources()` and expect it to fail; see the handover
+# and bf16 `sorted_value` works.  To work on the port, add its sources AND its
+# two include paths back to `setup.py` and expect it to fail; see the handover
 # and CLAUDE.md's "Known holes" for the measurement and the diagnosis.

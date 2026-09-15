@@ -10,12 +10,13 @@
 #   * the stale in-place `.so` is removed first -- `build_ext --inplace` copies
 #     out of `build/lib` by timestamp and the in-place `.so` is gitignored, so a
 #     stale one measures the previous binary against the new source.
-#   * `CUCC_TARGETS` defaults to one target per family this tree names, not the
-#     host list verbatim: this `setup.py` names the extension after the FAMILY,
-#     so two targets in one family build the same extension twice (the second
-#     silently overwriting the first) and `mxcc` rejects some aliases outright.
+#   * `CUCC_TARGETS` is not defaulted here.  The default is
+#     `deep_select/_arch.py::DEFAULT_TARGETS` (one target per family this tree
+#     names) and `setup.py` applies it, so the scripts cannot drift from it --
+#     an unset variable is simply an unset variable, all the way down.
 #
-# Env: CUCC_TARGETS, MACA_PATH (default /opt/maca), MAX_JOBS (ninja's -j).
+# Env: CUCC_TARGETS (default: `_arch.DEFAULT_TARGETS`), MACA_PATH (default
+#      /opt/maca), MAX_JOBS (ninja's -j).
 #
 #     CUCC_TARGETS=xcore1000,xcore1600 ./build.sh
 #     CUCC_TARGETS=native ./build.sh          # just this device
@@ -37,9 +38,9 @@ export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
 export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
 export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
-# One target per family (see the header).  `_arch.py::FAMILY_OF_TARGET` is the
-# authority on which spellings exist; an unrecognized one fails the build.
-export CUCC_TARGETS="${CUCC_TARGETS:-xcore1000,xcore1500,xcore1600}"
+# `CUCC_TARGETS` is deliberately not set: `setup.py` defaults it through
+# `_arch.resolve_targets`, which is also the authority on which spellings exist
+# (an unrecognized one fails the build by name).
 
 rm -rf build dist
 rm -rf ./*.egg-info
@@ -48,7 +49,7 @@ rm -f deep_select/deep_select_*.so
 which python
 python -c 'import sys, torch
 print(f"build.sh: python {sys.version.split()[0]}, torch {torch.__version__}")'
-echo "build.sh: CUCC_TARGETS=$CUCC_TARGETS"
+echo "build.sh: CUCC_TARGETS=${CUCC_TARGETS:-<unset: setup.py takes _arch.DEFAULT_TARGETS>}"
 
 # The loop over targets lives in setup.py: one extension per architecture, each
 # with its own `--offload-arch`.

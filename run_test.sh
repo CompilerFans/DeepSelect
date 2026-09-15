@@ -155,12 +155,17 @@ if [[ -n "${DS_ALLOW_BUSY:-}" ]]; then
 fi
 
 # ── the extension: which one, and is it the one the sources describe ────────
+# The **device's** family, not the build list's first entry: a tree built for
+# several architectures ships one `.so` each, and only this tells you which the
+# device in front of you loads.  (`resolve_targets(CUCC_TARGETS)[0]` would name
+# whichever was built first -- right only while `CUCC_TARGETS` happens to lead
+# with this device's family, which is how a receipt ends up naming the C500
+# artifact of a C600U measurement.)
 family=$(python - <<'PY'
 import os, sys
 sys.path.insert(0, os.getcwd())
-from deep_select._arch import family_of_target, resolve_targets
-targets = resolve_targets(os.environ.get("CUCC_TARGETS"))
-print(family_of_target(targets[0]) if targets else "")
+from deep_select._arch import family_of_target, native_target
+print(family_of_target(native_target()))
 PY
 ) || { echo "run_test.sh: could not resolve the target architecture" >&2; exit 1; }
 
