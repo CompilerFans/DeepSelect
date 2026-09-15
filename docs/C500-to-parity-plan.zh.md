@@ -2381,3 +2381,88 @@ exact for a denormal fill" —— **这条只有 fp32 一侧成立**。所以拿
 2. **split 的 topk 门槛**（§19.3，5–9×，一行条件 + 实例化代价）。
 
 **两条都还没做，本节只记录"为什么不能照搬"这个判断本身。**
+
+---
+
+## 21. backend 默认值核实，与 §19.3 那个"实例化代价"的真身（2026-09-15）
+
+### 21.1 `backend` 的默认值是 **`maca_c`**，三个名字都通（实测）
+
+本仓 `topk` 的签名（`deep_select/interface.py:80-95`）：
+
+```python
+def topk(..., backend: str = "maca_c", ...)
+```
+
+`_BACKENDS = ("maca_c", "torch", "deep_gemm")`（`:20`）。实测
+（`CUDA_VISIBLE_DEVICES=3`）：
+
+| 调用 | 结果 |
+|---|---|
+| `topk(x, k)` 不传 backend | 走 `maca_c`（= `_backend_for(native_target())`，本机 `xcore1000`） |
+| `backend="maca_c"` | 走本机内核 |
+| `backend="torch"` | 走参考实现，选中集合与 `maca_c` **完全一致** |
+| `backend="deep_gemm"` | 走 host 选择器，选中集合同样一致 |
+| `'maca c'` / `'maca-c'` / `'MACA_C'` / `'cuda'` / `''` | `ValueError: Unsupported backend: … Expected one of maca_c, torch, deep_gemm` |
+
+**所以"默认 torch、maca_c 叫 `maca_c`"这个前提不成立 —— 默认本来就是 `maca_c`。**
+线上用的是本机内核，不是参考实现。
+
+**一处要留意的地方（不是缺陷，是读法）**：`maca_c` 是**集合确定、顺序不确定**的。
+同一个 `(x, k)` 连调三次，选中的**集合**每次都一样（且与 `torch` 一致），
+但**列表顺序**不同：`[2553, 3890, 1605, 1737, 4088, 3484, 3493, 2371]` →
+`[…, 3484, 4088, …]` → 又回到第一次。契约只要求"无序选择"（`sorted_index=False`
+时），所以这**不违反契约**；但两个 `maca_c` 的读数**不能按元素逐个比较**，
+必须是集合比较 —— `tests/lib.py` 的检查本来就是集合语义。
+
+### 21.2 §19.3 说"放宽 topk 门槛要付实例化代价"——**代价是 0**
+
+那条说"分片合并只编译了两个 banner，放宽它 = 新增实例化"。**读了源码，正好相反**：
+
+```cpp
+// radix_core.cuh:2283 / 2343 —— 注意：模板参数里没有 topk
+__global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage1_kernel(...);
+__global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage2_kernel(...);
+
+// :2421 / :2444 —— 只有一条运行期上界
+if (topk > (int)kF32MaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+```
+
+**fp32 的分片是动态-k 的**（这正合 CLAUDE.md 记的"fp32 行没有宽块臂"）：两个
+kernel 都只按 `kBlockSize` 模板化，`topk` 是**运行期参数**。
+
+真正 static-k 的是**别的**两处：`launch_topk_bf16_chunked` 的
+`switch (topk) { case 512: …<512>; case 1024: …<1024>; }`（`:2090`，16 位臂），
+和 `chunked_f32_applies` 里那句 `params.topk == 512 || params.topk == 1024`
+（`maca_topk.cu:930`）。
+
+**所以把 fp32 的门槛从 `{512,1024}` 放宽到 `<= kF32MaxTopK(4096)` 不新增任何
+kernel 实例**：没有新模板、没有新 kernel，磁盘缓存里的 kernel 目录数**逐字不变**。
+要付的只有两件事，都能算出来：
+
+1. **workspace 随 topk 线性**（`chunked_f32_workspace_bytes`：
+   `B·C·k·4 + B·C·k·4 + B·k·4`）。`b4096` 上 C500 现取 `C=2`：
+
+   | k | `b4096·C=2` workspace | `b4096·C=16` |
+   |---|---|---|
+   | 512 | 33.8 MB | 269.7 MB |
+   | 1024 | 67.6 MB | 539.5 MB |
+   | 2048 | 135.3 MB | 1,079.0 MB |
+
+   现行 512/1024 本来就在分配第一、二行，**2048 是 +67.6 MB**（在 64 GiB 卡上
+   不构成风险），但 **4096 要到 1 GB 以上**，所以"放宽到哪里"必须按 workspace
+   预算选，不能一路放到 `kF32MaxTopK`。
+2. 上面那个顺带的：**`maca_c` 的 `>>` 是算术右移**。`topk >= 2048` 时它偏置
+   `1 << 30`，在**非负**输入上正好等价于 `1 << 31`（唯一区别是 NaN 被分到不同的桶），
+   所以这条不影响正确性；写在这里是因为以后再看到那个 `>>` 就不用重新推一遍。
+
+**两处改动的后果不一样**（记清楚，别混）：
+
+- **只放宽 `chunked_f32_applies` 的条件**（同时把 `f32_chunked_chunks` 的档位
+  补上 `topk > 1024`）：**0 实例化、0 新 kernel**，直接拿到 §19 的 5–9×。
+- **要顺带放宽 16 位臂**：那要付 `launch_topk_bf16_chunked` 的 `switch` 里
+  新增 `case` = **新实例化**（`<2048>` 等），这才是 CLAUDE.md 的 JIT 代价规则
+  管的那个东西。
+
+**§19.3 那句"改动是内核级 / 要盯实例化"因此按后者写的、按前者不成立，
+本条更正。** 两条改动都**仍未做**。
