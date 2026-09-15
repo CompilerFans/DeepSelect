@@ -1,5 +1,10 @@
-// Host-side topk() only; the tvm-ffi export lives in `csrc/ffi/ffi_entries.h`
-// and the kernel template instantiations are in separate files for parallel
+// Host-side topk() AND its tvm-ffi export: this file does not include
+// `csrc/ffi/ffi_entries.h`, it carries its own `TVM_FFI_DLL_EXPORT_TYPED_FUNC`
+// below.  (This line said the export lived in that header until 2026-09-16,
+// which would send a reader changing this signature to a file this TU never
+// sees -- the two architecture trees' entries would then diverge with nothing
+// to report it, the same failure `ffi_entries.h` itself was carrying.)  The
+// kernel template instantiations are in separate files for parallel
 // compilation.
 //
 // [MACA] `.cu`, not upstream's `.cpp`: torch routes a `.cpp` to `$cxx` and a
