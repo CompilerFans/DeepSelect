@@ -869,7 +869,14 @@ Facts the CSV records and the traps in reading it:
 - **The chip is in the path, the manifest and every row.** A perf record whose
   artifact is not identified is not a record: the manifest carries
   `device_name`, `sm_count`, torch version, *both* repositories' commits, the
-  extension's md5 and the status counts.
+  extension's md5 and the status counts. **The extension it names is the one the
+  *device* loads** — `_arch.native_target()`, the same name `run_bench.sh`
+  resolves its header md5 through, so the manifest and `run_header.txt` in one
+  directory cannot disagree. (They did, once: `provenance()` took the first
+  `.so` in `deep_select/`, which on a tree with the default three-family
+  `CUCC_TARGETS` is always `xcore1000` — so a C600U record named the C500
+  artifact. Fixed 2026-09-15; `perf_data/MetaX_C600-U/20260915_075059` is the
+  one record that predates the fix, and its md5 fields are wrong.)
 - **`status` is a column, and it is how a backend declines.** `pass` / `fail` /
   `unsupported`. `deep_gemm` is `unsupported` on **all 95** official cells —
   the grid is bf16 and that backend ranks float32 only — and a table that

@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as _dt
+import glob
 import hashlib
 import json
 import os
@@ -268,8 +269,16 @@ def device_dir_name() -> str:
 def provenance(sm_count: int) -> Dict[str, Any]:
     here = REPO
     host = os.environ.get("DEEP_GEMM_REPO", "/home/compiler_gfx/tilelang/mcDeepGEMM")
-    sos = sorted(f for f in os.listdir(os.path.join(here, "deep_select"))
-                 if f.endswith(".so"))
+    # The extension the *device* loads, which is the one every number below came
+    # from -- `_binding.load(native_target())`, the same name `run_bench.sh`
+    # resolves its md5 through.  Deliberately not "the `.so` in `deep_select/`":
+    # a tree with several architectures built (the default `CUCC_TARGETS`, one
+    # extension per family) has three of them, and taking the first names the
+    # C500 artifact in a C600U record.  The manifest is the record of which
+    # artifact was measured, so naming the wrong one is worse than naming none.
+    target = _arch.native_target()
+    sos = sorted(os.path.basename(p) for p in glob.glob(
+        os.path.join(here, "deep_select", f"deep_select_{target}*.so")))
     md5 = ""
     if sos:
         md5 = hashlib.md5(open(os.path.join(here, "deep_select", sos[0]),
@@ -281,7 +290,7 @@ def provenance(sm_count: int) -> Dict[str, Any]:
         # The arch family, per row: `metax_xcore<N>`, derived from the device
         # rather than from the directory name (the directory is the device's).
         # This is the column a reader filters on to find same-ISA records.
-        "chip": f"metax_{_arch.native_target()}",
+        "chip": f"metax_{target}",
         # The `perf_data/` directory this run belongs in -- the device's name.
         "device_dir": device_dir_name(),
         "device_name": torch.cuda.get_device_name(0),
