@@ -347,6 +347,17 @@ tried or explained, and the two retractions are as important as the wins:
   arm walks the whole load chain and still hits the wall), or on int/float
   emission — none of the three has anywhere to go.
 
+**And it is the one place a cross-backend comparison exists, where it is behind.**
+Settled 2026-09-16 (ledger §8): on the 12 fp32 shapes `deep_gemm` can serve, its
+`topk_coarse12` selector beats this row's span by ~2× at large batch and 4.5–5.5×
+at small batch, measured with both sides' NaN checks removed. The *operator*
+comparison goes the other way only because `deep_gemm` implements its NaN check
+as a torch expression over the whole input (11.8 ms on `b4096-v131072` against
+this row's fused 1.6 ms). So "we are faster than `deep_gemm`" is true of the
+operator and false of the kernel, and the fp32 row is where the gap is. This row
+is the **Sampler** path; deep_gemm cannot run on the bf16 grid at all, so there
+is no equivalent statement for the production Lightning-Indexer path.
+
 Two general traps this cost, both of which this repo has now paid for twice:
 
 1. **A controlled microbench does not transfer to the kernel.** The 1.65× address
@@ -1028,6 +1039,26 @@ Facts the CSV records and the traps in reading it:
   own kernel = 100%, so **>100% means that backend is faster than `maca_c`** (it
   is `maca_c_us / that_us * 100`). It is repeated on every row of a cell, so a
   row reads on its own.
+- **That ratio is kernel-to-kernel, and on a `deep_gemm` row it is not the
+  operator's.** The official matching rule takes kernels whose *name contains
+  `topk`*: `deep_gemm` has exactly **one** (`topk_coarse12`), `maca_c` has three
+  and gets their span — and neither side's NaN scan matches, but the two scans
+  differ by **7×** (`maca_c` fuses it into one kernel; `deep_gemm` pays a
+  torch-level `torch.isnan(input) & (cols < lengths)` over the same tensor).
+  Measured at `b4096-v131072`, fp32/`topk=2048`/full row, on a quiet C500:
+  `deep_gemm`'s selector 3266 µs against `maca_c`'s 6388 µs (**we are ~2×
+  behind**), while the operator comparison is 8037 vs 15870 µs (**we are ~2×
+  ahead**) — the direction flips with the boundary. Whole ledger section:
+  `docs/C500-radix-perf-ledger.zh.md` §8, which also records that launch count
+  is *not* the cause (~0.4 ms of a 7.8 ms gap) and that the NaN scan is a flat
+  ~20% tax on the large cells and 4–6% on the small ones.
+- **The selector grid lists 25 entries but only 12 distinct shapes.** Upstream's
+  `SELECTOR_PERF_SHAPES` is `(n_rows, n_cols, seq_len)` and this repo drops
+  `seq_len` (the window is not this operator's semantics — see
+  `DEEP_GEMM_SELECTOR_PERF_SHAPES`), so its 16 sglang entries collapse to 4
+  shapes measured 4× each, and one `(16, 66551)` appears in both the test-topk
+  and dsa groups. `deep_gemm` therefore passes on 25 rows covering 12 cells, and
+  the extra 13 are re-measurements, not coverage.
 - **`bandwidth_pct_of_wall`/`bandwidth(GB/s)` are the operator's own traffic,
   not the kernel's roof.** `Byte(MB)` counts the input read plus the outputs
   written, which is the quantity `tests/test.py:138` prints as TB/s; it is

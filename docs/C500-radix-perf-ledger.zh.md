@@ -1024,3 +1024,71 @@ cd /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect
 日志在 `/tmp/dsab/shards_0fc74ae.log`。**这个脚本只允许在没有别的
 `official_slice.py` 在飞时运行**（它要换 `.so`，在飞的 shard 会静默读到
 换掉之后的二进制），脚本自己会先检查并拒绝。跑完把结果填回 §5。
+
+## 8. 对照 `deep_gemm` 的 fp32 选择路径（2026-09-16，C500，device 1，机器空闲）
+
+**这节量的是"我们和 `deep_gemm` 差多少"，不是一次改动的前后对照。**
+
+`deep_gemm` 后端只服务 fp32 / `topk <= 2048` 的 **12 个去重 shape**（官方 bf16
+网格上它全部 `unsupported`）。快照 CSV 里 `deep_gemm` 列的
+`relative_pct_vs_maca_c` 在这 12 格上全部 >100%（中位 **2.02×**，最高 **4.27×**
+@ `b1-v107520`），读起来像"deep_gemm 更快"。**那是 kernel 对 kernel：**官方
+配对规则取"kernel 名含 `topk`"者，`deep_gemm` 只有 **1** 个这样的 kernel
+（`topk_coarse12`），maca_c 有 **3** 个（`stage1`/`stage2`/`radix`）取 span，
+而 `maca_c` 的 `nan_scan_kernel` **不匹配**、不计入。两边都把自己那侧的
+NaN 扫描排除在外，但**排除掉的东西差 7 倍**。
+
+### 8.1 相位拆分：`b4096-v131072`（fp32，`topk=2048`，整行 2.00 GiB 输入）
+
+| | 选择 kernel | NaN 扫描 | 其他 | 合计 wall | kernel 数 |
+|---|---|---|---|---|---|
+| `maca_c` | 6388 µs | 1619 µs | ~42 | **8049 µs** | 5 |
+| `deep_gemm` | **3266 µs** | **11788 µs** | 426 | **15892 µs** | 13 |
+
+**多 kernel / 多 launch 不是原因**：wall − Σkernel = 42 µs（maca_c）/
+412 µs（deep_gemm）——多出来的 8 个 launch 只值约 **0.4 ms**，占 7.8 ms 差距的
+**5%**。差距在**工作本身**：`deep_gemm` 的 NaN 检查是 torch 表达式
+（`torch.isnan(input) & (cols < lengths)`），要实体化两张 0.5 GiB 的 bool，
+其中广播比较走 64 位索引的非向量化 `elementwise_kernel_2_2`（**8342 µs**）；
+maca_c 是**一个融合 kernel 读一遍输入**（1619 µs / 2.0 GiB ≈ 1.33 TB/s）。
+
+### 8.2 关掉 NaN 扫描的 A/B（同一二进制，只差一个环境变量）
+
+`DS_TOPK_EXP_NO_NAN_SCAN=1` 是**临时实验开关，已还原**（`git checkout
+csrc/` + 重建，`grep -c EXP_NO_NAN_SCAN` = 0）。它是安全的：在 chunked 路径上
+`ws.lengths` / `ws.nan_flags` 只是 memset 成 0、之后按行 OR 的 flag 表
+（`maca_topk.cu:858`），跳过扫描就保持全 0 = "未发现 NaN"。
+`deep_gemm` 侧无法改包，改测**它自己的选择 kernel**（直接调
+`fp32_indexer_topk_selector`，绕开它 Python 层的扫描）。
+
+| shape | maca_c 扫描 ON | maca_c 扫描 OFF | 差 | 扫描占比 | deep_gemm 选择 kernel |
+|---|---|---|---|---|---|
+| b1 v131072 | 291 µs | 276 µs | −15 | 5% | 61 µs |
+| b1 v107520 | 281 µs | 270 µs | −11 | 4% | 58 µs |
+| b16 v107520 | 358 µs | 337 µs | −21 | 6% | 61 µs |
+| b256 v107520 | 565 µs | 451 µs | −114 | 20% | 207 µs |
+| b4096 v107520 | 6904 µs | 5571 µs | −1333 | 19% | 2699 µs |
+| b4096 v131072 | 8037 µs | 6425 µs | **−1612** | **20%** | **3260 µs** |
+
+### 8.3 结论（三条，缺一条这份记录就不完整）
+
+1. **我们的 fp32 选择路径确实落后很多，而且是批次越小越落后**：大 batch
+   （b4096）约 **2×**，小 batch（b1/b16）**4.5–5.5×**（270–337 µs vs 58–61 µs）。
+   去掉 NaN 扫描不改变这个排序——它只是一个恒定税。
+2. **NaN 扫描在大 batch 上是操作级约 20% 的税**（1612 / 8037）。小 batch 上
+   只占 4–6%（一行只有几百 KB），所以小 batch 的落后**不是**扫描造成的。
+3. **我们"操作级赢 deep_gemm"完全来自对方用 torch 写 NaN 检查**：去掉两边
+   的扫描后，`b4096-v131072` 是 **6425 µs vs 3260 µs = 我们慢 1.97×**；
+   带上扫描才是 8037 vs 15870 = 我们快 1.97×。**方向相反，且都在 2× 量级。**
+
+带宽口径（选择段，2.147 GB 输入）：我们 **334 GB/s ≈ 20%** 的 1,650 GB/s
+只读墙；对方 **659 GB/s ≈ 40%**。两边都离墙很远，对方近一倍。
+**这个"单趟对单趟"是查过源码的，不是假设**：`launch_topk_f32_chunked` 对输入行
+只有一趟（`topk_f32_chunk_stage1_kernel` 走 chunk，`stage2` 只在候选缓冲上跑
+radix，`radix_core.cuh:2249` / `:2309`），我们多出来的那一趟就是 NaN 扫描。
+所以差距在**每元素的活**（stage1 的阈值/staging 原子）上，不在趟数上——
+一开始的"我们读两趟"猜测是错的，已在此更正。
+
+**未做的部分，写在这里而不是省略**：三个我们落后的 shape（b1/b16-v107520、
+b1-v131072）里各占多少是选择 kernel、多少是固定开销，**没有拆**——这节只把
+"扫描 vs 非扫描"分开了。要动 fp32 行之前先补这一步。
