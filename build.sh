@@ -1,161 +1,87 @@
 #!/usr/bin/env bash
 #
-# Build the DeepSelect MACA kernels.
+# Build the DeepSelect MACA kernels in place.
 #
-# Mirrors the host repository's `build.sh` in shape (script_dir cd, MACA_PATH /
-# LD_LIBRARY_PATH, CUCC_TARGETS, restore the caller's directory), with one
-# deliberate difference: it does NOT run `bdist_wheel`.
+# The host repository's `build.sh` shape: script_dir cd, same MACA_PATH /
+# LD_LIBRARY_PATH setup, same `CUCC_TARGETS` variable and meaning, restore the
+# caller's directory.  Three deliberate differences:
 #
-# `setup.py` stamps the version with `datetime.now()`, and a PEP 517 / wheel
-# run executes `setup.py` twice -- once for metadata and once for the wheel.
-# When the two runs straddle a second boundary pip rejects the result as
-# misnamed (`Wheel has unexpected file name`), an upstream bug this tree
-# inherits.  `build_ext --inplace` runs `setup.py` once and sidesteps it, so
-# that is the working path and the one this script drives.  See README.md,
-# "Installation" / "MACA (MetaX)".
+#   * it does NOT run `bdist_wheel`.  `setup.py` stamps the version with
+#     `datetime.now()`, and a wheel run executes `setup.py` twice -- once for
+#     metadata, once for the wheel -- so the two can straddle a second boundary
+#     and be rejected as misnamed (`Wheel has unexpected file name`), an
+#     upstream bug this tree inherits.  `build_ext --inplace` runs `setup.py`
+#     once.  Producing the wheel is `install.sh`'s job.
+#   * it removes the stale in-place `.so` first.  `build_ext --inplace` copies
+#     out of `build/lib` by comparing timestamps, and the in-place `.so` sits
+#     under `deep_select/` (gitignored), so it is stale by default -- a stale
+#     one means measuring the previous binary while reading the new source
+#     (handover §4).  Never trust the timestamp.
+#   * `CUCC_TARGETS` defaults to one target per architecture family this tree
+#     names -- `xcore1000,xcore1500,xcore1600` -- matching the host repository's
+#     default in spirit.  It cannot be that list verbatim: several of the host
+#     default's entries are *aliases of a family already in the list*
+#     (`xcore1008`->1000, `xcore1502`/`xcore1520`->1500, `xcore1610`/`xcore1620`
+#     ->1600), and this `setup.py` names the extension after the FAMILY
+#     (`deep_select_xcore<N>`), so two targets in one family build the same
+#     extension twice -- the second silently overwriting the first -- while
+#     `mxcc` rejects `xcore1610`/`xcore1620` outright (`invalid target ID`) and
+#     the 3.5.3.17 toolchain rejects `xcore1008` too.  A caller who wants a
+#     specific part's spelling passes it, one target at a time.
 #
-# Usage:
-#     ./build.sh                               # this device (CUCC_TARGETS=native)
-#     ./build.sh --all                         # every architecture this tree names
-#     ./build.sh --targets xcore1000,xcore1600
-#     ./build.sh --clean                       # rm -rf build first (full rebuild)
-#     ./build.sh --list                        # print resolved targets and exit
+# Env: CUCC_TARGETS (default `xcore1000,xcore1500,xcore1600`), MACA_PATH
+#      (default /opt/maca), MAX_JOBS (torch reads it for ninja's -j).
 #
-# Env:
-#     CUCC_TARGETS   overrides the targets (same variable and meaning as the
-#                    host repository's build.sh); an explicit value always wins
-#     MACA_PATH      MACA toolkit root (default /opt/maca)
-#     MAX_JOBS       forwarded to ninja as -j
+# Cross-arch is the same line as any other build:
+#
+#     CUCC_TARGETS=xcore1000,xcore1600 ./build.sh
+#     CUCC_TARGETS=native ./build.sh          # just this device
 #
 set -euo pipefail
 
-# ── project root ────────────────────────────────────────────────────────────
 original_dir=$(pwd)
 script_dir=$(realpath "$(dirname "$0")")
 cd "$script_dir"
 
-usage() {
-    cat >&2 <<'EOF'
-Usage: build.sh [options]
-
-  --targets LIST   architectures to build (default: $CUCC_TARGETS or native)
-  --all            xcore1000,xcore1500,xcore1600 -- every family this tree names
-  --clean          rm -rf build before building (full rebuild)
-  --list           print the resolved targets and exit
-  -h, --help       this message
-
-Env: CUCC_TARGETS (default native), MACA_PATH (default /opt/maca), MAX_JOBS
-EOF
-}
-
-# ── environment ─────────────────────────────────────────────────────────────
 export MACA_PATH="${MACA_PATH:-/opt/maca}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
-# A config's shared-memory footprint is valid for exactly one architecture, and
-# torch appends a second `--offload-arch` when this is set -- which would put a
-# 128 KiB-sized config into a 64 KiB extension.  `setup.py` refuses to build
-# with it set, so clear it here rather than making the caller find out.
-if [[ -n "${TORCH_EXTENSION_ENABLE_XC1500_COMPILE:-}" ]]; then
-    echo "build.sh: clearing TORCH_EXTENSION_ENABLE_XC1500_COMPILE -- it makes" >&2
-    echo "          torch append an architecture to every source; name the" >&2
-    echo "          architectures with CUCC_TARGETS instead" >&2
-    unset TORCH_EXTENSION_ENABLE_XC1500_COMPILE
-fi
+# torch's `_find_cuda_home()` reads `CUDA_HOME`/`CUDA_PATH` *before* falling back
+# to `${MACA_PATH}/tools/cu-bridge` (guess #4) and cucc's own `CUCC_PATH` is what
+# it execs `gomxccbin` from, so a stale one left in the caller's shell silently
+# selects a different toolkit than MACA_PATH names -- measured on this box, whose
+# profile exports `CUDA_PATH`/`CUCC_PATH` for an SDK root the `/opt/maca` symlink
+# no longer points at, making `MACA_PATH=/opt/maca-3.8.1 ./build.sh` fail inside
+# cucc with `.../tools/cu-bridge/bin/gomxccbin: No such file or directory`.
+# Derive all three from MACA_PATH instead: they then cannot disagree, and
+# `MACA_PATH=... ./build.sh` means what it says.
+export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
+export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
+export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
-# ── arguments ───────────────────────────────────────────────────────────────
-do_clean=0
-list_only=0
-targets_spec="${CUCC_TARGETS:-native}"
+# One target per family this tree names -- the same three `xcore<N>` bases the
+# host repository's default resolves to, minus its per-part aliases, which this
+# build cannot take (see the note above): one extension per family, so a second
+# target in the same family would overwrite the first, and the toolchain does
+# not accept every alias spelling anyway.  `deep_select/_arch.py::FAMILY_OF_TARGET`
+# is the authority on which spellings exist; an unrecognized one fails the build
+# rather than being skipped.
+export CUCC_TARGETS="${CUCC_TARGETS:-xcore1000,xcore1500,xcore1600}"
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --targets)
-            [[ $# -ge 2 ]] || { echo "build.sh: --targets needs a value" >&2; exit 2; }
-            targets_spec="$2"; shift 2 ;;
-        --targets=*) targets_spec="${1#*=}"; shift ;;
-        --all)       targets_spec="xcore1000,xcore1500,xcore1600"; shift ;;
-        --clean)     do_clean=1; shift ;;
-        --list)      list_only=1; shift ;;
-        -h|--help)   usage; exit 0 ;;
-        *)           echo "build.sh: unknown argument: $1" >&2; usage; exit 2 ;;
-    esac
-done
-
-# Resolve through the repo's own `_arch`, so the script and the build cannot
-# disagree about what a target means or which kernel tree it lands on.
-resolved=$(CUCC_TARGETS="$targets_spec" python - <<'PY'
-import os
-from deep_select._arch import CAPACITY_BYTES, family_of_target, kernel_directory, resolve_targets
-
-for target in resolve_targets(os.environ.get("CUCC_TARGETS")):
-    family = family_of_target(target)
-    print(f"{target} {family} {CAPACITY_BYTES[family] // 1024} "
-          f"{kernel_directory(family)}")
-PY
-) || { echo "build.sh: could not resolve CUCC_TARGETS='$targets_spec'" >&2; exit 1; }
-
-echo "build.sh: MACA_PATH=$MACA_PATH"
-echo "build.sh: CUCC_TARGETS=$targets_spec"
-while read -r target family kibs tree; do
-    echo "build.sh:   $target -> xcore$family (${kibs} KiB/SM, csrc/$tree/)"
-done <<<"$resolved"
-if [[ "$list_only" == 1 ]]; then
-    exit 0
-fi
-
-# ── clean ───────────────────────────────────────────────────────────────────
-if [[ "$do_clean" == 1 ]]; then
-    echo "build.sh: rm -rf build"
-    rm -rf build
-fi
-
-# ── drop the stale in-place extensions ──────────────────────────────────────
-# `build_ext --inplace` copies out of build/lib by comparing timestamps, and
-# the in-place `.so` sits under `deep_select/` (gitignored), so it is stale by
-# default.  A stale one means measuring the previous binary while reading the
-# new source -- the handover note records exactly this trap.  Hence: remove
-# before building, never trust the timestamp.
-while read -r target _family _kibs _tree; do
-    for so in deep_select/deep_select_${target}*.so \
-              build/lib.*/deep_select/deep_select_${target}*.so; do
-        if [[ -e "$so" ]]; then
-            echo "build.sh: rm -f $so"
-            rm -f "$so"
-        fi
-    done
-done <<<"$resolved"
-
-# ── build ───────────────────────────────────────────────────────────────────
-# setup.py runs one extension per architecture, each with its own
-# `--offload-arch`, so the loop over targets lives in setup.py and not here.
-export CUCC_TARGETS="$targets_spec"
+rm -rf build dist
+rm -rf ./*.egg-info
+rm -f deep_select/deep_select_*.so
 
 which python
 python -c 'import sys, torch
 print(f"build.sh: python {sys.version.split()[0]}, torch {torch.__version__}")'
+echo "build.sh: CUCC_TARGETS=$CUCC_TARGETS"
 
-if [[ -n "${MAX_JOBS:-}" ]]; then
-    python setup.py build_ext --inplace -j "$MAX_JOBS"
-else
-    python setup.py build_ext --inplace
-fi
-
-# ── verify ──────────────────────────────────────────────────────────────────
-# An architecture with no kernel is a hole in `backend="maca_c"` on that
-# device, not a smaller build, so a build that produced no extension for a
-# requested target is an error here rather than at the first `topk` call.
-missing=0
-while read -r target family _kibs _tree; do
-    found=$(ls deep_select/deep_select_${target}*.so 2>/dev/null | head -1 || true)
-    if [[ -n "$found" ]]; then
-        echo "build.sh: OK  $target (xcore$family): $(basename "$found")"
-    else
-        echo "build.sh: ERROR no extension produced for $target" >&2
-        missing=1
-    fi
-done <<<"$resolved"
-[[ "$missing" == 0 ]] || exit 1
+# setup.py runs one extension per architecture, each with its own
+# `--offload-arch`, so the loop over targets lives there and not here.  A
+# target it cannot resolve, or one the compiler rejects, fails the build:
+# `set -e` above and `_arch.family_of_target` below are the whole check.
+python setup.py build_ext --inplace
 
 echo "build.sh: done"
 cd "$original_dir"

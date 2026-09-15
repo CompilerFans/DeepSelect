@@ -1,219 +1,69 @@
 #!/usr/bin/env bash
 #
-# Build DeepSelect for this device and install it into the active environment.
+# Build a wheel for this device and install it into the active environment.
 #
-# Mirrors the host repository's `install.sh` in shape (script_dir cd, MACA_PATH,
-# CUCC_TARGETS, bdist_wheel, pip install --force-reinstall --no-deps, restore
-# the caller's directory).  One thing the host script does not need and this
-# tree does: a *single* `setup.py` invocation per wheel.
+# The host repository's `install.sh` shape: script_dir cd, same MACA_PATH /
+# LD_LIBRARY_PATH setup, same `CUCC_TARGETS` (default `native`), `bdist_wheel`
+# then `pip install --force-reinstall --no-deps`, restore the caller's
+# directory.  One difference, recorded because it is not obvious from the
+# reference:
 #
-# `setup.py` stamps the version with `datetime.now()`.  A PEP 517 install runs
-# `setup.py` twice -- once for metadata, once for the wheel -- and when the two
-# runs straddle a second boundary pip rejects the result as misnamed
-# (`Wheel has unexpected file name`); build isolation adds a second, unrelated
-# failure (torch is not in pip's isolated environment).  So the wheel is built
-# here by one `bdist_wheel` run, and pip is handed the finished file.  See
-# README.md, "Installation" / "MACA (MetaX)".
+#   * the wheel is built by a single `bdist_wheel` run and pip is handed the
+#     finished file, rather than `pip install .`.  `setup.py` stamps the
+#     version with `datetime.now()`, and a PEP 517 install runs `setup.py`
+#     twice -- once for metadata, once for the wheel -- so the two runs can
+#     straddle a second boundary and pip rejects the result as misnamed
+#     (`Wheel has unexpected file name`).  Build isolation adds a second,
+#     unrelated failure (torch is not in pip's isolated environment).  One run
+#     cannot straddle itself, and `pip install .` is the split this avoids.
 #
-# Env:
-#     CUCC_TARGETS   targets to build (default native); explicit value wins
-#     MACA_PATH      MACA toolkit root (default /opt/maca)
-#     MAX_JOBS       forwarded to ninja as -j
-#     BUILDROOT      if set, the wheel is also copied to ${BUILDROOT}/wheel/
-#                    (the host repository's `build.sh` destination, so one
-#                    packaging step can collect both wheels)
+# It is the same build as `./build.sh` -- same variable, same default, one
+# extension per architecture -- differing only in what it produces: a wheel,
+# installed, instead of an in-place extension.
 #
-# Usage:
-#     ./install.sh                             # build for this device, install
-#     ./install.sh --targets xcore1600         # build for another architecture
-#     ./install.sh --all                       # xcore1000,xcore1500,xcore1600
-#     ./install.sh --build-only                # leave the wheel in dist/
-#     ./install.sh --clean                     # rm -rf build dist first
+# Env: CUCC_TARGETS (default `xcore1000,xcore1500,xcore1600`), MACA_PATH
+#      (default /opt/maca), MAX_JOBS (torch reads it for ninja's -j).
+#
+# Cross-arch is the same line as any other install:
+#
+#     CUCC_TARGETS=xcore1600 ./install.sh
+#     CUCC_TARGETS=native    ./install.sh         # just this device
 #
 set -euo pipefail
 
-# ── project root ────────────────────────────────────────────────────────────
 original_dir=$(pwd)
 script_dir=$(realpath "$(dirname "$0")")
 cd "$script_dir"
 
-usage() {
-    cat >&2 <<'EOF'
-Usage: install.sh [options]
-
-  --targets LIST   architectures to build (default: $CUCC_TARGETS or native)
-  --all            xcore1000,xcore1500,xcore1600 -- every family this tree names
-  --build-only     build the wheel but do not install it
-  --clean          rm -rf build dist before building
-  --no-link        do not symlink the built extension into deep_select/
-  -h, --help       this message
-
-Env: CUCC_TARGETS (default native), MACA_PATH (default /opt/maca), MAX_JOBS
-EOF
-}
-
-# ── environment ─────────────────────────────────────────────────────────────
 export MACA_PATH="${MACA_PATH:-/opt/maca}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
-# See build.sh: a second `--offload-arch` in one extension would carry a
-# 128 KiB-sized config into a 64 KiB build, and setup.py refuses outright.
-if [[ -n "${TORCH_EXTENSION_ENABLE_XC1500_COMPILE:-}" ]]; then
-    echo "install.sh: clearing TORCH_EXTENSION_ENABLE_XC1500_COMPILE -- it makes" >&2
-    echo "            torch append an architecture to every source; name the" >&2
-    echo "            architectures with CUCC_TARGETS instead" >&2
-    unset TORCH_EXTENSION_ENABLE_XC1500_COMPILE
-fi
+# See build.sh: torch's `_find_cuda_home()` reads `CUDA_HOME`/`CUDA_PATH` ahead
+# of its `${MACA_PATH}/tools/cu-bridge` fallback and cucc execs `gomxccbin` from
+# `CUCC_PATH`, so a stale one in the caller's environment silently wins (on this
+# box it made `MACA_PATH=/opt/maca-3.8.1 ./install.sh` die inside cucc).  Derive
+# all three from MACA_PATH so they cannot disagree with the toolkit this script
+# is building against.
+export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
+export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
+export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
-# ── arguments ───────────────────────────────────────────────────────────────
-do_clean=0
-build_only=0
-do_link=1
-targets_spec="${CUCC_TARGETS:-native}"
+# Same default as this tree's `build.sh` -- one target per family -- and *not*
+# the host repository's `install.sh`, which pins `native`.  There the wheel is
+# built for the active device; here it is the artifact a packaging step
+# collects, so it carries every family this tree names.  See `build.sh` for why
+# the family aliases in the host's list cannot be used.
+export CUCC_TARGETS="${CUCC_TARGETS:-xcore1000,xcore1500,xcore1600}"
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --targets)
-            [[ $# -ge 2 ]] || { echo "install.sh: --targets needs a value" >&2; exit 2; }
-            targets_spec="$2"; shift 2 ;;
-        --targets=*) targets_spec="${1#*=}"; shift ;;
-        --all)       targets_spec="xcore1000,xcore1500,xcore1600"; shift ;;
-        --build-only) build_only=1; shift ;;
-        --no-link)   do_link=0; shift ;;
-        --clean)     do_clean=1; shift ;;
-        -h|--help)   usage; exit 0 ;;
-        *)           echo "install.sh: unknown argument: $1" >&2; usage; exit 2 ;;
-    esac
-done
-
-# Resolve through the repo's own `_arch`, as build.sh does, so the targets this
-# script reports and the targets setup.py builds are the same list.
-resolved=$(CUCC_TARGETS="$targets_spec" python - <<'PY'
-import os
-from deep_select._arch import CAPACITY_BYTES, family_of_target, kernel_directory, resolve_targets
-
-for target in resolve_targets(os.environ.get("CUCC_TARGETS")):
-    family = family_of_target(target)
-    print(f"{target} {family} {CAPACITY_BYTES[family] // 1024} "
-          f"{kernel_directory(family)}")
-PY
-) || { echo "install.sh: could not resolve CUCC_TARGETS='$targets_spec'" >&2; exit 1; }
-
-echo "install.sh: MACA_PATH=$MACA_PATH"
-echo "install.sh: CUCC_TARGETS=$targets_spec"
-while read -r target family kibs tree; do
-    echo "install.sh:   $target -> xcore$family (${kibs} KiB/SM, csrc/$tree/)"
-done <<<"$resolved"
-
-# ── clean ───────────────────────────────────────────────────────────────────
-if [[ "$do_clean" == 1 ]]; then
-    echo "install.sh: rm -rf build dist"
-    rm -rf build dist
-fi
+rm -rf build dist
 rm -rf ./*.egg-info
-
-# ── stale in-place extensions ───────────────────────────────────────────────
-# The install lands in site-packages, but a leftover in-place `.so` under
-# `deep_select/` sits ahead of it on sys.path for anything run from the repo
-# root (`PYTHONPATH=.` is how every test here is invoked), so it would shadow
-# what was just installed.  Remove it, and build.sh will not be confused by it
-# either.
-while read -r target _family _kibs _tree; do
-    for so in deep_select/deep_select_${target}*.so \
-              build/lib.*/deep_select/deep_select_${target}*.so; do
-        if [[ -e "$so" ]]; then
-            echo "install.sh: rm -f $so"
-            rm -f "$so"
-        fi
-    done
-done <<<"$resolved"
-
-# ── build the wheel ─────────────────────────────────────────────────────────
-export CUCC_TARGETS="$targets_spec"
 
 which python
 which pip
-python -c 'import sys, torch
-print(f"install.sh: python {sys.version.split()[0]}, torch {torch.__version__}")'
+echo "install.sh: CUCC_TARGETS=$CUCC_TARGETS"
 
-# A single `bdist_wheel` invocation, then pip is handed the finished file.
-# `setup.py` derives the version from `datetime.now()`, and a PEP 517 install
-# runs it twice -- metadata, then wheel -- so the two runs can straddle a
-# second and pip rejects the result as misnamed.  One run cannot straddle
-# itself, and `pip install .` is the split this avoids.
-dist_dir="$script_dir/dist"
-rm -rf "$dist_dir"
-mkdir -p "$dist_dir"
-
-if [[ -n "${MAX_JOBS:-}" ]]; then
-    python setup.py bdist_wheel --dist-dir "$dist_dir" -j "$MAX_JOBS"
-else
-    python setup.py bdist_wheel --dist-dir "$dist_dir"
-fi
-
-wheel=$(ls "$dist_dir"/deep_select-*.whl 2>/dev/null | head -1 || true)
-if [[ -z "$wheel" ]]; then
-    echo "install.sh: ERROR no wheel was produced in $dist_dir" >&2
-    exit 1
-fi
-
-# No version repair.  An earlier revision renamed the wheel here when the
-# filename's version field disagreed with the metadata, and the branch was
-# unreachable: `setup.py`'s version is `<__version__>+<git_rev>.<datetime_rev>`,
-# and PEP 440 normalization turns the whole `+...` local segment into `[a-z0-9.]`
-# -- so the hyphens that would split it into its own filename field become dots
-# before the name is built (verified: `1.0.0+abc-20260915` lands in the
-# filename as `1.0.0+abc.20260915`, one field, dots present).  The predicate's
-# `"." in fields[1]` guard then always fired and the rename never ran.  The
-# wheel is named by the build and installed by that name.
-echo "install.sh: built $(basename "$wheel")"
-
-# Verify the targets got in before installing anything.  A wheel built for one
-# architecture and deployed to another fails at import, not here.
-#
-# Read through python's own `zipfile`, not `unzip`: the latter is not installed
-# on every MACA host (it is absent on the one this was measured on), while
-# python is already required by everything above.
-missing=0
-while read -r target _family _kibs _tree; do
-    if python -m zipfile -l "$wheel" | grep -q "deep_select/deep_select_${target}"; then
-        echo "install.sh: OK  wheel contains $target"
-    else
-        echo "install.sh: ERROR wheel has no extension for $target" >&2
-        missing=1
-    fi
-done <<<"$resolved"
-[[ "$missing" == 0 ]] || exit 1
-
-# ── export ──────────────────────────────────────────────────────────────────
-# Same destination and same env var as the host repository's `build.sh`
-# (`${BUILDROOT}/wheel/`), so one packaging step can collect both wheels by
-# pointing a single BUILDROOT at it.  The host copies there from `build.sh`
-# right after `bdist_wheel`; here the wheel is `install.sh`'s to produce, so
-# this is the only place it can happen.
-#
-# After the verification above, not before: what is exported is a wheel that
-# was confirmed to carry an extension for every requested target.  And before
-# the `--build-only` exit below, so a caller who only wants the artifact
-# (`--build-only` + BUILDROOT) gets it without installing anything.
-if [[ -n "${BUILDROOT:-}" ]]; then
-    dest="${BUILDROOT}/wheel"
-    mkdir -p "$dest"
-    cp "$wheel" "$dest/"
-    echo "install.sh: wheel also copied to $dest/$(basename "$wheel")"
-fi
-
-if [[ "$build_only" == 1 ]]; then
-    echo "install.sh: --build-only, leaving the wheel at $wheel"
-    exit 0
-fi
-
-# ── install ─────────────────────────────────────────────────────────────────
-# --force-reinstall so a rebuild overwrites the previous one (the wheel's local
-# version segment changes every build, but a same-second rebuild would not) and
-# --no-deps because the MACA-patched torch is the environment's job, as in the
-# host repository's install.sh.
-pip install "$wheel" --force-reinstall --no-deps
+python setup.py bdist_wheel
+pip install dist/*.whl --force-reinstall --no-deps
 
 # Confirm what the environment now resolves, from a directory that is not the
 # repo -- otherwise the check reports the repo's own package and passes even
@@ -223,43 +73,6 @@ import deep_select, os
 print("install.sh: installed", deep_select.__version__)
 print("install.sh: from     ", os.path.dirname(deep_select.__file__))
 ' )
-
-# ── link into the repo ──────────────────────────────────────────────────────
-# Every test in this repository is run with `PYTHONPATH=.` from the repo root
-# (README "Testing"), which resolves `deep_select` to the *repo* copy first --
-# so an installed wheel alone would not be what the suites exercise.  Symlink
-# the wheel's extension back under `deep_select/` so the repo and the
-# environment are the same build.  A symlink, not a copy: the build.sh stale-
-# binary trap (an in-place `.so` newer than its source, skipped by
-# `build_ext --inplace`'s timestamp check) needs the file to be visibly a
-# link, and a re-`build.sh` overwrites the target rather than fighting it.
-if [[ "$do_link" == 1 ]]; then
-    # Ask pip where the install actually went.  Not `import deep_select` from
-    # the repo root: `PYTHONPATH=.` puts the repo's own (uninstalled) package
-    # first on sys.path, so that reports the repo back and the link becomes a
-    # symlink onto itself.
-    site_pkgs=$(pip show deep_select | sed -n 's/^Location: //p' | head -1)
-    if [[ -z "$site_pkgs" || ! -d "$site_pkgs/deep_select" ]]; then
-        echo "install.sh: ERROR cannot locate the installed package to link" >&2
-        exit 1
-    fi
-    while read -r target _family _kibs _tree; do
-        target_so=$(ls "$site_pkgs/deep_select/deep_select_${target}"*.so 2>/dev/null | head -1 || true)
-        if [[ -z "$target_so" ]]; then
-            echo "install.sh: ERROR the installed package has no $target extension" >&2
-            exit 1
-        fi
-        name=$(basename "$target_so")
-        link="$script_dir/deep_select/$name"
-        if [[ "$target_so" == "$link" ]]; then
-            echo "install.sh: ERROR refusing to link $name onto itself" >&2
-            exit 1
-        fi
-        rm -f "$link"
-        ln -s "$target_so" "$link"
-        echo "install.sh: linked deep_select/$name -> $site_pkgs"
-    done <<<"$resolved"
-fi
 
 echo "install.sh: done"
 cd "$original_dir"
