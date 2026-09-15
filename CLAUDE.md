@@ -166,8 +166,11 @@ Build plumbing worth knowing before editing `setup.py`:
   `__MACACC__` into `__CUDACC__`/`__NVCC__`, which torch's c10 headers and `kerutils/common/common.h` both branch on),
   `-gencode=...` → `-DNV_ARCH_A100 -Xdevice -D__CUDA_ARCH__=800`, `-lcudart` → `-lmcruntime`, plus the MACA library `-I`
   catalogue. Everything it does not recognize it forwards unchanged to mxcc (`-forward-unknown-to-compiler`), which is how
-  the mxcc-dialect flags in `compile_args` reach the compiler. `TORCH_EXTENSION_ENABLE_XC1500_COMPILE` is refused outright
-  — it would put a second `--offload-arch` in one extension.
+  the mxcc-dialect flags in `setup.py`'s `nvcc_args` reach the compiler.
+  **That catalogue is cucc's, and `setup.py` must not repeat it**: `conf.json`'s `all/adder` already passes `-I` for
+  `cu-bridge/include`, `include/soft-link` and every `include/mc*` library, plus `-imacros __macro_mxcc.h`. A hand-written
+  copy drifts — this file carried 12 entries, 7 of which cucc already passed and 5 of which it did not. What cucc does
+  *not* add is `${MACA_PATH}/include` (`maca_bfloat16.h`, `cub/`), which is the one that stays.
 - **Do not reimplement cu-bridge.** An earlier revision of `setup.py` wrote its own `bin/nvcc` wrapper over mxcc and pointed
   `CUDA_HOME` at it. It replicated the header and the `-gencode` translation, and silently dropped the rest — including
   `bin/gnu`, which torch asks *this same `CUDA_HOME`* for unconditionally (`get_wcuda_gnu_path()`, called from

@@ -291,7 +291,8 @@ for the absent `bin/nvcc`, and cucc is the whole CUDA-dialect adapter (the
 `__macro_mxcc.h` compatibility header, torch's `-gencode` →
 `-D__CUDA_ARCH__`, `-lcudart` → `-lmcruntime`, the MACA library include
 catalogue). `-gencode` derived from the building machine's device is not
-involved, so one extension is one architecture.
+involved: the architecture set comes from `CUCC_TARGETS` through
+`-offload-arch`, and the include catalogue is cucc's own, not repeated here.
 
 `-use-fast-math` is passed with FTZ turned back off
 (`-Xclang -fdenormal-fp-math-f32=ieee`): the ranking path is integer-only and
