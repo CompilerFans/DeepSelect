@@ -243,11 +243,27 @@ step can collect both wheels:
 BUILDROOT=/tmp/out ./install.sh --build-only   # export the wheel, install nothing
 ```
 
-`CUCC_TARGETS` defaults to `native`, the device the build is running on (the
-same variable and meaning as the host repository's `build.sh`), and each target
-builds the kernel that fits it -- `csrc/xcore1000/` for a 64 KiB part,
-`csrc/xcore1600/` for a 128 KiB one -- producing
-`deep_select/deep_select_xcore<N>*.so`.
+`CUCC_TARGETS` is the whole target interface (the same variable and meaning as
+the host repository's `build.sh`); it defaults to `xcore1000,xcore1500,xcore1600`
+-- one target per family, the same *set* of families the host default names,
+minus its per-part aliases, which this build cannot take (one extension per
+family: two targets in one family would overwrite each other, and `mxcc` rejects
+`xcore1610`/`xcore1620` outright). `CUCC_TARGETS=native` is the shortcut for
+"just this device", and `CUCC_TARGETS=xcore1600 ./build.sh` for one family.
+
+Each target builds the kernel its capacity selects -- `csrc/xcore1000/` for a
+64 KiB part, `csrc/xcore1600/` for a 128 KiB one -- producing
+`deep_select/deep_select_xcore<N>*.so`. A 128 KiB part currently gets
+`csrc/xcore1000/` too (`deep_select/_arch.py`'s `DEEP_SELECT_128KIB_KERNEL`),
+because the ported kernel selects wrong on a C600U. That is a deliberate
+containment and not a fallback: the C500 kernel is correct on a C600U and
+1.5-2.9x faster than the port there (see CLAUDE.md, "Can a C600U run the C500
+kernel").
+
+Both scripts derive `CUDA_HOME`/`CUDA_PATH`/`CUCC_PATH` from `MACA_PATH`: torch's
+`_find_cuda_home()` reads the first two before its `${MACA_PATH}/tools/cu-bridge`
+fallback, and `cucc` execs `gomxccbin` out of `CUCC_PATH`, so a stale value in
+the caller's environment silently beats `MACA_PATH`.
 
 Device code is compiled by `mxcc`, reached through **cu-bridge's `cucc`**, with
 `--offload-arch=xcore<N>` passed per extension, so an extension is for the

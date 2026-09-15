@@ -185,7 +185,7 @@ The kernel tree is split **by per-SM shared memory**, because that is what a top
 | `csrc/xcore1000/` | C500 (64 KiB/SM) | `maca_topk.cu`, hand-written for MACA |
 | `csrc/xcore1600/` | C600, C600U (128 KiB/SM) | the upstream kernels, ported — **currently not built by default** |
 
-**A 128 KiB family builds `csrc/xcore1000/` by default right now**, because `csrc/xcore1600/` selects wrong on a C600U (see Known holes). `deep_select/_arch.py`'s `DEEP_SELECT_128KIB_KERNEL` chooses the source tree — `xcore1000` (default) or `xcore1600` for working the 32-lane audit — and it never changes the extension's name, so `backend="maca_c"` cannot see which one backed it. Delete the override once the port passes `scripts/official_slice.py` on a C600U.
+**A 128 KiB family builds `csrc/xcore1000/` by default right now**, because `csrc/xcore1600/` selects wrong on a C600U (see Known holes). This is *confirmed as the right containment*, not merely an unrefuted default: `csrc/xcore1000/` is 1.5-2.9x faster than the port on the C600U (4096x16384 k=512: 1413.8us / 94.9 GB/s vs 4146.8us / 32.4 GB/s) and passes `check_result` on every cell the port fails. Nothing in that tree is C500-specific code, and the capacity gate cannot fire in this direction -- see "Can a C600U run the C500 kernel" below. `deep_select/_arch.py`'s `DEEP_SELECT_128KIB_KERNEL` chooses the source tree — `xcore1000` (default) or `xcore1600` for working the 32-lane audit — and it never changes the extension's name, so `backend="maca_c"` cannot see which one backed it. Delete the override once the port passes `scripts/official_slice.py` on a C600U.
 
 `csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel), `TopkSelectArgs` — and the per-SM capacity constant `NATIVE_SHARED_MEMORY_PER_SM_BYTES`, selected by `-DDEEP_SELECT_NATIVE_ARCH` (set by `setup.py` from the same `CUCC_TARGETS` entry as `--offload-arch`). Both kernels reject a config that cannot fit that capacity **at compile time**, so upstream's 227 KiB-sized tuples cannot ride into a 64 KiB build and fail at launch instead.
 
@@ -260,6 +260,52 @@ Two general traps this cost, both of which this repo has now paid for twice:
    memory violation), and a "pass 1 only" variant is only meaningful if the
    removal leaves the *other* pass's cost unchanged.
 
+### Can a C600U run the C500 kernel?  Yes — measured, and it already does
+
+The answer to "why not just build `csrc/xcore1000/` on the 128 KiB parts" is
+that the tree **already does**, and it is the better artifact, not a fallback.
+Measured on one C600U (device 1, MACA 3.8.1), both artifacts built for the same
+extension name, official cases / checks / timing rule:
+
+| cell | `csrc/xcore1000/` | `csrc/xcore1600/` |
+| --- | --- | --- |
+| 4096 x 16384 k=512 bf16 | **1413.8 us / 94.9 GB/s** | 4146.8 us / 32.4 GB/s — FAIL |
+| 4096 x 1024 k=512 bf16 | **477.4 us / 17.6 GB/s** | 997.3 us / 8.4 GB/s — FAIL |
+| 512 x 262144 k=512 bf16 | **1793.1 us / 149.7 GB/s** | 2721.2 us / 98.6 GB/s — FAIL |
+| 8 x 4096 k=512 fp32 | 16.7 us / 7.9 GB/s | 16.4 us / 8.0 GB/s — FAIL |
+
+`check_result` passes all five cells on `csrc/xcore1000/` and fails all five on
+the port. The two fp32 cells are latency-bound and identical; the rest is
+1.5–2.9x.
+
+**Why it is feasible, checkable rather than assumed:**
+
+- Nothing in `csrc/xcore1000/` is C500-specific code. No `__MACA_ARCH__` branch
+  anywhere in the tree; every cross-lane primitive is already 64-lane
+  (`radix_core.cuh`'s `kWarpSize = 64` under `__MACACC__`); the ranking is
+  integer key manipulation with no float math to differ per part.
+- **Capacity cannot fire in this direction.** `structs.h` picks
+  `NATIVE_SHARED_MEMORY_PER_SM_BYTES` (64 KiB for family 1000, 128 KiB for
+  1500/1600) from `-DDEEP_SELECT_NATIVE_ARCH`, which `setup.py` passes from the
+  target, so a C600U build gets the 128 KiB constant. The compile-time rejection
+  exists to stop an *oversized* config; a 64 KiB-sized one in a 128 KiB SM
+  cannot trip it.
+- **The SM-count-sensitive constants are already parameterized** by
+  `NATIVE_SM_COUNT` (104/28/32): `wave_filled_chunks` (the chunked split),
+  `NATIVE_F32_CHUNK_WORK_TARGET`, and the grid sizing. The C500 values are the
+  measured ones; the 1500/1600 values are arithmetic carried over and **marked
+  unmeasured in the source**. That is a performance caveat, and the table above
+  bounds it — the correct artifact still wins by the measured margin.
+- What is given up is exactly the port's reason for existing: `topk` in
+  `(1024, 4096]` and `vocab_size >= 2^23` are the *ported* kernel's limits, and
+  `maca_topk.cu` has neither (it has no capacity gate by design — "a 128 KiB SM
+  runs it with room to spare"). bf16 `sorted_value`, rejected by the port, is
+  accepted here. Neither limit is reached by the official grid.
+
+So the default is not a workaround standing in for a broken kernel: it is the
+shipping kernel, on a part it is correct and faster on. `DEEP_SELECT_128KIB_KERNEL`
+exists to reach the port while it is being debugged, not because the C500 tree
+is a second-best on a C600U.
 ### xcore1600 — the ported upstream kernels
 
 **This tree does not currently pass on a C600U and is not built by default** — see Known holes for the measurement, the reproduction, and the 32-lane suspect list. Everything below describes it as written; treat it as unvalidated until the audit is done and re-run `scripts/official_slice.py --backend maca_c` on a C600U with `DEEP_SELECT_128KIB_KERNEL=xcore1600`.
@@ -943,7 +989,9 @@ it removes the seeding that made an earlier reading of this look deterministic w
 
 - **`csrc/xcore1600/` selects wrong on a C600U. This is measured, not suspected, and it is the first thing to
   fix.** It is *contained* for now — a 128 KiB family builds `csrc/xcore1000/` by default
-  (`DEEP_SELECT_128KIB_KERNEL`, see Kernel architecture above), which passes 200/200 on a C600U. Setting that variable
+  (`DEEP_SELECT_128KIB_KERNEL`, see Kernel architecture above), which passes 200/200 on a C600U — and is not merely
+  correct there but **faster**: see "Can a C600U run the C500 kernel", which measures 1.5-2.9x against the port and
+  records why the containment is the right answer rather than a fallback. Setting that variable
   to `xcore1600` puts the broken kernel back, which is how the audit is done.
   On a `MetaX C600-U` (reports `sm89` → family 1600, so `backend="maca_c"` resolved *here*, not to `maca_topk.cu`):
   a monotonic row of `0..511` with `topk=8` returns indices like `[448..455]` where the answer is `[511..504]`, and
@@ -960,8 +1008,23 @@ it removes the seeding that made an earlier reading of this look deterministic w
   shim, with a `gnu` symlink patched in so it builds at all) gave **7 distinct** wrong sets in 8 runs, the cu-bridge build
   **8 of 8**. The two `.so` md5s differ, so this is same-source-same-behavior under a toolchain change, not a regression.
   The port was only ever validated by compilation — the README says so, and CLAUDE.md's own "Beware reading upstream's
-  CUDA-era code as a model" note predicted exactly this. Run-to-run variance is itself the tell: a lane-width bug in an
-  under-counted reduction is a race, not a fixed offset.
+  CUDA-era code as a model" note predicted exactly this.
+
+  **Re-measured 2026-09-15 on an `arange` row: the wrong answer is DETERMINISTIC, and the "racy" reading was an
+  artefact of random input.** Five consecutive runs of `2 x 512 k=8` returned the identical index list. The *set* is
+  right (`{504..511}`), the pairing is right (`value == input[idx]`), and the **values** are wrong: the row is
+  `[512, 506, 508, 510, 512, 514, 516, 518]` where `input[idx]` is exactly that. 512 is exact in bf16, so this is not
+  precision, and it is not a shuffle — it is a systematic value corruption. `min(selected) >= max(unselected)` fails on
+  every row of the official slice. Run-to-run variance is a tell for a lane-width bug, but it is not the tell *here*, and
+  treating it as one sent the audit at the wrong shape.
+
+  **Diagnosis: a rescan reachable only on a C600U.** The port's config tuples stage more per CTA than a 64 KiB SM can
+  hold, so a path that re-reads the row once its staging buffer is exhausted cannot be taken on C500 — which is the only
+  part the port was ever run on. Where it can be taken, it drops the high members of a **tied run at the threshold** and
+  writes every member back with the *group's low member's* key: five 508s for a group `{508, 510, 512}`, three 504s for
+  `{504, 506}`. That is exactly the measured shape, it explains why the index set survives and only the values do not,
+  and it is reachable only on the larger part. The 32-lane list below remains a live suspect for the *other* symptoms
+  (`device-side assert`, the NaN trap on NaN-free input) — it is no longer the explanation for this one.
   **Prime suspect, already documented:** the port carries CUDA's 32-lane model on a 64-lane wave. `common_parts.cuh:121`
   (`NUM_WARPS = NUM_THREADS / 32`), `:1463` (`__ballot_sync(0xFFFFFFFF, …)`), `:488`/`:496`/`:497`/`:784`/`:791`/`:1432`/
   `:1440`/`:1469` (`__reduce_add_sync(0xFFFFFFFF, …)`), `v3/topk_select.cuh:54` (`threadIdx.x % 32`), and the `0xFFFFFFFF`
