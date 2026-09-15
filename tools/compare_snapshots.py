@@ -20,7 +20,7 @@ changed (either direction); **0** otherwise, including when `torch` or
 
 Usage:
     tools/compare_snapshots.py <candidate_dir> --base <baseline_dir>
-                               [--tol 0.03] [--top 25]
+                               [--tol 0.03]
 """
 
 from __future__ import annotations
@@ -30,6 +30,10 @@ import csv
 import os
 import sys
 from typing import Dict, List, Optional, Tuple
+
+# How many cells the report prints per backend, by |delta|.  A constant, not a
+# flag: its only caller passed one value, so the default was dead config.
+PRINTED = 40
 
 KEY = ("case_source", "family", "n_rows", "n_cols", "top_k", "sorted_value",
        "input_dtype", "index_dtype")
@@ -90,13 +94,6 @@ def main() -> int:
                          "(default 0.03; the official harness re-run, same "
                          "binary and same device, was measured at a median "
                          "0.25%% and a max 1.3%% per cell above 100us)")
-    ap.add_argument("--top", type=int, default=25,
-                    help="how many cells to print per backend, by |delta|")
-    ap.add_argument("--device", default="",
-                    help="the device these two runs were taken on, for the "
-                         "header only; it is never used to decide anything "
-                         "(the comparison is per cell, and both sides are the "
-                         "same directory's runs by construction)")
     args = ap.parse_args()
 
     base = load(args.base)
@@ -158,7 +155,7 @@ def main() -> int:
               f"({len(skipped)} not comparable)")
         print(f"    total {tot_b:.1f} -> {tot_c:.1f} us "
               f"({(tot_c - tot_b) / tot_b * 100:+.2f}%)")
-        shown = [r for r in sorted(results, key=lambda r: -abs(r[3]))[:args.top]
+        shown = [r for r in sorted(results, key=lambda r: -abs(r[3]))[:PRINTED]
                  if r[4] != "noise"]
         if not shown:
             print("    (no cell beyond tolerance)")

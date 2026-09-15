@@ -915,6 +915,15 @@ split、且 bf16 略快"，**这两格不能当作同一个口径的两个读数
 
 ## 5. 门的记录
 
+> **本节的命令是记录，不是用法（2026-09-16）**：`scripts/official_slice.py` 已
+> 删除，其 `--backend` / `--seed` / `--sample` 并入官方 `tests/test.py`
+> （`PYTHONPATH=$PWD python tests/test.py --backend maca_c --sample 1000000 -rf`），
+> `--shard` 没有跟过来。下表**按当时的命令原样保留**——账本不该被改写成一条
+> 没产生过这些数字的命令。两点随之改变：**全表门现在是一个进程**（重启能力
+> 没了，`--shard` 是当时唯一的缓解手段）；**本节同一条 shard 的耗时相差 5×**
+> （`~340 s` 见 handover §4，`1,730–1,917 s` 见下方两条），照抄任何一个都不可靠，
+> 以当天实测为准。
+
 | 门 | 命令 | 结果 |
 |---|---|---|
 | 官方大表（正确性） | `scripts/official_slice.py --backend maca_c --sample 1000000 --shard i/4` ×4 串行 | `ea8bcb0`：82170/82170，0 unsupported，0 failed，17.5 min；`4cd740a`：82170/82170；`3f8dfe7`：82170/82170；**`4baee61`（fp32 split + 两级门槛）：82170/82170**（20543+20543+20542+20542，每 shard 1,730–1,917 s） |

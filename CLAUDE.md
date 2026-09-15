@@ -20,18 +20,18 @@ Public entry point is `deep_select.topk` (`deep_select/interface.py`). **Its sig
 
 Three backends, which name **implementations, not architectures** (the same vocabulary as mcDeepGEMM's `backend=`):
 
-- `"torch"` (**the default**) — reference implementation built from torch ops; runs on any device/dtype, including where no kernel is built. Also the differential-check arm.
+- `"torch"` (**the default**) — reference implementation built from torch ops; runs on any device/dtype, including where no kernel is built. Also the differential-check backend.
 - `"maca_c"` — the MACA kernel this device has: the **production path** and the fast one. Which kernel that is is a property of the device, not a call-site choice.
 - `"deep_gemm"` — the `deep_gemm` package's `fp32_indexer_topk_selector`, called through its Python API, imported lazily. Implements a **strict subset** of the contract (float32 only, `topk <= 2048`, unordered); what it cannot serve raises `UnsupportedByBackend`, never a narrower answer.
 
 **The default is correctness-first, and that is a deliberate reversal of an
 earlier one.** `backend` used to default to `"maca_c"`; it defaults to
-`"torch"` now (2026-09-15), because the reference is the arm that does not
+`"torch"` now (2026-09-15), because the reference is the backend that does not
 depend on a kernel being correct on the device in front of you — so making it
 the default costs no coverage (the kernel is validated *against* it) and
 removes the last route by which a caller who asked for nothing in particular
 could reach a kernel defect.  The cost is speed, and it is real: the `torch`
-arm is the slow one.
+backend is the slow one.
 
 The default is **not** a string default in the signature — `backend=None`
 means "take the process default", resolved per call by `_default_backend()`
@@ -41,12 +41,13 @@ in the signature: `inspect.signature(deep_select.topk)` reports `None`, and a
 caller who wants the kernel asks for it by name or exports
 `DS_TOPK_BACKEND=maca_c`.
 
-Two arms therefore say different things and both are needed when the default
-moves: `scripts/official_slice.py --backend maca_c` **pins** the call (it
-rebinds `deep_select.topk`), so it tests the kernel and says *nothing* about
-the default; `--default-arm maca_c` leaves the official call site unmodified
-and sets `DS_TOPK_BACKEND`, so it tests the path a bare call actually takes.
-Passing both is refused rather than silently reported as one.
+Two modes therefore say different things and both are needed when the default
+moves: `tests/test.py --backend maca_c` **pins** the call (it passes
+`backend=` into `run_testcase`), so it tests the kernel and says *nothing*
+about the default; `DS_TOPK_BACKEND=maca_c python tests/test.py` leaves the
+official call site unmodified and sets the process default instead, so it tests
+the path a bare call actually takes.  (The suite's `--backend` defaults to
+`maca_c`, so a bare `python tests/test.py` is the pinned mode.)
 
 ## Build
 
@@ -416,7 +417,7 @@ Known holes for the measurement, the reproduction, and the 32-lane suspect list.
 Everything below describes it as written; treat it as unvalidated. To work on
 it, put `csrc/xcore1600/api.cu` and its `instantiations/` into `SOURCES`, put
 `csrc/xcore1600/` and `csrc/3rdparty/kerutils/include` back on `include_dirs`,
-and re-run `scripts/official_slice.py --backend maca_c` on a C600U. It will not
+and re-run `tests/test.py --backend maca_c` on a C600U. It will not
 compile as-is: its `NATIVE_SHARED_MEMORY_PER_SM_BYTES` went with the
 per-architecture build (see "the arch constants are arguments"), so it needs a
 capacity passed at runtime the same way `sm_count` now is.
@@ -424,7 +425,7 @@ capacity passed at runtime the same way `sm_count` now is.
 **A C600U pass is necessary but not sufficient to wire it back in**: switching
 the source tree also changes which kernel serves C600 and C600U production
 traffic at every shape — that is a routing change, not just an audit milestone,
-and it needs the perf arm too (the C600U measurements say the port also *loses*
+and it needs the perf measurement too (the C600U measurements say the port also *loses*
 on time today).
 
 `api.cu` is the host dispatch + pybind11 module; `v3/` (bf16) and `v3_fp32/` (fp32) each hold `topk_select.cuh` + a generated `instantiations/` directory. `common_parts.cuh`, `bit_utils.cuh`, `utils.cuh`, `config.h`, `dispatch_utils.h` are shared.
@@ -676,7 +677,7 @@ Measured 2026-09-14 on `maca_topk.cu` (xcore1000, the build's own flags): the
 launched device functions report a **48-byte stack frame, no spill**, with
 **`topk_kernel_radix<…,512,…>` at 44 MT / up to 78 STregisters** and
 **`topk_kernel_radix<…,1024,…>` at 46 MT / up to 78 ST**. The `topk_bf16_*_kernel_*`
-family (the runtime/static-k/chunked arms) is lighter — 24 MT / 42-52 ST — and
+family (the runtime/static-k/chunked variants) is lighter — 24 MT / 42-52 ST — and
 those are only reached by the chunked path (below).
 
 ### 2. Occupancy — `~/maca_kernel_doctor`
@@ -831,9 +832,9 @@ The check is **always on**. It is a raw **bit-pattern** test (exponent all-ones 
 
 `abort_when_nan_found=True` (default) calls `trap()` / aborts. With `False`, such a row leaves `0x3F3F3F3F` in `output_idx[row, 0]` and the rest of the row is undefined — a NaN row must be excluded from any value comparison, as the suites do.
 
-## What `backend="torch"` is, and is not, as the validation arm
+## What `backend="torch"` is, and is not, as the validation backend
 
-`"torch"` is the right arm for **adapter and interface** work, and it is not an
+`"torch"` is the right backend for **adapter and interface** work, and it is not an
 oracle for the *ranking*.  Both halves are measured; keep them apart.
 
 - **It is not a bare `torch.topk`.**  `topk_torch` (`interface.py:387-557`) is
@@ -846,7 +847,7 @@ oracle for the *ranking*.  Both halves are measured; keep them apart.
 - **A set difference against it is not a defect.**  The contract is
   `min(selected) >= max(unselected)` and says nothing about ties.  Measured with
   `NormalFloatDistribution` (bf16, b 8/64, v 4096/65536, k 512/2048, with and
-  without a window, `/tmp/dsab/tie2.py`) both arms pass that contract on every
+  without a window, `/tmp/dsab/tie2.py`) both backends pass that contract on every
   row, yet they agree on the selected **set** for only **11/64 and 22/64** of
   rows — because **7 to 44 elements of a row tie at the k-th value**, and which
   of them is selected is unspecified.  Set (or elementwise) agreement is
@@ -875,24 +876,23 @@ against the contract on **bf16** cells.  Do not gate on `maca_c == torch`.
 
 There is **no pytest suite and no `conftest.py` here** (unlike mcDeepGEMM). The suite is upstream's, driven by its own `__main__`.
 
-**"Unmodified" is not accurate and this line said it until 2026-09-15**, which made the delta look smaller than it is. `git diff --numstat upstream/main HEAD -- tests/` is the authority: six files changed (`test.py` +231/−119, `lib.py` +42/−38, `kernelkit/build.py` +118, `kernelkit/platform.py` +79/−6, `kernelkit/stress.py` +7/−1, `kernelkit/__init__.py` +1/−1). Two of them are reworks, not portability patches, and both are described below: `test.py`'s extraction and `kernelkit/build.py`'s MACA stack check. The *method* is upstream's throughout — nothing here replaces a checker, and `test.py`'s assertion set is provably unchanged (6 unique `check_is_bitwise_equal` labels, 7 call sites, identical to upstream).
+**"Unmodified" is not accurate and this line said it until 2026-09-15**, which made the delta look smaller than it is. `git diff --numstat upstream/main HEAD -- tests/` is the authority: six files changed (`test.py` +231/−119, `lib.py` +42/−38, `kernelkit/build.py` +118, `kernelkit/platform.py` +79/−6, `kernelkit/stress.py` +7/−1, `kernelkit/__init__.py` +1/−1). Two of them are reworks, not portability patches, and both are described below: `test.py`'s extraction and `kernelkit/build.py`'s MACA stack check. The *method* is upstream's throughout — nothing here replaces a checker, and `test.py`'s assertion set is provably unchanged (**7 unique `check_is_bitwise_equal` labels over 7 call sites**, identical to upstream — label set and count are both checkable rather than asserted: `re.findall(r"check_is_bitwise_equal\(\s*([^,]+?)\s*,", src)` on the two revisions). **This file said "6 unique" until 2026-09-16**; the set is `{NaN guard, index range, unique index, topk gathered value, topk condition, sorted index, sorted value}`, which is seven. The invariant is the *identity*, not the number, so the "6" was a wrong number attached to a right claim — which is exactly the kind of thing a reader re-derives and then distrusts the rest of.
 
 ```bash
 PYTHONPATH=. python tests/test.py --perf-only              # performance grid, 95 cases
 PYTHONPATH=. python tests/test.py --perf-only -nc          # skip the inter-case cooldowns
 PYTHONPATH=. python tests/test.py --perf-only --dtype bf16 # 90 of them, ~1 min on C500
-PYTHONPATH=. python tests/test.py --perf-only --no-deep-gemm-shapes   # force them out
 
-PYTHONPATH=. python scripts/official_slice.py              # correctness, 200/200 sampled
-PYTHONPATH=. python scripts/official_slice.py                    # the default (torch)
-PYTHONPATH=. python scripts/official_slice.py --backend torch    # the reference
-PYTHONPATH=/path/to/mcDeepGEMM:. python scripts/official_slice.py --backend deep_gemm
+PYTHONPATH=. python tests/test.py --backend maca_c --sample 200   # correctness, 200 drawn
+PYTHONPATH=. python tests/test.py --backend torch                # the reference
+PYTHONPATH=/path/to/mcDeepGEMM:. python tests/test.py --backend deep_gemm
+DS_TOPK_BACKEND=maca_c PYTHONPATH=. python tests/test.py         # the unpinned default
 ```
 
 - `tests/test.py` builds a correctness table (105,138 cases, hours) and a performance grid, and runs both through the same `run_testcase`. Its checks are the contract's own — index range, uniqueness, `value_i == input[index_i]`, the definitional `min(selected) >= max(unselected)`, the NaN guard, the orderings. **No reference implementation is computed anywhere**, so nothing can drift from the contract it checks. Every perf case is checked first and timed second, so a case that selects wrong is reported as a failure rather than as a time.
-- `scripts/official_slice.py` drives a seeded uniform sample of the same table through the same official `run_testcase`, capped at `batch_size * vocab_size <= 2**28`.
-- **The `deep_gemm` rows are capability-gated, and the gate is a package question.** `deep_select.deep_gemm_available()` is `import deep_gemm` succeeding *and* the package carrying the entry that backend calls (`fp32_indexer_topk_selector`), cached per process. It is asked by `tests/test.py` (`--deep-gemm-shapes`), `scripts/perf_snapshot.py` (`--deep-gemm-axes`), `scripts/official_slice.py` and `run_bench.sh`; all four take `BooleanOptionalAction`-style tri-states, so `--no-…` forces the arm out and an unset flag takes the probe's answer. **This replaced a `DEEP_GEMM_REPO` path resolution** (2026-09-15): which checkout `import deep_gemm` lands on is not this repository's business, only whether the call will work. Neither the tree's location nor its git commit is recorded any more — `perf_snapshot`'s manifest carries `deep_gemm_package` + `deep_gemm_version` instead. The gate count is therefore **95 cells where the package is absent and 120 where it is present**, on one unmodified tree.
-- `run_test.sh` is the entry point that wraps both arms, records the extension md5 + the `CUDA_VISIBLE_DEVICES` in force + an `mx-smi` snapshot beside each log, and reports a stale extension rather than refusing to run:
+- **`tests/test.py` carries the correctness fast path itself** — `--backend NAME` (default `maca_c`), `--seed S` (seed the table before it is built) and `--sample N` (draw `N` correctness cases; the perf grid is always kept whole). The three were a separate driver's (`scripts/official_slice.py`, deleted 2026-09-16) and moved in because that driver held a **hand copy** of the table construction — measured identical on all 105,138 non-callable fields, so it had not drifted, but it was a second copy that had to be edited in lockstep. `--shard I/N` and the `2**28` element budget did **not** come over: the budget's job passes to the OOM `skip`, and the loss is recorded under "Full-table correctness gate" below.
+- **The `deep_gemm` rows are capability-gated, and the gate is a package question with no flag on it.** `deep_select.deep_gemm_available()` is `import deep_gemm` succeeding *and* the package carrying the entry that backend calls (`fp32_indexer_topk_selector`), cached per process. `tests/test.py`, `scripts/perf_snapshot.py` and `run_bench.sh` each ask it and act on the answer; none of them takes an override, on purpose. **A `--no-…` switch existed for one commit and was removed (2026-09-16) because it could not work**: the switch has to reach every runner, each of which probes for itself, so an override that is not forwarded is an override the caller believes they made. Measured before removing it: `run_bench.sh --no-deep-gemm-shapes` reported "95 official cells only" and ran 120. **This replaced a `DEEP_GEMM_REPO` path resolution** (2026-09-15): which checkout `import deep_gemm` lands on is not this repository's business, only whether the call will work. Neither the tree's location nor its git commit is recorded any more — `perf_snapshot`'s manifest carries `deep_gemm_package` + `deep_gemm_version` instead. The gate count is therefore **95 cells where the package is absent and 120 where it is present**, on one unmodified tree.
+- `run_test.sh` is the entry point that wraps both suites, records the extension md5 + the `CUDA_VISIBLE_DEVICES` in force + an `mx-smi` snapshot beside each log, and reports a stale extension rather than refusing to run:
 
   ```bash
   ./run_test.sh --perf --dtype bf16 -nc # the perf grid, ~1 min on C500
@@ -902,30 +902,55 @@ PYTHONPATH=/path/to/mcDeepGEMM:. python scripts/official_slice.py --backend deep
   ```
 
   It has **no exclusivity gate** on purpose: `pgrep` cannot see device pinning, and `mx-smi` was measured on this box lying both ways (`--show-process` said "no process found" while a job ran; `--show-all-process` put a process holding 4 GB on device 3 under GPUs 0–2). Pick the device with `CUDA_VISIBLE_DEVICES`, run, and read the recorded md5 before comparing two runs.
-- `--backend` is the one thing the official suite cannot express (its call site passes no `backend=`), so the driver rebinds `deep_select.topk` for the run rather than editing the official file.
-- **`test.py`'s delta is an extraction, not a rewrite.** The inline checks of `run_testcase` became `check_result` and `check_call_contract`, so `scripts/perf_snapshot.py` runs *that* code instead of a copy of it — the docstring says so where they are defined. The evidence that this is a refactor and not a behaviour change is mechanical: the `check_is_bitwise_equal` label set and call-site count are identical to upstream's (6 and 7), so no correctness assertion was added, dropped or reworded. A `perf_snapshot` that checked a copy would be free to drift from the gate it claims to mirror.
+- `--backend` is the one thing the official suite cannot express on its own (its call site passes no `backend=`), so it is threaded through `run_testcase` instead of being edited into the official call: `run_testcase(p, backend)` defaults to `maca_c` and passes it to `deep_select.topk`. **The upstream call site is unchanged in shape** — it gained one keyword argument, and the suite's own checks are untouched.
+- **Every case reports a status and the run reaches its summary.** Upstream stops at the first wrong answer (`if not is_correct: sys.exit(1)`), which tells you nothing about the other 105,137 cases. The statuses are `pass` / `check_fail` (selected wrong) / `crash` (raised) / `skip` (`torch.cuda.OutOfMemoryError`, then `empty_cache()`) / `unsupported` (`UnsupportedByBackend` — a coverage gap, not a defect). `check_fail` and `crash` stop the run unless `-rf`, which keeps the flag's upstream meaning (`if not args.run_to_finish: sys.exit(1)` — continue rather than stop). A lost CUDA context **always** stops it: a device-side fault does not raise once, it poisons the context, so a naive loop would print 105k identical crashes and call that a result — `context_alive()` (`torch.cuda.synchronize()`) is how "this case was bad" is told from "there is no device any more". A real SIGSEGV is still uncatchable in-process; see the full-table gate below.
+- **`test.py`'s delta is an extraction, not a rewrite.** The inline checks of `run_testcase` became `check_result` and `check_call_contract`, so `scripts/perf_snapshot.py` runs *that* code instead of a copy of it — the docstring says so where they are defined. The evidence that this is a refactor and not a behaviour change is mechanical: the `check_is_bitwise_equal` label set and call-site count are identical to upstream's (7 and 7, **in the same order**), so no correctness assertion was added, dropped or reworded. One thing to know before running that diff, because it looks alarming and is not: a whitespace-normalised comparison of the `check_is_bitwise_equal` and `assert` lines reports **DIFFERS**, and the entire difference is one variable rename — `assert batch_topk_value is not None` → `assert ans_topk_value is not None`. `run_testcase` still builds the clones as `batch_topk_*` and passes them in; inside the extracted `check_result` they arrive as the parameters `ans_topk_*`, so it is the same check on the same value. Everything else is the same lines at a different indentation. A `perf_snapshot` that checked a copy would be free to drift from the gate it claims to mirror.
 - Two edits under `tests/kernelkit/` are for MACA portability: `platform.py` asks torch whether it can see a device instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA controller), and one PEP 701 f-string at `stress.py:292` is rewritten for Python 3.10. A third, `kernelkit/build.py` (+118), is *ours*: `check_maca_stack_frame`, the `--resource-usage` stand-in for upstream's `cuobjdump` spill gate (see the resource-audit section). `tests/lib.py` carries two more of the same kind, about this torch's missing UInt kernels: `torch.randint(...).to(torch.uint16)` and `result.view(uint).copy_(...)` both raise `NotImplementedError: "copy_" not implemented for 'UInt16'` under `torch.set_default_device("cuda")`, which with the default device set is *every* `randint` in the distributions — the harness could not generate a case at all. `Distribution.as_uint` casts on the CPU and moves the result; `Distribution.put_uint_bits` writes through the equal-width **signed** view. Both are bit-exact; neither changes what a case contains.
-- Not covered by either arm, recorded rather than papered over: the contract rejections (strided row, wrong dtype, `topk` out of range, undersized output buffer) — the official table asserts on values and has no exception cases — and `begin` / `hint` / caller-allocated `output_idx`, which the official call site always passes as `None`.
+- Not covered by either suite, recorded rather than papered over: the contract rejections (strided row, wrong dtype, `topk` out of range, undersized output buffer) — the official table asserts on values and has no exception cases — and `begin` / `hint` / caller-allocated `output_idx`, which the official call site always passes as `None`.
 
-### Full-table correctness gate (C500, ~17.5 min)
+### Full-table correctness gate (C500, hours — see the spread below)
 
 ```bash
-for i in 0 1 2 3; do
-  PYTHONPATH=$PWD python scripts/official_slice.py --backend maca_c --sample 1000000 --shard $i/4
-done
+PYTHONPATH=$PWD python tests/test.py --backend maca_c --sample 1000000 -rf
 ```
 
-82,170 cases, **must be 4 serial shards** (~5.6 min each). **Do not run 8 concurrent** — 8 concurrent torch processes make CUB's onesweep radix sort wedge the device and take the machine down with it (measured). Serial is just as fast; the cost is per-case construction.
+82,170 cases, one process. `--sample 1000000` exceeds the table, so `min()`
+draws all of it; `-rf` is what keeps the run going to its summary.
+
+**Budget the wall clock from a measurement on the day, not from this file.**
+The recorded per-shard figures for this same 20,543-case quarter disagree by
+**5×**: `docs/C500-radix-handover.zh.md` §4 says `~340 s` (→ ~23 min for four),
+and `docs/C500-radix-perf-ledger.zh.md` §5's later rows say **1,730–1,917 s**
+(→ ~2 h for four). Both are for four serial shards of 20543/20543/20542/20542;
+nothing in either says which machine state produced the difference, and no
+single-process run of the whole table has been taken. So: plan for **a couple of
+hours**, and replace this paragraph with the measured number the first time the
+one-process gate is actually run.
+
+`--shard` went with the driver it lived in on 2026-09-16, which is what turned
+four restartable quarters into one:
+
+- **The loss is process-level death, and it has happened here.**
+  `docs/C500-radix-perf-ledger.zh.md:928` records
+  `timeout: the monitored command dumped core` at case 8091/20543. The status
+  loop catches every *Python* failure, but a coredump takes the status table
+  with it and there is nothing in-process to catch. `--shard` was the only
+  mitigation and was the reason the gate was restartable. **If long runs start
+  dying again, this is the first thing to put back** — not a wrapper script.
+- **Do not run the shards concurrently to replace the speed.** There are no
+  shards now, but the rule that produced them stands: **never 8 concurrent
+  torch processes** — 8 of them make CUB's onesweep radix sort wedge the device
+  and take the machine down with it (measured). Serial is just as fast; the cost
+  is per-case construction.
 
 ### Performance snapshots — `scripts/perf_snapshot.py`, `perf_data/<device>/<stamp>/`
 
 ```bash
 CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \
   python3 scripts/perf_snapshot.py                       # the official grid
-  ... --deep-gemm-axes                                   # + the fp32 selector grid
-  ... --dry-run                                          # print the plan, measure nothing
   ... --cases-file extra.json                            # add cases, no code change
-./run_bench.sh [--set-baseline] [--compare-only] [--list] [--arms LIST]
+  ... --out-dir DIR                                      # the record's own directory
+./run_bench.sh [--set-baseline] [--compare-only] [--backends LIST]
 ```
 
 Writes `perf_data/<device>/<YYYYmmdd_HHMMSS>/` — following mcDeepGEMM's
@@ -956,7 +981,7 @@ device.** A record taken on another board is not a comparison for this one;
 **The recorder is thin on purpose: the measurement is the harness's.** Every
 piece is `tests/test.py`, called rather than re-implemented — `performance_cases()`
 for the grid, `check_result` / `check_call_contract` for the checks, `bench_topk`
-for the timing rule, `bench_torch_reference` for the reference arm (a bare
+for the timing rule, `bench_torch_reference` for the reference backend (a bare
 `torch.topk`, which is what the official runner times — **not**
 `backend="torch"`, whose reference implementation pads, masks and converts
 around the same call and launches ~21 kernels where this launches one). The only
@@ -991,7 +1016,7 @@ Facts the CSV records and the traps in reading it:
   dropped those rows would read as "the two backends agree everywhere" when only
   the fp32 cells were ever compared. `fail` still carries its time when one
   could be taken: a case that selects wrong is a defect whatever it runs at.
-  `deep_gemm` numbers only exist at all with `--deep-gemm-axes`.
+  `deep_gemm` numbers exist at all only when the package is importable.
 - **The kernel-name filter is case-insensitive**, here and in `tests/test.py`.
   `torch.topk` is spelled two ways and only one has a lowercase `topk`:
   `at::native::mbtopk::*` (large inputs) and `at::native::gatherTopK_opt`
@@ -1046,14 +1071,14 @@ Beyond mcDeepGEMM's general rules (state the principle and the magnitude; keep r
 - Why: the old approach's cost, with measured numbers.
 - A before→after table over the representative cells, in **both currencies** — µs **and** GB/s, with the trip count and the % of the read-only wall. Logical GB/s is `B × V × 2 B ÷ kernel time`; the wall is a measured **1,487 GB/s streaming read** on C500 (1,344 GB/s mixed) — do not back it out of the kernel. **The wall is per-part; measure it for the part you are on.** On C600U it is **1,545 GB/s**, measured with a purpose-written `uint4` grid-stride read kernel (`/tmp/readwall.cu` in the session that took it — a torch reduction measures 274 GB/s on the same device and is *not* the wall): 224 blocks → 1,545, 448 → 1,532, 896 → 1,523, 1792 → 1,401. The two numbers being close is a coincidence of these two parts, not a constant.
 - A **roofline verdict** for the affected cell: if it is not bandwidth-bound, say what it *is* bound on (currently: per-CTA dependency chain — `load → key transform → compare → shared atomic` — and serialized shared atomics).
-- The gate results. Both arms: `95/95` perf (`./run_test.sh --perf`, ~100 s) **and** a correctness arm — `82170/82170` for the full-table 4-shard run on C500 (`~17.5 min`), or `200/200` for the seeded sample (`./run_test.sh --test`, ~63 s on C600U) when the change is being iterated rather than landed. Say which one you ran.
+- The gate results. Both suites: `95/95` perf (`./run_test.sh --perf`, ~100 s) **and** a correctness suite — `82170/82170` for the full-table 4-shard run on C500 (`~17.5 min`), or `200/200` for the seeded sample (`./run_test.sh --test`, ~63 s on C600U) when the change is being iterated rather than landed. Say which one you ran.
 - An architecture-boundary statement: changes confined to `csrc/xcore1000/` leave xcore1600 byte-identical, so **no C600U validation is owed**. Say so explicitly when true. (Byte-identical is still the right claim — but as of this writing xcore1600 is *not itself validated*, so "no C600U validation is owed" is an argument about the byte-identity of the artifact, not a claim that xcore1600 works. See Known holes.)
 
 These cells frequently have **no compute roofline** — the kernel does a few comparisons and one histogram increment per element and has no FLOP — so "both currencies" lands as logical-GB/s × trips versus the read wall plus a per-CTA limiting factor.
 
-**A contended run is not a record, and it must not move the baseline.** The tell is that **every** backend moved against the same bit-identical `.so` (see the environment traps §2 for the measurement). One more is available before spending a run: `run_bench.sh --compare-only` prints the per-cell `relative_pct_vs_maca_c` for the latest run against the baseline for free, and `deep_select_perf.csv` carries the same ratio on every row — a contended grid shows the *reference* arm drifting, which no tree change can cause. Two rules follow:
+**A contended run is not a record, and it must not move the baseline.** The tell is that **every** backend moved against the same bit-identical `.so` (see the environment traps §2 for the measurement). One more is available before spending a run: `run_bench.sh --compare-only` prints the per-cell `relative_pct_vs_maca_c` for the latest run against the baseline for free, and `deep_select_perf.csv` carries the same ratio on every row — a contended grid shows the *reference* backend drifting, which no tree change can cause. Two rules follow:
 
-- **Do not pass `--set-baseline` on a run whose header shows another torch process.** `run_bench.sh` repoints whenever every arm passed (`BENCH_STATUS -eq 0`), which a contended run does — all three arms "pass", they just measure the wrong thing. Repointing then bakes a phantom regression into the baseline that later runs are compared against, and the run_bench warning ("--set-baseline was given, so the baseline WILL move past this. That is a decision") is exactly the decision not to make. Land the run as a directory, cite the ratio evidence, and re-measure on a quiet box.
+- **Do not pass `--set-baseline` on a run whose header shows another torch process.** `run_bench.sh` repoints whenever every stage passed (`BENCH_STATUS -eq 0`), which a contended run does — all three stages "pass", they just measure the wrong thing. Repointing then bakes a phantom regression into the baseline that later runs are compared against, and the run_bench warning ("--set-baseline was given, so the baseline WILL move past this. That is a decision") is exactly the decision not to make. Land the run as a directory, cite the ratio evidence, and re-measure on a quiet box.
 - **A baseline directory written by `perf_snapshot.py` directly is invisible to `run_bench.sh`.** `latest_result_dir()` requires a `manifest.json` **and** a `run_header.txt`; a baseline produced by the snapshot rather than by `run_bench.sh` has only the former, so `--compare-only` and the automatic comparison both report "no baseline at …" and skip. A repoint under `run_bench.sh` will therefore look like it worked and change nothing about what gets compared. (Both old baselines were deleted on 2026-09-15 — `perf_data/` is empty and awaited a clean re-measure on a quiet device; a `run_bench.sh --set-baseline` run is what is supposed to create the first one, precisely so it has a `run_header.txt` and is not born invisible.)
 
 ## Build-change discipline
@@ -1287,7 +1312,7 @@ What a caller still needs is stated rather than implied: **torch at the call
 site** (tensors cross as DLPack, but a `torch.Tensor` is what has the
 `__dlpack__` protocol, and output buffers are allocated with `torch.empty`),
 and **`tvm_ffi` to load the artifact at all**. `deep_select/interface.py`
-imports torch for its own checks and its `backend="torch"` reference arm -- that
+imports torch for its own checks and its `backend="torch"` reference backend -- that
 is the harness layer, unchanged, not the ABI.
 
 **A kernel launch must run inside `_binding.launching()`.** The C++ side reads

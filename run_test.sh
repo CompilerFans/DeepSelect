@@ -2,10 +2,15 @@
 #
 # Run this tree's tests the way upstream runs them.
 #
-# Two arms, both upstream's own, unmodified: `tests/test.py --perf-only` (the
-# whole performance grid in ONE process, every case checked before it is timed)
-# and `scripts/official_slice.py` (a seeded sample of the correctness table
-# through upstream's own `run_testcase`).
+# Two suites, one file: `tests/test.py --perf-only` (the whole performance grid
+# in ONE process, every case checked before it is timed) and `tests/test.py`
+# (a seeded sample of the correctness table, run through the same
+# `run_testcase`).  The correctness half used to be a separate driver
+# (`scripts/official_slice.py`, deleted 2026-09-16) whose `--backend` /
+# `--seed` / `--sample` now live in the official file; "upstream's own file,
+# extended" is the accurate description, not "unmodified" -- the checks
+# themselves are untouched, and that is checkable (`git diff upstream/main HEAD
+# -- tests/test.py` touches no assertion).
 #
 # What this adds over typing those in is *recording*, not gating: whichever
 # extension the run actually loaded, and what the box looked like while it ran.
@@ -15,11 +20,10 @@
 #     ./run_test.sh --perf -nc                # ... without the per-case cooldowns
 #     ./run_test.sh --perf --dtype bf16       # 90 of the 95 cases
 #     ./run_test.sh --test                    # correctness sample (default 200)
-#     ./run_test.sh --test --sample 1000000 --shard 0/4
+#     ./run_test.sh --test --sample 2000
 #     ./run_test.sh --all                     # perf then correctness
-#     ./run_test.sh --list                    # print the plan and exit
 #
-# Anything after the known options is forwarded to the arm verbatim, so
+# Anything after the known options is forwarded to the suite verbatim, so
 # upstream's own flags (`-nc`, `-rf`, `--dtype`) work without this script knowing
 # them all -- the ones listed are only the ones it has to parse.
 #
@@ -43,20 +47,23 @@
 # The md5 is recorded because this tree's `.so` is gitignored, so "what did I
 # measure" is not implied by the source -- and it has already been the thing
 # that made a confusing timing difference findable.  A stale extension is
-# reported loudly but does not stop the run (the arm is often checking a source
+# reported loudly but does not stop the run (the suite is often checking a source
 # tree whose build you only want the *result* of, and refusing costs a round
 # trip); the md5 is recorded either way, so a later reader is never misled.
 #
 # Env:
-#     CUDA_VISIBLE_DEVICES  device selection; applied to the arm.  Default:
+#     CUDA_VISIBLE_DEVICES  device selection; applied to the suite.  Default:
 #                           unchanged (whatever the host set).
 #     DS_RESULTS_DIR        same as --results
 #     MACA_PATH             MACA toolkit root (default /opt/maca).  MACA_HOME is
 #                           consulted when this is unset; this one wins if both are set.
 #     DS_TOPK_BACKEND       which implementation a call with no `backend=` runs
-#                           (the library default is `torch`, the reference),
-#                           honoured by BOTH arms; `run_bench.sh` sets `maca_c`
-#                           for its gate arms for the same reason.
+#                           (the library default is `torch`, the reference).
+#                           **It does not reach these suites any more**: both go
+#                           through `tests/test.py`, whose call always carries
+#                           `backend=` explicitly (see `--backend` under Options).
+#                           Use `--backend` here; reach for this variable when
+#                           what you want to test is an *unpinned* caller.
 #
 set -euo pipefail
 
@@ -66,32 +73,30 @@ cd "$script_dir"
 
 usage() {
     cat >&2 <<'EOF'
-Usage: run_test.sh [--perf | --test | --all] [options] [-- <arm args>]
+Usage: run_test.sh [--perf | --test | --all] [options] [-- <suite args>]
 
-Arms (default --perf):
+Suites (default --perf):
   --perf               tests/test.py --perf-only   (the official perf grid)
-  --test               scripts/official_slice.py   (correctness sample)
+  --test               tests/test.py               (correctness sample)
   --all                both, perf first
 
 Options:
-  --dtype DTYPE        bf16 | fp32 (forwarded to the arm)
+  --dtype DTYPE        bf16 | fp32 (forwarded to the suite)
   -nc, --no-cooldown   forwarded to tests/test.py; skip the per-case sleeps
-  --sample N           correctness arm: how many cases (default 200)
-  --shard I/N          correctness arm: run shard I of N
-  --backend NAME       correctness arm, PINNED call: maca_c | torch | deep_gemm.
-                       Unset = the library's own default (torch), exercised
-                       through the unmodified official call site.
-  --default-arm NAME   correctness arm, UNPINNED call: set the process default
-                       to NAME and leave `deep_select.topk(...)` as written.
-                       "maca_c" here = "the default serves the kernel", which
-                       --backend maca_c does not test (it pins the call).
+  --sample N           correctness suite: how many cases (default 200; the
+                       table is 105,138, which is hours)
+  --backend NAME       correctness suite: maca_c (the default), torch, or
+                       deep_gemm.  Passed to `deep_select.topk` at the call site,
+                       so the default tests the kernel rather than the reference.
+                       (DS_TOPK_BACKEND -- what an *unpinned* caller resolves to
+                       -- does NOT reach this suite: the call here always carries
+                       a backend.  To test the default, call the library.)
   --results DIR        where the log + receipt go (default results/)
   --allow-build        build first if the extension is missing or older than
                        the sources (default: run anyway, and say so in the log)
-  --list               print what would run and exit
   -h, --help           this message
 
-Anything after `--` goes to the arm verbatim.
+Anything after `--` goes to the suite verbatim.
 There is no exclusivity gate: pick the device with CUDA_VISIBLE_DEVICES, and
 read the recorded md5 + mx-smi snapshot before comparing two runs.
 
@@ -102,40 +107,43 @@ EOF
 export MACA_PATH="${MACA_PATH:-${MACA_HOME:-/opt/maca}}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
-arm=""
+suite=""
 results_dir="${DS_RESULTS_DIR:-results}"
 allow_build=0
-list_only=0
 dtype=""
 declare -a perf_args=()      # --dtype, -nc/-rf: tests/test.py knows these
-declare -a test_args=()      # --sample, --shard, --backend: official_slice.py does
+# The correctness suite's defaults are the ones the deleted driver applied:
+# 200 cases rather than the whole 105,138-case table, and `-rf` so a case that
+# goes wrong is recorded and the run still reaches its summary.  A caller's
+# own `--sample` / `--backend` is appended after these and argparse keeps the
+# last occurrence, so the caller wins.
+declare -a test_args=(--sample 200 -rf)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --perf)             arm="${arm:+$arm,}perf"; shift ;;
-        --test)             arm="${arm:+$arm,}test"; shift ;;
-        --all)              arm="perf,test"; shift ;;
+        --perf)             suite="${suite:+$suite,}perf"; shift ;;
+        --test)             suite="${suite:+$suite,}test"; shift ;;
+        --all)              suite="perf,test"; shift ;;
         --dtype)            [[ $# -ge 2 ]] || { echo "run_test.sh: --dtype needs a value" >&2; exit 2; }
                             dtype="$2"; perf_args+=("--dtype" "$2"); shift 2 ;;
         --dtype=*)          dtype="${1#*=}"; perf_args+=("$1"); shift ;;
-        --sample|--shard|--backend|--default-arm)
+        --sample|--backend)
                             [[ $# -ge 2 ]] || { echo "run_test.sh: $1 needs a value" >&2; exit 2; }
                             test_args+=("$1" "$2"); shift 2 ;;
-        --sample=*|--shard=*|--backend=*|--default-arm=*) test_args+=("$1"); shift ;;
+        --sample=*|--backend=*) test_args+=("$1"); shift ;;
         --results)          [[ $# -ge 2 ]] || { echo "run_test.sh: --results needs a value" >&2; exit 2; }
                             results_dir="$2"; shift 2 ;;
         --results=*)        results_dir="${1#*=}"; shift ;;
-        # tests/test.py knows these (they come from lib.stick_unit_test_args);
-        # official_slice.py does not, so they must not reach the test arm.
+        # Both suites are `tests/test.py` now, so these reach both; they are
+        # kept in perf_args only, so one command line carries one copy.
         -nc|--no-cooldown|-rf|--run-to-finish) perf_args+=("$1"); shift ;;
         --allow-build)      allow_build=1; shift ;;
-        --list)             list_only=1; shift ;;
         -h|--help)          usage; exit 0 ;;
         --)                 shift
                             # After `--`, split on what the flag is: the two
-                            # arms do not share a CLI, and forwarding the union
-                            # to both was a bug (official_slice.py exits 2 on
-                            # `--dtype`, which the default `--all` would hit).
+                            # suites do not share a CLI, and forwarding the union
+                            # to both was a bug (`--dtype` with `--perf-only`
+                            # asks the perf grid a question it cannot answer).
                             while [[ $# -gt 0 ]]; do
                                 case "$1" in
                                     --dtype|--dtype=*) perf_args+=("$1"); shift ;;
@@ -145,11 +153,11 @@ while [[ $# -gt 0 ]]; do
                             done
                             break ;;
         *)                  echo "run_test.sh: unknown argument: $1" >&2
-                            echo "  (pass arm-specific flags after --)" >&2
+                            echo "  (pass suite-specific flags after --)" >&2
                             usage; exit 2 ;;
     esac
 done
-arm="${arm:-perf}"
+suite="${suite:-perf}"
 
 # ── the extension: which one, and is it the one the sources describe ────────
 # The **device's** family, not the build list's first entry: a tree built for
@@ -207,18 +215,6 @@ stamp=$(date +%Y%m%d_%H%M%S)
 receipt="${results_dir}/deepselect_run_${stamp}"
 devices="${CUDA_VISIBLE_DEVICES:-<unset: whatever the host set>}"
 
-if [[ "$list_only" == "1" ]]; then
-    echo "run_test.sh: arm(s)      = $arm"
-    echo "run_test.sh: extension   = $so"
-    echo "run_test.sh: md5         = $md5"
-    echo "run_test.sh: devices     = $devices"
-    echo "run_test.sh: dtype       = ${dtype:-(all)}"
-    echo "run_test.sh: perf args   = ${perf_args[*]:-(none)}"
-    echo "run_test.sh: test args   = ${test_args[*]:-(none)}"
-    echo "run_test.sh: receipt     = ${receipt}.txt"
-    exit 0
-fi
-
 mkdir -p "$results_dir"
 
 # ── run ─────────────────────────────────────────────────────────────────────
@@ -226,7 +222,7 @@ run_one() {
     local name="$1"; shift
     local log="${receipt}_${name}.log"
     {
-        echo "# run_test.sh     arm=${name}"
+        echo "# run_test.sh     suite=${name}"
         echo "# timestamp_utc   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
         echo "# host            $(hostname)"
         echo "# extension       ${so}"
@@ -256,21 +252,21 @@ run_one() {
 }
 
 rc=0
-IFS=',' read -ra arms <<<"$arm"
-for a in "${arms[@]}"; do
+IFS=',' read -ra suites <<<"$suite"
+for a in "${suites[@]}"; do
     case "$a" in
         perf)
             run_one perf tests/test.py --perf-only "${perf_args[@]+"${perf_args[@]}"}" || rc=1
             ;;
         test)
-            run_one test scripts/official_slice.py "${test_args[@]+"${test_args[@]}"}" || rc=1
+            run_one test tests/test.py "${test_args[@]+"${test_args[@]}"}" || rc=1
             ;;
-        *) echo "run_test.sh: unknown arm '$a'" >&2; exit 2 ;;
+        *) echo "run_test.sh: unknown suite '$a'" >&2; exit 2 ;;
     esac
 done
 
 {
-    echo "# run_test.sh: ${arm} finished rc=${rc}"
+    echo "# run_test.sh: ${suite} finished rc=${rc}"
     echo "# extension_md5 ${md5}   (${so})"
     echo "# cuda_visible_devices ${devices}"
 } >> "${receipt}.txt"

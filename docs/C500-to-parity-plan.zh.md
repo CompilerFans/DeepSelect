@@ -1075,7 +1075,7 @@ b256 的 110.5 µs 只覆盖 **256 个 CTA**（104 AP 上 2.46 波），而 bf16
 | `NATIVE_F32_CHUNK_WORK_TARGET` | **260（实测）** | **80（缩放）** | 它是 2.5 × AP 数；C600U 上 2.5 × 32 = 80，但 2.5 这个比值本身只在 C500 上验证过 |
 | `NATIVE_SM_COUNT` | 104 | 32 | 网格填充的分母 |
 | 流的墙 | **1,650 GB/s**（`uint4` 流式读） | **1,545 GB/s**（已实测，见 `docs/C500-radix-perf-ledger.zh.md`） | 所有 GB/s 的分子 |
-| **csrc/xcore1600/** | 不建 | **建但已知错** | 见 Known holes：C600U 上选错，必须先在 C600U 上跑通 `scripts/official_slice.py` |
+| **csrc/xcore1600/** | 不建 | **建但已知错** | 见 Known holes：C600U 上选错，必须先在 C600U 上跑通 `tests/test.py --backend maca_c`（2026-09-16 前写作 `scripts/official_slice.py`，该驱动已删除） |
 
 **这一节的四个实验都不落地任何改动**，被测源码与 `.so` 都已恢复
 （`radix_core.cuh` 回 HEAD；仓库根 `.so` = `fullB_row.so`，
@@ -2395,6 +2395,10 @@ exact for a denormal fill" —— **这条只有 fp32 一侧成立**。所以拿
 > 同批加入 `scripts/official_slice.py --default-arm`：`--backend` 钉的是
 > **调用**（不测默认），`--default-arm` 钉的是**默认**（调用点不动），
 > 二者互斥地各答一个问题。
+> **该驱动 2026-09-16 已删除**，名字也早已从 `--default-arm` 改成
+> `--default-backend`；这项能力现在由环境变量 `DS_TOPK_BACKEND` 承担，
+> 用法是 `DS_TOPK_BACKEND=maca_c python tests/test.py`。上面两句对
+> "钉调用"与"钉默认"的区分仍然成立。
 
 ### 21.1 `backend` 的默认值是 **`maca_c`**，三个名字都通（实测，默认翻转前）
 

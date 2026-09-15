@@ -4,26 +4,26 @@
 # baseline.  The "how is this tree doing" entry point; `run_test.sh` is the
 # correctness/gating one.
 #
-# ── The three arms ──────────────────────────────────────────────────────────
+# ── The three stages ──────────────────────────────────────────────────────────
 #
 #   1. `perf_snapshot.py` -- writes the CSV: the OFFICIAL grid (`tests/test.py`'s
 #      own `performance_cases()`, called not restated), plus the selector
-#      grid, for the backends named in `--arms`.
+#      grid, for the backends named in `--backends`.
 #   2. `tests/test.py --perf-only` -- the same grid driven by upstream's own file
 #      in one process.  Redundant with (1) on purpose: it is the gate.
 #   3. `tests/test.py --perf-only --dtype fp32` -- the fp32 Sampler cells.
 #
-# Nothing here re-implements a measurement -- every arm is upstream's file, and
+# Nothing here re-implements a measurement -- every stage is upstream's file, and
 # `tests/test.py` can neither select a backend nor emit a CSV, which is why the
-# snapshot is its own arm rather than a mode of it.
+# snapshot is its own stage rather than a mode of it.
 #
 # ── Failure, and the baseline ───────────────────────────────────────────────
 #
-# The FIRST failing arm stops the run: a comparison against a baseline whose
+# The FIRST failing stage stops the run: a comparison against a baseline whose
 # grid was not fully measured is not a comparison.  The verdict is written to
 # `compare_result.txt` before the baseline moves.
 #
-# `--set-baseline` repoints when every ARM passed, not on the comparator's exit
+# `--set-baseline` repoints when every stage passed, not on the comparator's exit
 # status; REGRESSED does not block it but is printed loudly, so repointing past
 # a regression is a decision someone made.
 #
@@ -37,15 +37,14 @@
 #     ./run_bench.sh                          # snapshot + the official gate
 #     ./run_bench.sh --set-baseline           # ... and repoint baseline at it
 #     ./run_bench.sh --compare-only           # no measurement; latest vs baseline
-#     ./run_bench.sh --arms maca_c,torch      # a subset of the three
-#     ./run_bench.sh --list                   # print the plan and exit
+#     ./run_bench.sh --backends maca_c,torch  # a subset of the three
 #     ./run_bench.sh --baseline-dir 20260801  # repoint, do not measure
 #
 # Env:
-#     CUDA_VISIBLE_DEVICES  device selection, applied to every arm.
+#     CUDA_VISIBLE_DEVICES  device selection, applied to every stage.
 #                           Default: unchanged.
 #     DS_BENCH_DIR          output root (default perf_data)
-#     DS_BENCH_TIMEOUT      per-arm timeout in seconds (default 5400)
+#     DS_BENCH_TIMEOUT      per-stage timeout in seconds (default 5400)
 #     MACA_PATH             MACA toolkit root (default /opt/maca).  MACA_HOME is
 #                           consulted when this is unset; this one wins if both are set.
 #
@@ -61,18 +60,13 @@ usage() {
     cat >&2 <<'EOF'
 Usage: run_bench.sh [options]
 
-  --arms LIST         comma-separated subset of maca_c,torch,deep_gemm
+  --backends LIST     comma-separated subset of maca_c,torch,deep_gemm
   --device N          shorthand for CUDA_VISIBLE_DEVICES=N
-  --set-baseline      repoint <chip>/baseline at this run (only if all arms pass)
+  --set-baseline      repoint <chip>/baseline at this run (only if all stages pass)
   --baseline-dir DIR  repoint the baseline at DIR and exit without measuring
   --compare-only      compare the latest run against the baseline, measure nothing
-  --no-deep-gemm-shapes  do not add the selector shapes to any arm (by default
-                      they are added when the `deep_gemm` package can serve
-                      them; that backend has no cell on the official bf16 grid,
-                      so without them its column is 95 `unsupported` rows)
   --skip-gate         do not run tests/test.py --perf-only (the official grid)
   --results DIR       output root (default perf_data)
-  --list              print what would run and exit
   -h, --help          this message
 
 Env: CUDA_VISIBLE_DEVICES, DS_BENCH_DIR, DS_BENCH_TIMEOUT, MACA_PATH (or MACA_HOME)
@@ -84,9 +78,10 @@ export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi
 
 # Whether the `deep_gemm` column can be measured at all is the *package's*
 # answer -- does it import, and does it carry the entry `backend="deep_gemm"`
-# calls -- and never a question about where its source lives.  Off when it
-# cannot serve them, so the run does not spend 25 cells on rows that would all
-# read `unsupported`.  `--no-deep-gemm-shapes` overrides it off.
+# calls -- and never a question about where its source lives.  Asked here for
+# the read-out below only: every runner asks it for itself, which is why there
+# is no switch to forward (an override would have to reach all three, and one
+# that does not is an override a caller believes they made).
 deep_gemm_shapes=$(python -W "ignore:Could not find flash_attn:UserWarning" - <<'PY'
 import os, sys
 sys.path.insert(0, os.getcwd())
@@ -94,21 +89,19 @@ from deep_select import deep_gemm_available
 print(1 if deep_gemm_available() else 0)
 PY
 ) || deep_gemm_shapes=0
-arms="maca_c,torch,deep_gemm"
+backends="maca_c,torch,deep_gemm"
 set_baseline=0
 baseline_dir=""
 compare_only=0
 skip_gate=0
-list_only=0
 results_dir="${DS_BENCH_DIR:-perf_data}"
 timeout_s="${DS_BENCH_TIMEOUT:-5400}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --no-deep-gemm-shapes)   deep_gemm_shapes=0; shift ;;
-        --arms)             [[ $# -ge 2 ]] || { echo "run_bench.sh: --arms needs a value" >&2; exit 2; }
-                            arms="$2"; shift 2 ;;
-        --arms=*)           arms="${1#*=}"; shift ;;
+        --backends)         [[ $# -ge 2 ]] || { echo "run_bench.sh: --backends needs a value" >&2; exit 2; }
+                            backends="$2"; shift 2 ;;
+        --backends=*)       backends="${1#*=}"; shift ;;
         --device)           [[ $# -ge 2 ]] || { echo "run_bench.sh: --device needs a value" >&2; exit 2; }
                             export CUDA_VISIBLE_DEVICES="$2"; shift 2 ;;
         --device=*)         export CUDA_VISIBLE_DEVICES="${1#*=}"; shift ;;
@@ -121,7 +114,6 @@ while [[ $# -gt 0 ]]; do
         --results)          [[ $# -ge 2 ]] || { echo "run_bench.sh: --results needs a value" >&2; exit 2; }
                             results_dir="$2"; shift 2 ;;
         --results=*)        results_dir="${1#*=}"; shift ;;
-        --list)             list_only=1; shift ;;
         -h|--help)          usage; exit 0 ;;
         *)                  echo "run_bench.sh: unknown argument: $1" >&2; usage; exit 2 ;;
     esac
@@ -185,23 +177,6 @@ latest_result_dir() {
     printf '%s\n' "${latest}"
 }
 
-if [[ "$list_only" == "1" ]]; then
-    echo "run_bench.sh: device dir  = ${device_dir}  (the device's own name;"
-    echo "                              the arch family metax_xcore${family} is"
-    echo "                              recorded per row as \`chip\`)"
-    echo "run_bench.sh: extension   = ${so}"
-    echo "run_bench.sh: md5         = ${md5}"
-    echo "run_bench.sh: devices     = ${devices}"
-    echo "run_bench.sh: arms        = ${arms}"
-    echo "run_bench.sh: selector shapes = $([[ ${deep_gemm_shapes} -eq 1 ]] && echo yes || echo no)  (the deep_gemm backend's grid: 25 perf cells at top_k=2048 fp32, plus its correctness shapes on the gate; the only cells it can answer)"
-    echo "run_bench.sh: grid        = $([[ ${deep_gemm_shapes} -eq 1 ]] && echo '95 official + 25 selector = 120 cells' || echo '95 official cells only')"
-    echo "run_bench.sh: official gate = $([[ ${skip_gate} -eq 1 ]] && echo skipped || echo yes)"
-    echo "run_bench.sh: out root    = ${chip_dir}/<YYYYmmdd_HHMMSS>"
-    echo "run_bench.sh: baseline    = ${chip_dir}/baseline"
-    echo "run_bench.sh: timeout     = ${timeout_s}s per arm"
-    exit 0
-fi
-
 mkdir -p "$chip_dir"
 
 # ── --baseline-dir: repoint and exit, measuring nothing ─────────────────────
@@ -237,7 +212,7 @@ if [[ ${compare_only} -eq 1 ]]; then
     {
         echo "# compare: ${latest} vs baseline $(readlink "${chip_dir}/baseline")"
         python3 tools/compare_snapshots.py "${chip_dir}/${latest}" \
-            --base "${chip_dir}/baseline" --device "${device_dir}"
+            --base "${chip_dir}/baseline"
     } 2>&1 | tee "${chip_dir}/${latest}/compare_result.txt" || exit $?
     exit 0
 fi
@@ -253,7 +228,7 @@ mkdir -p "$out"
     echo "# extension       ${so}"
     echo "# extension_md5   ${md5}"
     echo "# cuda_visible_devices ${devices}"
-    echo "# arms            ${arms}"
+    echo "# backends        ${backends}"
     echo "${stale_note}"
     echo "# ---"
     echo "# mx-smi"
@@ -263,7 +238,7 @@ mkdir -p "$out"
         | sed 's/^/#   /' || echo "#   (none)"
 } > "${out}/run_header.txt"
 
-run_arm() {
+run_stage() {
     local name="$1"; shift
     local log="${out}/${name}.log"
     echo "run_bench.sh: [${name}] -> ${log}"
@@ -283,45 +258,36 @@ run_arm() {
 bench_status=0
 snapshot_failed=0
 
-# arm 1 -- the snapshot.  It writes the CSVs, so its failure is reported as its
+# stage 1 -- the snapshot.  It writes the CSVs, so its failure is reported as its
 # own thing rather than "a bench failure" (it can fail on memory; the gate may
 # still pass).
-snap_args=(scripts/perf_snapshot.py --arms "${arms}" --out-dir "${results_dir}"
-           --tag "${stamp}")
-# Without the selector shapes the `deep_gemm` column compares nothing, so they
-# ride in the SNAPSHOT whenever they are on (which is the default when the
-# package can serve them).
-if [[ ${deep_gemm_shapes} -eq 1 ]]; then snap_args+=(--deep-gemm-axes); fi
-if ! run_arm snapshot python "${snap_args[@]}"; then
+snap_args=(scripts/perf_snapshot.py --backends "${backends}"
+           --out-dir "${out}")
+if ! run_stage snapshot python "${snap_args[@]}"; then
     snapshot_failed=1
     bench_status=1
 fi
 
-# arm 2 -- the official grid, upstream's own file.  The gate.
+# stage 2 -- the official grid, upstream's own file.  The gate.
 # `python tests/test.py`, not `./tests/test.py`: upstream's file is not
 # executable, and a bare path there fails with rc=126 before it runs anything
 # (which reads as a bench failure but is a launcher mistake).
-gate_deep_gemm=()
-if [[ ${deep_gemm_shapes} -eq 1 ]]; then gate_deep_gemm+=(--deep-gemm-shapes); fi
-# `DS_TOPK_BACKEND=maca_c` pins the DEFAULT, not the call: `tests/test.py`'s call
-# site is unmodified, so what runs is the path a caller who names no backend
-# takes.  Without it the library default (`torch`, see `deep_select/interface.py`)
-# serves these arms and the gate times the reference.  (`perf_snapshot.py` needs
-# nothing -- it passes `backend=` per arm.)
-#
-# The `env` prefix is load-bearing for arm 3 too: its fp32 Sampler cells are where
-# `deep_gemm` raises `UnsupportedByBackend`, so unpinned it would measure no
-# kernel at all.
-gate_env=(env DS_TOPK_BACKEND=maca_c)
+# No env prefix, and that is a change: these stages used to be launched as
+# `env DS_TOPK_BACKEND=maca_c` so that the *library* default would not serve the
+# gate with the `torch` reference.  `tests/test.py` now passes `backend=maca_c`
+# itself (`run_testcase`'s default), which means it never consults the process
+# default -- measured: with `DS_TOPK_BACKEND=torch` in the environment the call
+# still arrives as `backend=maca_c`.  So the env var was left changing nothing,
+# which is the knob this repo deletes rather than keeps.
 if [[ ${skip_gate} -eq 0 ]]; then
-    run_arm official "${gate_env[@]}" python tests/test.py --perf-only -nc "${gate_deep_gemm[@]}" || bench_status=1
+    run_stage official python tests/test.py --perf-only -nc || bench_status=1
 fi
 
-# arm 3 -- the official grid's fp32 arm: `tests/test.py` filters its own
+# stage 3 -- the official grid's fp32 run: `tests/test.py` filters its own
 # `performance_cases` (bf16), so this is the Sampler cells plus the selector
 # shapes.
 if [[ ${skip_gate} -eq 0 ]]; then
-    run_arm official_fp32 "${gate_env[@]}" python tests/test.py --perf-only -nc --dtype fp32 "${gate_deep_gemm[@]}" || bench_status=1
+    run_stage official_fp32 python tests/test.py --perf-only -nc --dtype fp32 || bench_status=1
 fi
 
 {
@@ -354,7 +320,7 @@ else
         {
             echo "# compare: ${stamp} vs baseline ${base_name}"
             python3 tools/compare_snapshots.py "${out}" \
-                --base "${chip_dir}/baseline" --device "${device_dir}" --top 40
+                --base "${chip_dir}/baseline"
         } 2>&1 | tee "${out}/compare_result.txt"
         compare_rc=${PIPESTATUS[0]}
         set -e
@@ -377,7 +343,7 @@ if [[ ${set_baseline} -eq 1 ]]; then
         ln -sfn "${stamp}" "${chip_dir}/baseline"
         echo "run_bench.sh: baseline set: ${chip_dir}/baseline -> ${stamp}"
     else
-        echo "run_bench.sh: baseline NOT updated -- an arm failed (rc=${bench_status})" >&2
+        echo "run_bench.sh: baseline NOT updated -- a stage failed (rc=${bench_status})" >&2
     fi
 fi
 

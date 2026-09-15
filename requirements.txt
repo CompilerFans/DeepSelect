@@ -55,8 +55,8 @@ torch>=2.1.0
 # `tests/kernelkit/__init__.py` imports `bench`, and `bench` imports triton at
 # module scope (the profiler-range marker kernel is `@triton.jit`), so
 # `import kernelkit` -- and therefore `tests/test.py`, `tests/lib.py` and
-# `scripts/official_slice.py`, all of which import it -- raises ImportError
-# without triton.  Note that this includes the *correctness* arm, which never
+# `scripts/perf_snapshot.py`, all of which import it -- raises ImportError
+# without triton.  Note that this includes the *correctness* suite, which never
 # times anything: the import is module-scope, so it is collateral.
 #
 # `bench.py` is upstream's, byte for byte (`git diff upstream/main --

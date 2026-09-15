@@ -15,7 +15,7 @@ as a contract rejection.  Records are metadata only: a tensor is reported as
 shape/dtype/device and its values are never read, so turning this on cannot
 change what a call computes.
 
-A call into one arm (`topk` -> `topk_torch`) is one record, not two: the
+A call into one backend (`topk` -> `topk_torch`) is one record, not two: the
 innermost public entry is the one whose arguments the caller wrote, and the
 outer one already reports the `backend` it was asked for.
 

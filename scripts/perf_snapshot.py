@@ -5,12 +5,13 @@ A *thin* recorder: the cases, the data, the checks and the timings are all
 the one the official harness cannot express: **which backend answered**, one row
 per (cell, backend), each with a `status` of `pass` / `fail` / `unsupported`.
 A cell a backend cannot serve states its reason there, and is never dropped.
-Backends: `maca_c` -- this repository's kernel, the production arm (the DEFAULT
+Backends: `maca_c` -- this repository's kernel, the production backend (the DEFAULT
 is `torch`, so it is asked for by name); `torch` -- the official reference, a
 bare `torch.topk`, NOT `backend="torch"`, which pads, masks and converts around
 the same call and measures something else entirely; `deep_gemm` -- that
 package's `fp32_indexer_topk_selector`, float32 only, hence `unsupported` on the
-whole bf16 official grid.  `--deep-gemm-axes` adds the fp32 grid it answers.
+whole bf16 official grid.  The fp32 grid it answers rides along whenever
+`deep_select.deep_gemm_available()` says that backend can run at all.
 Cases: the official grid (`tests/test.py::performance_cases()`) plus
 `--cases-file`, a JSON list of `lib.TestParam` fields, e.g.
 `{"batch_size": 6, "vocab_size": 32768, "topk": 1024}`.  Those three are the
@@ -27,11 +28,9 @@ SM count.  The family is recorded per row (`chip`), never inferred from it.
 Usage:
     CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \\
         python3 scripts/perf_snapshot.py
-    ... --arms a,b                # subset of the backends (default: all three)
-    ... --deep-gemm-axes          # + the fp32 selector grid (default: when usable)
+    ... --backends a,b            # subset of the backends (default: all three)
     ... --cases-file extra.json   # + your own cases
-    ... --out-dir DIR --tag NAME  # where the record lands / its timestamp
-    ... --dry-run                 # print what would run, measure nothing
+    ... --out-dir DIR             # the record's own directory
     ./run_bench.sh                # the orchestrator: this + the official gate
 """
 from __future__ import annotations
@@ -56,7 +55,7 @@ import lib  # noqa: E402
 import test as official  # noqa: E402
 from deep_select import _arch  # noqa: E402
 PYBIN = sys.executable
-ARMS = ("maca_c", "torch", "deep_gemm")
+BACKENDS = ("maca_c", "torch", "deep_gemm")
 # Short spellings for `--cases-file`.  Only the pair this operator serves.
 DTYPES = {"bf16": "bfloat16", "bfloat16": "bfloat16",
           "fp32": "float32", "float32": "float32"}
@@ -99,12 +98,12 @@ def measure(p, t, backend: str) -> Dict[str, Any]:
     row: Dict[str, Any] = {"status": "pass", "error_type": "", "error_message": ""}
     if backend == "torch":
         # Nothing checks the reference, here as in `tests/test.py`: a speed
-        # baseline, not a correctness arm.
+        # baseline, not a correctness check.
         if t.end is not None or t.output_idx_offset is not None or p.vocab_size < p.topk:
             # `run_testcase`'s own eligibility guard, carried as the reason so an
             # absent number is not read as a missing measurement.  A bare
             # `torch.topk` with `k > x.shape[1]` raises, hence the guard.
-            row["error_message"] = ("not applicable: the reference arm needs "
+            row["error_message"] = ("not applicable: the reference backend needs "
                                     "vocab_size >= topk, no window, no offset "
                                     "(tests/test.py's own guard)")
             return row
@@ -144,7 +143,7 @@ def measure(p, t, backend: str) -> Dict[str, Any]:
                                 else "") + f"{type(exc).__name__}: {str(exc)[:120]}"
     return row
 def _us(seconds: Optional[float]) -> Any:
-    """Seconds -> microseconds, or "" when the arm did not apply / was not timed.
+    """Seconds -> microseconds, or "" when the backend did not apply / was not timed.
     Empty rather than 0: a 0 us cell reads as an implausible win.
     """
     return round(seconds * 1e6, 3) if seconds else ""
@@ -153,8 +152,8 @@ def deep_gemm_cases() -> List[Any]:
     """The `deep_gemm` selector perf shapes, from `tests/test.py`.
 
     The table lives there (`DEEP_GEMM_SELECTOR_PERF_SHAPES`), not here: the official
-    grid drives the *same* shapes via `--deep-gemm-shapes`, and a second copy drifts
-    from the gate meant to check it.  `note` marks the rows whose `seq_len`
+    grid drives the *same* shapes, and a second copy drifts from the gate meant
+    to check it.  `note` marks the rows whose `seq_len`
     is narrower than `n_cols` -- windows there, whole-row rankings here, so the
     two are not comparable at the same shape.
     """
@@ -229,7 +228,7 @@ def device_dir_name() -> str:
 
 
 def _deep_gemm_package() -> Dict[str, str]:
-    """What the `deep_gemm` arm is, recorded from the *package* it imports.
+    """What the `deep_gemm` backend is, recorded from the *package* it imports.
 
     A package question, not a location one: `backend="deep_gemm"` is
     `import deep_gemm`, so what decides the numbers is the module that import
@@ -298,8 +297,8 @@ def rows_for(p, source: str, note: str, got: Dict[str, Dict[str, Any]],
                  + p.out_idx_dtype.itemsize))
     ref = got.get("maca_c", {}).get("time(us)")
     out = []
-    for arm in ARMS:
-        g = got.get(arm)
+    for backend in BACKENDS:
+        g = got.get(backend)
         if g is None:
             continue
         row = {c: "" for c in COLUMNS}
@@ -316,7 +315,7 @@ def rows_for(p, source: str, note: str, got: Dict[str, Dict[str, Any]],
             "input_dtype": str(p.dtype).replace("torch.", ""),
             "index_dtype": str(p.out_idx_dtype).replace("torch.", ""),
             "num_runs": p.num_runs,
-            "backend": arm,
+            "backend": backend,
             "status": g["status"],
             "error_type": g.get("error_type", ""),
             "error_message": g.get("error_message", ""),
@@ -340,30 +339,28 @@ def main() -> int:
         epilog="extra cases (--cases-file) are a JSON list of lib.TestParam "
                "fields; only batch_size, vocab_size and topk are required, and "
                "dtype/out_idx_dtype take " + "/".join(sorted(set(DTYPES))) + ".")
-    ap.add_argument("--arms", default=",".join(ARMS),
+    ap.add_argument("--backends", default=",".join(BACKENDS),
                     help="comma-separated subset of the backends")
-    ap.add_argument("--deep-gemm-axes", action=argparse.BooleanOptionalAction,
-                    default=None,
-                    help="run the fp32 selector grid too (the only cells the "
-                         "deep_gemm backend can answer).  Default: run it when "
-                         "the `deep_gemm` package is importable and carries the "
-                         "entry that backend calls")
     ap.add_argument("--cases-file", default="",
                     help="JSON list of extra cases (see the epilog)")
-    ap.add_argument("--out-dir", default=os.path.join(REPO, "perf_data"))
-    ap.add_argument("--tag", default="")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="print the plan, measure nothing")
+    ap.add_argument("--out-dir", default="",
+                    help="the directory to write this snapshot into.  "
+                         "Default: <repo>/perf_data/<device>/<YYYYmmdd_HHMMSS> "
+                         "(see the module docstring)")
     args = ap.parse_args()
-    arms = [a for a in args.arms.split(",") if a]
-    for a in arms:
-        if a not in ARMS:
-            raise SystemExit(f"unknown backend {a!r}; expected one of {', '.join(ARMS)}")
+    backends = [a for a in args.backends.split(",") if a]
+    for a in backends:
+        if a not in BACKENDS:
+            raise SystemExit(f"unknown backend {a!r}; expected one of {', '.join(BACKENDS)}")
     cases = [("official", "", p) for p in official.performance_cases()]
-    if args.deep_gemm_axes is None:
-        from deep_select import deep_gemm_available
-        args.deep_gemm_axes = deep_gemm_available()
-    if args.deep_gemm_axes:
+    # Whether the `deep_gemm` column can be measured is the package's answer,
+    # not a switch: no flag here, and no `--no-` on the harness above it.  A
+    # switch would have to be forwarded to every runner that probes for itself,
+    # and an override that is not forwarded is an override a caller believes
+    # they made (measured: `run_bench.sh --no-deep-gemm-shapes` reported 95
+    # cells and ran 120).
+    from deep_select import deep_gemm_available
+    if deep_gemm_available():
         cases += [("deep_gemm_axes", note, p) for note, p in deep_gemm_cases()]
     if args.cases_file:
         cases += [("extra", note, p) for note, p in cases_from_file(args.cases_file)]
@@ -371,26 +368,18 @@ def main() -> int:
     import deep_select  # noqa: E402  (after set_default_device)
     target = _arch.native_target()
     sm_count = _arch.native_sm_count()
-    if args.dry_run:
-        print(f"chip {target}  dir {device_dir_name()}  backends {arms}")
-        by = {}
-        for source, _note, p in cases:
-            by[(source, str(p.dtype), str(p.out_idx_dtype))] = \
-                by.get((source, str(p.dtype), str(p.out_idx_dtype)), 0) + 1
-        for k, v in sorted(by.items()):
-            print(f"  {k[0]:<16} {k[1]:<18} idx {k[2]:<12} {v:>4} cases")
-        print(f"  {'TOTAL':<16} {len(cases)} cases x {len(arms)} backends "
-              f"= {len(cases) * len(arms)} rows")
-        return 0
-    stamp = args.tag or _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     prov = provenance(sm_count)
-    device_dir = prov["device_dir"]
-    out = os.path.join(args.out_dir, device_dir, stamp)
+    # `--out-dir` is the directory itself, not a root to hang a name under: a
+    # caller that names one has already decided where this record goes.
+    out = args.out_dir or os.path.join(
+        REPO, "perf_data", prov["device_dir"],
+        _dt.datetime.now().strftime("%Y%m%d_%H%M%S"))
+    run_id = os.path.basename(out.rstrip(os.sep))
     os.makedirs(out, exist_ok=True)
     started = _dt.datetime.now().astimezone()
     rows: List[Dict[str, Any]] = []
     print(f"chip {prov['chip']}  device {prov['device_name']}  sm {sm_count}  "
-          f"backends {arms}  cases {len(cases)}", flush=True)
+          f"backends {backends}  cases {len(cases)}", flush=True)
     print(f"{'case':<46}{'backend':<10}{'status':<12}{'us':>12}{'GB/s':>10}",
           flush=True)
     for i, (source, note, p) in enumerate(cases):
@@ -403,12 +392,12 @@ def main() -> int:
             print(f"  generate_testcase failed for {p}: {exc}", flush=True)
             break
         got = {}
-        for arm in arms:
-            got[arm] = measure(p, t, arm)
-            g = got[arm]
+        for backend in backends:
+            got[backend] = measure(p, t, backend)
+            g = got[backend]
             label = (f"{source[:5]}/{str(p.dtype).replace('torch.','')[:4]} "
                      f"b{p.batch_size}-v{p.vocab_size}-k{p.topk}")
-            print(f"{label:<46}{arm:<10}{g['status']:<12}"
+            print(f"{label:<46}{backend:<10}{g['status']:<12}"
                   f"{g.get('time(us)', '')!s:>12}"
                   f"{(g.get('bandwidth(GB/s)') or '')!s:>10}"
                   + (f"  [{g['error_message'][:34]}]" if g.get("error_message") else ""),
@@ -430,24 +419,28 @@ def main() -> int:
         counts[(r["backend"], r["status"])] = counts.get((r["backend"], r["status"]), 0) + 1
     manifest = dict(prov)
     manifest.update({
-        "run_id": stamp,
+        "run_id": run_id,
         "output_dir": out,
         "command": " ".join([PYBIN] + sys.argv),
         "started_at_utc": started.astimezone(_dt.timezone.utc).isoformat(),
         "finished_at_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "csv_files": [os.path.basename(csv_path)],
-        "backends": arms,
+        "backends": backends,
         "cases": len(cases),
         "rows": len(rows),
         "status_counts": {f"{k[0]}/{k[1]}": v for k, v in sorted(counts.items())},
         "csv_format_version": 1,
-        "case_source": "tests/test.py::performance_cases() (+ --deep-gemm-axes, "
-                       "+ --cases-file)",
+        # The selector cells are not an axis any more: whether they are added is
+        # `deep_select.deep_gemm_available()`'s answer, and `cases` below records
+        # how many there turned out to be.  Naming a flag here would be naming
+        # one that no longer exists.
+        "case_source": "tests/test.py::performance_cases() (+ the selector grid "
+                       "when the deep_gemm package can serve it, + --cases-file)",
         "measurement": ("tests/test.py's own: one 'topk'-matching kernel's time, "
                         "else the e2e span over the matching kernels; p.num_runs "
                         "reps, L2 flushed (kk.bench). Correctness: "
                         "tests/test.py::check_result / check_call_contract, "
-                        "applied to every backend except `torch`, whose arm is a "
+                        "applied to every backend except `torch`, whose column is a "
                         "bare torchtopk the official harness does not check "
                         "either."),
     })

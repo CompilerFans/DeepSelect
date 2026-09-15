@@ -61,7 +61,7 @@ C500（xcore1000）上走的是**行式 radix 选择**：一行一个 CTA，两�
 | `csrc/xcore1000/maca_topk.cu` | **契约层 + 启动层**：`topk` 的对外契约（values / sorted / NaN / 窗口 / 偏移 / 短行）、NaN 扫描、动态 smem 尺寸与布局、kernel 启动 |
 | `csrc/xcore1000/radix_core.cuh` | **选择数据流**（header-only）：`radix_topk_row_bf16_b`（16 位行，生产路径）、`radix_topk_row_f32*`（32 位行）、若干 static-k / register / chunked 变体 |
 | `csrc/structs.h` | `TopkSelectArgs` / `RowParams` |
-| `scripts/official_slice.py` | 官方大表的切片驱动（正确性门） |
+| `scripts/official_slice.py` | 官方大表的切片驱动（正确性门）——**2026-09-16 已删除，能力并入 `tests/test.py`**（见 §4 正确性门） |
 | `tests/test.py` | 官方性能表（每个 perf 用例先查正确性再计时） |
 
 **这条数据流当前的耗时归因在 `C500-radix-profile.zh.md`**（2026-09-12，
@@ -137,13 +137,22 @@ python setup.py build_ext --inplace
 
 ```bash
 cd /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect
-for i in 0 1 2 3; do
-  PYTHONPATH=$PWD python scripts/official_slice.py --backend maca_c \
-      --sample 1000000 --shard $i/4
-done
+PYTHONPATH=$PWD python tests/test.py --backend maca_c --sample 1000000 -rf
 ```
 
-全表 82,170 例，**必须 4 个 shard**：每个约 5.6 min，四个共 ~17.5 min。
+> **路径已迁移（2026-09-16）**：本节原来跑 `scripts/official_slice.py
+> --backend maca_c --sample 1000000 --shard i/4`，×4 串行。那个驱动已删除，
+> 它的 `--backend` / `--seed` / `--sample` 并进了官方 `tests/test.py`；
+> `--shard` 没有跟过来。因此现在是**一个进程跑全表**，本手册下方与
+> `C500-radix-perf-ledger.zh.md` §5 里那条 `--shard` 命令行是**当时的记录**，
+> 保留原样（账本不该被改写成一条没产生过那些数字的命令）。
+> 重启能力随之消失：账本 §5 记过两次 `dumped core`，`--shard` 是当时唯一的
+> 缓解手段。**长跑再出现 core dump 时，第一件事是把 `--shard` 加回来。**
+
+全表 82,170 例。**耗时以当天实测为准，别照抄本文的数字**：同样这 20,543 例的
+一个 shard，本文 §4 记的是 `~340 s`，账本 §5 后期几条记的是 **1,730–1,917 s**，
+两者差 **5×**，且都没有记当时的机器状态；全表单进程实测**还没跑过**。按
+**数小时**规划。<br>
 **不要开 8 个并发**——8 个并发 torch 进程会让 CUB 的 onesweep radix sort 把
 设备打挂（实测，且会连坐整机）。串行跑也一样快，因为瓶颈在每例的构造。
 

@@ -112,8 +112,8 @@ def check_result(p: TestParam, t: Testcase, ans_topk_value, ans_topk_index) -> b
 
 def topk_total_size(p: TestParam, t: Testcase, ans_topk_value, ans_topk_index) -> int:
     """The operator's own traffic in bytes, as `run_testcase`'s TB/s line
-    computes it.  An output may be `None` for the reference arm, which writes
-    its own."""
+    computes it.  An output may be `None` for the reference backend, which
+    writes its own."""
     return (t.end.sum() if t.end is not None else p.batch_size * p.vocab_size) * t.input.element_size() \
         + (get_space(ans_topk_value) if ans_topk_value is not None else 0) \
         + (get_space(ans_topk_index) if ans_topk_index is not None else 0)
@@ -137,7 +137,7 @@ def bench_topk(fn, p: TestParam, t: Testcase, ans_topk_value, ans_topk_index):
 
 
 def bench_torch_reference(p: TestParam, t: Testcase):
-    """The `torch.topk` reference arm, timed by the rule above.
+    """The `torch.topk` reference backend, timed by the rule above.
 
     A *bare* `torch.topk`, not `deep_select.topk(backend="torch")`: that one
     pads, masks and converts, launching ~20 kernels where this launches one.
@@ -159,7 +159,13 @@ def bench_torch_reference(p: TestParam, t: Testcase):
 
 
 @torch.inference_mode()
-def run_testcase(p: TestParam):
+def run_testcase(p: TestParam, backend: str = "maca_c"):
+    """Run one case and answer whether it selected correctly.
+
+    `backend` is passed to `deep_select.topk` at the call site.  The default is
+    `maca_c` -- the kernel this tree exists to ship -- so a bare call tests the
+    kernel and not the reference implementation that validates it.
+    """
     if p.seed == -1:
         global _counter
         p.seed = _counter.next()
@@ -185,7 +191,8 @@ def run_testcase(p: TestParam):
             idx_oob_fill_value=p.idx_oob_fill_value,
             value_oob_fill_value=p.value_oob_fill_value,
             return_value=p.return_value,
-            abort_when_nan_found=False
+            abort_when_nan_found=False,
+            backend=backend,
         )
 
     ans_topk_value, ans_topk_index = run_topk_select()
@@ -346,28 +353,57 @@ if __name__ == '__main__':
                         help="Only run testcases whose input dtype matches")
     parser.add_argument("--perf-only", action="store_true",
                         help="Only run performance testcases (num_runs > 0)")
-    parser.add_argument("--deep-gemm-shapes", action=argparse.BooleanOptionalAction,
-                        default=None,
-                        help="Run the selector shapes (fp32, top_k=2048): the only "
-                             "rows the `deep_gemm` backend can answer, so the only "
-                             "rows it can be compared on.  Default: run them when "
-                             "the `deep_gemm` package is importable and carries the "
-                             "entry that backend calls, skip them otherwise")
+    parser.add_argument("--backend", default="maca_c",
+                        choices=["maca_c", "torch", "deep_gemm"],
+                        help="which implementation every case runs: `maca_c` "
+                             "(the kernel, the default), `torch` (the reference "
+                             "implementation) or `deep_gemm`.  Passed to "
+                             "`deep_select.topk` at the call site.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="seed the case table before it is built, so the "
+                             "same command draws the same shapes.  Unset = the "
+                             "unseeded table, as upstream builds it.")
+    parser.add_argument("--sample", type=int, default=0,
+                        help="draw this many correctness cases instead of all "
+                             "of them (the perf grid is always kept whole).  "
+                             "0 or unset = the whole table.")
     args = parser.parse_args()
 
-    # A package question, not a location one: whether the backend will work is
-    # `import deep_gemm` plus the entry it calls, which is what this asks.
-    if args.deep_gemm_shapes is None:
-        import deep_select
-        args.deep_gemm_shapes = deep_select.deep_gemm_available()
+    import deep_select
+
+    # An explicit `--backend deep_gemm` on a box that cannot run it is refused
+    # before anything is measured: otherwise every case reports a failure and
+    # the run reads as a kernel defect rather than a missing package.
+    if args.backend == "deep_gemm" and not deep_select.deep_gemm_available():
+        raise SystemExit(
+            "tests/test.py: --backend deep_gemm was asked for, but `import "
+            "deep_gemm` does not succeed here or the package does not carry "
+            "`fp32_indexer_topk_selector`.  Nothing was run.")
+    if args.seed is not None:
+        random.seed(args.seed)
 
     correctness_cases = correctness_cases_()
 
     performance_cases = performance_cases()
-    if args.deep_gemm_shapes:
+    # The selector shapes ride along whenever the backend that answers them can
+    # run here.  A package question, not a location one, and not a switch: no
+    # flag, because an override would have to reach every runner that probes for
+    # itself (measured: `run_bench.sh --no-deep-gemm-shapes` reported 95 cells
+    # and ran 120).
+    selector_cases = []
+    if deep_select.deep_gemm_available():
+        selector_cases = deep_gemm_selector_correctness_cases()
         performance_cases = performance_cases + deep_gemm_selector_perf_cases()
 
-    testcases = correctness_cases + performance_cases
+    # The selector shapes are prepended rather than drawn, as they were when a
+    # separate driver held them: they are 2 cases out of 105,140, so sampling
+    # would leave the one backend that answers them with nothing to compare.
+    if args.sample:
+        drawn = random.Random(args.seed).sample(
+            correctness_cases, min(args.sample, len(correctness_cases)))
+    else:
+        drawn = correctness_cases
+    testcases = selector_cases + drawn + performance_cases
 
     if args.dtype is not None:
         wanted_dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}[args.dtype]
@@ -378,22 +414,82 @@ if __name__ == '__main__':
     # To sweep batch x sequence length instead of the grid above, build the same
     # list here (`num_runs=10`, `NormalFloatDistribution(lambda f: f*1000)`).
 
-    failed_cases = []
+    # Every case ends in exactly one of these, and the run reaches its summary
+    # whatever happened: which cases went wrong has to be readable, not buried
+    # behind the first one.  `unsupported` is the backend being narrower than
+    # the operator (a coverage gap, not a defect) and `skip` is the environment.
+    status = {"pass": [], "check_fail": [], "crash": [], "skip": [], "unsupported": []}
+    stopped_early = ""
+
+    def context_alive() -> bool:
+        """Whether the device can still run anything.
+
+        A device-side fault does not raise once -- it poisons the CUDA context,
+        so every later case reports the same error.  Left alone, a 105k-case
+        table prints 105k identical crashes and calls that a result; this is how
+        the loop tells "this case was bad" from "there is no device any more".
+        """
+        try:
+            torch.cuda.synchronize()
+            return True
+        except Exception:
+            return False
+
     for test_idx, test in enumerate(testcases):
         if test != testcases[0] and test.num_runs > 0 and not args.no_cooldown:
             time.sleep(0.2)
         print("================")
         print(f"[{test_idx+1:6d}/{len(testcases):6d}, {test_idx/len(testcases)*100:2.0f}%] ", end="")
-        is_correct = run_testcase(test)
-        if not is_correct:
-            failed_cases.append(test)
+        try:
+            is_correct = run_testcase(test, backend=args.backend)
+        except torch.cuda.OutOfMemoryError as exc:
+            status["skip"].append((test, f"out of memory: {str(exc)[:120]}"))
+            torch.cuda.empty_cache()
+            print("    SKIPPED: out of memory", flush=True)
+            continue
+        except deep_select.UnsupportedByBackend as exc:
+            status["unsupported"].append((test, str(exc)[:120]))
+            print(f"    UNSUPPORTED: {str(exc)[:120]}", flush=True)
+            continue
+        except Exception as exc:
+            status["crash"].append((test, f"{type(exc).__name__}: {str(exc)[:200]}"))
+            print(f"    CRASHED: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
+            if not context_alive():
+                stopped_early = (f"the device stopped responding at case "
+                                 f"{test_idx + 1}/{len(testcases)}; stopping, "
+                                 f"because every later case would report the "
+                                 f"same fault")
+                break
             if not args.run_to_finish:
-                sys.exit(1)
-    
-    if len(failed_cases) > 0:
-        print(f"\033[31m\033[1m{len(failed_cases)} / {len(testcases)} cases failed:\033[0m")
-        for case in failed_cases:
-            print(f"    {case}")
+                stopped_early = (f"stopping at the first crash; `-rf` runs the "
+                                 f"whole table and reports every case")
+                break
+            continue
+        status["pass" if is_correct else "check_fail"].append((test, ""))
+        if not is_correct:
+            print("    SELECTED WRONG", flush=True)
+            if not args.run_to_finish:
+                stopped_early = (f"stopping at the first case that selected "
+                                 f"wrong; `-rf` runs the whole table and reports "
+                                 f"every case")
+                break
+
+    print(f"\n{'=' * 64}")
+    for name in ("pass", "check_fail", "crash", "skip", "unsupported"):
+        print(f"  {name:<12} {len(status[name]):>7}")
+    if stopped_early:
+        print(f"  (run stopped early: {stopped_early})")
+    for name in ("check_fail", "crash", "skip", "unsupported"):
+        for test, why in status[name]:
+            print(f"  {name:<12} {test}" + (f"\n{'':<15}[{why}]" if why else ""))
+    # Every case that was attempted landed in exactly one status list, so this is
+    # the count that ran -- which is not `len(testcases)` when the run stopped
+    # early, and saying "of 125 run" after running one is a false report.
+    attempted = sum(len(v) for v in status.values())
+    if status["check_fail"] or status["crash"]:
+        ran = (f"of {attempted} run" if attempted == len(testcases)
+               else f"of {attempted} run of {len(testcases)} (stopped early)")
+        print(f"\033[31m\033[1m{len(status['check_fail'])} case(s) selected wrong, "
+              f"{len(status['crash'])} crashed, {ran}\033[0m")
         sys.exit(1)
-    else:
-        print(f"\033[32m\033[1mAll {len(testcases)} cases passed!\033[0m")
+    print(f"\033[32m\033[1mAll {len(status['pass'])} cases passed!\033[0m")

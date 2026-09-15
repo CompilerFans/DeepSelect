@@ -124,7 +124,7 @@ def topk(
     # per call so a process that sets the variable late still gets it.
     if backend is None:
         backend = _default_backend()
-        # The call record shows `backend=None`; this is the arm it became.
+        # The call record shows `backend=None`; this is the backend it became.
         log("backend resolved", backend=backend)
     # Checked before anything is read off `input`, so a mistyped backend name
     # is reported as such rather than as whatever a None tensor does next.

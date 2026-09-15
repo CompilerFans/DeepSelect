@@ -224,7 +224,7 @@ of the architecture it was compiled for:
 CUCC_TARGETS=xcore1000 python setup.py build_ext --inplace             # C500
 CUCC_TARGETS=xcore1600 python setup.py build_ext --inplace             # C600, C600U
 CUCC_TARGETS=xcore1000,xcore1600 python setup.py build_ext --inplace   # both
-PYTHONPATH=. python scripts/official_slice.py                          # correctness
+PYTHONPATH=. python tests/test.py --backend maca_c --sample 200        # correctness
 ```
 
 The scripts wrap those calls. `build.sh` builds **in place** — that is the one
@@ -358,7 +358,7 @@ architectures -- the same vocabulary as `mcDeepGEMM`'s `backend=`.
 `"torch"` (**the default**) is a reference implementation of the same contract
 built from torch ops: it runs on any device and dtype, so it is usable on a
 machine with no MACA kernel built at all, and for differentially checking
-results (`scripts/official_slice.py --backend torch`). It is the arm to trust
+results (`tests/test.py --backend torch`). It is the backend to trust
 when the question is what the *answer* should be, and it is the default for
 that reason: the kernel path is validated against it, so leaving it out of the
 default costs no coverage and removes the last route by which a caller who
@@ -453,10 +453,10 @@ then.
 
 | variable | default | effect |
 | --- | --- | --- |
-| `CUDA_VISIBLE_DEVICES` | the machine's | which device the arms run on. Recorded in the perf manifest, and the way to pick a device -- there is no exclusivity gate |
+| `CUDA_VISIBLE_DEVICES` | the machine's | which device the runs use. Recorded in the perf manifest, and the way to pick a device -- there is no exclusivity gate |
 | `DS_RESULTS_DIR` | `results/` | where `run_test.sh` writes its log and receipt |
 | `DS_BENCH_DIR` | `perf_data` | `run_bench.sh`'s output root |
-| `DS_BENCH_TIMEOUT` | `5400` | per-arm timeout, in seconds |
+| `DS_BENCH_TIMEOUT` | `5400` | per-run timeout, in seconds |
 
 There is no variable that points at the `deep_gemm` source or checkout: what
 the backend needs is the *package*, so whether it can serve a run is
@@ -527,41 +527,68 @@ time.  On C500 the bf16 half of the grid passes in about a minute.
 ### Correctness
 
 The correctness table is 105,138 cases and takes hours, so
-[`scripts/official_slice.py`](scripts/official_slice.py) drives a seeded uniform
-sample of 200 of them through the same official `run_testcase`, unchanged
-(capped at `batch_size * vocab_size <= 2**28`, which bounds the reference
-`torch.topk` without dropping a shape family):
+[`tests/test.py`](tests/test.py) -- upstream's file -- takes `--sample N`,
+`--seed S` and `--backend NAME`:
 
 ```bash
-PYTHONPATH=. python scripts/official_slice.py     # 200/200 passed
+PYTHONPATH=. python tests/test.py --backend maca_c --sample 200   # 200 of the table
+PYTHONPATH=. python tests/test.py                                 # all of it (hours)
 ```
 
-`--backend` is the one thing the official suite cannot express -- its call site
-passes no `backend=` -- so the driver rebinds `deep_select.topk` for the run
-rather than editing the official file:
+`--backend` is the one thing the suite cannot express on its own -- its call site
+passes no `backend=`. It is now a parameter of `run_testcase`, defaulting to
+`maca_c` (the kernel this tree exists to ship), so the other two are reachable
+by name:
 
 ```bash
-PYTHONPATH=. python scripts/official_slice.py                    # the default (torch)
-PYTHONPATH=. python scripts/official_slice.py --backend maca_c   # the kernel, pinned
-PYTHONPATH=. python scripts/official_slice.py --backend torch    # the reference
-PYTHONPATH=/path/to/mcDeepGEMM:. python scripts/official_slice.py --backend deep_gemm
+PYTHONPATH=. python tests/test.py --backend maca_c   # the kernel (the default)
+PYTHONPATH=. python tests/test.py --backend torch    # the reference
+PYTHONPATH=/path/to/mcDeepGEMM:. python tests/test.py --backend deep_gemm
 ```
 
-A pinned arm and the default are different questions and there is a flag for
-each. `--backend maca_c` pins the call, so it says nothing about the default --
-the process default is never consulted. `--default-arm maca_c` leaves the
-official call site exactly as written and sets `DS_TOPK_BACKEND` instead, so
-what runs is the path a caller who names no backend actually takes.
+A pinned backend and a process default are different questions and there is a
+flag for each. `--backend maca_c` pins the call, so it says nothing about the
+default -- the process default is never consulted. `DS_TOPK_BACKEND=maca_c`
+leaves the official call site exactly as written and sets the process default
+instead, so what runs is the path a caller who names no backend actually takes.
 
 ```bash
-PYTHONPATH=. python scripts/official_slice.py --default-arm maca_c
+DS_TOPK_BACKEND=maca_c PYTHONPATH=. python tests/test.py
 ```
 
-A backend whose service range is narrower than the operator's says so through
-`UnsupportedByBackend`, and those cases are counted as `unsupported` in the
-summary instead of failing the run.
+`--backend deep_gemm` in an environment where the package cannot serve the call
+is refused before anything runs, rather than discovered case by case. A backend
+that *is* present but serves a narrower range says so through
+`UnsupportedByBackend`, and those cases are counted as `unsupported` rather than
+failing the run.
 
-Two things neither arm covers, both recorded rather than papered over: the
+**Every case reports a status and the run reaches its summary.** Upstream stops
+at the first wrong answer (`sys.exit(1)`), which is the right thing for CI and
+tells you nothing about the other 105,137 cases. The statuses are `pass`,
+`check_fail` (it selected wrong), `crash` (it raised), `skip`
+(`torch.cuda.OutOfMemoryError`) and `unsupported`. A `crash` normally stops the
+run -- a poisoned CUDA context makes every later case report the same error --
+unless `-rf` is given, which keeps going so the damage can be counted. `-rf` is
+therefore what makes a long exploratory run worth starting, and it keeps the
+meaning it had upstream (`if not args.run_to_finish: sys.exit(1)`), which was
+about continuing rather than stopping:
+
+```bash
+./run_test.sh --test --sample 2000          # 200 cases by default; this one 2000
+```
+
+For CI the exit status is the contract, and it is unchanged: any `check_fail` or
+`crash` exits 1, and a clean run exits 0. What *is* new is which implementation a
+bare invocation tests. Upstream's call site is `deep_select.topk(...)` with no
+`backend=`, which resolves to the library default (`torch`, the reference); here
+`run_testcase` passes `backend="maca_c"` unless told otherwise, so the suite
+tests the kernel. Asking for the reference is now explicit:
+
+```bash
+PYTHONPATH=. python tests/test.py --backend torch
+```
+
+Two things the suite does not cover, both recorded rather than papered over: the
 contract rejections (a strided input row, the wrong dtype, `topk` out of range,
 an output buffer smaller than `(batch_size, topk)`) -- the official table
 asserts on values and has no exception cases -- and `begin` / `hint` /
