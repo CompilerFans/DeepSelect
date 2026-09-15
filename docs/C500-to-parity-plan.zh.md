@@ -2259,3 +2259,125 @@ split 有没有开**。
 窗口、喂 `NormalFloatDistribution`，所以**同一 `n_cols` 下本仓的数与 host 自己
 那张表的数不可比**；本节所有对比都是**本仓 harness 内三个 backend 之间**的，
 这也是 `deepselect_perf.csv` 的 `relative_pct_vs_maca_c` 列的含义。
+
+---
+
+## 20. 为什么不能把 host 选择器直接搬过来：**四道门，被砍掉的那部分正是这条赛道**（2026-09-15）
+
+§19 量出"同为 fp32 split 开着的格子还差 1.2–1.8×"，于是问题自然变成
+"那为什么不干脆把 `deep_gemm.fp32_indexer_topk_selector` 照搬过来"。
+**答案是：它服务不了本仓的绝大多数格子，而被它砍掉的偏序恰好是这条赛道。**
+四道门，每一道都是源码里的一行。
+
+### 20.1 第一道：它不是同一组数据类型
+
+`csrc/kernels/fp32_topk.cu:1371` 的选择策略：
+
+```cpp
+  if (n_rows <= 32) { chunk_count = select_chunk_count(...); }
+  switch (select_topk_kernel(params, chunk_count)) {
+    case TopKKernel::Chunks: ... break;
+    case TopKKernel::Coarse12: ... break;
+    case TopKKernel::Single: ... break;
+  }
+```
+
+`select_topk_kernel`（`:1233`）的**第一个**分支是：
+
+```cpp
+  if (params.n_rows <= 32) return chunk_count == 0 ? Single : Chunks;
+```
+
+而 `kThreads = 1024`（`:18`）、`__launch_bounds__(kThreads)`（`:707`）——
+**整个 host 选择器是 1024 线程/CTA 的 fp32 内核**。
+
+**bf16 那一半在这里没有实现。** 而它在本仓不是边角料，是主线内核加上主线数据集：
+
+| 类别 | 本仓官方网格 | 本仓正确性表（105,138） |
+|---|---|---|
+| bf16 Lightning Indexer | 90 / 95（**95%**） | 46,728（**44%**） |
+| fp32 Sampler / 选择器 | 5 / 95 | 58,410（56%） |
+
+把 fp32 选择器搬过来，服务的是这张表里 **7.4%** 的格子
+（`fp32 且 topk<=2048 且 无序 且 int32 索引` = 7,788/105,138），
+其余 **92.6% 要另写一套 16 位内核** —— 本仓的 `csrc/xcore1000/` 就是那一套。
+
+### 20.2 第二道：算术强度是常数，不是变量
+
+两个内核读的元素数一样，返回的元素数也一样：
+
+    本仓 `maca_topk.cu` 与 host `fp32_topk.cu`：每元素读 4 B、每行返回 k×4 B。
+    算术强度 ≤ 4k/4V + 1 ≈ 1.01 FLOP/Byte，**与 B、V、k 都无关**。
+
+两者都在 1650 GB/s 的只读墙的约 20% 附近跑（§18.5 的只读栅栏就是同一条
+`load → 比较 → 共享原子` 链）。所以**这不是一个"换个更好算法"的差距**：
+同一份 DRAM 流量，两边都不可能突破同一个约 2.7% 的指令开销（§18.2），
+剩下的差距只能来自**在飞字节数与 kernel 道数**，而这两项在别的方面被钉住了：
+
+- **本仓一条行**：`kSMEM = 48 KiB`（`radix_core.cuh:75`）→ arena 13,784 B、
+  `1,563.9 B` 粒度下 **每 SM 5 个 CTA**；512 线程。
+  （host clamp 是 100–200 KB/SM，对 65,536 与 131,072 给出同一个数 ——
+  **这条数据无法区分这两种 AP**，所以用 host 源里可验证的那个事实：
+  `kSMEM = 48 KiB`、`kThreads = 512`、两趟读。）
+- **host 一条行**：单趟、`kThreads = 1024`、`kCoarse12SmemBytes = 16 KiB`
+  的 arena、`kCoarse12Threads = 640`。
+- 一道 1024 线程的 CTA **就是一个 SM 的满配**（2048 线程）。
+  **本仓不能把行核提到 1024 线程**：`radix_topk_row_bf16_b` 是 `<<<batches, 512>>>`，
+  那 512 是量出来的，提到 1024 会同时改每 CTA 的行数与占用率，
+  是"性能变更纪律"要求重新做 before→after 的那一类；**本轮没有做**。
+
+### 20.3 第三道：契约，而且不是可以补的那部分
+
+host 那个入口**只收** (scores, seq_lens, top_k, seq_starts)：
+它的行长来自 device 上的 `seq_lens`；`begin` / `end` / `output_idx` /
+`output_idx_offset` / `idx_oob_fill_value` / `value_oob_fill_value` /
+`return_value` 一个都没有。
+
+而 `tests/test.py:64-70` 的正确答案定义是：
+
+```python
+    min_selected >= max_unselected
+```
+
+**这个"未选中集合"是通过 `end` / `output_idx_offset` 表达出来的。**
+本仓的 `end` 是**每行不同、且只在 device 上存在**的。host 那个内核的
+`initialize_row_context` 从 `seq_lens` 里取行长 —— 形状对得上，**契约对不上**。
+
+### 20.4 第四道：`value_oob_fill_value` 在 bf16 上不可表示
+
+默认是 `-1234123412341234`（约 -1.2e15）。
+
+    这个数**能**精确表示成** fp32**（24 位有效位，1.234e15 → ULP 1.0e8，整数可精确表示）。
+    这个数**不能**表示成 **bf16**（8 位有效位 → 只能到 2 的幂量级；1.234e15 最接近的是 1.1529215e18）。
+
+CLAUDE.md 的 NaN 契约一节写的是：
+"the one float conversion (`__float2bfloat16` of `value_oob_fill_value`) stays
+exact for a denormal fill" —— **这条只有 fp32 一侧成立**。所以拿 fp32 内核
+去经 DLPack 服务 bf16 输入，填充值会在第一跳就变形；`tests/test.py` 的
+`check_result` 会逐值比较，**这一条过不去**。
+
+### 20.5 结论：不是"搬不动"，是"搬过来也不是同一条赛道"
+
+四道门合起来：
+
+| 门 | host 选择器 | 本仓 | 影响 |
+|---|---|---|---|
+| 1 数据类型 | fp32-only，1024 线程 | bf16 + fp32 两套，512 线程 | 服务 7.4% 的正确性表；**官方网格 95% 是 bf16** |
+| 2 算术强度 | ≈1.01 FLOP/B，两边一样 | 同 | 不是算法差距；差距在在飞字节数/道数，被 `kSMEM=48 KiB`、512 线程钉住 |
+| 3 契约 | 无 `end`/`output_idx`/填充值 | 全套 | 正确答案本身要 `end` 才定义得出来 |
+| 4 填充值 | fp32 可表示 | bf16 不可表示 | bf16 臂**过不了逐值检查** |
+
+**所以 §19 那个 1.2–1.8× 不能靠移植消掉**：移植只能覆盖官方网格的 **5/95**，
+而被它放弃的 90/95 bf16 格与 92.6% 的正确性表**必须走本仓这套 16 位内核** ——
+本仓的 kernel 不是"没选对 host 那个算法"，它就是 host 没有的那一半。
+
+**真正能拿走的两件事，都还没做：**
+
+1. **单趟 compact+refine**（host 的 structural 优势，§5 已记）。它要一个
+   同样能表达 `end` 的 16 位数据流，且必须补齐 §8.4 的溢出回退
+   （host 的 `topk_chunks_compact_refine` 在暂存满了之后**静默丢成员**，
+   这正是它 `test_selector_candidate_overflow` 那个 `xfail`）。
+   **这是 1.2–1.8× 里属于数据流的那部分，上限 1.8×。**
+2. **split 的 topk 门槛**（§19.3，5–9×，一行条件 + 实例化代价）。
+
+**两条都还没做，本节只记录"为什么不能照搬"这个判断本身。**
