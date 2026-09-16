@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 #
-# Build a wheel and install it into the active environment.  Same build as
-# `./build.sh`, producing a wheel instead of an in-place extension.
+# Build a wheel **for this device** and install it into the active
+# environment.  Same build as `./build.sh`, narrowed to one family and followed
+# by a `pip install`.
 #
-#     ./install.sh                            # every family
-#     CUCC_TARGETS=xcore1600 ./install.sh     # for another architecture
-#     CUCC_TARGETS=native    ./install.sh     # just this device
+#     ./install.sh                            # this device's family
+#     CUCC_TARGETS=xcore1600 ./install.sh     # another architecture
 #
 # Env:
-#     CUCC_TARGETS  targets to compile; unset means
-#                   `deep_select/_arch.py::DEFAULT_TARGETS`, one per family
+#     CUCC_TARGETS  targets to compile; unset means **`native`**, the family
+#                   this device reports.  Narrowing is the point of this
+#                   script: what it installs is the wheel the machine in front
+#                   of you runs, and a caller who needs the shippable
+#                   all-family artifact wants `./build.sh`.
 #     MACA_PATH     MACA toolkit root (default /opt/maca).  MACA_HOME is
 #                   consulted when this is unset; this one wins if both are set.
 #     MAX_JOBS      ninja's -j
@@ -35,14 +38,17 @@ export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
 export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
 export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
-# `CUCC_TARGETS` is deliberately not set; see the header.
+# One image by default, unlike `build.sh`.  This installs onto a machine, so
+# the other two families' images would be dead weight in that machine's
+# site-packages; an explicit `CUCC_TARGETS` still wins.
+export CUCC_TARGETS="${CUCC_TARGETS:-native}"
 
 rm -rf build dist
 rm -rf ./*.egg-info
 
 which python
 which pip
-echo "install.sh: CUCC_TARGETS=${CUCC_TARGETS:-<unset: setup.py takes _arch.DEFAULT_TARGETS>}"
+echo "install.sh: CUCC_TARGETS=$CUCC_TARGETS"
 
 python setup.py bdist_wheel
 pip install dist/*.whl --force-reinstall --no-deps

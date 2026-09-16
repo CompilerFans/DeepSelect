@@ -227,20 +227,24 @@ CUCC_TARGETS=xcore1000,xcore1600 python setup.py build_ext --inplace   # both
 PYTHONPATH=. python tests/test.py --backend maca_c --sample 200        # correctness
 ```
 
-The scripts wrap those calls. `build.sh` builds **in place** — that is the one
-the suites here need, since they run with `PYTHONPATH=.` and so resolve the
-repo's `deep_select/`, where `_binding.load()` globs for the extension.
-`install.sh` builds a wheel and `pip install`s it, which puts the extension in
-`site-packages/deep_select/` and nothing back in the tree — so a tree that has
-been `clean.sh`ed needs a `build.sh` before `run_test.sh` will find anything.
+The scripts wrap those calls, divided by **what they produce**:
+`develop.sh` builds **in place** and installs nothing -- that is the one the
+suites here need, since they run with `PYTHONPATH=.` and so resolve the repo's
+`deep_select/`, where `_binding.load()` globs for the extension. `build.sh`
+builds a wheel for every family, and `install.sh` builds the same wheel
+narrowed to this device and `pip install`s it, which puts the extension in
+`site-packages/deep_select/` and nothing back in the tree -- so a tree that has
+been `clean.sh`ed needs a `develop.sh` before `run_test.sh` will find anything.
 `clean.sh` removes the build artifacts, and `run_test.sh` runs the suites and
 records what it measured.
 
-**The wheel is left in `dist/` and nowhere else.** There is no `BUILDROOT`
-export and no `--build-only`: both were this script's earlier spellings and went
-with its flag parsing (`9a6105b`). A cut that needs the wheel elsewhere copies it
-out of `dist/`; a reader should not re-add an output path that was removed on
-purpose.
+**The wheel goes to `dist/`, and to `${BUILDROOT}/wheel/` when `BUILDROOT` is
+set.** That is the host repository's (`mcDeepGEMM/build.sh`) own variable and
+destination, so one packaging step can collect both wheels by pointing a single
+`BUILDROOT` at both trees. A `--build-only` flag was this script's earlier
+spelling and went with its flag parsing (`9a6105b`); the `BUILDROOT` export
+came back on its own (`build.sh`, 2026-09-16) because it is the reference's
+behaviour and needs no flag.
 
 It is tagged `py3-none-linux_x86_64` and declares `torch` and `apache-tvm-ffi`
 (unpinned -- the MACA torch builds carry metax-suffixed local versions, which a
@@ -250,19 +254,24 @@ to name, and what the wheel is actually sensitive to is the platform. See
 CLAUDE.md's wheel table for what the target machine must still provide.
 
 ```bash
-./build.sh                             # every family (CUCC_TARGETS to narrow)
-./install.sh                           # build a wheel and install it
-./clean.sh && ./build.sh               # full rebuild
+./develop.sh                           # in-place build, this device only
+./build.sh                             # a wheel, every family (CUCC_TARGETS to narrow)
+BUILDROOT=/out ./build.sh              # ...and copy it to /out/wheel/
+./install.sh                           # a wheel for this device, pip installed
+./clean.sh && ./develop.sh             # full rebuild
 ./run_test.sh --perf --dtype bf16 -nc  # the performance grid
 ./run_test.sh --all                    # performance grid + correctness sample
 ```
 
 `CUCC_TARGETS` is the whole build interface (the same variable and meaning as
-mcDeepGEMM's `build.sh`); it defaults to `xcore1000,xcore1500,xcore1600`
--- one target per family, the same *set* of families mcDeepGEMM's default names,
-minus its per-part aliases, which `mxcc` rejects outright (`xcore1008`,
-`xcore1610`, `xcore1620`). `CUCC_TARGETS=native` is the shortcut for "just this
-device", and `CUCC_TARGETS=xcore1600 ./build.sh` for one family.
+mcDeepGEMM's `build.sh`). Unset means `xcore1000,xcore1500,xcore1600` in
+`build.sh` -- one target per family, the same *set* of families mcDeepGEMM's
+default names, minus its per-part aliases, which `mxcc` rejects outright
+(`xcore1008`, `xcore1610`, `xcore1620`) -- and `native`, this device alone, in
+`develop.sh` and `install.sh`. The difference is deliberate: a wheel has to
+carry every family to be shippable, while a local build only has to carry the
+board in front of you. `CUCC_TARGETS=xcore1600 ./develop.sh` is the one-family
+form when you want it explicitly.
 
 **The target list is a list of images, not of builds.** One extension,
 `deep_select/deep_select_maca*.so`, carries one image per target, because mxcc
@@ -442,8 +451,9 @@ then.
 
 | variable | default | effect |
 | --- | --- | --- |
-| `CUCC_TARGETS` | `xcore1000,xcore1500,xcore1600` | which `-offload-arch` images go into the one extension; `native` = this device only. An unrecognized target fails the build |
-| `MACA_PATH` | `/opt/maca` | the MACA toolkit root, and the authority for it. `build.sh`/`install.sh` derive `CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`/`LD_LIBRARY_PATH` from it, since a stale one of those in the caller's shell silently beats it |
+| `CUCC_TARGETS` | `xcore1000,xcore1500,xcore1600` (`build.sh`); `native` (`develop.sh`, `install.sh`) | which `-offload-arch` images go into the one extension; `native` = this device only. An unrecognized target fails the build |
+| `MACA_PATH` | `/opt/maca` | the MACA toolkit root, and the authority for it. All three scripts derive `CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`/`LD_LIBRARY_PATH` from it, since a stale one of those in the caller's shell silently beats it |
+| `BUILDROOT` | unset | `build.sh` only. When set, the wheel is also copied to `${BUILDROOT}/wheel/` — the host repository's own destination, so one packaging step can collect both wheels by pointing a single `BUILDROOT` at both trees |
 | `MACA_HOME` | — | toolkit root too, consulted when `MACA_PATH` is unset. `MACA_PATH` wins if both are set |
 | `MAX_JOBS` | torch's | ninja's `-j`. Not read by this tree -- `build.sh` passes it through to the build |
 | `DEEP_SELECT_MACA_STACK_CHECK` | unset → skip | run the mxcc `--resource-usage` spill gate over `1` (all sources) or a comma-separated list |

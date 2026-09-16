@@ -193,9 +193,9 @@ PY
 so=$(ls deep_select/deep_select_maca*.so 2>/dev/null | head -1 || true)
 if [[ -z "$so" ]]; then
     echo "run_test.sh: no extension in deep_select/" >&2
-    echo "             build it first:  ./build.sh" >&2
+    echo "             build it first:  ./develop.sh" >&2
     if [[ "$allow_build" == "1" ]]; then
-        ./build.sh
+        ./develop.sh
         so=$(ls deep_select/deep_select_maca*.so 2>/dev/null | head -1 || true)
     else
         exit 1
@@ -213,8 +213,8 @@ if [[ -n "$newest_src" ]]; then
     echo "             the extension may not match the sources." >&2
     echo "             extension md5 below is what will actually be measured." >&2
     if [[ "$allow_build" == "1" ]]; then
-        echo "run_test.sh: --allow-build: running ./build.sh"
-        ./build.sh
+        echo "run_test.sh: --allow-build: running ./develop.sh"
+        ./develop.sh
         so=$(ls deep_select/deep_select_maca*.so 2>/dev/null | head -1 || true)
         stale_note="# STALE           rebuilt by --allow-build before this run"
     else

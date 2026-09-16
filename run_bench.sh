@@ -149,7 +149,7 @@ chip_dir="${results_dir}/${device_dir}"
 so=$(ls deep_select/deep_select_maca*.so 2>/dev/null | head -1 || true)
 if [[ -z "$so" ]]; then
     echo "run_bench.sh: no extension in deep_select/" >&2
-    echo "              build it first:  ./build.sh" >&2
+    echo "              build it first:  ./develop.sh" >&2
     exit 1
 fi
 

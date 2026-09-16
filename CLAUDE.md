@@ -51,61 +51,91 @@ the path a bare call actually takes.  (The suite's `--backend` defaults to
 
 ## Build
 
+Three scripts, divided **by what they produce** rather than by audience. The
+split is the whole interface:
+
+| script | produces | targets default | installs? |
+| --- | --- | --- | --- |
+| `./develop.sh` | `deep_select/deep_select_maca*.so`, in place | `native` (this device) | no |
+| `./build.sh` | `dist/*.whl` (+ `${BUILDROOT}/wheel/` if set) | every family | no |
+| `./install.sh` | the same wheel, `pip install`ed | `native` (this device) | yes |
+
+**`./develop.sh` is the one that writes the in-place extension**, and it is
+what `run_test.sh` / `run_bench.sh` call when they are passed `--allow-build`
+(or find nothing to measure). That is not a convenience: `_binding.py` loads
+`.so` out of the package directory and both runners read its md5 as the "which
+artifact did I measure" receipt, so an extension in *site-packages* is the
+wrong artifact for a measurement even when it is the right one for a caller.
+
 ```bash
-./build.sh                                    # CUCC_TARGETS=xcore1000,xcore1500,xcore1600 (default)
-CUCC_TARGETS=native          ./build.sh       # just this device
-CUCC_TARGETS=xcore1600       ./build.sh       # one architecture
+./develop.sh                                  # just this device
+CUCC_TARGETS=xcore1000,xcore1500,xcore1600 ./develop.sh   # cross-family check
 ```
 
-`build.sh` is the entry point; it wraps the same `setup.py` calls shown below.
-It mirrors mcDeepGEMM's `build.sh` in shape but deliberately does **not** run
-`bdist_wheel` — see the `pip install .` note below for why `--inplace` is the
-working path — and it removes the stale in-place `.so` before building rather
-than trusting `build_ext`'s timestamp comparison. It resolves targets through
-`deep_select/_arch.py` so the script and `setup.py` cannot disagree, and an
-unrecognized target fails the build rather than being skipped. `MACA_PATH`
-(default `/opt/maca`) and `MAX_JOBS` are honored.
+`develop.sh` defaults to `native` for the reason a packaging step defaults to
+every family: developing against one device should not cost three device
+compiles. An explicit `CUCC_TARGETS` always wins, so the cross-family check
+needs no second flag. It removes the stale in-place `.so` before building
+rather than trusting `build_ext`'s timestamp comparison.
+
+```bash
+./build.sh                                    # every family (CUCC_TARGETS to narrow)
+CUCC_TARGETS=xcore1600       ./build.sh       # one architecture
+BUILDROOT=/out               ./build.sh       # also copy the wheel to /out/wheel/
+```
+
+`build.sh` is mcDeepGEMM's `build.sh` in shape: `bdist_wheel`, and a
+`${BUILDROOT}/wheel/` export when `BUILDROOT` is set — **the same variable and
+the same destination as the host repository's, so one packaging step can
+collect both wheels by pointing a single `BUILDROOT` at both trees.** It
+resolves targets through `deep_select/_arch.py` so the script and `setup.py`
+cannot disagree, and an unrecognized target fails the build rather than being
+skipped. `MACA_PATH` (default `/opt/maca`) and `MAX_JOBS` are honored.
 
 **There is no argument parsing — the target list is `CUCC_TARGETS` and nothing
-else**, which is mcDeepGEMM's shape. Two things `build.sh` does that
-mcDeepGEMM's does not, both recorded in its header: it removes the stale
-in-place `.so` first, and its default is one target per family this tree names
-(`xcore1000,xcore1500,xcore1600`) rather than mcDeepGEMM's default verbatim — that
+else**, which is mcDeepGEMM's shape. One thing `build.sh`'s default does that
+mcDeepGEMM's does not: it is one target per family this tree names
+(`xcore1000,xcore1500,xcore1600`) rather than mcDeepGEMM's list verbatim — that
 list's `xcore1008`/`xcore1502`/`xcore1520`/`xcore1610`/`xcore1620` are
 **aliases of a family already in the list**, and this `setup.py` names the
 extension after the *family*, so two targets in one family build the same
 extension twice while `mxcc` rejects several of those spellings outright.
 
 ```bash
-./install.sh                                  # build a wheel and install it
+./install.sh                                  # this device's family, installed
 CUCC_TARGETS=xcore1600 ./install.sh           # for another architecture
 ```
 
-`install.sh` additionally installs into the active environment
-(`pip install <wheel> --force-reinstall --no-deps`, matching mcDeepGEMM's
-`install.sh`). One thing it has to do that mcDeepGEMM's does not:
+`install.sh` builds the same wheel `build.sh` does, narrowed to one family, and
+installs it into the active environment (`pip install <wheel>
+--force-reinstall --no-deps`, matching mcDeepGEMM's `install.sh`). One thing it
+has to do that mcDeepGEMM's does not:
 
 - **Build the wheel by a single `bdist_wheel` run, then hand pip the file.**
   `pip install .` cannot work here (see below); building first keeps `setup.py`
   to one invocation. One run cannot straddle the second boundary; the split is
   what `pip install .` creates.
 
-**The wheel is left in `dist/` and nowhere else — there is no `BUILDROOT`
-export.** That is a decision, not an omission: a `${BUILDROOT}/wheel/` export
-landed once (`761edc0`) and was dropped along with the flag parsing it shipped
-with when these three scripts were rewritten to mcDeepGEMM's shape
-(`9a6105b`, "the target list is an env var, not four flags"). If a packaging
-step needs the wheel somewhere else, `dist/*.whl` is what to collect; do not
-re-introduce a second output path or an env var that only some callers set.
+**Three `CUCC_TARGETS` defaults, and they are all deliberate.** No value means
+`deep_select/_arch.py::DEFAULT_TARGETS` (`xcore1000,xcore1500,xcore1600`, one
+per family) and only `build.sh` takes it — a build host need not have a MACA
+card in it at all, and a wheel carrying only the device it was built on is a
+wheel that cannot be shipped anywhere else. `develop.sh` and `install.sh` say
+`native` because both are acting on *this machine*. A caller who wants the
+shippable artifact runs `build.sh`; the other two are the local paths.
+(This paragraph said "neither script sets it" until 2026-09-16, which was true
+of `build.sh` alone. The tree is the authority:
+`grep -n 'CUCC_TARGETS:-' *.sh`.)
 
 The underlying call, if you need it directly (this bypasses the scripts' env
 derivation, so export `MACA_PATH`/`CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`
 yourself — see the build-change discipline section for why):
 
 ```bash
-CUCC_TARGETS=xcore1000 python setup.py build_ext --inplace             # C500
+CUCC_TARGETS=xcore1000 python setup.py build_ext --inplace             # C500, in place
 CUCC_TARGETS=xcore1600 python setup.py build_ext --inplace             # C600, C600U
 CUCC_TARGETS=xcore1000,xcore1600 python setup.py build_ext --inplace   # both
+python setup.py bdist_wheel                                            # a wheel
 ```
 
 ```bash
@@ -119,18 +149,11 @@ here). It deliberately does **not** touch `$HOME/.deep_gemm`, `~/.triton`,
 `~/.tilelang` or `~/.metax`, unlike mcDeepGEMM's script: nothing here writes them, so
 that would be deleting another project's cache. Its only option is `--dry-run`;
 `--yes` was its first spelling and is gone — a flag that is accepted and ignored
-is a flag a caller believes did something. `./clean.sh && ./build.sh` is the
-supported full-rebuild chain.
-
-`CUCC_TARGETS` is the same variable and meaning as mcDeepGEMM's `build.sh`,
-and **neither script here sets it** — an unset variable stays unset and
-`setup.py` applies `deep_select/_arch.py::DEFAULT_TARGETS`
-(`xcore1000,xcore1500,xcore1600`, one per family), so the scripts cannot drift
-from it. `native` is the opt-in `CUCC_TARGETS=native ./build.sh` for a
-one-image local build, and a wheel is what a packaging step collects, so the
-default carries every family. (This line said "defaults to `native`" until
-2026-09-15 and contradicted the command block above it. The tree is the
-authority: `grep -n DEFAULT_TARGETS deep_select/_arch.py`.)
+is a flag a caller believes did something. `./clean.sh && ./develop.sh` is the
+supported full-rebuild chain, and it is `develop.sh` rather than `build.sh`
+because after the `clean` you have to rebuild the in-place extension before
+anything can be measured — `build.sh` leaves you with a wheel and nothing to
+run.
 
 **The target list is an image list, not a build list.** One extension —
 `deep_select/deep_select_maca.so` — carries one
@@ -179,8 +202,9 @@ the unpacked directory, `backend="maca_c"` run from `/tmp` — correct. That
 proves the package is self-contained apart from torch/MACA/tvm_ffi; it was taken
 on the build machine, so it is **not** a second-machine test.
 
-**The stale `.so` must be deleted before rebuilding** — `build.sh` does this for
-you, but a bare `setup.py build_ext --inplace` does not (see the handover §4):
+**The stale `.so` must be deleted before rebuilding** — `develop.sh` does this
+for you, but a bare `setup.py build_ext --inplace` does not (see the handover
+§4):
 
 ```bash
 rm -f deep_select/deep_select_maca*.so \
@@ -189,7 +213,7 @@ rm -f deep_select/deep_select_maca*.so \
 
 `build_ext --inplace` compares timestamps and **silently skips** the copy when the target is newer than `build/lib`. The `.so` lives under `deep_select/` and is gitignored, so it is stale by default. The `.so` md5 is sensitive to source line endings and is usable as a "which source did I actually measure" receipt — **but it is not a content-addressed hash, and a differing md5 is not by itself evidence that the source or the behavior differs.**
 
-**Two identical-source builds do NOT produce identical md5s** (measured 2026-09-14, this host). `./build.sh` twice in a row on an untouched tree gave `0909cc25557dd7f2a12e82110f22b1f2` then `4b29550adb7137d25f0d47b5864db9f3`. `cmp -l` localizes the difference exactly: **6 bytes at `0x3a2af8..0x3a2afd`**, in the middle of a string that reads `…maca_topk-02b752.cpp\0__FRAME_END__…` — mxcc names the intermediate compilation unit with a **random suffix** (`maca_topk-<6 hex>.cpp`), so the embedded debug/line-table string differs per build while the code is byte-identical. The file size is the same. The upshot: cite the md5 as a receipt for *which artifact* you measured, never as evidence that two artifacts are the same or different code; when the difference matters, `cmp -l` the pair first, and if the only differing bytes are that filename string, the binaries are the same build.
+**Two identical-source builds do NOT produce identical md5s** (measured 2026-09-14, this host). `./develop.sh` — then spelled `./build.sh`, before the scripts were divided by output — twice in a row on an untouched tree gave `0909cc25557dd7f2a12e82110f22b1f2` then `4b29550adb7137d25f0d47b5864db9f3`. `cmp -l` localizes the difference exactly: **6 bytes at `0x3a2af8..0x3a2afd`**, in the middle of a string that reads `…maca_topk-02b752.cpp\0__FRAME_END__…` — mxcc names the intermediate compilation unit with a **random suffix** (`maca_topk-<6 hex>.cpp`), so the embedded debug/line-table string differs per build while the code is byte-identical. The file size is the same. The upshot: cite the md5 as a receipt for *which artifact* you measured, never as evidence that two artifacts are the same or different code; when the difference matters, `cmp -l` the pair first, and if the only differing bytes are that filename string, the binaries are the same build.
 
 **A comment-only source edit also changes the binary, and it is decidable whether it changed code** (measured 2026-09-14). Adding 36 lines of comment moved 32 more bytes in `.text`; `cmp -l` plus a byte-pattern read says exactly what they are: every one sits on a `be <imm32>` (x86 `mov esi, imm32`) and **every immediate shifted by exactly +36** — i.e. they are embedded source line numbers, not code. So the full 38-byte delta was 32 line numbers + 6 filename-suffix bytes, and the code was identical. When you need to make that claim, do it this way rather than by md5 or by argument:
 - `cmp -l <a> <b> | wc -l` — is it a handful of bytes or a lot?
@@ -219,7 +243,7 @@ Build plumbing worth knowing before editing `setup.py`:
   `USE_MACA`. Every build died with `no cu-bridge gnu found`, and the file's `os.environ["CXX"] = "g++"` line was dead
   code: ninja's `$cxx` was cu-bridge's `gnu` either way. The lesson is the shape of the bug, not the instance.
   **If a CUDA_HOME must be synthesized, `bin/gnu` is not optional.** (Recovered with `git reset --mixed`-free edits;
-  the fix is commit-sized and the fallback is `./build.sh` from a clean `build/`. The general form of the lesson is
+  the fix is commit-sized and the fallback is `./develop.sh` from a clean `build/`. The general form of the lesson is
   the headline of "Build-change discipline" below.)
 - Every source in `csrc/` is a `.cu`, so the device compiler is the only compiler the build runs for sources.
   `api.cu` is host *code* (no `__global__`), spelled `.cu` so torch routes it to the device rule rather than to `$cxx`:
@@ -1126,7 +1150,7 @@ The build has one failure mode worth a rule, because it cost a day and the bug w
 A build change here is verified by *building both targets and running them*, never by reasoning about which flags
 reached the compiler. Concretely:
 
-1. `rm -rf build && ./build.sh` for every target — `build_ext --inplace` compares timestamps and will silently reuse a
+1. `rm -rf build && ./develop.sh` for every target — `build_ext --inplace` compares timestamps and will silently reuse a
    stale object directory, so an incremental "it built" proves nothing about a toolchain change.
 2. The device compiler and the host linker are **printed by `setup.py`** (`deep_select: device compiler is …`). Read
    those two lines; do not assume.
@@ -1229,7 +1253,7 @@ seen fail is not evidence**, and 4 of its 12 controls are pairs that must report
    reports for `Module`/`ClassDef`/`FunctionDef` bodies too. Runtime strings — `assert` messages, log lines, format
    strings — are **not** docstrings and stay in the comparison, because changing one can change behaviour.
 
-Landing this kind of change: `rm -rf build && ./build.sh` (a comment edit still changes the artifact — mxcc embeds
+Landing this kind of change: `rm -rf build && ./develop.sh` (a comment edit still changes the artifact — mxcc embeds
 source line numbers — so "the md5 moved" is not evidence of a behaviour change, and the gate is), then
 `./run_test.sh --test`. `e3f73cb` is the worked example: 28/28 documentation-only, `BUILD_RC=0`, 202/202 passed.
 

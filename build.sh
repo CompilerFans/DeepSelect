@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 #
-# Build the DeepSelect MACA kernels in place.
+# Build the DeepSelect wheel.  This is the script a packaging step runs: it
+# produces an artifact for **every family this tree names** and installs
+# nothing.
 #
 #     ./build.sh                              # every family
-#     CUCC_TARGETS=xcore1000,xcore1600 ./build.sh
+#     CUCC_TARGETS=xcore1600 ./build.sh       # one architecture
 #     CUCC_TARGETS=native ./build.sh          # just this device
+#     BUILDROOT=/out ./build.sh               # also copy the wheel to /out/wheel/
 #
 # Env:
 #     CUCC_TARGETS  targets to compile.  Unset means
@@ -14,10 +17,25 @@
 #     MACA_PATH     MACA toolkit root (default /opt/maca).  MACA_HOME is
 #                   consulted when this is unset; this one wins if both are set.
 #     MAX_JOBS      ninja's -j
+#     BUILDROOT     if set, the wheel is also copied to `${BUILDROOT}/wheel/` --
+#                   the host repository's own destination for the same variable
+#                   (`mcDeepGEMM/build.sh`), so one packaging step can collect
+#                   both wheels by pointing a single BUILDROOT at both trees.
 #
-# `build_ext --inplace` rather than `bdist_wheel`: a wheel run executes
-# `setup.py` twice, and `setup.py` stamps its version with `datetime.now()`.
-# `install.sh` does the wheel and carries that workaround.
+# **This script does not produce `deep_select/deep_select_maca*.so`.**  That is
+# `./develop.sh`, and the three scripts divide by output rather than by
+# audience: a local iteration wants an extension in the checkout
+# (`_binding.py` loads it from the package directory, and the runners receipt
+# its md5), while a packaging step wants a wheel and nothing else.
+#
+#     develop.sh   build_ext --inplace  ->  deep_select/<so>   (run the tests)
+#     build.sh     bdist_wheel          ->  dist/<whl>, ${BUILDROOT}/wheel/
+#     install.sh   bdist_wheel + pip    ->  site-packages
+#
+# `bdist_wheel` rather than `build_ext --inplace` for the same reason
+# `install.sh` builds its wheel first and hands the file to pip: `setup.py`
+# stamps its version with `datetime.now()`, so the two runs of a PEP 517
+# install can straddle a second boundary and produce a rejected wheel name.
 #
 set -euo pipefail
 
@@ -36,12 +54,11 @@ export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
 export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
 export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
+# `CUCC_TARGETS` is deliberately not set; see the header.  `setup.py` applies
+# `_arch.DEFAULT_TARGETS` -- one target per family, which is what a wheel has to
+# carry: a wheel built for one board cannot be shipped to another.
 rm -rf build dist
 rm -rf ./*.egg-info
-# The in-place `.so` is gitignored, and `build_ext --inplace` copies out of
-# `build/lib` by timestamp: left in place, a stale one would measure the
-# previous binary against the new source.
-rm -f deep_select/deep_select_*.so
 
 which python
 # `-W` drops torch's own "flash_attn is not installed" import warning (nothing
@@ -52,7 +69,16 @@ echo "build.sh: CUCC_TARGETS=${CUCC_TARGETS:-<unset: setup.py takes _arch.DEFAUL
 
 # `CUCC_TARGETS` becomes one `-offload-arch` list: every target is an image of
 # the same source in the one extension, so a single build serves every family.
-python setup.py build_ext --inplace
+python setup.py bdist_wheel
+
+# After the wheel exists, so what is exported is a wheel that was built.  Same
+# destination and same variable as the host repository's `build.sh`.
+if [[ -n "${BUILDROOT:-}" ]]; then
+    dest="${BUILDROOT}/wheel"
+    mkdir -p "${dest}"
+    cp dist/*.whl "${dest}/"
+    echo "build.sh: wheel also copied to ${dest}"
+fi
 
 echo "build.sh: done"
 cd "$original_dir"

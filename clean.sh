@@ -6,8 +6,8 @@
 #     ./clean.sh --dry-run     # print what would go, remove nothing
 #     ./clean.sh --help
 #
-# The default is to remove, with no confirmation: `./clean.sh && ./build.sh`
-# would otherwise print nothing alarming, succeed anyway (`build.sh` does its
+# The default is to remove, with no confirmation: `./clean.sh && ./develop.sh`
+# would otherwise print nothing alarming, succeed anyway (`develop.sh` does its
 # own `rm`), and silently not rebuild.  The listing is on request because it is
 # a second traversal.
 #
@@ -116,5 +116,5 @@ print(f"    {deep_select.__version__}  from {os.path.dirname(deep_select.__file_
 PY
 )
 
-echo "clean.sh: done.  Rebuild with ./build.sh or ./install.sh."
+echo "clean.sh: done.  Rebuild with ./develop.sh (in place) or ./build.sh (a wheel)."
 cd "$original_dir"
