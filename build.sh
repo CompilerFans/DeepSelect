@@ -10,10 +10,9 @@
 #     BUILDROOT=/out ./build.sh               # also copy the wheel to /out/wheel/
 #
 # Env:
-#     CUCC_TARGETS  targets to compile.  Unset means
-#                   `deep_select/_arch.py::DEFAULT_TARGETS`, one per family;
-#                   `setup.py` applies that default, so the scripts do not
-#                   repeat the literal.  An unrecognized target fails the build.
+#     CUCC_TARGETS  targets to compile, in `mxcc`'s `-offload-arch` spelling.
+#                   Unset means one per family (see below); an unrecognized
+#                   target is rejected by mxcc.
 #     MACA_PATH     MACA toolkit root (default /opt/maca).  MACA_HOME is
 #                   consulted when this is unset; this one wins if both are set.
 #     MAX_JOBS      ninja's -j
@@ -54,9 +53,11 @@ export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
 export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
 export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
-# `CUCC_TARGETS` is deliberately not set; see the header.  `setup.py` applies
-# `_arch.DEFAULT_TARGETS` -- one target per family, which is what a wheel has to
-# carry: a wheel built for one board cannot be shipped to another.
+# One target per family, which is what a wheel has to carry: a wheel built for
+# one board cannot be shipped to another.  The spellings go to `mxcc` verbatim
+# -- `-offload-arch` is its own vocabulary, and it is the thing that knows what
+# this toolchain accepts.
+export CUCC_TARGETS="${CUCC_TARGETS:-xcore1000,xcore1500,xcore1600}"
 rm -rf build dist
 rm -rf ./*.egg-info
 
@@ -65,7 +66,7 @@ which python
 # here uses it); every other warning still prints.
 python -W "ignore:Could not find flash_attn:UserWarning" -c 'import sys, torch
 print(f"build.sh: python {sys.version.split()[0]}, torch {torch.__version__}")'
-echo "build.sh: CUCC_TARGETS=${CUCC_TARGETS:-<unset: setup.py takes _arch.DEFAULT_TARGETS>}"
+echo "build.sh: CUCC_TARGETS=$CUCC_TARGETS"
 
 # `CUCC_TARGETS` becomes one `-offload-arch` list: every target is an image of
 # the same source in the one extension, so a single build serves every family.

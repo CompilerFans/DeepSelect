@@ -112,10 +112,19 @@ _HEADER_WRITTEN = False
 
 
 def _device() -> str:
+    """The device line of the header: name, sm, SM count.
+
+    Everything here comes off torch's device properties, and the whole thing is
+    best-effort -- a header that cannot describe the device prints `unknown`
+    rather than failing the call being logged.
+    """
     try:
-        from ._arch import native_family, native_sm_count
-        name = torch.cuda.get_device_name() if torch.cuda.is_available() else "no device"
-        return f"xcore{native_family()} ({name}, {native_sm_count()} SMs)"
+        if not torch.cuda.is_available():
+            return "no device"
+        from ._arch import native_sm_count
+        name = torch.cuda.get_device_name()
+        major, minor = torch.cuda.get_device_capability()
+        return f"{name} (sm{major}{minor}, {native_sm_count()} SMs)"
     except Exception:
         return "unknown"
 

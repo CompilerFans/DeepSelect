@@ -43,24 +43,15 @@ def get_current_platform() -> Platform:
 # NVIDIA host are both `CUDA` to it, which is correct for `requires_platform`
 # and useless for anything that has to branch on the hardware.
 #
-# The key is the same one the port uses everywhere else -- the sm pair the
-# device reports, which is what `deep_select/_arch.py::FAMILY_OF_SM` and the
-# C++ side's `DeviceCapability::from_mc_arch` both key on.  A device *name* is
-# deliberately not used: the parts spell themselves inconsistently across SDK
-# generations (`MetaX C600U`, `MetaX C600-UL`, ...), which is exactly the
-# reason `_arch.py` keeps a family base as the stable key and treats the
-# spellings as aliases.
+# The key is the sm pair the device reports (`deep_select/_arch.py` keys its
+# family label on the same one).  A device *name* is deliberately not used: the
+# parts spell themselves inconsistently across SDK generations (`MetaX C600U`,
+# `MetaX C600-UL`, ...), and this value comes from the capability pair rather
+# than from the product string.
 #
-# This table mirrors `deep_select/_arch.py::FAMILY_OF_SM`, and the two are kept
-# in sync by hand: `tests/` is the suite and `deep_select/` is the installed
-# package, so this file does not import it (a test helper importing the package
-# under test would also make `setup.py`'s own `import tests.kernelkit` circular
-# on a tree where the extension is not built yet).  A change to either belongs
-# in the same review.
-#
-# An unrecognized sm answers 0 rather than guessing a family -- the same rule
-# `family_of_target` applies to an unknown compiler target, which raises there
-# because a build has to stop; a test helper that only classifies should not.
+# An unrecognized sm answers 0 rather than guessing a family: a test helper
+# that only classifies should not raise where a caller is asking "which one is
+# this", and 0 is already the answer it gives when there is no device at all.
 MACA_FAMILY_OF_SM = {
     80: 1000,       # C500
     86: 1500,       # C600

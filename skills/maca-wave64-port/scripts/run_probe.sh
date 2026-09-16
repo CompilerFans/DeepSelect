@@ -12,30 +12,15 @@
 # different (and irrelevant) answer.
 set -euo pipefail
 
+# The target is `mxcc`'s own `-offload-arch` spelling (`native` included) and
+# is passed through untouched -- `native` resolves to the xcore1000 family on
+# this toolchain, measured byte-identical to `-offload-arch=xcore1000` on a
+# C500.  No table here: naming a target is the compiler's vocabulary, not ours.
 target="${1:-native}"
 device="${2:-}"
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 maca_root="${MACA_HOME:-${MACA_PATH:-/opt/maca}}"
-
-if [[ "$target" == "native" ]]; then
-    # Ask the runtime, the same way deep_select._arch.native_target() does.
-    sm=$(python - <<'PY' 2>/dev/null | tail -1
-import torch
-c = torch.cuda.get_device_capability()
-print(c[0] * 10 + c[1])
-PY
-)
-    case "$sm" in
-        80)  target=xcore1000 ;;
-        86)  target=xcore1500 ;;
-        87|88|89) target=xcore1600 ;;
-        *)   echo "run_probe.sh: device reports sm$sm, which is not a known MACA family;" >&2
-             echo "              pass the target explicitly (xcore1000/xcore1500/xcore1600)" >&2
-             exit 1 ;;
-    esac
-    echo "run_probe.sh: native target resolved to $target"
-fi
 
 export MACA_PATH="$maca_root"
 export CUDA_PATH="$maca_root/tools/cu-bridge"

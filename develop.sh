@@ -55,6 +55,13 @@ export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 # three device compiles.  An explicit `CUCC_TARGETS` still wins, so the
 # cross-family check is `CUCC_TARGETS=xcore1000,xcore1500,xcore1600
 # ./develop.sh` and needs no other flag.
+#
+# `native` is **`mxcc`'s own spelling** for the local part -- verified against
+# `-offload-arch=xcore1000` on a C500, byte-identical and the same
+# `__MACA_ARCH__=1000` -- and it is passed through untouched.  It is not ours
+# to resolve: an earlier revision asked torch for the device's capability and
+# mapped it through a family table, which raised "no MACA device visible" on a
+# build host that has no card but does have a working cross-compiler.
 export CUCC_TARGETS="${CUCC_TARGETS:-native}"
 
 rm -rf build dist

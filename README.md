@@ -270,8 +270,8 @@ BUILDROOT=/out ./build.sh              # ...and copy it to /out/wheel/
 mcDeepGEMM's `build.sh`). Unset means `xcore1000,xcore1500,xcore1600` in
 `build.sh` -- one target per family, the same *set* of families mcDeepGEMM's
 default names, minus its per-part aliases, which `mxcc` rejects outright
-(`xcore1008`, `xcore1610`, `xcore1620`) -- and `native`, this device alone, in
-`develop.sh` and `install.sh`. The difference is deliberate: a wheel has to
+(`xcore1008`, `xcore1610`, `xcore1620`) -- and `native`, mxcc's own spelling
+for the local part, in `develop.sh` and `install.sh`. The difference is deliberate: a wheel has to
 carry every family to be shippable, while a local build only has to carry the
 board in front of you. `CUCC_TARGETS=xcore1600 ./develop.sh` is the one-family
 form when you want it explicitly.
@@ -454,7 +454,7 @@ then.
 
 | variable | default | effect |
 | --- | --- | --- |
-| `CUCC_TARGETS` | `xcore1000,xcore1500,xcore1600` (`build.sh`); `native` (`develop.sh`, `install.sh`) | which `-offload-arch` images go into the one extension; `native` = this device only. An unrecognized target fails the build |
+| `CUCC_TARGETS` | `xcore1000,xcore1500,xcore1600` (`build.sh`); `native` (`develop.sh`, `install.sh`) | which `-offload-arch` images go into the one extension; `native` = the local part, in mxcc's own spelling. An unrecognized target is rejected by `mxcc` |
 | `MACA_PATH` | `/opt/maca` | the MACA toolkit root, and the authority for it. All three scripts derive `CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`/`LD_LIBRARY_PATH` from it, since a stale one of those in the caller's shell silently beats it |
 | `BUILDROOT` | unset | `build.sh` only. When set, the wheel is also copied to `${BUILDROOT}/wheel/` — the host repository's own destination, so one packaging step can collect both wheels by pointing a single `BUILDROOT` at both trees |
 | `MACA_HOME` | — | toolkit root too, consulted when `MACA_PATH` is unset. `MACA_PATH` wins if both are set |

@@ -153,7 +153,7 @@ if [[ -z "$device_dir" ]]; then
     echo "run_bench.sh: torch reports no device name; naming the directory after" >&2
     echo "              the arch family instead" >&2
     device_dir=$(python -W "ignore:Could not find flash_attn:UserWarning" -c \
-        'from deep_select._arch import family_of_target, native_target; print("metax_xcore" + family_of_target(native_target()))')
+        'from deep_select._arch import native_family; print("metax_" + native_family())')
 fi
 
 md5=$(md5sum "$so" | cut -d' ' -f1)

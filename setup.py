@@ -22,6 +22,15 @@ SOURCES = [
     "csrc/xcore1000/maca_topk.cu",
 ]
 
+# What the build does when `CUCC_TARGETS` says nothing: one target per family,
+# which is what a wheel has to carry -- a wheel built for one board cannot be
+# shipped to another.  The four spellings `mxcc` accepts are passed to it
+# verbatim: there is no table here, and `native` is mxcc's own spelling for the
+# local part.  The literal lives in `build.sh`/`install.sh`/`develop.sh` too;
+# it is one line each and they name different sets on purpose (see their
+# headers).
+DEFAULT_TARGETS = "xcore1000,xcore1500,xcore1600"
+
 
 def _tvm_ffi_root():
     """Where `tvm_ffi` keeps its headers and shared library.
@@ -75,9 +84,9 @@ def build_for_maca():
 
     `CUCC_TARGETS` becomes one comma-separated `-offload-arch`, which mxcc takes
     as a set of images of the same source in one file.  Unset means
-    `_arch.DEFAULT_TARGETS`, one target per family, so a build host needs no
-    MACA card to produce a shippable wheel; `native` is the one-image shortcut.
-    An unrecognized target fails the build by name.
+    `DEFAULT_TARGETS` below, one target per family, so a build host needs no
+    MACA card; `native` is mxcc's own spelling for the local part and is passed
+    through untouched.  An unrecognized target is rejected by mxcc.
 
     Nothing is specialized per architecture at compile time, and nothing can
     be: a family macro would be a lie in two of the three images.  The two
@@ -95,8 +104,6 @@ def build_for_maca():
     import torch.utils.cpp_extension as cpp_extension
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-    from deep_select._arch import resolve_targets
-
     maca_root = _maca_root()
     this_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -104,7 +111,10 @@ def build_for_maca():
     # so asking that package beats guessing a prefix.  `lib_subdir` is
     # platform-dependent and resolved, because the rpath below points at it.
     tvm_ffi_root, lib_subdir = _tvm_ffi_root()
-    targets = resolve_targets(os.environ.get("CUCC_TARGETS"))
+    targets = [t.strip() for t in
+               (os.environ.get("CUCC_TARGETS") or DEFAULT_TARGETS).split(",") if t.strip()]
+    if not targets:
+        raise RuntimeError(f"CUCC_TARGETS={os.environ.get('CUCC_TARGETS')!r} selects no target")
 
     # The compiler pair, printed rather than assumed -- see the cu-bridge note
     # above for why `CUDA_HOME` must be the one torch resolved.

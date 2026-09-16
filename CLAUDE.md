@@ -101,9 +101,10 @@ BUILDROOT=/out               ./build.sh       # also copy the wheel to /out/whee
 `${BUILDROOT}/wheel/` export when `BUILDROOT` is set — **the same variable and
 the same destination as the host repository's, so one packaging step can
 collect both wheels by pointing a single `BUILDROOT` at both trees.** It
-resolves targets through `deep_select/_arch.py` so the script and `setup.py`
-cannot disagree, and an unrecognized target fails the build rather than being
-skipped. `MACA_PATH` (default `/opt/maca`) and `MAX_JOBS` are honored.
+sets `CUCC_TARGETS` if the caller did not, and passes the list to `mxcc`
+verbatim — `-offload-arch` is the compiler's own vocabulary, so an
+unrecognized target is rejected by `mxcc` rather than by a table here.
+`MACA_PATH` (default `/opt/maca`) and `MAX_JOBS` are honored.
 
 **There is no argument parsing — the target list is `CUCC_TARGETS` and nothing
 else**, which is mcDeepGEMM's shape. One thing `build.sh`'s default does that
@@ -130,15 +131,26 @@ has to do that mcDeepGEMM's does not:
   what `pip install .` creates.
 
 **Three `CUCC_TARGETS` defaults, and they are all deliberate.** No value means
-`deep_select/_arch.py::DEFAULT_TARGETS` (`xcore1000,xcore1500,xcore1600`, one
-per family) and only `build.sh` takes it — a build host need not have a MACA
-card in it at all, and a wheel carrying only the device it was built on is a
-wheel that cannot be shipped anywhere else. `develop.sh` and `install.sh` say
-`native` because both are acting on *this machine*. A caller who wants the
-shippable artifact runs `build.sh`; the other two are the local paths.
-(This paragraph said "neither script sets it" until 2026-09-16, which was true
-of `build.sh` alone. The tree is the authority:
+`xcore1000,xcore1500,xcore1600` — one per family — and only `build.sh` takes it:
+a build host need not have a MACA card in it at all, and a wheel carrying only
+the device it was built on is a wheel that cannot be shipped anywhere else.
+`develop.sh` and `install.sh` say `native` because both are acting on *this
+machine*. A caller who wants the shippable artifact runs `build.sh`; the other
+two are the local paths. (This paragraph said "neither script sets it" until
+2026-09-16, which was true of `build.sh` alone. The tree is the authority:
 `grep -n 'CUCC_TARGETS:-' *.sh`.)
+
+**Every spelling in that list goes to `mxcc` untouched, `native` included.**
+There is no arch table between the scripts and the compiler, and there should
+not be: `-offload-arch` is mxcc's own vocabulary, so a target list is one line
+of environment in each script rather than a value a lookup has to expand. An
+earlier revision translated `native` by asking torch for the device's
+capability and mapping it through a family table — measured, that made
+`CUCC_TARGETS=native` **fail on a card-less host** ("no MACA device visible")
+even though `mxcc -offload-arch=native` cross-compiles there fine, which is the
+one machine a build host is. `native` on this toolchain resolves to the
+xcore1000 family: measured on a C500, `-offload-arch=native` is byte-identical
+to `-offload-arch=xcore1000` and takes `__MACA_ARCH__` to the same `1000`.
 
 The underlying call, if you need it directly (this bypasses the scripts' env
 derivation, so export `MACA_PATH`/`CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`
@@ -175,8 +187,8 @@ compiles each into its own image of the same source. Measured: three targets →
 three images in one file, 11.07 MB against 3.7 MB for one. There is therefore
 **no compile-time architecture selection at all** — a family macro would be a
 lie in two of the three images — and the two numbers the kernel sizes its grids
-against arrive as arguments from `_arch.py`. See "the arch constants are
-arguments" below.
+against arrive as arguments from `_arch.py` (`native_sm_count()`, from the
+device's own properties). See "the arch constants are arguments" below.
 
 **What the wheel carries, and what the target machine must provide.** The
 images for every target are inside, so a C600U loads the `xcore1600` one — but
@@ -314,7 +326,7 @@ One extension carries an image per family, so nothing can be specialized at comp
 
 | number | source | where it lands |
 | --- | --- | --- |
-| SM count (104/28/32) | the **architecture the device reports** — torch → `_arch.FAMILY_OF_SM` → `SM_COUNT` row | `RowParams::sm_count`, one `int64_t` appended to the tvm-ffi entry's positional args |
+| SM count (104/28/32) | the **device reports it** — torch → `_arch.native_sm_count()` (`torch.cuda.get_device_properties().multi_processor_count`) | `RowParams::sm_count`, one `int64_t` appended to the tvm-ffi entry's positional args |
 | fp32 split work target (260/70/80) | **derived in the kernel**, `sm_count * 5 / 2` | `maca_topk.cu`'s `f32_chunk_work_target` |
 
 Three things this is deliberately not:
@@ -480,7 +492,7 @@ on time today).
 
 Upstream's algorithm is kept (threshold-and-compact scan in a random block order, one global read per element); only its device-side dependencies were replaced: TMA tensor-map loads → cooperative `ldg`, mbarriers → a single buffer with `__syncthreads`, inline PTX → MACA builtins/plain C++. Config tuples were re-derived for 128 KiB (upstream's are sized for an H100's 227 KiB). `v3_cluster` was **deleted**, not ported — MACA has no cluster launch — and those shapes fall through to the general kernel with no dispatch arm.
 
-**The config table has two halves that must be edited together**: `scripts/generate_instantiations.py` (the table, its arithmetic, and the `check_fits_maca` refusal) and the `TopkSelectConfig<...>` call sites in `csrc/xcore1600/api.cu`. A mismatch is a **link error**, not a runtime one. Note also that `deep_select/_arch.py` duplicates the `deep_gemm` package's `utils/arch_config.py` `XcoreFamily` rows (capacity + family spelling) by hand — it cannot import that package, so a change to either belongs in the same review.
+**The config table has two halves that must be edited together**: `scripts/generate_instantiations.py` (the table, its arithmetic, and the `check_fits_maca` refusal) and the `TopkSelectConfig<...>` call sites in `csrc/xcore1600/api.cu`. A mismatch is a **link error**, not a runtime one. Note also that `tests/kernelkit/platform.py` duplicates the `deep_gemm` package's `utils/arch_config.py` `XcoreFamily` rows (capacity + family spelling) by hand — it cannot import that package, so a change to either belongs in the same review.
 
 Consequences of the port, all deliberate:
 
@@ -1066,9 +1078,9 @@ Facts the CSV records and the traps in reading it:
   artifact is not identified is not a record: the manifest carries
   `device_name`, `sm_count`, torch version, *both* repositories' commits, the
   extension's md5 and the status counts. **The extension it names is the one the
-  *device* loads** — `_arch.native_target()`, the same name `run_bench.sh`
-  resolves its header md5 through, so the manifest and `run_header.txt` in one
-  directory cannot disagree. (They did, once: `provenance()` took the first
+  *device* loads** — `_binding.extension_path`, the same call
+  `_binding.load` makes, so the manifest and `run_header.txt` in one directory
+  cannot disagree. (They did, once: `provenance()` took the first
   `.so` in `deep_select/`, which on a tree with the default three-family
   `CUCC_TARGETS` is always `xcore1000` — so a C600U record named the C500
   artifact. Fixed 2026-09-15; `perf_data/MetaX_C600-U/20260915_075059` is the

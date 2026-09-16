@@ -235,7 +235,7 @@ def device_dir_name() -> str:
     """
     name = (torch.cuda.get_device_name(0) or "").strip()
     if not name:
-        return f"metax_{_arch.native_target()}"
+        return f"metax_{_arch.native_family()}"
     return name.replace(" ", "_")
 
 
@@ -278,7 +278,7 @@ def provenance(sm_count: int) -> Dict[str, Any]:
         **_deep_gemm_package(),
         # Arch family per row (`metax_xcore<N>`), from the device, not the
         # directory name: the column to filter on for same-ISA rows.
-        "chip": f"metax_{_arch.native_target()}",
+        "chip": f"metax_{_arch.native_family()}",
         "device_dir": device_dir_name(),
         "device_name": torch.cuda.get_device_name(0),
         "sm_count": sm_count,
