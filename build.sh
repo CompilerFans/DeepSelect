@@ -18,18 +18,10 @@ rm -rf build dist
 rm -rf ./*.egg-info
 
 which python
-# `-W` drops torch's own "flash_attn is not installed" import warning (nothing
-# here uses it); every other warning still prints.
-python -W "ignore:Could not find flash_attn:UserWarning" -c 'import sys, torch
-print(f"build.sh: python {sys.version.split()[0]}, torch {torch.__version__}")'
 echo "build.sh: CUCC_TARGETS=$CUCC_TARGETS"
 
-# `CUCC_TARGETS` becomes one `-offload-arch` list: every target is an image of
-# the same source in the one extension, so a single build serves every family.
 python setup.py bdist_wheel
 
-# After the wheel exists, so what is exported is a wheel that was built.  Same
-# destination and same variable as the host repository's `build.sh`.
 if [[ -n "${BUILDROOT:-}" ]]; then
     dest="${BUILDROOT}/wheel"
     mkdir -p "${dest}"

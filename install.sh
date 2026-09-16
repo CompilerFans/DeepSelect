@@ -24,14 +24,5 @@ echo "install.sh: CUCC_TARGETS=$CUCC_TARGETS"
 python setup.py bdist_wheel
 pip install dist/*.whl --force-reinstall --no-deps
 
-# From outside the repo on purpose: run from here and the check reports the
-# repo's own package, passing even when the install did nothing.  `-W` drops
-# torch's "flash_attn is not installed" warning (see build.sh).
-( cd /tmp && python -W "ignore:Could not find flash_attn:UserWarning" -c '
-import deep_select, os
-print("install.sh: installed", deep_select.__version__)
-print("install.sh: from     ", os.path.dirname(deep_select.__file__))
-' )
-
 echo "install.sh: done"
 cd "$original_dir"

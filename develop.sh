@@ -19,14 +19,8 @@ rm -rf ./*.egg-info
 rm -f deep_select/deep_select_*.so
 
 which python
-# `-W` drops torch's own "flash_attn is not installed" import warning (nothing
-# here uses it); every other warning still prints.
-python -W "ignore:Could not find flash_attn:UserWarning" -c 'import sys, torch
-print(f"develop.sh: python {sys.version.split()[0]}, torch {torch.__version__}")'
 echo "develop.sh: CUCC_TARGETS=$CUCC_TARGETS"
 
-# `CUCC_TARGETS` becomes one `-offload-arch` list: every target is an image of
-# the same source in the one extension, so a single build serves every family.
 python setup.py build_ext --inplace
 
 echo "develop.sh: in-place extension at $(ls deep_select/deep_select_maca*.so)"
