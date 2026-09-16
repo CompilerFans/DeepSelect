@@ -701,8 +701,12 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 // at is dropping that CTA (`chunks + 1` -> `chunks`) -- a change to the merge
 // launch, not a constant, so it is not made on arithmetic alone.
 namespace {
-// The `DEEP_SELECT_F32_CHUNKS` sweep behind the work target is tabulated at
-// `deep_select/_arch.py`'s `F32_CHUNK_WORK_TARGET` -- do not re-derive it.
+// The work target is `f32_chunk_work_target(sm_count)` above -- `sm_count * 5
+// / 2`, the 2.5 being the only fit ever measured (on C500).  This comment sent
+// readers to `deep_select/_arch.py`'s `F32_CHUNK_WORK_TARGET` until
+// 2026-09-16; no such symbol exists there or anywhere, and the table it named
+// was dissolved when the per-architecture builds went (the per-family SM
+// counts it multiplied are what `_arch.py` still carries, in `SM_COUNT`).
 //
 // `DEEP_SELECT_F32_CHUNK32` raises the ceiling from 16 to 32 for the b6/V=1M
 // cell the V-sweep flagged (parity plan §17.3).  A ceiling, not a count, so
@@ -727,6 +731,34 @@ inline int f32_chunks_small_batch(uint32_t batches, int ceiling,
 }
 inline int f32_chunks_large_batch() { return 2; }
 
+// **The chunk count's own rule cannot see `topk`, and that is the axis it is
+// wrong on above 512.**  Stage 2's merge reads `num_chunks * topk` candidates
+// per row -- `candidate_stride` in `rk::launch_topk_f32_chunks_stage2` -- and
+// `f32_chunks_for` sizes itself from the batch alone.  Measured over ~20 cells
+// (`V` in {65536, 66551, 107520, 129280, 131072, 262144}, `batches <= 16`,
+// `kk.bench`, contract checked; the sweeps are in ledger §8.6): the batch rule
+// is already at the optimum for `topk <= 512`, and capping at 8 above that is
+// worth **+4.8% .. +40.0%**.  Small-batch tier only -- above
+// `kF32ChunksFewBatches` the count is the constant 2 and never reaches this.
+//
+// **8, not 4, and that is the one place the sweep overturned the obvious
+// answer.**  4 wins at `V = 129280` (112.2 vs 118.8 us at k=1024) but loses at
+// `V = 65536` (75.3 vs 70.7 us) and at every `V = 66551` cell (90.5 vs 88.2 us
+// at b1); at `V = 262144` it is worse than the *batch rule's own* 16 by 39%
+// (138.4 vs 99.5 us at b6-k1024).  8 has the best worst cell.
+inline int f32_topk_chunk_cap(uint32_t topk, uint32_t vocab, int c_default) {
+    if (topk <= 512) return 0;   // 0 = no cap; keeps `DEEP_SELECT_F32_CHUNK32` in force
+    // Only where the merge is a real share of the row: `c * topk` candidates
+    // against `vocab` elements.  The three cells below a tenth are exactly the
+    // three where the batch rule's own count is the optimum (`V = 262144`,
+    // k = 1024 -- 6.25%, at b1/b6/b16), so capping them is a pure loss
+    // (-9.3% / -2.4% / -4.2%).  `10` sits between that 6.25% and the 12.5% of
+    // the nearest win; the threshold is fitted, the bracket on both sides of
+    // it is measured.
+    if ((uint64_t)c_default * topk * 10 <= vocab) return 0;
+    return 8;
+}
+
 // The batch above which the chunk count stops being a parallelism knob: 64 is
 // the split's own small-batch ceiling, a property of the gate rather than a
 // fitted value.  At 6 rows the machine is empty and chunks are the only CTAs
@@ -734,7 +766,13 @@ inline int f32_chunks_large_batch() { return 2; }
 inline constexpr uint32_t kF32ChunksFewBatches = 64;
 }  // namespace
 
-int f32_chunked_chunks(uint32_t batches, uint32_t sm_count) {
+// `topk` and `vocab_size` are parameters here, not read off `params`, because
+// every caller that sizes the workspace must get the same answer as the one
+// that launches: a workspace sized for one chunk count and a grid launched with
+// another is a write past the arena, and the gate at `topk_launch` compares the
+// two.
+int f32_chunked_chunks(uint32_t batches, uint32_t topk, uint32_t vocab_size,
+                       uint32_t sm_count) {
     const uint32_t work_target = f32_chunk_work_target(sm_count);
     static const int override_n = [] {
         const char *v = std::getenv("DEEP_SELECT_F32_CHUNKS");
@@ -745,10 +783,11 @@ int f32_chunked_chunks(uint32_t batches, uint32_t sm_count) {
         return 0;
     }();
     if (override_n != 0) return override_n;   // A/B knob; does not change default
+    if (batches > kF32ChunksFewBatches) return f32_chunks_large_batch();
     const int ceiling = f32_chunk_ceiling_32() ? 32 : kF32ChunkCeiling;
-    return batches <= kF32ChunksFewBatches
-               ? f32_chunks_small_batch(batches, ceiling, work_target)
-               : f32_chunks_large_batch();
+    const int c = f32_chunks_small_batch(batches, ceiling, work_target);
+    const int cap = f32_topk_chunk_cap(topk, vocab_size, c);
+    return (cap != 0 && c > cap) ? cap : c;
 }
 
 // The batch bound has no single value: the split costs a merge over `batches`
@@ -860,7 +899,8 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
                               cudaStream_t stream, bool sorted_index,
                               bool sorted_value, bool return_value, int block,
                               void *workspace) {
-    const int chunks = f32_chunked_chunks(batches, params.sm_count);
+    const int chunks = f32_chunked_chunks(batches, params.topk,
+                                          params.vocab_size, params.sm_count);
     const ChunkedF32Workspace ws = chunked_f32_workspace(
         workspace, batches, params.topk, chunks);
     // `ws.lengths` is the NaN-flag table here, not the split's row table --
@@ -965,7 +1005,9 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
         params.end_ptr != nullptr &&
         chunked_bytes >= detail::chunked_f32_workspace_bytes(
                              n, params.topk,
-                             detail::f32_chunked_chunks(n, params.sm_count)) &&
+                             detail::f32_chunked_chunks(n, params.topk,
+                                                        params.vocab_size,
+                                                        params.sm_count)) &&
         detail::chunked_f32_applies(params, n) &&
         // The engine's own bound, kept separate from the policy predicate so
         // the two cannot be confused (they were one expression until §21.2).
@@ -1231,7 +1273,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         value_dtype == 0 && detail::chunked_f32_applies(p, (uint32_t)batches);
     if (bf16_split || f32_split) {
         const int f32_chunks =
-            detail::f32_chunked_chunks((uint32_t)batches, p.sm_count);
+            detail::f32_chunked_chunks((uint32_t)batches, p.topk,
+                                       p.vocab_size, p.sm_count);
         const size_t need_lengths = (size_t)batches * sizeof(int32_t);
         const size_t need_workspace =
             f32_split
