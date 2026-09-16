@@ -121,10 +121,11 @@ def _device() -> str:
     try:
         if not torch.cuda.is_available():
             return "no device"
-        from ._arch import get_device_num_sms
         name = torch.cuda.get_device_name()
         major, minor = torch.cuda.get_device_capability()
-        return f"{name} (sm{major}{minor}, {get_device_num_sms()} SMs)"
+        sms = torch.cuda.get_device_properties(
+            torch.cuda.current_device()).multi_processor_count
+        return f"{name} (sm{major}{minor}, {sms} SMs)"
     except Exception:
         return "unknown"
 

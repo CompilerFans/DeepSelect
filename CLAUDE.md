@@ -187,8 +187,8 @@ compiles each into its own image of the same source. Measured: three targets →
 three images in one file, 11.07 MB against 3.7 MB for one. There is therefore
 **no compile-time architecture selection at all** — a family macro would be a
 lie in two of the three images — and the two numbers the kernel sizes its grids
-against arrive as arguments from `_arch.py` (`get_device_num_sms()`, from the
-device's own properties). See "the arch constants are arguments" below.
+against arrive as arguments the caller reads off the device -- see "the arch
+constants are arguments" below.
 
 **What the wheel carries, and what the target machine must provide.** The
 images for every target are inside, so a C600U loads the `xcore1600` one — but
@@ -326,14 +326,13 @@ One extension carries an image per family, so nothing can be specialized at comp
 
 | number | source | where it lands |
 | --- | --- | --- |
-| SM count (104/28/32) | the **device reports it** — torch → `_arch.get_device_num_sms()` (`torch.cuda.get_device_properties().multi_processor_count`) | `RowParams::sm_count`, one `int64_t` appended to the tvm-ffi entry's positional args |
+| SM count (104/28/32) | the **device reports it** — `torch.cuda.get_device_properties().multi_processor_count`, read at the call site in `interface.py` | `RowParams::sm_count`, one `int64_t` appended to the tvm-ffi entry's positional args |
 | fp32 split work target (260/70/80) | **derived in the kernel**, `sm_count * 5 / 2` | `maca_topk.cu`'s `f32_chunk_work_target` |
 
-Three things this is deliberately not:
+Two things this is deliberately not:
 
-- **Not a driver query.** `cudaDeviceGetAttribute(cudaDevAttrMultiProcessorCount)` would answer, but the device has already told the caller which part it is, and a family is what the number is a property of. One dict lookup on a known fact beats a device call.
-- **Not the build's target list.** `CUCC_TARGETS` says what images were compiled, not what device is in front of you; deriving the grid from it names the wrong artifact as soon as the list does not lead with this device's family (the same defect `perf_snapshot.provenance()` and the two `run_*` scripts each had once).
-- **Not re-read per call.** `interface.py::_sm_count()` is `lru_cache`d at the same granularity as `_backend_for()` — both are process invariants.
+- **Not the build's target list.** `CUCC_TARGETS` says what images were compiled, not what device is in front of you; deriving the grid from it names the wrong artifact as soon as the list does not lead with this device's family (the same defect `perf_snapshot.provenance()` and the two `run_*` scripts each had once). It is also not the `--offload-arch` spelling resolved back: `mxcc`'s `native` is that vocabulary, not this one.
+- **Not a module.** There is no `_arch.py` and no family table: `get_device_properties` is a struct copy out of the driver's cache, **measured at 1.7 us** against a kernel this operator runs in tens to thousands of us, so it is read where it is used (`interface.py`; `perf_snapshot.py` once per record; `_log.py`'s header). It used to be `lru_cache`d behind a `_sm_count()` -- a wrapper whose only remaining job was to memoize a 1.7 us call.
 
 `sm_count = 0` is refused by `DS_HOST_CHECK` rather than defaulted: a zero sizes every grid to nothing, which is an empty answer rather than a crash.
 
@@ -452,9 +451,8 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
   own; `maca_topk.cu` has no capacity gate by design.
 - **The SM-count-sensitive numbers are arguments now**, not constants:
   `wave_filled_chunks` (the chunked split's grid) and the fp32 split's work
-  target both read `params.sm_count`, which `interface.py` resolves from the
-  architecture the device reports (`_arch.get_device_num_sms()`, cached per
-  process). The work target is `sm_count * 5 / 2` — the 2.5 is the C500 fit,
+  target both read `params.sm_count`, which `interface.py` reads off the device
+  at the call site. The work target is `sm_count * 5 / 2` — the 2.5 is the C500 fit,
   the only one ever measured; the old 70/80 constants were that same
   arithmetic written out. **No C600/C600U measurement stands behind the 2.5**,
   so the caveat is unchanged by having removed the table: the table never had

@@ -44,8 +44,8 @@ re-derived for 128 KiB, since upstream's are sized for an H100's 227 KiB.
 > The port stays in the tree as the reserved implementation, but it is no longer
 > built or buildable: reaching it now takes a source change to `setup.py`'s
 > `SOURCES` *and* its `include_dirs` (its `kerutils` include was dropped from the
-> build with it), not an environment variable, and `deep_select/_arch.py` has no
-> switch for it. Everything below in this section describes `csrc/xcore1600/` as
+> build with it), not an environment variable, and there is no switch for it
+> anywhere in `setup.py`. Everything below in this section describes `csrc/xcore1600/` as
 > it stands, port bugs included.
 
 Consequences:

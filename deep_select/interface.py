@@ -5,7 +5,6 @@ import torch
 from typing import Optional, Tuple
 
 from . import _binding
-from ._arch import get_device_num_sms
 from ._log import log, log_call
 
 
@@ -43,13 +42,6 @@ _KERNEL_NAME = "deep_select_maca"
 def _backend_for():
     """The loaded tvm-ffi extension implementing `maca_c`."""
     return _binding.load(_KERNEL_NAME)
-
-
-@functools.lru_cache(maxsize=1)
-def _sm_count() -> int:
-    """SM count of this process's device, cached: a property of the process,
-    not of the call."""
-    return get_device_num_sms()
 
 
 # `structs.h`'s INPUT_/OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT, for when no kernel
@@ -197,12 +189,15 @@ def topk(
         # False (`Optional[TensorView>`).  `kernels=[...]` is not part of this
         # operator's contract, so nothing here reads it.
         #
-        # `_sm_count()` is the odd one out: the only argument derived from the
-        # *device* rather than the problem.  The kernel sizes its grids against
-        # it and one extension serves every family, so it cannot be compiled
-        # in; it comes from the architecture the device reports, not from a
-        # driver query, not from the build's target list, and -- being a
-        # process invariant -- not from a call that reads it again each time.
+        # The SM count is the odd one out: the only argument derived from the
+        # *device* rather than the problem.  `maca_topk.cu` sizes its grids in
+        # CTAs against it and one extension serves every part, so it cannot be
+        # compiled in -- the device reports it, and there is no table behind it.
+        # Read here rather than cached: `get_device_properties` is a struct
+        # copy from the driver's cache, measured at 1.7 us against a kernel
+        # this operator runs in tens to thousands of us.  The kernel refuses a
+        # zero itself rather than defaulting it -- a zero sizes every grid to
+        # nothing, which is an empty answer, not a crash.
         #
         # This tuple's order is the C++ entry's parameter list, not this
         # signature's: `check_nan` is appended last here as a keyword, and
@@ -220,7 +215,8 @@ def topk(
             return_value,
             abort_when_nan_found,
             check_nan,
-            _sm_count(),
+            int(torch.cuda.get_device_properties(
+                torch.cuda.current_device()).multi_processor_count),
         )
         # `maca_c` means this device's kernel: the extension is resolved here,
         # not in the signature, which keeps `torch` usable with no MACA device.

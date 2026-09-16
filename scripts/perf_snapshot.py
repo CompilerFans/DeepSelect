@@ -65,7 +65,6 @@ import torch  # noqa: E402
 import kernelkit as kk  # noqa: E402
 import lib  # noqa: E402
 import test as official  # noqa: E402
-from deep_select import _arch  # noqa: E402
 PYBIN = sys.executable
 BACKENDS = ("maca_c", "torch", "deep_gemm")
 # Short spellings for `--cases-file`.  Only the pair this operator serves.
@@ -389,12 +388,8 @@ def main() -> int:
         cases += [("extra", note, p) for note, p in cases_from_file(args.cases_file)]
     torch.set_default_device("cuda")
     import deep_select  # noqa: E402  (after set_default_device)
-    # `target` is deliberately not bound here: `chip` reads it in
-    # `provenance()`, from `_arch` directly, the way `device_dir_name()` does.
-    # It was a local here once and `provenance()` still named it -- a
-    # `NameError` at the first line of every run, and nothing caught it because
-    # this script had not been executed since that refactor.
-    sm_count = _arch.get_device_num_sms()
+    sm_count = int(torch.cuda.get_device_properties(
+        torch.cuda.current_device()).multi_processor_count)
     prov = provenance(sm_count)
     # `--out-dir` is the directory itself, not a root to hang a name under: a
     # caller that names one has already decided where this record goes.
