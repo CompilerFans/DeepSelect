@@ -146,17 +146,56 @@ if [[ -z "$device_dir" ]]; then
 fi
 
 chip_dir="${results_dir}/${device_dir}"
-so=$(ls deep_select/deep_select_maca*.so 2>/dev/null | head -1 || true)
+
+# The extension under test, asked of the package that will answer.  This is
+# `_binding.extension_path`, the same call `_binding.load` makes, so the md5
+# below is the artifact the process actually loads -- for the checkout's
+# package or for an installed wheel alike (a deployed wheel carries its `.so`
+# beside `_binding.py`).
+#
+# The checkout goes on the path **only when it has a built extension**.  `python -`
+# starts with the cwd on `sys.path`, so that has to be taken off explicitly --
+# with the tree reachable the import lands on its `deep_select/`, which imports
+# fine and then fails at call time (the extension loads lazily), and an
+# installed wheel could never answer.
+so=$(python -W "ignore:Could not find flash_attn:UserWarning" - <<'PY'
+import glob, os, sys
+here = os.getcwd()
+sys.path[:] = [p for p in sys.path if p not in ("", here)]
+if glob.glob(os.path.join(here, "deep_select", "deep_select_maca*.so")):
+    sys.path.insert(0, here)
+try:
+    from deep_select.interface import _KERNEL_NAME, _binding
+    print(_binding.extension_path(_KERNEL_NAME) or "")
+except Exception:
+    print("")
+PY
+)
 if [[ -z "$so" ]]; then
-    echo "run_bench.sh: no extension in deep_select/" >&2
-    echo "              build it first:  ./develop.sh" >&2
+    echo "run_bench.sh: no extension found; looked in the checkout first, then in" >&2
+    echo "              the installed deep_select.  Build one (./develop.sh) or" >&2
+    echo "              install one (./install.sh)." >&2
     exit 1
+fi
+
+# The same axis, for the stages.  `$REPO` goes on the path only when it is the
+# tree answering -- the two must agree, or the run measures one artifact and
+# receipts another.  `tests` is always there: the grid lives in the repo and is
+# not in the wheel.
+if [[ "$so" == "$PWD"/deep_select/* ]]; then
+    stage_pythonpath=".:tests"
+else
+    stage_pythonpath="tests"
+    echo "run_bench.sh: measuring the installed package's extension:" >&2
+    echo "              $so" >&2
 fi
 
 # A header newer than the .so means the extension may not match the sources.
 # Reported, not enforced -- the md5 is the record either way, as in run_test.sh.
+# Only a checkout's extension can answer this: `csrc/` describes what a local
+# build would produce, not what an installed wheel was built from.
 stale_note="# STALE           no"
-if [[ -n "$(find csrc -newer "$so" \( -name '*.cu' -o -name '*.cuh' \) 2>/dev/null | head -1)" ]]; then
+if [[ "$so" == "$PWD"/deep_select/* ]] && [[ -n "$(find csrc -newer "$so" \( -name '*.cu' -o -name '*.cuh' \) 2>/dev/null | head -1)" ]]; then
     newest_src=$(find csrc -newer "$so" \( -name '*.cu' -o -name '*.cuh' \) | head -1)
     echo "run_bench.sh: $newest_src is newer than $so -- the extension may not" >&2
     echo "              match the sources; the md5 in the manifest is the record." >&2
@@ -243,7 +282,7 @@ run_stage() {
     local log="${out}/${name}.log"
     echo "run_bench.sh: [${name}] -> ${log}"
     set +e
-    PYTHONPATH=".:tests" timeout "${timeout_s}" "$@" 2>&1 | tee "$log"
+    PYTHONPATH="${stage_pythonpath}" timeout "${timeout_s}" "$@" 2>&1 | tee "$log"
     local rc=${PIPESTATUS[0]}
     set -e
     if [[ ${rc} -eq 124 ]]; then

@@ -47,8 +47,20 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# `$REPO/tests` always goes on the path -- the grid lives there and is not in
+# the wheel (`setup.py`: `find_packages(include=["deep_select"])`).  `$REPO`
+# itself goes on **only if the checkout has a built extension**, and the cwd
+# comes off first: invoking this file as `python scripts/perf_snapshot.py` from
+# the repo root puts `''` (= the cwd = `$REPO`) on `sys.path` before any of
+# this runs, and that entry alone is enough to make `import deep_select` land on
+# the tree -- which imports fine and then fails inside `_binding.load`, since
+# the extension is resolved lazily at call time.  Without one of these, a
+# `pip install`ed wheel could never answer.
+sys.path[:] = [p for p in sys.path if p not in ("", os.getcwd())]
 sys.path.insert(0, os.path.join(REPO, "tests"))
-sys.path.insert(0, REPO)
+if glob.glob(os.path.join(REPO, "deep_select", "deep_select_maca*.so")):
+    sys.path.insert(0, REPO)
 import torch  # noqa: E402
 import kernelkit as kk  # noqa: E402
 import lib  # noqa: E402
@@ -248,17 +260,20 @@ def _deep_gemm_package() -> Dict[str, str]:
 
 def provenance(sm_count: int) -> Dict[str, Any]:
     here = REPO
-    # The extension the *device* loads -- `_binding.load()`, the same artifact
-    # `run_bench.sh` resolves its md5 through.  There is one name now (the
-    # build produces a single fat extension), but this stays in terms of the
-    # loader's own constant so the two cannot drift into naming different
-    # files: a record whose md5 is not the loaded artifact's is not a record.
-    sos = sorted(os.path.basename(p) for p in glob.glob(
-        os.path.join(here, "deep_select", "deep_select_maca*.so")))
+    # The extension the *device* loads, asked of the loader itself: it is the
+    # same glob and the same newest-wins rule `_binding.load()` uses, so this
+    # cannot name a different file than the one that answers a call.  A record
+    # whose md5 is not the loaded artifact's is not a record.
+    #
+    # Asked through the package rather than from a path under `here`, so it
+    # answers for an installed wheel (`--package`) exactly as for a checkout --
+    # the deployed package carries its `.so` beside `_binding.py`.
+    from deep_select.interface import _KERNEL_NAME, _binding
+
+    so = _binding.extension_path(_KERNEL_NAME)
     md5 = ""
-    if sos:
-        md5 = hashlib.md5(open(os.path.join(here, "deep_select", sos[0]),
-                               "rb").read()).hexdigest()
+    if so is not None:
+        md5 = hashlib.md5(open(so, "rb").read()).hexdigest()
     return {
         **_deep_gemm_package(),
         # Arch family per row (`metax_xcore<N>`), from the device, not the
@@ -271,7 +286,7 @@ def provenance(sm_count: int) -> Dict[str, Any]:
         "python": platform.python_version(),
         "deep_select_git_commit": _run(["git", "log", "-1", "--format=%H"], here),
         "deep_select_git_dirty": bool(_run(["git", "status", "--porcelain"], here)),
-        "extension_so": sos[0] if sos else "",
+        "extension_so": so or "",
         "extension_md5": md5,
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
     }

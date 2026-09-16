@@ -62,10 +62,22 @@ split is the whole interface:
 
 **`./develop.sh` is the one that writes the in-place extension**, and it is
 what `run_test.sh` / `run_bench.sh` call when they are passed `--allow-build`
-(or find nothing to measure). That is not a convenience: `_binding.py` loads
-`.so` out of the package directory and both runners read its md5 as the "which
-artifact did I measure" receipt, so an extension in *site-packages* is the
-wrong artifact for a measurement even when it is the right one for a caller.
+(after that, or when nothing is found). The split is not a convenience:
+`_binding.py` loads the `.so` out of the package directory and both runners
+read its md5 as the "which artifact did I measure" receipt.
+
+**But they do not require the checkout's.** The extension is resolved by asking
+the package that will answer — `_binding.extension_path`, the same glob and
+newest-wins rule `load()` uses — and `$REPO` goes on the path only when the
+checkout has a built extension. With one, the tree answers (every existing
+receipt keeps naming the same file); without one, an **installed wheel answers**,
+so `./install.sh` + `./run_bench.sh` works with no build step. That is the
+reference's shape too: `mcDeepGEMM/run_all.sh` installs a wheel, strips the repo
+from the path, and only then runs its suites.
+
+What is genuinely location-bound is `tests/` — the grid lives there and is not
+in the wheel (`setup.py`: `find_packages(include=["deep_select"])`) — so it
+stays on the path in both cases.
 
 ```bash
 ./develop.sh                                  # just this device

@@ -19,7 +19,7 @@ from __future__ import annotations
 import functools
 import glob
 import os
-from typing import Any
+from typing import Any, Optional
 
 _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -58,6 +58,26 @@ class _Module:
 
 
 @functools.lru_cache(maxsize=None)
+def extension_path(name: str) -> Optional[str]:
+    """The file ``load(name)`` will load, or None if there is none.
+
+    **Public because a measurement has to hash the artifact the process will
+    actually load.**  `run_bench.sh` and `perf_snapshot.py` receipt this file's
+    md5 as the "which binary did I measure" record; a receipt taken from a
+    path guessed outside the loader is not a receipt.  It matters most for the
+    *installed* package, where `_PACKAGE_DIR` is `site-packages/deep_select/`
+    -- the deployed wheel carries its `.so` beside this file, so this answers
+    for a package exactly as it does for a checkout.
+
+    One rule, one place: `load()` calls this, so the two cannot drift into
+    naming different files.  Newest wins, so a stale artifact cannot shadow a
+    fresh one.
+    """
+    hits = sorted(glob.glob(os.path.join(_PACKAGE_DIR, _LIBRARY_GLOB.format(name=name))))
+    return hits[-1] if hits else None
+
+
+@functools.lru_cache(maxsize=None)
 def load(name: str) -> Any:
     """The loaded tvm-ffi module named ``name``.
 
@@ -73,15 +93,14 @@ def load(name: str) -> Any:
     """
     import tvm_ffi
 
-    hits = sorted(glob.glob(os.path.join(_PACKAGE_DIR, _LIBRARY_GLOB.format(name=name))))
-    if not hits:
+    path = extension_path(name)
+    if path is None:
         raise RuntimeError(
-            f"{name} has not been built; build it with ./build.sh (setup.py "
+            f"{name} has not been built; build it with ./develop.sh (setup.py "
             f"produces one extension, deep_select_maca, carrying an image for "
             f"each architecture in CUCC_TARGETS)"
         )
-    # Newest build wins, so a stale artifact cannot shadow a fresh one.
-    return _Module(tvm_ffi.load_module(hits[-1]))
+    return _Module(tvm_ffi.load_module(path))
 
 
 def launching():

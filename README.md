@@ -228,15 +228,18 @@ PYTHONPATH=. python tests/test.py --backend maca_c --sample 200        # correct
 ```
 
 The scripts wrap those calls, divided by **what they produce**:
-`develop.sh` builds **in place** and installs nothing -- that is the one the
-suites here need, since they run with `PYTHONPATH=.` and so resolve the repo's
-`deep_select/`, where `_binding.load()` globs for the extension. `build.sh`
-builds a wheel for every family, and `install.sh` builds the same wheel
-narrowed to this device and `pip install`s it, which puts the extension in
-`site-packages/deep_select/` and nothing back in the tree -- so a tree that has
-been `clean.sh`ed needs a `develop.sh` before `run_test.sh` will find anything.
-`clean.sh` removes the build artifacts, and `run_test.sh` runs the suites and
-records what it measured.
+`develop.sh` builds **in place** and installs nothing; `build.sh` builds a wheel
+for every family; `install.sh` builds the same wheel narrowed to this device and
+`pip install`s it. `clean.sh` removes the build artifacts, and `run_test.sh` /
+`run_bench.sh` run the suites and record what they measured.
+
+**The runners do not require the checkout's extension.** They ask the package
+that will answer -- `_binding.extension_path`, the same lookup `load()` does --
+and put the repo on the path only when it has a built extension. A tree that has
+been `./develop.sh`ed measures the tree (every existing receipt keeps naming the
+same file); a tree that has only been `./install.sh`ed measures the installed
+wheel, with no build step. `tests/` stays on the path either way, since the grid
+lives in the repo and is not in the wheel.
 
 **The wheel goes to `dist/`, and to `${BUILDROOT}/wheel/` when `BUILDROOT` is
 set.** That is the host repository's (`mcDeepGEMM/build.sh`) own variable and
