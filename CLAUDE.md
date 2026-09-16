@@ -60,9 +60,10 @@ split is the whole interface:
 | `./build.sh` | `dist/*.whl` (+ `${BUILDROOT}/wheel/` if set) | every family | no |
 | `./install.sh` | the same wheel, `pip install`ed | `native` (this device) | yes |
 
-**`./develop.sh` is the one that writes the in-place extension**, and it is
-what `run_test.sh` / `run_bench.sh` call when they are passed `--allow-build`
-(after that, or when nothing is found). The split is not a convenience:
+**`./develop.sh` is the one that writes the in-place extension**, and
+`run_test.sh` calls it when it is passed `--allow-build` and finds nothing.
+`run_bench.sh` has no such flag — it measures, and a build is a separate act
+someone should have to ask for. The split is not a convenience:
 `_binding.py` loads the `.so` out of the package directory and both runners
 read its md5 as the "which artifact did I measure" receipt.
 
@@ -953,6 +954,15 @@ DS_TOPK_BACKEND=maca_c PYTHONPATH=. python tests/test.py         # the unpinned 
   ./run_test.sh --all                   # both, perf first
   CUDA_VISIBLE_DEVICES=3 ./run_test.sh --perf   # pick the device with the env
   ```
+
+  **Its CLI is three things wide — a suite, `--results`, `--allow-build` — and
+  everything else is forwarded verbatim** to `tests/test.py`, which is where the
+  flags are documented. That is deliberate and it is the whole design: the two
+  runners do not restate a suite CLI, they *record* around one. The
+  `--sample` / `--seed` / `--backend` / `--dtype` / `-nc` / `-rf` the suites
+  accept arrive through `"$@"`, so an upstream flag nobody here has heard of
+  works too — and anything the suite rejects is reported as the suite's own
+  argparse error, which is the truthful message.
 
   It has **no exclusivity gate** on purpose: `pgrep` cannot see device pinning, and `mx-smi` was measured on this box lying both ways (`--show-process` said "no process found" while a job ran; `--show-all-process` put a process holding 4 GB on device 3 under GPUs 0–2). Pick the device with `CUDA_VISIBLE_DEVICES`, run, and read the recorded md5 before comparing two runs.
 - `--backend` is the one thing the official suite cannot express on its own (its call site passes no `backend=`), so it is threaded through `run_testcase` instead of being edited into the official call: `run_testcase(p, backend)` defaults to `maca_c` and passes it to `deep_select.topk`. **The upstream call site is unchanged in shape** — it gained one keyword argument, and the suite's own checks are untouched.
