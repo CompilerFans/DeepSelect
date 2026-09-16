@@ -4,9 +4,8 @@
 # produces an artifact for **every family this tree names** and installs
 # nothing.
 #
-#     ./build.sh                              # every family
+#     ./build.sh                              # the shippable wheel
 #     CUCC_TARGETS=xcore1600 ./build.sh       # one architecture
-#     CUCC_TARGETS=native ./build.sh          # just this device
 #     BUILDROOT=/out ./build.sh               # also copy the wheel to /out/wheel/
 #
 # Env:

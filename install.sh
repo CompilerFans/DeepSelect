@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
 # Build a wheel **for this device** and install it into the active
-# environment.  Same build as `./build.sh`, narrowed to one family and followed
+# environment.  Same build as `./build.sh`, narrowed to one image and followed
 # by a `pip install`.
 #
-#     ./install.sh                            # this device's family
+#     ./install.sh                            # this device
 #     CUCC_TARGETS=xcore1600 ./install.sh     # another architecture
 #
 # Env:
-#     CUCC_TARGETS  targets to compile; unset means **`native`**, the family
-#                   this device reports.  Narrowing is the point of this
-#                   script: what it installs is the wheel the machine in front
-#                   of you runs, and a caller who needs the shippable
+#     CUCC_TARGETS  targets to compile; unset means **`native`**, `mxcc`'s
+#                   spelling for the part in front of you.  Narrowing is the
+#                   point of this script: what it installs is the wheel this
+#                   machine runs, and a caller who needs the shippable
 #                   all-family artifact wants `./build.sh`.
 #     MACA_PATH     MACA toolkit root (default /opt/maca).  MACA_HOME is
 #                   consulted when this is unset; this one wins if both are set.
@@ -38,10 +38,9 @@ export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
 export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
 export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
-# One image by default, unlike `build.sh`.  This installs onto a machine, so
-# the other two families' images would be dead weight in that machine's
-# site-packages; an explicit `CUCC_TARGETS` still wins.  `native` is `mxcc`'s
-# own spelling for the local part (see develop.sh) and passes through untouched.
+# One image by default, unlike `build.sh`: this installs onto a machine, so the
+# other two images would be dead weight in that machine's site-packages.  An
+# explicit `CUCC_TARGETS` still wins.
 export CUCC_TARGETS="${CUCC_TARGETS:-native}"
 
 rm -rf build dist
