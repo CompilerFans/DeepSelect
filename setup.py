@@ -22,13 +22,11 @@ SOURCES = [
     "csrc/xcore1000/maca_topk.cu",
 ]
 
-# What the build does when `CUCC_TARGETS` says nothing: one target per family,
-# which is what a wheel has to carry -- a wheel built for one board cannot be
-# shipped to another.  The four spellings `mxcc` accepts are passed to it
-# verbatim: there is no table here, and `native` is mxcc's own spelling for the
-# local part.  The literal lives in `build.sh`/`install.sh`/`develop.sh` too;
-# it is one line each and they name different sets on purpose (see their
-# headers).
+# What this file builds when `CUCC_TARGETS` says nothing.  `build.sh` sets the
+# same list, and that is what a wheel has to carry -- one board's image cannot
+# be shipped to another; `develop.sh` / `install.sh` narrow it to `native`.
+# A direct `setup.py build_ext` here is the third caller, so it needs a default
+# of its own, and the family list is the safe one.
 DEFAULT_TARGETS = "xcore1000,xcore1500,xcore1600"
 
 

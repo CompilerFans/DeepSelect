@@ -40,7 +40,8 @@ export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
 # One image by default, unlike `build.sh`: this installs onto a machine, so the
 # other two images would be dead weight in that machine's site-packages.  An
-# explicit `CUCC_TARGETS` still wins.
+# explicit `CUCC_TARGETS` still wins.  `native` is `mxcc`'s own spelling (see
+# develop.sh).
 export CUCC_TARGETS="${CUCC_TARGETS:-native}"
 
 rm -rf build dist

@@ -55,8 +55,8 @@ export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 # An explicit `CUCC_TARGETS` still wins, so the cross-family check is
 # `CUCC_TARGETS=xcore1000,xcore1500,xcore1600 ./develop.sh`.
 #
-# `native` is `mxcc`'s own spelling and passes through untouched -- measured on
-# a C500, byte-identical to `-offload-arch=xcore1000` and the same
+# `native` is `mxcc`'s own spelling, passed through untouched -- measured on a
+# C500, byte-identical to `-offload-arch=xcore1000` and the same
 # `__MACA_ARCH__=1000`.
 export CUCC_TARGETS="${CUCC_TARGETS:-native}"
 
