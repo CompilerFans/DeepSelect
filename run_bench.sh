@@ -147,14 +147,8 @@ fi
 # `perf_snapshot.py` derives the name from the same call, so the two cannot
 # land in different directories.
 device_dir=$(python -W "ignore:Could not find flash_attn:UserWarning" -c \
-    'import torch; print((torch.cuda.get_device_name(0) or "").strip().replace(" ", "_"))' \
+    'import torch; print((torch.cuda.get_device_name(0) or "unknown_device").strip().replace(" ", "_"))' \
     ) || { echo "run_bench.sh: could not read the device name from torch" >&2; exit 1; }
-if [[ -z "$device_dir" ]]; then
-    echo "run_bench.sh: torch reports no device name; naming the directory after" >&2
-    echo "              the arch family instead" >&2
-    device_dir=$(python -W "ignore:Could not find flash_attn:UserWarning" -c \
-        'from deep_select._arch import native_family; print("metax_" + native_family())')
-fi
 
 md5=$(md5sum "$so" | cut -d' ' -f1)
 devices="${CUDA_VISIBLE_DEVICES:-<unset: whatever the host set>}"

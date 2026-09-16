@@ -187,7 +187,7 @@ compiles each into its own image of the same source. Measured: three targets →
 three images in one file, 11.07 MB against 3.7 MB for one. There is therefore
 **no compile-time architecture selection at all** — a family macro would be a
 lie in two of the three images — and the two numbers the kernel sizes its grids
-against arrive as arguments from `_arch.py` (`native_sm_count()`, from the
+against arrive as arguments from `_arch.py` (`get_device_num_sms()`, from the
 device's own properties). See "the arch constants are arguments" below.
 
 **What the wheel carries, and what the target machine must provide.** The
@@ -326,7 +326,7 @@ One extension carries an image per family, so nothing can be specialized at comp
 
 | number | source | where it lands |
 | --- | --- | --- |
-| SM count (104/28/32) | the **device reports it** — torch → `_arch.native_sm_count()` (`torch.cuda.get_device_properties().multi_processor_count`) | `RowParams::sm_count`, one `int64_t` appended to the tvm-ffi entry's positional args |
+| SM count (104/28/32) | the **device reports it** — torch → `_arch.get_device_num_sms()` (`torch.cuda.get_device_properties().multi_processor_count`) | `RowParams::sm_count`, one `int64_t` appended to the tvm-ffi entry's positional args |
 | fp32 split work target (260/70/80) | **derived in the kernel**, `sm_count * 5 / 2` | `maca_topk.cu`'s `f32_chunk_work_target` |
 
 Three things this is deliberately not:
@@ -453,7 +453,7 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
 - **The SM-count-sensitive numbers are arguments now**, not constants:
   `wave_filled_chunks` (the chunked split's grid) and the fp32 split's work
   target both read `params.sm_count`, which `interface.py` resolves from the
-  architecture the device reports (`_arch.native_sm_count()`, cached per
+  architecture the device reports (`_arch.get_device_num_sms()`, cached per
   process). The work target is `sm_count * 5 / 2` — the 2.5 is the C500 fit,
   the only one ever measured; the old 70/80 constants were that same
   arithmetic written out. **No C600/C600U measurement stands behind the 2.5**,
@@ -1035,16 +1035,17 @@ Writes `perf_data/<device>/<YYYYmmdd_HHMMSS>/` — following mcDeepGEMM's
 a `baseline` symlink under `perf_data/<device>/` and compares against it with
 `tools/compare_snapshots.py`.
 
-**`<device>` is the device's own name, not the arch family** (`MetaX C500` ->
+**`<device>` is the device's own name, not an arch family** (`MetaX C500` ->
 `MetaX_C500`). The directory has to answer *which board was measured on* —
 `MetaX C600` and `MetaX C600-U` are both xcore1600 but have different clocks, a
 different read wall and a different SM count, so a family-named directory stacks
-two machines silently. The arch family is still recorded **per row** as the
-`chip` column (`metax_xcore<N>`) and in the manifest, and a reader filters on
-that to find same-ISA records; it is never inferred back out of the directory
-name. Both sides derive the name from the same call — `perf_snapshot.py`'s
-`device_dir_name()` and `run_bench.sh`'s `device_dir` — so a snapshot and its
-`run_bench.sh` wrapper cannot land in different directories. The `--device N`
+two machines silently. **`chip` is that same string**, on every row and in the
+manifest: it was `metax_xcore<N>`, derived from the capability pair, and while
+the two usually agreed they were two answers to one question — a part reporting
+anything but its familiar sm would have put one name in the directory and
+another in the column. Both sides derive it from the same call —
+`perf_snapshot.py`'s `device_dir_name()` and `run_bench.sh`'s `device_dir` — so a
+snapshot and its `run_bench.sh` wrapper cannot land in different directories. The `--device N`
 CLI flag is unrelated: it is shorthand for `CUDA_VISIBLE_DEVICES=N`, the GPU
 index, not the directory name.
 

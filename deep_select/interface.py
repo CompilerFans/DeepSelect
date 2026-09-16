@@ -5,7 +5,7 @@ import torch
 from typing import Optional, Tuple
 
 from . import _binding
-from ._arch import native_sm_count
+from ._arch import get_device_num_sms
 from ._log import log, log_call
 
 
@@ -49,7 +49,7 @@ def _backend_for():
 def _sm_count() -> int:
     """SM count of this process's device, cached: a property of the process,
     not of the call."""
-    return native_sm_count()
+    return get_device_num_sms()
 
 
 # `structs.h`'s INPUT_/OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT, for when no kernel

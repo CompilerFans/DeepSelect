@@ -233,10 +233,18 @@ def device_dir_name() -> str:
     Falls back to the arch spelling only when torch reports no device name at
     all (a driver quirk, not a normal case).
     """
-    name = (torch.cuda.get_device_name(0) or "").strip()
-    if not name:
-        return f"metax_{_arch.native_family()}"
-    return name.replace(" ", "_")
+    return device_name()
+
+
+def device_name() -> str:
+    """`torch.cuda.get_device_name(0)`, with spaces turned into underscores.
+
+    The one name a record carries: the directory, the manifest's `device_name`
+    and the `chip` column all come from here, so they cannot disagree. The
+    `metax_xcore<N>` spelling it used to use for `chip` was a second answer to
+    the same question, derived through the capability pair.
+    """
+    return (torch.cuda.get_device_name(0) or "unknown_device").strip().replace(" ", "_")
 
 
 def _deep_gemm_package() -> Dict[str, str]:
@@ -276,9 +284,9 @@ def provenance(sm_count: int) -> Dict[str, Any]:
         md5 = hashlib.md5(open(so, "rb").read()).hexdigest()
     return {
         **_deep_gemm_package(),
-        # Arch family per row (`metax_xcore<N>`), from the device, not the
-        # directory name: the column to filter on for same-ISA rows.
-        "chip": f"metax_{_arch.native_family()}",
+        # The device itself, not an arch derivation of it: the same string the
+        # directory is named after, so the two cannot disagree.
+        "chip": device_dir_name(),
         "device_dir": device_dir_name(),
         "device_name": torch.cuda.get_device_name(0),
         "sm_count": sm_count,
@@ -386,7 +394,7 @@ def main() -> int:
     # It was a local here once and `provenance()` still named it -- a
     # `NameError` at the first line of every run, and nothing caught it because
     # this script had not been executed since that refactor.
-    sm_count = _arch.native_sm_count()
+    sm_count = _arch.get_device_num_sms()
     prov = provenance(sm_count)
     # `--out-dir` is the directory itself, not a root to hang a name under: a
     # caller that names one has already decided where this record goes.
