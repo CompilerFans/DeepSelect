@@ -71,9 +71,8 @@ static_assert(kCandidateCapacity >= kMaxTopK,
               "the coarse12 arena must hold a whole top-k answer");
 static_assert(kSmemBytes >= 2 * (size_t)kCandidateCapacity * sizeof(int32_t),
               "the arena is aliased onto the coarse histogram, so it must fit "
-              "both -- which is why this route is only entered when "
-              "sm_count == 104: on a device with a smaller budget the two do "
-              "not overlap");
+              "both -- which is why the gate is a *budget* test: on a device "
+              "that cannot afford this arena the two do not overlap");
 static_assert((size_t)kCoarseBins * sizeof(int32_t) <= kSmemBytes,
               "the coarse histogram is written into the arena before the "
               "candidates are, so the arena must hold 4096 32-bit bins -- and "

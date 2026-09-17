@@ -2078,10 +2078,10 @@ CUDA_VISIBLE_DEVICES=0 ./run_test.sh --test --backend maca_c --sample 200 -rf --
 All 313 cases passed!
 ```
 
-receipt：`/tmp/gate_smem/deepselect_run_20260918_002625.txt`，
-`extension_md5 bb2e6a3323c1b33e556c48ddfd514070`（9 个 skip 全是 OOM，
+receipt：`/tmp/gate_cmt/deepselect_run_20260918_004408.txt`，
+`extension_md5 254851f70c92836901fc9e552212e5dc`（9 个 skip 全是 OOM，
 和 §11.5 同一批 `cudaMalloc 16–32 GiB` 撞上已有占用）。§12.11 的设备自适应
-改动之后重跑过一遍，同样是 313 通过。
+改动、以及它之后那两处注释修正，各重跑过一遍，都是 313 通过。
 
 **C600/C600U 边界**：`csrc/xcore1600/`、`setup.py`、`build.sh`
 `git diff --name-only` 全为空。新增的 `dg_coarse12.cuh` 只在
@@ -2143,24 +2143,57 @@ cold-L2 的 `vectorized_elementwise_kernel_nullary_opt`）。产品那一列**�
 
 ### 12.11 设备自适应：一次审计，和把「哪个设备」换成「多少预算」
 
-这一节是一次**重审**的结果，不是新功能。起因是问：那些 `sm_count` 判断，有多少
-真的在判断它们以为自己在判断的东西。
+**先回答一个被问过两次的问题：能不能用编译期常数宏（CMake 的 `add_definitions`
+或 `-D`）按 family 定义 SM 数和共享内存？** 不能，而且**这条路这个仓库已经走过、
+已经拆掉了**，不是没试过。
 
-**先说结论：编译期 `#ifdef` 加常数宏这条路是死的，不是没试。** 实测（C500，device 0）：
+`git log -S NATIVE_SHARED_MEMORY_PER_SM_BYTES` 指向两个提交：`19b4971` 加了它
+（`#if DEEP_SELECT_NATIVE_ARCH == 1000` → 64 KiB，`== 1500 || == 1600` → 128 KiB，
+外加一条 `NATIVE_SM_COUNT` 的 104/28/32 表），`5f5a93c` 把它和整张表一起删了。
+那个提交的正文写得很直接：
 
-```
--offload-arch=xcore1000    host pass: __MACA_ARCH__ undefined   device pass: __MACA_ARCH__ = 1000
--offload-arch=xcore1500    host pass: __MACA_ARCH__ undefined   device pass: (未跑，本机无 1500)
--offload-arch=xcore1600    host pass: __MACA_ARCH__ undefined   device pass: (同上)
-```
+> In a fat binary one compile produces three images, so a family macro is a lie in
+> two of them.  Both numbers are therefore **arguments**, supplied by the caller.
 
-`__MACA_ARCH__` **只在 device pass 定义**，host pass 里三个目标全都 undefined ——
-所以 `#if __MACA_ARCH__ == 1000` 在 host 侧**永远走 `#else`**，不是「取到 1000」，
-是「取不到」。更根本的是：`-offload-arch=xcore1000,xcore1500,xcore1600` 是
-**一次编译、一个 `.so`、三份设备镜像**（`strings` 验过三份都在），而
-`f32_chunk_work_target` / `f32_coarse12_applies` 都是 **host 函数** —— host 代码
-在一份 `.so` 里只有一份，它不可能同时是三个常数。要按架构编译期分叉，得拆成
-三个 artifact，那是 `setup.py` 说的「one source, one extension」整个推翻。
+三条独立的理由，任何一条都足够：
+
+1. **`__MACA_ARCH__` 只在 device pass 定义。** 实测（C500，device 0）：
+   `-offload-arch=xcore1000/1500/1600` 三个目标，host pass 全是 undefined，
+   device pass 是 `1000`。所以 host 代码里的 `#if __MACA_ARCH__ == 1000`
+   **永远走 `#else`** —— 不是"取到 1000"，是"取不到"。
+   （`__MACACC__` 两遍都定义，这正是 `radix_core.cuh` 里 16 KB / 48 KB 那个分支
+   能在 host 上工作的原因。）
+2. **一份 `.so`，三份设备镜像。** `-offload-arch=a,b,c` 是一次编译，`strings`
+   验过三份镜像都在。host 代码在这份产物里**只有一份**，不可能同时是三个常数。
+3. **要按架构编译期分叉，得拆成三个 artifact** —— 那正是 `5f5a93c` 推翻的东西，
+   也是 `setup.py` 的 "one source, one extension"。
+
+**顺带一个必须说的事实**：当前发出去的 `deep_select_maca.so` **只带 xcore1000
+一份镜像**（`strings` 只有一个目标），而 `DEFAULT_TARGETS` 声明的是三个。
+`build.sh` 走 `bdist_wheel` 会带全，`setup.py build_ext` 这条默认路径不会。
+这是**已存在的**构建事实，不是这次改出来的。
+
+**那么"表"应该放在哪？** 放 Python，而且**已经放了**：`deep_gemm/utils/arch_config.py`
+是公开的 family 属性表，`Xcore1000Family.shared_memory_bytes = 64 * 1024`、
+`Xcore1500Family` 和 `Xcore1600Family` 都是 `128 * 1024`，
+`_common.get_device_shared_memory_size()` 就查这张表（先试
+`prop.shared_memory_per_block`，没有才回落到表）。SM 数那张表**在 `a22f5a0`
+删掉了**，因为设备自己会报 —— `multi_processor_count`。
+
+所以对 **SM 数**和**共享内存**这两个量，正确的形态是**运行时、设备自己报**，
+而不是编译期常数：
+
+* AP 数 → `torch.cuda.get_device_properties(...).multi_processor_count`，调用方读；
+* 共享内存 → `cudaDevAttrMaxSharedMemoryPerBlockOptin`，入口点读（本次改的），
+  回落时才是 `arch_config.py` 那张表。
+
+**为什么这次不是"查表"而是"读设备"。** 因为这条门问的是**这台机器够不够**，
+不是**这台机器属于哪个家族**。家族是编译期的（`-offload-arch` 选的），预算是
+运行期的（同一家族不同 SKU 可以不同，SDK 换代也会变）。把预算写成家族常数，
+就是让一个编译期标签去回答一个运行期问题 —— 和原来那个 `sm_count == 104`
+是同一个错误，只是换了个地方。而**表仍然是需要的**：`arch_config.py` 那张表是
+**回落**（设备不报 `shared_memory_per_block` 时用），并且它同时是"新家族该往哪
+加一行"的文档。
 
 **审计出来的三处，两处改，一处不改：**
 

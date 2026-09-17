@@ -93,8 +93,11 @@ struct RowParams {
     // The AP count every grid-sizing decision below reads, supplied by the
     // caller from `torch.cuda.get_device_properties(...)`.  An argument rather
     // than a compile-time constant because one extension serves all three
-    // families.  Zero means "unknown", which `resolve_sm_count` turns into an
-    // error rather than a plausible wrong grid.
+    // families -- `-offload-arch=xcore1000,xcore1500,xcore1600` is one compile
+    // producing one `.so` with three device images, and host code exists once
+    // in that artifact, so an `#if` on the target cannot be three numbers.
+    // Zero means "unknown", which `resolve_sm_count` turns into an error
+    // rather than a plausible wrong grid.
     uint32_t sm_count;
     // The second machine number, and it is read from the device rather than
     // named here: `cudaDevAttrMaxSharedMemoryPerBlockOptin`, in bytes.  The
