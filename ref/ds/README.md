@@ -257,6 +257,16 @@ the driver or from an arch macro. Upstream gets it from
 `kC500SmCount = 104` (ref `:851`, upstream `:816`) and returns the constant 2
 on anything else.
 
+**Read this against the source of its date, not today's.** The two paragraphs
+above describe the tree this snapshot was taken from. Upstream has moved twice
+since: `_arch.py` was deleted (2026-09-17, `a22f5a0`), and the AP count now
+comes from `torch.cuda.get_device_properties(...)` at the call site in
+`interface.py`; `kC500SmCount` was renamed `kF32Coarse12MeasuredSmCount` and is
+a *provenance* stamp rather than a device test; and the build is one artifact
+per family as of 2026-09-18. `ds_topk`'s signature — `sm_count` as an argument
+— is the part that did **not** change, which is why this repro still compiles
+and still matches.
+
 ---
 
 ## 4. `kSMEM` and the constants it drives

@@ -460,10 +460,13 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
 - **Capacity cannot fire in this direction, and there is no capacity constant
   to fire.** `NATIVE_SHARED_MEMORY_PER_SM_BYTES` and the
   `-DDEEP_SELECT_NATIVE_ARCH` that selected it went with the per-architecture
-  builds (2026-09-15, `5f5a93c`): one extension serves every family, so a
-  per-family compile-time constant has no build to live in. The gate it
-  implemented — reject an oversized config at compile time — was the port's
-  own; `maca_topk.cu` has no capacity gate by design.
+  builds (2026-09-15, `5f5a93c`) — and the constant came back on 2026-09-18 as
+  `csrc/structs.h`'s `ARCH_SMEM_PER_AP_BYTES`, per family, now that the build
+  is one artifact per family again (see "the arch constants are compile-time").
+  The gate it implemented — reject an oversized config at compile time — was
+  the port's own; `maca_topk.cu` has no capacity gate by design, and its one
+  budget test (`f32_coarse12_applies`) is an `if constexpr` against that same
+  constant.
 - **The SM-count-sensitive numbers are arguments now**, not constants:
   `wave_filled_chunks` (the chunked split's grid) and the fp32 split's work
   target both read `params.sm_count`, which `interface.py` reads off the device

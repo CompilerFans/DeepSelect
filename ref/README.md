@@ -448,7 +448,9 @@ went from the constant `2` to
 artifact is `deep_select/deep_select_maca.so`
 `md5 3114a5fd50eaaa90e713621b51f98e94`, built 01:49 from
 `csrc/xcore1000/maca_topk.cu` at 00:48 (extension newer than source, so not
-stale).
+stale).  (The artifact name is `deep_select_maca_xcore1000.so` since
+2026-09-18, when the build became one `.so` per family; this receipt predates
+that and its md5 names the file as it was.)
 
 The change is visible where the rule fires, and the cells the rule decides are
 exactly `bs > 64` (`kF32ChunksFewBatches`) and `vocab > 262144`:

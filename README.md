@@ -283,12 +283,14 @@ the same source (measured: three targets → three images, 11.07 MB against
 3.7 MB for one). Each target builds `csrc/xcore1000/maca_topk.cu` -- the
 hand-written MACA kernel, for every capacity, 64 KiB and 128 KiB alike.
 
-One consequence is worth stating because it shapes the source: **there is no
-per-architecture specialization at compile time.** A family macro would be
-correct in one image and a lie in the other two, so the two numbers the kernel
-sizes its grids against -- the SM count and the fp32 split's work target --
-travel as arguments, sourced from the architecture the device reports through
-torch. See CLAUDE.md, "the arch constants are arguments".
+One consequence is worth stating because it shapes the source: **the build is
+one artifact per family, and the per-family constants are compiled in.** Each
+`CUCC_TARGETS` entry is its own `-offload-arch=xcore<N>` compile carrying
+`-DDEEP_SELECT_ARCH=<N>`, so `csrc/structs.h` can hold a real family table (AP
+count, per-AP shared memory) and the loader picks the artifact matching the
+device. The AP count the *grids* are sized against still travels as an argument
+-- a grid must fill the machine in front of the call, not the one the image was
+built for. See CLAUDE.md, "the arch constants are compile-time".
 
 The ported kernels under `csrc/xcore1600/` are reserved and unbuilt: they select
 wrong on a C600U, and the C500 kernel is both correct there and 1.5-2.9x faster
