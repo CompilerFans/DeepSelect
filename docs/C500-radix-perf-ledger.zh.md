@@ -2147,6 +2147,10 @@ cold-L2 的 `vectorized_elementwise_kernel_nullary_opt`）。产品那一列**�
 `mcoplib` 的 `top_k` 写死 512，且 `k = 512` 三格它**自己的校验器报 `FAIL(self)`**
 （见 `mcoplib-two-topk-ops` 那条已知缺陷），所以它在这张表里没有可比的位置。
 
+**这一节的落地版读数仍然成立**：§12.12 换的是**构建形态**（一族一个 artifact、
+族常数进编译期），没有动任何一条判据的数值 —— 路由门的两半边在 C500 上给出
+逐格相同的答案，16 格 × i32/i64 全部 exact，官方门 313 格全过。所以这张表不用重测。
+
 ### 12.11 设备自适应：一次审计，和把「哪个设备」换成「多少预算」
 
 **先回答一个被问过两次的问题：能不能用编译期常数宏（CMake 的 `add_definitions`
@@ -2283,7 +2287,7 @@ host 代码每份产物各有一份**，编译期常数就不是"用一个标签
 | 设备族 → 文件 | `_xcore1000` → `deep_select_maca_xcore1000.so` |
 | 端到端 | 16 格 × i32/i64 **全部 exact**，`BAD 0` |
 | 低宽度梯子（`lovv.py`） | V=2048…3584 × k=2048/1024/512 全 exact，`BAD 0` |
-| 官方门 | `All 313 cases passed!`（`/tmp/gate_arch/deepselect_run_20260918_012532.txt`，md5 `2ce76e3f`） |
+| 官方门 | `All 313 cases passed!`（`/tmp/gate_arch2/deepselect_run_20260918_013606.txt`，md5 `a510810e`；上一份 `2ce76e3f` 是同源的中间构建） |
 | `#error` 两条 | 不设宏、设 `9999`，都按预期炸 |
 | `ref/c500_gate` | `gate constants consistent`，11 个探针形状全部与门一致 |
 
