@@ -1,0 +1,56 @@
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail16topk_chunks_initILb0ELi3EEEvPNS1_19TopKChunksWorkspaceIXT0_EEENS1_10TopKParamsE 
+  0 bytes stack frame 
+ maca info  : Used  6 MTregisters, 22 STregisters, 0 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail23topk_chunks_coarse_histILb0ELi3EEEvNS1_10TopKParamsEPNS1_19TopKChunksWorkspaceIXT0_EEE 
+  0 bytes stack frame 
+ maca info  : Used  26 MTregisters, 44 STregisters, 4196 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail26topk_chunks_compact_refineILb0ELi3EEEvNS1_10TopKParamsEPNS1_19TopKChunksWorkspaceIXT0_EEE 
+  0 bytes stack frame 
+ maca info  : Used  40 MTregisters, 60 STregisters, 1052 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail16topk_chunks_initILb0ELi4EEEvPNS1_19TopKChunksWorkspaceIXT0_EEENS1_10TopKParamsE 
+  0 bytes stack frame 
+ maca info  : Used  6 MTregisters, 22 STregisters, 0 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail23topk_chunks_coarse_histILb0ELi4EEEvNS1_10TopKParamsEPNS1_19TopKChunksWorkspaceIXT0_EEE 
+  0 bytes stack frame 
+ maca info  : Used  26 MTregisters, 44 STregisters, 4204 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail26topk_chunks_compact_refineILb0ELi4EEEvNS1_10TopKParamsEPNS1_19TopKChunksWorkspaceIXT0_EEE 
+  0 bytes stack frame 
+ maca info  : Used  34 MTregisters, 60 STregisters, 1052 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail16topk_chunks_initILb0ELi5EEEvPNS1_19TopKChunksWorkspaceIXT0_EEENS1_10TopKParamsE 
+  0 bytes stack frame 
+ maca info  : Used  6 MTregisters, 22 STregisters, 0 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail23topk_chunks_coarse_histILb0ELi5EEEvNS1_10TopKParamsEPNS1_19TopKChunksWorkspaceIXT0_EEE 
+  0 bytes stack frame 
+ maca info  : Used  26 MTregisters, 44 STregisters, 4212 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail26topk_chunks_compact_refineILb0ELi5EEEvNS1_10TopKParamsEPNS1_19TopKChunksWorkspaceIXT0_EEE 
+  0 bytes stack frame 
+ maca info  : Used  38 MTregisters, 60 STregisters, 1052 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail16topk_chunks_initILb0ELi6EEEvPNS1_19TopKChunksWorkspaceIXT0_EEENS1_10TopKParamsE 
+  0 bytes stack frame 
+ maca info  : Used  6 MTregisters, 22 STregisters, 0 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail23topk_chunks_coarse_histILb0ELi6EEEvNS1_10TopKParamsEPNS1_19TopKChunksWorkspaceIXT0_EEE 
+  0 bytes stack frame 
+ maca info  : Used  28 MTregisters, 44 STregisters, 4220 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail26topk_chunks_compact_refineILb0ELi6EEEvNS1_10TopKParamsEPNS1_19TopKChunksWorkspaceIXT0_EEE 
+  0 bytes stack frame 
+ maca info  : Used  38 MTregisters, 60 STregisters, 1052 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail13topk_coarse12ILb0EEEvNS1_10TopKParamsE 
+  0 bytes stack frame 
+ maca info  : Used  32 MTregisters, 44 STregisters, 1052 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8
+ maca info  : Function properties for  _ZN9deep_gemm7indexer6detail11topk_singleILb0EEEvNS1_10TopKParamsE 
+  0 bytes stack frame 
+ maca info  : Used  32 MTregisters, 78 STregisters, 12680 bytes shared mem  
+ maca info  : staticMaxWarps/PEU : 8

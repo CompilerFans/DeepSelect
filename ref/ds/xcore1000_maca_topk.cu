@@ -1,3 +1,32 @@
+// ── reference extraction ────────────────────────────────────────────────────
+//
+// Upstream: `csrc/xcore1000/maca_topk.cu`.  Everything above the host entry at
+// the bottom of this file is upstream lines 1-1108, verbatim, with exactly two
+// edits, both in the include block: `"structs.h"` is dropped (see the note
+// where it stood) and `"radix_core.cuh"` becomes `"xcore1000_radix_core.cuh"`
+// (the file it is copied to here).
+//
+// What upstream had after line 1108, and what is not here:
+//
+//   * 1112-1421  the tvm-ffi entry `deep_select::topk(TensorView, ...)` --
+//                dtype/shape/stride checks, the process-wide grow-only
+//                `cudaMalloc` scratch cache under a mutex, the length table it
+//                builds when the caller passes no `end`, and
+//                `TVMFFIEnvGetStream` for the stream.  Replaced by the plain
+//                host entry at the bottom of this file; the parts of it that
+//                are the dataflow's own input (the length table, the
+//                workspace sizing, the NaN-flag table) are carried over there.
+//   * 1125-1425  the `deep_select` namespace and the `../ffi/ffi_entries.h`
+//                registration tail.
+//
+// The kernel layer is untouched, so the whole contract surface is still here:
+// the `length <= topk` shortcut, the NaN bit-pattern check and its two
+// `abort_on_nan` behaviors, the out-of-band fills, the ordered emit, the
+// `RowParams`-by-value ABI, `nan_scan_kernel`, and every routing predicate
+// (`chunked_bf16_applies`, `chunked_f32_applies`, `topk_worth_splitting_f32`,
+// `f32_chunked_chunks`, `chunked_chunks`, `radix_block_for`).
+// ────────────────────────────────────────────────────────────────────────────
+
 // MACA-native row-wise top-K for DeepSelect -- the shipping backend.
 //
 // Implements the `topk` contract (`deep_select.interface.topk`) on primitives
@@ -39,13 +68,18 @@
 #include <mutex>
 #include <vector>
 
-#include "structs.h"
+// [reference] upstream includes "structs.h" here.  Nothing in the kernel layer
+// reads it: the only users were `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` and
+// `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` in the tvm-ffi edge (upstream lines
+// 1185, 1220-1222), which this file does not carry.  Its other effect was to
+// pull in `maca_bfloat16.h`; `radix_core.cuh` includes that itself, which is
+// where the 16-bit arms still get it.  Dropped so the reference needs nothing
+// from `csrc/`.
 // The ported C500 dataflow (see the provenance banner in that file).  It is
 // included here so that this translation unit -- the one `setup.py` builds --
 // is what proves it compiles under the mxcc/cu-bridge toolchain, and so that
 // the bf16 selection path below is a header-only dependency.
-#include "radix_core.cuh"
-#include "dg_coarse12.cuh"
+#include "xcore1000_radix_core.cuh"
 
 namespace deep_select_maca {
 
@@ -69,22 +103,6 @@ struct RowParams {
     // Null everywhere else.
     const int32_t *preselected;
     const int32_t *nan_flags;
-    // The per-row scan table the *other* new route needs: unlike `nan_flags`
-    // (owned by whichever split built it, inside that split's workspace), this
-    // one is allocated and zeroed by the dispatcher for any call that can
-    // reach a route answering a row without ranking it -- currently the
-    // coarse12 arm, which folds the scan into its own pass 1.  Written by that
-    // kernel, read by the contract half.  Null when nothing scans.
-    int32_t *scan_flags;
-    // The coarse12 route's staging buffer: `n_rows * topk` int32 columns, the
-    // row positions that kernel ranks.  It cannot be `output_index` itself
-    // because the public entry's default `indices_type` is int64 and the kernel
-    // writes int32 -- through the caller's pointer the two widths interleave.
-    // The contract half widens these into `output_index` the way it already
-    // widens the split's answer.  Allocated by the dispatcher for any call the
-    // route can reach; null otherwise, which the route reads as "not staged"
-    // and answers with the row path.
-    int32_t *coarse12_cols;
     uint64_t stride_input_batch;
     uint64_t stride_output_value_batch;
     uint64_t stride_output_index_batch;
@@ -340,13 +358,6 @@ static __device__ __forceinline__ bool row_has_nan(const ValueT *row,
 // small batch is the whole machine parked on six CTAs reading a 12 MB row; this
 // asks the same question at the width the row needs.  `flags` is zeroed by the
 // caller and a row's flag is raised by whichever chunk read the bit pattern.
-//
-// **The fp32 split no longer launches this.**  Stage 1's pass 1 reads exactly
-// these bytes at exactly this width, so the scan rides its own load instead
-// (`rk::topk_f32_chunk_stage1_kernel`'s `kNan`, and the ledger's §10.7 for the
-// A/B: the whole walk goes, for ~3% on the pass that absorbs it).  What is
-// left here is the 16-bit split's scan, the fp32 row path's, and the A/B arm
-// `DS_FUSE_NAN_OFF=1` reaches -- which is why it is not deleted.
 constexpr int kScanBlock = 256;
 
 template <typename ValueT>
@@ -754,151 +765,32 @@ inline int f32_chunks_small_batch(uint32_t batches, int ceiling,
     return f32_chunks_for(batches, ceiling, work_target);
 }
 
-// **The chunk count's own rule cannot see `topk`, and above 512 it is the
-// wrong axis.**  Stage 2's merge reads `num_chunks * topk` candidates per row
-// -- `candidate_stride` in `rk::launch_topk_f32_chunks_stage2` -- and
-// `f32_chunks_for` sizes itself from the batch alone.  The batch rule is
-// already at the optimum for `topk <= 512`; above that the merge weights the
-// count and a `topk`-aware cap is what §8.6 added.  Small-batch tier only --
-// above `kF32ChunksFewBatches` the count is the large-batch rule and never
-// reaches this.
+// **The chunk count's own rule cannot see `topk`, and that is the axis it is
+// wrong on above 512.**  Stage 2's merge reads `num_chunks * topk` candidates
+// per row -- `candidate_stride` in `rk::launch_topk_f32_chunks_stage2` -- and
+// `f32_chunks_for` sizes itself from the batch alone.  Measured over ~20 cells
+// (`V` in {65536, 66551, 107520, 129280, 131072, 262144}, `batches <= 16`,
+// `kk.bench`, contract checked; the sweeps are in ledger §8.6): the batch rule
+// is already at the optimum for `topk <= 512`, and capping at 8 above that is
+// worth **+4.8% .. +40.0%**.  Small-batch tier only -- above
+// `kF32ChunksFewBatches` the count is the constant 2 and never reaches this.
 //
-// §8.6's version of that cap pinned the count at 8 and was measured over a
-// sweep that is now superseded: it was wrong at both ends.  What this one is
-// bounded by is the **chunk length**, and every length measured wants a count
-// that is a multiple of two -- so the count is written as the product of two
-// independent doubled quantities rather than as one number.
-//
-// `kF32ChunkSplitCeiling` (32) bounds the second one and is a *smem* bound, not
-// a fit.  The arena is `kF32SmemInputSize` = 1757 slots and the 8-bit coarse
-// level's threshold bin is not `L / 256` wide but about `L / 58` -- the suffix
-// count reaches `topk` several bins below the mean, so it stops in the wider
-// tail of the distribution (ratio flat at 57.9 / 56.8 / 58.2 for `L` in
-// {87384, 65536, 131072}).  A bin that does not fit falls through to
-// `radix_topk_row_f32_rescan`, which re-walks the whole window once per key
-// byte -- five passes instead of two.  So `L / 58 <= 1757`, i.e. **L <= 101906**.
-// The largest power of two under that is 65536.  That is the whole constant:
-// two geometry facts, no measured value.
-//
-// **There used to be a `topk`-aware cap here and it was wrong in both
-// directions.**  It read `c_default * topk * 10 <= vocab` and returned 8 when
-// that failed.  Measured, interleaved repeats, `kk.bench`, contract checked,
-// b1 and b6, `k = 2048`, medians of 2-3 rounds (ledger §10.9):
-//
-//     V        library ran    optimum   delta     -> V/c     optimum's chunk
-//     98304    8              8            0%       12288
-//     114688   8              4        -17.2%       28672
-//     131072   8              4        -17.2%       32768
-//     196608   8              6         -7.6%       32768
-//     229376   8              4         -8.4%       57344
-//     262144   8              6         -4.1%       43690
-//     327680   16             6        -31.7%       54613
-//     393216   16             6        -24.7%       65536
-//     458752   16             6        -26.3%       76459
-//     524288   16             8        -18.8%       65536
-//
-// The cap fired far too little (it exempted V >= 327680 and left the batch
-// rule's 16, worth -18.8% .. -31.7%) and, where it did fire, pinned the count
-// at 8 -- which is above the optimum at every V below 131072 on this ladder.
-// The 8 was not a measurement of this tier's optimum; it was the merge weight
-// `topk` puts on it, and that is a different axis.  **This is not an artefact
-// of the fused NaN scan**: the `DS_FUSE_NAN_OFF` cross (`ab_fuse_chunks.py`,
-// b1/b6 at V = 65536, 129280) puts both arms' optimum at the same count, so
-// §8.6's sweep was already pointing low on its own.
-//
-// **What the optimum actually is: where stage 1 and stage 2 balance.**  They
-// move in opposite directions in `c` -- stage 1 falls (`V / c` per CTA, more
-// CTAs to hide the latency) and stage 2 rises (`num_chunks * topk` candidates
-// read per row, and it is one CTA per row either way).  Setting the two
-// derivatives against each other gives `c = theta * sqrt(V / topk)`, and the
-// ladder above is that curve with `theta = 1/2`:
-//
-//     V        0.5*sqrt(V/2048)   nearest even   measured optimum
-//     98304    3.46               4              8   (4 is 6.4% off)
-//     114688   3.74               4              4
-//     131072   4.00               4              4
-//     196608   4.90               4              6   (1.4% off)
-//     229376   5.29               6              4   (2.3% off)
-//     262144   5.66               6              6
-//     327680   6.32               6              6
-//     393216   6.93               6              6
-//     458752   7.48               8              6   (1.0% off)
-//     524288   8.00               8              8
-//
-// Worst cell 6.4%, mean under 1.5%, and the two structural instincts are both
-// in it: the count grows as `sqrt(V)` (more chunks only pay while stage 1's
-// per-CTA latency is what is hiding) and falls as `1/sqrt(topk)` (a bigger
-// merge is more expensive per candidate read).
-//
-// `theta = 1/2` is the one fitted number and it is fitted on `topk = 2048`
-// only -- the `topk` axis of the curve is *predicted*, not measured, so the
-// formula is applied only where `topk > 512` (the same gate §8.6 used) and the
-// result is a cap: the caller takes `min` with the batch rule, so a cell the
-// formula would raise past its measured count is unaffected.
-//
-// **`kF32ChunkCurveFloor` is a discontinuity in the data, not in the model.**
-// The curve predicts 4 at both `V = 98304` and `V = 114688`, but the measured
-// optimum steps 8 -> 4 across that interval (`0.0972` against `0.1034` at the
-// low end; `0.1438` against `0.1550` at the high end, and the stage split flips
-// sign between them -- s1's slope dominates at 98304, s2's at 114688). Above
-// the floor the curve is used; below it the count is the measured 8, which is
-// what both cells below want. Between those two V there is no measurement, so
-// the boundary is placed on the measured one.
-//
-// `work_target` is the batch rule's own cap (`c * b <= 2.5 * sm_count`): the
-// split exists to fill a machine a short batch leaves empty, so at a large
-// batch it has nothing to buy and must not be forced up.
-inline constexpr uint32_t kF32ChunkSplitCeiling = 32;
-inline constexpr uint32_t kF32ChunkCurveFloor = 114688;
-// The curve is fitted on `k = 2048` only, and it is applied on that axis only.
-// For `512 < topk < 2048` §8.6's measurements still stand and still disagree
-// with the curve: at `V = 262144, k = 1024` the batch rule's own 16 measures
-// 99.5 us against 138.4 us for the curve's 8, so extrapolating down the `topk`
-// axis would replace a measured optimum with a predicted one.
-inline constexpr uint32_t kF32ChunkCurveTopK = 2048;
-
-inline uint32_t f32_isqrt(uint64_t v) {
-    uint32_t r = 0;
-    for (uint32_t bit = 1u << 30; bit != 0; bit >>= 1) {
-        if ((uint64_t)(r + bit) * (r + bit) <= v) r += bit;
-    }
-    return r;
-}
-
-// Round a half-integer up to the next even value: the ladder's optima are all
-// even (they come in `c` and `c/2` pairs of a 2-way split), and an odd count
-// makes `chunk_size = ceil(L/c)` uneven, which the chunk geometry's 8-element
-// rounding then amplifies.
-inline int f32_chunk_round_even(uint32_t c) {
-    if (c < 2u) return 2;
-    return (c & 1u) ? (int)(c + 1u) : (int)c;
-}
-
-inline int f32_topk_chunk_cap(uint32_t topk, uint32_t vocab, uint32_t c_default,
-                              uint32_t work_target) {
+// **8, not 4, and that is the one place the sweep overturned the obvious
+// answer.**  4 wins at `V = 129280` (112.2 vs 118.8 us at k=1024) but loses at
+// `V = 65536` (75.3 vs 70.7 us) and at every `V = 66551` cell (90.5 vs 88.2 us
+// at b1); at `V = 262144` it is worse than the *batch rule's own* 16 by 39%
+// (138.4 vs 99.5 us at b6-k1024).  8 has the best worst cell.
+inline int f32_topk_chunk_cap(uint32_t topk, uint32_t vocab, int c_default) {
     if (topk <= 512) return 0;   // 0 = no cap; keeps `DEEP_SELECT_F32_CHUNK32` in force
-    if (vocab >= kF32ChunkCurveFloor && topk == kF32ChunkCurveTopK) {
-        // `c = 0.5 * sqrt(V / topk)`, in integers: `c = isqrt(V / (4 * topk))`.
-        // Nothing else: the merge-share guard below is *not* allowed to exempt
-        // a cell here, and that is the point of splitting the two cases.
-        int c = f32_chunk_round_even(f32_isqrt((uint64_t)vocab / (4ull * topk)));
-        if ((uint64_t)c > work_target) c = f32_chunk_round_even(work_target);
-        if (c > (int)kF32ChunkSplitCeiling) c = (int)kF32ChunkSplitCeiling;
-        return c;
-    }
-    // §8.6's rule for everything the curve does not cover.  The guard is
-    // `c_default * topk * 10 <= vocab` -- the merge reading under a tenth of the
-    // row is already at the batch rule's own count, so capping it is a pure
-    // loss.  **The curve above had to be split out of this because the guard
-    // fires exactly at the cells the ladder says the curve should decide**: at
-    // `k = 2048` the product is `8 * 2048 * 10 = 163840` (cap in force) or
-    // `16 * 2048 * 10 = 327680` (exempt), so every `V >= 327680` took the
-    // `return 0` arm and ran the batch rule's 16.  That is why `rule_ab.py`
-    // read `V = 393216 / 524288` at `-0.2% / +0.2%` while the ladder's optimum
-    // there is worth `-24.7% / -18.8%` (in force 0.2859 / 0.2959 against
-    // 0.2152 / 0.2414 at `c = 6 / 8`).
+    // Only where the merge is a real share of the row: `c * topk` candidates
+    // against `vocab` elements.  The three cells below a tenth are exactly the
+    // three where the batch rule's own count is the optimum (`V = 262144`,
+    // k = 1024 -- 6.25%, at b1/b6/b16), so capping them is a pure loss
+    // (-9.3% / -2.4% / -4.2%).  `10` sits between that 6.25% and the 12.5% of
+    // the nearest win; the threshold is fitted, the bracket on both sides of
+    // it is measured.
     if ((uint64_t)c_default * topk * 10 <= vocab) return 0;
-    return 8;   // §8.6's measured cap for `512 < topk < 2048`
+    return 8;
 }
 
 // ── the chunk count above `kF32ChunksFewBatches` ────────────────────────────
@@ -970,112 +862,6 @@ inline int f32_chunks_large_batch(uint32_t vocab_size, uint32_t sm_count) {
 // fitted value.  At 6 rows the machine is empty and chunks are the only CTAs
 // there are; at 256 rows the grid already covers the machine twice over.
 inline constexpr uint32_t kF32ChunksFewBatches = 64;
-
-// Where the coarse12 route takes over.  The batch floor is not one number,
-// because the measured crossing is not one number: it moves with the width.
-// A row walk is only worth the machine when there are enough CTAs to fill it,
-// and how many that is depends on how much work each CTA has -- which is `V`.
-// The ladder below is `k = 2048`, paired medians, `B/A < 1` meaning the route
-// won; the ledger's §12 has the full table.
-//
-//      V        b16     b24     b32     b48     b64     b96    b128
-//      8192    0.821   0.801   1.015   0.763   0.724     -      -
-//     32768    0.630     -       -       -       -       -      -
-//     65536    0.897     -       -       -       -       -      -
-//    131072    0.910   0.908   0.839     -       -       -      -
-//    196608    1.029     -     0.925   0.891   0.796     -      -
-//    262144    1.182   1.092   1.048   1.042   0.915   0.813  0.672
-//    393216    1.407     -     1.255   1.184   1.031     -      -
-//    524288    1.525   1.469   1.319   0.277   0.253   0.840    -
-//
-// Two regimes fall out of it, and one constant cannot hold both.  At or below
-// `V = 131072` the route is already ahead at `b16` and never measured behind.
-// `196608` is the first width where `b16` loses (1.029), so `131072` is the
-// boundary: everything at or under it takes the 16 floor, everything above
-// takes 64.  The two widths between them are unmeasured and are deliberately
-// left on the wide side, which is the conservative direction.
-//
-// Above the boundary the crossing sits between `b48` and `b64` at `262144` and
-// above `b64` at `393216`, so 64 is the one value that is a win at every wide
-// cell measured except `393216` (1.031 -- the flat part of the crossing, +3%).
-// `524288` wants a floor near 36, but that cell is the split's own cliff --
-// `b32` is 1.319 and `b40` is 0.277 against a baseline whose stage 1 jumps
-// 0.22 ms to 1.68 ms between them -- so it is not a crossing to site a
-// constant on, and the 64 floor takes `b64` there at -74.7%.
-// The wide-width floor is a product, not a count, because the crossing moves
-// with `topk` as well as with the width.  Measured crossing batch, `V = 262144`,
-// paired medians (`B/A < 1` = the route won):
-//
-//     topk    crossing    batches * topk
-//     2048    ~56         114688
-//     1024    ~112        114688
-//     512     ~95         48640   (and ~190 at V = 524288 -> 97280)
-//
-// The first two agree to the digit; `topk = 512` crosses earlier than the
-// product would put it, so this floor is **conservative there by design** --
-// it declines `b128` at `V = 262144 k = 512` (-12.2%, a win left on the table)
-// in exchange for never entering the two cells where the route loses badly at
-// that `topk` (`b64 V = 524288` is +55.7%, `b128 V = 524288` is +4.1%,
-// `b64 V = 262144` is +17.6% -- all three excluded).
-inline constexpr uint64_t kF32Coarse12WorkTarget = 114688;
-inline constexpr uint32_t kF32Coarse12MinBatchesNarrow = 16;
-inline constexpr uint32_t kF32Coarse12NarrowVocab = 131072;
-
-// The width floor is the one value in this gate that is not a crossing at all.
-// The port wins at every width the split is legal at -- `V = 4096` is -29.1%,
-// `8192` is -45.9%, `16384` is -53.4%, and the `(V, k)` sweeps above that are
-// all wins -- so there is nothing to site it on.  What sets it instead is the
-// original's own bound: `select_topk_policy` never routes to coarse12 below
-// `n_cols = 2049`.  Below that the split is the only arm anyone has measured,
-// so the gate matches the original rather than inventing a floor.  (2048, not
-// 2049: the facade's own stride guard already rejects anything that is not a
-// multiple of 256 floats, and 2048 is the largest legal width under 2049.)
-inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
-
-// ── the deep_gemm coarse12 route ────────────────────────────────────────────
-//
-// `dg_coarse12.cuh` carries `topk_coarse12`, extracted whole from
-// `mcDeepGEMM/csrc/kernels/fp32_topk.cu`.  It answers one row in one CTA and
-// writes *positions in the row*, which is exactly what the contract half below
-// consumes, so it replaces the whole split for the shapes it serves rather than
-// sitting beside it.
-//
-// **C500 only, and for once the reason is not a measurement but a budget.**
-// The kernel's 16 KB arena holds a 4096-bin coarse histogram first and the
-// candidate array second, so it needs 16 KB of dynamic shared memory.  That is
-// `kF32RowSmemBytes`-sized on C500 and is not on a device with a smaller
-// budget -- and unlike every other C500-only rule in this file, a smaller
-// budget does not make it slower, it makes it **wrong**.  So the gate is the
-// same discriminator the rest of the file uses (`sm_count`, see the
-// `kC500SmCount` note above for why not an arch macro), and the value is
-// required to match rather than being compared as a threshold.
-//
-// Why it is worth having at all: on the shapes deep_gemm routes here it is
-// 2.0-2.3x faster than the row kernel (ledger §12).  The three measured
-// differences are 12 coarse bits against 8, 640 threads against 512, and one
-// 16 KB arena against 14 KB plus a ping-pong refine buffer.
-inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
-    if (params.sm_count != kC500SmCount) return false;
-    // The arena's bound, not a fitted one: `topk_coarse12_row` serves at most
-    // what the candidate half can hold, and there is no overflow path in the
-    // *staged* refine that can make a larger answer correct.
-    if (params.topk > (uint32_t)rk::dg12::kMaxTopK) return false;
-    if (batches == 0) return false;
-    // The original's own width bound (`n_cols >= 2049`).  It matters more now
-    // than it did: the narrow arm below is `return batches >= 16` with no other
-    // `V` test, so without this line a 1024-wide row would route, which is
-    // below every width anyone has measured on either arm.
-    if (params.vocab_size < kF32Coarse12MinVocab) return false;
-    // Route on the shape deep_gemm itself routes on (`select_topk_policy`),
-    // with the floor taken from the measured crossing on this device.  The
-    // narrow-width arm is why there are two arms and not one: at or below
-    // `V = 131072` the route is ahead at `b16` and never measured behind, so
-    // the width decides which floor applies, and only the wide one is a
-    // function of `topk`.  The tables above have both.
-    if (params.vocab_size <= kF32Coarse12NarrowVocab)
-        return batches >= kF32Coarse12MinBatchesNarrow;
-    return (uint64_t)batches * params.topk >= kF32Coarse12WorkTarget;
-}
 }  // namespace
 
 // `topk` and `vocab_size` are parameters here, not read off `params`, because
@@ -1099,41 +885,8 @@ int f32_chunked_chunks(uint32_t batches, uint32_t topk, uint32_t vocab_size,
         return f32_chunks_large_batch(vocab_size, sm_count);
     const int ceiling = f32_chunk_ceiling_32() ? 32 : kF32ChunkCeiling;
     const int c = f32_chunks_small_batch(batches, ceiling, work_target);
-    const int cap = f32_topk_chunk_cap(topk, vocab_size, (uint32_t)c, work_target);
-    int n = (cap != 0 && c > cap) ? cap : c;
-    // **The arena floor, which this branch never had.**  `f32_chunks_large_batch`
-    // above is derived from exactly one thing -- the largest chunk whose
-    // threshold bin still fits `kF32SmemInputSize` -- but the small-batch
-    // branch below `kF32ChunksFewBatches` was sized from the batch alone and
-    // never learned it.  The omission is not a slope, it is a cliff, and it
-    // lands precisely on the branch boundary: at `V = 524288` the batch rule
-    // gives `c = 4` for `33 <= batches <= 64`, which is a 131072-element chunk
-    // against a 101906 bound, so `radix_topk_row_f32_rescan` runs five passes
-    // where it should run two.  Measured, split alone, `k = 2048`:
-    // `b32` is 0.3732 ms (c = 8, 65536/chunk, no rescan) and `b33` is 1.77 ms
-    // (c = 4); `b65` takes the branch above, gets 6, and is fine again.  So the
-    // two branches disagreed about the same row at their own seam.  With the
-    // floor, split alone: `b40` **-77.6%**, `b64` **-72.5%**, and the two
-    // controls that have no overflow (`b32`, `b40 V = 262144`) at -0.1% / -0.3%.
-    //
-    // Applied *after* the cap and as a floor, not a replacement: the batch rule
-    // and the curve still decide the count wherever they are already above the
-    // bound.  Same gate as the branch above -- C600/C600U keep their count.
-    //
-    // **Guarded on `topk` because the bound is.**  `kF32OverflowChunkLen` is
-    // `kF32SmemInputSize * 58`, and that 58 was measured at `k = 2048` (see the
-    // derivation above).  At `k = 512` the threshold bin is narrower, the bound
-    // is looser, and `c = 4` never overflowed -- so applying it there raises the
-    // count for nothing and the merge pays: measured `b64 V = 524288 k = 512`
-    // is **+14.3%** with the floor, against -0.1% / -0.3% on the controls.
-    // Rather than extrapolate a ratio that a measurement just falsified, the
-    // floor applies exactly where its constant was derived.
-    if (sm_count == kC500SmCount && topk == kF32ChunkCurveTopK) {
-        const uint32_t arena =
-            (vocab_size + kF32OverflowChunkLen - 1) / kF32OverflowChunkLen;
-        if ((uint32_t)n < arena) n = (int)arena;
-    }
-    return n;
+    const int cap = f32_topk_chunk_cap(topk, vocab_size, c);
+    return (cap != 0 && c > cap) ? cap : c;
 }
 
 // The batch bound has no single value: the split costs a merge over `batches`
@@ -1257,27 +1010,19 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
     // makes the scan independent of that rather than merely consistent with
     // it.  Both the clearing and the scan go when `check_nan` is off: the row
     // kernel reads this table only under that same flag.
-    //
-    // With the scan fused, this table is still built the same way -- zeroed
-    // here, OR-ed per row -- and only stage 1's own pass 1 walks the row.  One
-    // row walk instead of two; the contract the flag answers is unchanged.
     const size_t table_bytes = (size_t)batches * sizeof(int32_t);
-    const bool fuse_scan = params.check_nan && rk::f32_stage1_fuses_scan();
     if (params.check_nan) {
         cudaMemsetAsync(ws.lengths, 0, table_bytes, stream);
-        if (!fuse_scan) {
-            nan_scan_kernel<float><<<batches * chunks, kScanBlock, 0, stream>>>(
-                params.input, params.end_ptr,
-                (int64_t)(params.stride_input_batch / sizeof(float)),
-                params.vocab_size, (uint32_t)chunks, ws.lengths);
-        }
+        nan_scan_kernel<float><<<batches * chunks, kScanBlock, 0, stream>>>(
+            params.input, params.end_ptr,
+            (int64_t)(params.stride_input_batch / sizeof(float)),
+            params.vocab_size, (uint32_t)chunks, ws.lengths);
     }
     const cudaError_t rc = rk::launch_topk_f32_chunked(
         (const float *)params.input, params.end_ptr, ws.cols, ws.merged,
         (int)batches, (int)params.vocab_size, (int)params.topk, chunks, stream,
         // The row stride is in bytes at this layer and in elements there.
-        (int64_t)(params.stride_input_batch / sizeof(float)),
-        fuse_scan, ws.lengths);
+        (int64_t)(params.stride_input_batch / sizeof(float)));
     RowParams merged = params;
     const bool preselected = rc == cudaSuccess;
     merged.preselected = preselected ? ws.merged : nullptr;
@@ -1355,81 +1100,6 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
         }
         return;
     }
-    // **Both index widths, and that is the point.**  The gate here used to be
-    // `index_dtype == 0`, which made the whole route unreachable through the
-    // public facade: `deep_select.topk`'s default `indices_type` is
-    // `torch.int64`, so every default call took the split and this kernel was
-    // never launched.  The first A/B of this route measured 0.0% for exactly
-    // that reason.
-    //
-    // The kernel itself is width-agnostic -- it answers in row *columns*, which
-    // are int32 by nature -- so widening means staging those columns through
-    // the dispatcher's scratch and letting the contract half do the widening it
-    // already does for the split.  Writing them straight into `output_index`
-    // would be wrong for int64 (`int32_t*` arithmetic over an int64 buffer), so
-    // the scratch is not an optimization here, it is what makes the arm legal.
-    if (value_dtype == 0 && detail::f32_coarse12_applies(params, n)) {
-        int32_t *const staging = params.coarse12_cols;
-        if (staging != nullptr) {
-            // No split, no workspace of its own, no NaN table of its own: this
-            // kernel walks each row itself and answers in row columns, so the
-            // contract half below is the only other thing that touches the row
-            // -- and it is a pass over the *answer*, not over the input.
-            // `params.end_ptr` is the row table the dispatcher already
-            // populated with the scratch's all-`vocab_size` entry when the
-            // caller passed no `end`, which is the same table the split reads.
-            // `params.vocab_size` -- not the row stride -- is the width to
-            // scan.  They agree for a full-width tensor and differ the moment
-            // the caller hands over a column slice of a wider matrix, which is
-            // exactly what the benchmark harness does (`s[:, :L]`): the kernel
-            // would then walk past the live prefix and rank columns that are
-            // outside the tensor the caller asked about.
-            const cudaError_t rc = rk::dg12::launch_topk_coarse12(
-                (const float *)params.input, params.end_ptr, staging,
-                params.scan_flags, (int)n, (int)params.topk,
-                (int64_t)(params.stride_input_batch / sizeof(float)),
-                (int)params.vocab_size, cuda_stream);
-            if (rc == cudaSuccess) {
-                // Hand the answer to the contract half the way the split does,
-                // so its per-row `-1` check decides row by row: a row this
-                // kernel could not serve, or one whose window is no longer
-                // than `topk`, comes back with an empty slot and is re-ranked
-                // by the row path.
-                //
-                // The scan table goes with it, and that is not optional: this
-                // kernel answers a row *without* ranking it, so under
-                // `check_nan` the contract half must read a flag rather than
-                // scan -- and the flag is the one that kernel raised while
-                // reading the row anyway.
-                RowParams merged = params;
-                merged.preselected = staging;
-                merged.nan_flags = params.scan_flags;
-                if (index_dtype == 0) {
-                    detail::launch_typed_radix<float, int32_t>(
-                        merged, n, cuda_stream, sorted_index, sorted_value, rv,
-                        block, /*preselected=*/true);
-                } else {
-                    detail::launch_typed_radix<float, int64_t>(
-                        merged, n, cuda_stream, sorted_index, sorted_value, rv,
-                        block, /*preselected=*/true);
-                }
-                return;
-            }
-        }
-        // A launch that did not happen leaves the buffer untouched, so the row
-        // path answers instead -- the same fallback the split takes.  So does
-        // an allocation that could not be made.
-        if (index_dtype == 0) {
-            detail::launch_typed_radix<float, int32_t>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
-                /*preselected=*/false);
-        } else {
-            detail::launch_typed_radix<float, int64_t>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
-                /*preselected=*/false);
-        }
-        return;
-    }
     if (value_dtype == 0 && chunked_workspace != nullptr &&
         params.end_ptr != nullptr &&
         chunked_bytes >= detail::chunked_f32_workspace_bytes(
@@ -1471,401 +1141,240 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
         }
     }
 }
-
-}  // namespace deep_select_maca
-
-// ── the tvm-ffi entry points ────────────────────────────────────────────────
+// ── the reference's host entry ──────────────────────────────────────────────
 //
-// Torch-free: this TU no longer includes <torch/extension.h> or
-// <ATen/cuda/CUDAContext.h>, so the extension carries no torch DT_NEEDED
-// entry and its behavior is not tied to the host's torch build.  The contract
-// checks that used to be `TORCH_CHECK` are `DS_HOST_CHECK`, the tensors are
-// `tvm::ffi::TensorView`, and the stream comes from the FFI environment.
-#include "../ffi/ffi_error.h"
-#include "../ffi/ffi_tensor.h"
-
-#include <tvm/ffi/extra/c_env_api.h>
-
-#include <utility>
-#include <vector>
-
-namespace deep_select {
-
-using namespace deep_select_maca;
-namespace dsf = deep_select::ffi;
-
-// ── the chunked path's scratch, held across calls ───────────────────────────
+// `ds_topk` (declared in `xcore1000_ds_topk.h`).  What it does that upstream's
+// `deep_select::topk()` did:
 //
-// `cudaMalloc`/`cudaFree` on this runtime cost ~70-100 us per *pair* at this
-// size class, and the cost is non-monotonic in size (a 12 MB allocation is
-// nearly free; 300 KB is the worst case).  The split needs this workspace plus
-// a row-length table on every call, so a fresh pair each time put a ~265 us
-// host floor in front of a ~96 us kernel -- `e2e = max(host, device)`.
+//   * fills `RowParams` from the arguments.  Fixed at the upstream defaults
+//     this reference does not expose: fp32 input, int32 indices, no values
+//     out, no index offset (so the `length <= topk` shortcut skips
+//     `emit_ordered` and writes plain ascending indices), `idx_fill = -1`,
+//     `check_nan = true`, `abort_on_nan = false`.
+//   * evaluates the split's gates in the same order upstream does, so the
+//     workspace below is sized for the arm that will actually run.  The
+//     equality that matters is the one upstream enforces with `DS_HOST_CHECK`:
+//     `topk_launch` re-derives `f32_chunked_chunks(...)` from `params` and
+//     refuses the split unless `chunked_bytes` is at least what that count
+//     needs.  Both sides call the same functions here, so they agree.
+//   * builds the per-row length table when the caller passes none -- upstream
+//     internals, not a caller-visible detail: `end` absent already means "the
+//     whole row", and the split requires an `end_ptr`.
+//   * allocates the workspace.  Upstream holds a grow-only one across calls
+//     with a per-buffer `cudaMalloc` the first time a shape needs it
+//     (`ChunkedScratch`), and that is what is reproduced below, lock included
+//     -- a per-call `cudaMalloc`/`cudaFree` would be outside the dataflow and
+//     would put the driver's own allocator in the timed region.
 //
-// So they are cached process-wide and **grown only**.  Growing rather than
-// keying by shape is the design: a caller alternating between two batches would
-// realloc on every switch under a shape-keyed cache, which is the cost this
-// exists to remove.
-//
-// Three properties make reuse safe rather than merely fast:
-//
-//   * `chunked_workspace(base, batches, topk)` walks forward from `base` by the
-//     *geometry of this call*, not by the capacity, so a buffer larger than this
-//     call needs is correct by construction.
-//   * the split's kernels write every slot they read back -- stage 1 fills each
-//     candidate slot it is asked for, and `nan_flags` is memset per call --
-//     so nothing is inherited from the previous call.
-//   * the lengths table is skipped only when `(batches, vocab_size)` -- both
-//     arguments of this call -- already match the pair it was last filled for.
-//     Its content is `[vocab_size] * batches`, a pure function of that pair, so
-//     the pair *is* the content; see `lengths_epoch` at the fill.
-//
-// The high-water mark is bounded by the gate that admits the split
-// (`chunked_bf16_applies`: batches <= 64, topk <= 1024) -- ~6.3 MB of workspace
-// and 256 B of table, held for the life of the process.  A bounded, one-time
-// footprint in exchange for removing a per-call host cost larger than the
-// kernel it fronts.  Freeing instead of holding gives most of the win back:
-// free-then-malloc *should* be cheap, and measured on this runtime it is not.
+// The NaN-flag table is the first `batches * sizeof(int32_t)` bytes of the
+// workspace (`ChunkedF32Workspace::lengths`): `nan_scan_kernel` accumulates
+// into it and `topk_kernel_radix` reads it in its `kPreSelected` arm.  Upstream
+// memsets it only under `params.check_nan`, which is true here, so the cast is
+// live and not a reinterpretation of the length table.
 
+// ── error reporting ─────────────────────────────────────────────────────────
+//
+// The two macros the body below uses live upstream in `../ffi/ffi_error.h`
+// (`DS_HOST_CHECK`, `DS_CUDA_RUNTIME_CHECK`), where they raise
+// `tvm::ffi::Error` so the runtime can surface the message as a python
+// exception.  There is no FFI here, so they are re-spelled with the same names
+// and the same fail-loudly intent: message to stderr, then `std::abort()`.  A
+// `void` C entry has no error channel to return through, and a reference that
+// ignored a failed `cudaMalloc` would print a GB/s number for a run that never
+// happened.
+#define DS_REF_RAISE(...)                                                      \
+    do {                                                                       \
+        std::fprintf(stderr, "[ds_topk] %s:%d: ", __FILE_NAME__, __LINE__);    \
+        std::fprintf(stderr, __VA_ARGS__);                                     \
+        std::fprintf(stderr, "\n");                                            \
+        std::abort();                                                          \
+    } while (0)
+
+#define DS_HOST_CHECK(cond, ...)                                               \
+    do {                                                                       \
+        if (!(cond)) DS_REF_RAISE(__VA_ARGS__);                                \
+    } while (0)
+
+#define DS_CUDA_RUNTIME_CHECK(cmd)                                             \
+    do {                                                                       \
+        const cudaError_t _ds_err = (cmd);                                     \
+        if (_ds_err != cudaSuccess)                                            \
+            DS_REF_RAISE("%s failed: %s", #cmd, cudaGetErrorString(_ds_err));  \
+    } while (0)
+
+namespace {
+
+// Upstream's `ChunkedScratch` (maca_topk.cu, the `deep_select` namespace), minus
+// the fields only the tvm-ffi layer touched.  Both buffers are grow-only and
+// shared by every call in the process, so the kernel arguments must not be
+// resized between the launches of one call -- which is why the lock is held
+// across them rather than around the allocation alone.
 struct ChunkedScratch {
-    std::mutex mu;
-    void *workspace = nullptr;
-    size_t workspace_bytes = 0;
+    static constexpr int64_t kNoEpoch = -1;
+
     int32_t *lengths = nullptr;
     size_t lengths_count = 0;
-    // The `(batches, vocab_size)` the device table was last **filled** for.
-    // `kNoEpoch` means "unknown, must refill"; it is not a fabricated `(0, 0)`,
-    // which a call with `batches == 0` would match and then skip the fill on.
-    static constexpr int64_t kNoEpoch = -1;
+    // `[vocab_size] * batches` is a pure function of two arguments of the call
+    // that fills this table, so "is it already right" is a question about that
+    // pair and nothing else. `kNoEpoch` means "must refill".
     int64_t lengths_epoch_batches = kNoEpoch;
     int64_t lengths_epoch_vocab = kNoEpoch;
-    // One `int32_t` per row, zeroed once per call that scans.  This is the
-    // table `topk_kernel_radix`'s preselected arm reads to decide whether the
-    // row is poisoned -- and it is *read on every preselected path*, while
-    // only the two splits used to own one (each embedded in its own workspace
-    // layout).  The coarse12 route answers a row without ranking it, so it can
-    // hand back a row a scan would have rejected, and it had no table to read:
-    // `nan_flags` stayed null and the first `check_nan` read faulted.  This
-    // buffer is that table for every route that does not bring its own.
-    int32_t *scan_flags = nullptr;
-    size_t scan_flags_count = 0;
-    // The coarse12 route's answer buffer: `n_rows * topk` int32 columns, which
-    // are the row *positions* the kernel ranks.  It is separate from
-    // `output_index` because the public entry's default `indices_type` is
-    // int64, and a kernel writing int32 through the caller's pointer would
-    // interleave.  Grown like the rest and never shrunk.
-    int32_t *coarse12_cols = nullptr;
-    size_t coarse12_cols_count = 0;
+
+    void *workspace = nullptr;
+    size_t workspace_bytes = 0;
+
+    // The cache is process-wide while the kernels have no thread-safety
+    // contract of their own, so it carries its own lock rather than assuming
+    // the caller serializes.
+    std::mutex mu;
 };
 
 ChunkedScratch &chunked_scratch() {
-    static ChunkedScratch s;
-    return s;
+    static ChunkedScratch scratch;
+    return scratch;
 }
 
-tvm::ffi::Array<int64_t> get_alignment_requirement() {
-    return {INPUT_STRIDE_ALIGNMENT_REQUIREMENT,
-            OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT};
-}
+struct ScratchGuard {
+    std::mutex *m;
+    explicit ScratchGuard(std::mutex *mu) : m(mu) { if (m) m->lock(); }
+    ~ScratchGuard() { if (m) m->unlock(); }
+};
 
-void topk(const tvm::ffi::TensorView &input, int64_t topk,
-          const tvm::ffi::Optional<tvm::ffi::TensorView> &end,
-          bool sorted_value, bool sorted_index,
-          const tvm::ffi::Optional<tvm::ffi::TensorView> &output_value,
-          const tvm::ffi::TensorView &output_index,
-          const tvm::ffi::Optional<tvm::ffi::TensorView> &output_idx_offset,
-          int64_t idx_oob_fill_value, double value_oob_fill_value,
-          bool return_value, bool abort_when_nan_found, bool check_nan,
-          // SM count of the device this call runs on, from the caller's
-          // architecture table (`deep_select/_arch.py`).  The last argument
-          // rather than one near `topk` because it is the only one the caller
-          // derives from the *device* rather than from the problem.
-          int64_t sm_count) {
-    DS_HOST_CHECK(input.ndim() == 2, "input must be 2-D, got ", input.ndim());
-    const int64_t batches = dsf::size(input, 0);
-    const int64_t vocab_size = dsf::size(input, 1);
-    const bool float32 = dsf::is_float32(input);
-    const bool bfloat16 = dsf::is_bfloat16(input);
+}  // namespace
 
-    DS_HOST_CHECK(topk > 0, "topk must > 0");
-    DS_HOST_CHECK(topk <= (int64_t)kMaxTopK, "topk must be <= ", kMaxTopK);
-    DS_HOST_CHECK(!(sorted_value && !return_value),
-                  "`return_value` must be enabled when `sorted_value` is True");
-    DS_HOST_CHECK(!(sorted_value && sorted_index),
-                  "`sorted_value` and `sorted_index` cannot be used at the same time");
-    DS_HOST_CHECK(float32 || bfloat16,
-                  "input dtype must be float32 or bfloat16");
-    DS_HOST_CHECK(dsf::is_index_type(output_index),
-                  "output_index dtype must be int32 or int64");
-    DS_HOST_CHECK(dsf::stride(input, 1) == 1, "input.stride(1) must be 1");
-    DS_HOST_CHECK(dsf::stride(input, 0) * (int64_t)dsf::element_size(input) %
-                          (int64_t)INPUT_STRIDE_ALIGNMENT_REQUIREMENT == 0,
-                  "input.stride(0) must be a multiple of ",
-                  INPUT_STRIDE_ALIGNMENT_REQUIREMENT, " bytes");
-
-    // Every output row is addressed as `row * stride(0) + column`, so a
-    // last-dimension stride other than 1 (or a row that is too short) writes
-    // outside the columns the caller owns.  Upstream rejects both
-    // (api.cu KU_CHECK_LAST_DIM_CONTIGUOUS / KU_CHECK_SHAPE) -- without the
-    // check the result is silently scrambled, so refuse instead.
-    auto check_out_tensor = [&](const char what[],
-                                const tvm::ffi::TensorView &t) {
-        DS_HOST_CHECK(t.device().device_id == input.device().device_id,
-                      what, " must be on the same device as `input`");
-        DS_HOST_CHECK(dsf::stride(t, 1) == 1, what, ".stride(1) must be 1");
-        DS_HOST_CHECK(dsf::size(t, 0) == batches && dsf::size(t, 1) >= topk,
-                      what, " must be at least (batch_size, topk) = (",
-                      batches, ", ", topk, ")");
-    };
-    check_out_tensor("output_index", output_index);
-    if (return_value) {
-        DS_HOST_CHECK(output_value.has_value(),
-                      "`output_value` must not be `None` when `return_value` is True");
-        const tvm::ffi::TensorView &ov = output_value.value();
-        DS_HOST_CHECK(dsf::same_dtype(ov.dtype(), input.dtype()),
-                      "output_value dtype must match input dtype");
-        check_out_tensor("output_value", ov);
-    }
-    // The per-row tables are read as `table[row]`, so `stride(0)` must be 1 and
-    // the tensor must be on the device (a wrong-device pointer faults on read).
-    auto check_row_table = [&](const char what[],
-                               const tvm::ffi::TensorView &t) {
-        DS_HOST_CHECK(t.device().device_id == input.device().device_id,
-                      what, " must be on the same device as `input`");
-        DS_HOST_CHECK(t.ndim() == 1 && dsf::size(t, 0) == batches &&
-                          dsf::stride(t, 0) == 1,
-                      what, " must be a contiguous tensor of `batch_size` entries");
-    };
-    if (end.has_value()) check_row_table("end", end.value());
-    if (output_idx_offset.has_value()) {
-        check_row_table("output_idx_offset", output_idx_offset.value());
-    }
-
-    const tvm::ffi::TensorView &ov =
-        return_value ? output_value.value() : output_index;
+extern "C" void ds_topk(const float* scores, const int32_t* lengths, int32_t* out,
+                        int n_rows, int n_cols, int top_k, int sm_count) {
+    const int value_dtype = 0;   // float32  (bf16 would be 1)
+    const int index_dtype = 0;   // int32    (int64 would be 1)
+    const bool sorted_index = false;
+    const bool sorted_value = false;
+    const bool return_value = false;
+    const int64_t batches = (int64_t)n_rows;
 
     RowParams p{};
-    p.input = dsf::const_data_ptr(input);
-    p.output_value = return_value ? dsf::data_ptr(ov) : nullptr;
-    p.output_index = dsf::data_ptr(output_index);
-    p.end_ptr = end.has_value() ? dsf::data_ptr<int32_t>(end.value()) : nullptr;
-    p.idx_offset_ptr = output_idx_offset.has_value()
-                           ? dsf::data_ptr<int32_t>(output_idx_offset.value())
-                           : nullptr;
-    // The kernel offsets rows in *bytes*; `stride` counts elements.
-    p.stride_input_batch = (uint64_t)dsf::stride(input, 0) * dsf::element_size(input);
-    p.stride_output_value_batch =
-        return_value ? (uint64_t)dsf::stride(ov, 0) * dsf::element_size(ov) : 0;
-    p.stride_output_index_batch =
-        (uint64_t)dsf::stride(output_index, 0) * dsf::element_size(output_index);
-    p.vocab_size = (uint32_t)vocab_size;
-    p.topk = (uint32_t)topk;
-    // A zero here sizes every grid below to nothing -- an empty answer, not a
-    // crash -- and the caller cannot fail to know it (it reads the number off
-    // the device).  Refuse rather than round it to something plausible.
-    DS_HOST_CHECK(sm_count > 0, "sm_count must be > 0 (got ", sm_count, ")");
+    p.input = scores;
+    p.output_value = nullptr;
+    p.output_index = out;
+    p.end_ptr = nullptr;          // filled in below when the split runs
+    p.idx_offset_ptr = nullptr;
+    p.preselected = nullptr;
+    p.nan_flags = nullptr;
+    p.stride_input_batch = (uint64_t)n_cols * sizeof(float);
+    p.stride_output_value_batch = 0;
+    p.stride_output_index_batch = (uint64_t)top_k * sizeof(int32_t);
+    p.vocab_size = (uint32_t)n_cols;
+    p.topk = (uint32_t)top_k;
     p.sm_count = (uint32_t)sm_count;
-    p.idx_fill = (int32_t)idx_oob_fill_value;
-    p.value_fill = (float)value_oob_fill_value;
-    p.check_nan = check_nan;
-    p.abort_on_nan = abort_when_nan_found;
+    p.idx_fill = -1;
+    p.value_fill = 0.0f;
+    p.check_nan = true;
+    p.abort_on_nan = false;
 
-    const int value_dtype = float32 ? 0 : 1;
-    const int index_dtype = dsf::same_dtype(output_index.dtype(), dsf::kInt32) ? 0 : 1;
-    // The FFI environment holds torch's current stream while the python
-    // facade is inside `tvm_ffi.use_torch_stream()` (deep_select/_binding.py).
-    // Outside it TVMFFIEnvGetStream reports the null handle, which is the
-    // legacy default stream -- the same thing the torch build launched on
-    // when no stream was set, so this is not a behavior change.
-    const cudaStream_t stream = (cudaStream_t)TVMFFIEnvGetStream(
-        (int32_t)dsf::device_type(input), dsf::device_index(input));
+    if (n_rows <= 0 || n_cols <= 0 || top_k <= 0 ||
+        top_k > kMaxTopK || sm_count <= 0) {
+        DS_HOST_CHECK(n_rows > 0 && n_cols > 0,
+                      "bad shape: n_rows=%d n_cols=%d", n_rows, n_cols);
+        DS_HOST_CHECK(top_k > 0 && top_k <= kMaxTopK,
+                      "topk must be in (0, %d], got %d", kMaxTopK, top_k);
+        DS_HOST_CHECK(sm_count > 0, "sm_count must be > 0 (got %d)", sm_count);
+    }
 
-    // Both buffers are built HERE rather than taken from the caller.  The
-    // lengths table is an internal detail of the split's stage 1 -- `end`
-    // absent already means the whole row -- so keeping it here leaves the
-    // public entry a pure DLTensor boundary.  The workspace is raw cudaMalloc
-    // rather than a torch tensor, because a torch tensor here is exactly the
-    // coupling the tvm-ffi migration removes; it is synchronous on the calling
-    // thread, so it is ordered before the launches on any stream, and cached
-    // across calls -- see `ChunkedScratch`.
-    static const bool kCacheScratch = [] {
+    const bool f32_split = detail::chunked_f32_applies(p, (uint32_t)batches);
+    const int f32_chunks = detail::f32_chunked_chunks(
+        (uint32_t)batches, p.topk, p.vocab_size, p.sm_count);
+    const size_t need_lengths = (size_t)batches * sizeof(int32_t);
+    const size_t need_workspace =
+        f32_split ? detail::chunked_f32_workspace_bytes((uint32_t)batches,
+                                                        (uint32_t)top_k,
+                                                        f32_chunks)
+                  : 0;
+
+    // The cache is the upstream default path; `DEEP_SELECT_NO_SCRATCH_CACHE=1`
+    // turns it off, which is the knob upstream carries for the same reason.
+    static const bool cache_scratch = [] {
         const char *v = std::getenv("DEEP_SELECT_NO_SCRATCH_CACHE");
         return !(v != nullptr && v[0] == '1' && v[1] == '\0');
     }();
-
-    // The cache is process-wide while the kernels here have no thread-safety
-    // contract of their own, so the scratch carries its own lock rather than
-    // assuming the caller serializes.  Held across the launches, because the
-    // buffers are not done being read when this function returns.
-    struct ScratchGuard {
-        std::mutex *m;
-        explicit ScratchGuard(std::mutex *mu) : m(mu) { if (m) m->lock(); }
-        ~ScratchGuard() { if (m) m->unlock(); }
-    };
     ChunkedScratch &scratch = chunked_scratch();
-    ScratchGuard scratch_guard(kCacheScratch ? &scratch.mu : nullptr);
-    bool scratch_borrowed = false;
+    ScratchGuard scratch_guard(cache_scratch ? &scratch.mu : nullptr);
 
-    int32_t *lengths = nullptr;
+    int32_t *row_lengths = nullptr;
     void *workspace = nullptr;
-    size_t workspace_bytes = 0;
-    // One scratch arm per split.  The two differ in dtype and in the workspace
-    // layout they derive from it, so they are separate branches over a shared
-    // allocator/table front half; the fp32 arm takes the same `p.end_ptr` route
-    // (its split requires `end_ptr != nullptr`).
-    const bool bf16_split =
-        value_dtype == 1 && detail::chunked_bf16_applies(p, (uint32_t)batches);
-    const bool f32_split =
-        value_dtype == 0 && detail::chunked_f32_applies(p, (uint32_t)batches);
-    // The routes that answer a row *without* ranking it -- the splits and the
-    // coarse12 arm -- read the per-row scan table in the contract half.  The
-    // shape gate above is not enough to know whether one of them will be taken
-    // (the splits are reached through `topk_launch`'s own predicates and its
-    // workspace check), so the table is provided for the whole `check_nan`
-    // class and only when a route really asks for it: staying inside that class
-    // costs one `cudaMemsetAsync` over `batches` ints, and it is that memset
-    // alone that makes reading a slot legal.  A plain row run under
-    // `check_nan` scans the row itself and never reads this, but the memset it
-    // pays for is 255x smaller than the row scan it replaces (see
-    // `f32_coarse12_applies`), so the class is the right place to draw the line.
-    const bool needs_scan_table =
-        check_nan && (bf16_split || f32_split ||
-                      (value_dtype == 0 && detail::f32_coarse12_applies(p, (uint32_t)batches)));
-    // The coarse12 answer buffer, allocated by the same rule: a call the route
-    // can reach gets one, so `topk_launch` can stage the columns it ranks
-    // whatever the caller's index width is.  Allocated up front rather than
-    // inside the dispatch because the dispatch is the kernel layer and this is
-    // a host allocation, and because a failure here has to fall back to the row
-    // path rather than fault.
-    const bool needs_coarse12_cols =
-        value_dtype == 0 && detail::f32_coarse12_applies(p, (uint32_t)batches);
-    if (needs_coarse12_cols) {
-        const size_t need_cols = (size_t)batches * (size_t)p.topk;
-        if (need_cols > scratch.coarse12_cols_count) {
-            int32_t *grown = nullptr;
-            DS_CUDA_RUNTIME_CHECK(
-                cudaMalloc(&grown, need_cols * sizeof(int32_t)));
-            if (scratch.coarse12_cols)
-                DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.coarse12_cols));
-            scratch.coarse12_cols = grown;
-            scratch.coarse12_cols_count = need_cols;
-        }
-    }
-    if (bf16_split || f32_split) {
-        const int f32_chunks =
-            detail::f32_chunked_chunks((uint32_t)batches, p.topk,
-                                       p.vocab_size, p.sm_count);
-        const size_t need_lengths = (size_t)batches * sizeof(int32_t);
-        const size_t need_workspace =
-            f32_split
-                ? detail::chunked_f32_workspace_bytes((uint32_t)batches,
-                                                      (uint32_t)topk, f32_chunks)
-                : detail::chunked_workspace_bytes(
-                      (uint32_t)batches, (uint32_t)topk,
-                      (uint32_t)detail::chunked_chunks(p));
+    bool borrowed = false;
 
-        if (!kCacheScratch) {
-            if (!end.has_value()) {
-                DS_CUDA_RUNTIME_CHECK(cudaMalloc(&lengths, need_lengths));
-                std::vector<int32_t> host_lengths((size_t)batches,
-                                                  (int32_t)vocab_size);
-                DS_CUDA_RUNTIME_CHECK(cudaMemcpy(lengths, host_lengths.data(),
-                                                 need_lengths,
-                                                 cudaMemcpyHostToDevice));
-                p.end_ptr = lengths;
-            }
-            DS_CUDA_RUNTIME_CHECK(cudaMalloc(&workspace, need_workspace));
-            workspace_bytes = need_workspace;
-        } else {
-            // Grow-only.  A `cudaFree` here would be correct but would give back
-            // exactly the cost this buffer exists to avoid, so the peak is held.
+    if (f32_split) {
+        if (cache_scratch) {
+            // Grow-only.  A free here would be correct and would give back
+            // exactly the cost this buffer exists to avoid, so the peak is
+            // held.  Also clear the epoch on a resize: then "no epoch" means
+            // "must refill" instead of a fabricated `(0, 0)`.
             if (need_workspace > scratch.workspace_bytes) {
                 void *grown = nullptr;
                 DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need_workspace));
-                if (scratch.workspace) DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.workspace));
+                if (scratch.workspace)
+                    DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.workspace));
                 scratch.workspace = grown;
                 scratch.workspace_bytes = need_workspace;
             }
             if (need_lengths > scratch.lengths_count * sizeof(int32_t)) {
                 int32_t *grown = nullptr;
                 DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need_lengths));
-                if (scratch.lengths) DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.lengths));
+                if (scratch.lengths)
+                    DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.lengths));
                 scratch.lengths = grown;
                 scratch.lengths_count = (size_t)batches;
                 scratch.lengths_epoch_batches = ChunkedScratch::kNoEpoch;
                 scratch.lengths_epoch_vocab = ChunkedScratch::kNoEpoch;
             }
-            if (!end.has_value()) {
-                // `[vocab_size] * batches` is a pure function of two arguments of
-                // this call, so "is the table already right" is a question about
-                // that pair -- `lengths_epoch` is set only by the fill below, and
-                // clearing it on a resize makes "no epoch" mean "must refill"
-                // rather than a fabricated `(0, 0)`.
+            if (lengths == nullptr) {
                 if (scratch.lengths_epoch_batches != batches ||
-                    scratch.lengths_epoch_vocab != (int64_t)vocab_size) {
+                    scratch.lengths_epoch_vocab != (int64_t)n_cols) {
                     std::vector<int32_t> host_lengths((size_t)batches,
-                                                      (int32_t)vocab_size);
+                                                      (int32_t)n_cols);
                     DS_CUDA_RUNTIME_CHECK(cudaMemcpy(scratch.lengths,
                                                      host_lengths.data(),
                                                      need_lengths,
                                                      cudaMemcpyHostToDevice));
                     scratch.lengths_epoch_batches = batches;
-                    scratch.lengths_epoch_vocab = (int64_t)vocab_size;
+                    scratch.lengths_epoch_vocab = (int64_t)n_cols;
                 }
-                p.end_ptr = scratch.lengths;
+                row_lengths = scratch.lengths;
+            } else {
+                row_lengths = const_cast<int32_t *>(lengths);
             }
             workspace = scratch.workspace;
-            workspace_bytes = need_workspace;
-            scratch_borrowed = true;
-        }
-    }
-
-    // The per-row scan table, owned here rather than by the route that reads
-    // it.  Only `check_nan` calls that can reach a route answering a row
-    // without ranking it get one (`needs_scan_table` above), the table is
-    // zeroed on the current stream so the kernel that raises a flag is ordered
-    // after it, and it is *not* UNinitialized state a reader could trip over
-    // -- a slot is read on the first call that reads it at all.
-    //
-    // Zeroing per call rather than tagging an epoch is deliberate: the flag
-    // lives for exactly one call (it answers "is this row poisoned" for the
-    // input as it is now), so a table reused across calls would have to be
-    // cleared in the same place anyway, and a flag left raised from a previous
-    // call is the one failure mode that is silent.
-    if (needs_scan_table) {
-        if (p.scan_flags == nullptr) {
-            if ((size_t)batches > scratch.scan_flags_count) {
-                int32_t *grown = nullptr;
-                DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, (size_t)batches * sizeof(int32_t)));
-                if (scratch.scan_flags)
-                    DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.scan_flags));
-                scratch.scan_flags = grown;
-                scratch.scan_flags_count = (size_t)batches;
+            borrowed = true;
+        } else {
+            if (lengths == nullptr) {
+                // What upstream builds for an `end`-less caller:
+                // `[vocab_size] * batches`.
+                int32_t *own = nullptr;
+                DS_CUDA_RUNTIME_CHECK(cudaMalloc(&own, need_lengths));
+                std::vector<int32_t> host_lengths((size_t)batches, (int32_t)n_cols);
+                DS_CUDA_RUNTIME_CHECK(cudaMemcpy(own, host_lengths.data(),
+                                                 need_lengths,
+                                                 cudaMemcpyHostToDevice));
+                row_lengths = own;
+            } else {
+                row_lengths = const_cast<int32_t *>(lengths);
             }
-            p.scan_flags = scratch.scan_flags;
+            DS_CUDA_RUNTIME_CHECK(cudaMalloc(&workspace, need_workspace));
         }
-        DS_CUDA_RUNTIME_CHECK(cudaMemsetAsync(p.scan_flags, 0,
-                                              (size_t)batches * sizeof(int32_t),
-                                              stream));
+        p.end_ptr = row_lengths;
     }
-    if (needs_coarse12_cols) p.coarse12_cols = scratch.coarse12_cols;
 
-    // The cached branch hands out the scratch's pointers directly, so the guard
-    // must not free them -- it owns only what this call allocated itself (the
-    // uncached branch, and nothing at all once `DEEP_SELECT_NO_SCRATCH_CACHE` is
-    // off).
-    struct FreeIfSet {
-        void *p;
-        ~FreeIfSet() { if (p) cudaFree(p); }
-    } free_lengths{scratch_borrowed ? nullptr : (void *)lengths},
-        free_workspace{scratch_borrowed ? nullptr : workspace};
-
-    topk_launch(p, batches, (void *)stream, value_dtype, index_dtype,
+    topk_launch(p, batches, /*stream=*/nullptr, value_dtype, index_dtype,
                 sorted_index, sorted_value, return_value, workspace,
-                workspace_bytes);
+                need_workspace);
     DS_CUDA_RUNTIME_CHECK(cudaGetLastError());
+
+    // The cached branch hands out the scratch's own pointers, so it owns only
+    // what this call allocated itself -- which is nothing once the cache is on.
+    if (!borrowed) {
+        if (workspace) DS_CUDA_RUNTIME_CHECK(cudaFree(workspace));
+        if (lengths == nullptr && row_lengths)
+            DS_CUDA_RUNTIME_CHECK(cudaFree(row_lengths));
+    }
 }
 
-}  // namespace deep_select
-
-#include "../ffi/ffi_entries.h"
+}  // namespace deep_select_maca

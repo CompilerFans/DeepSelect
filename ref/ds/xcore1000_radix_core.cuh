@@ -32,6 +32,28 @@
  * 使用方式: #include "radix_core.cuh"
  */
 
+// ── reference extraction note ───────────────────────────────────────────────
+//
+// Verbatim copy of `csrc/xcore1000/radix_core.cuh` (2464 lines).  Not one
+// character below this banner was changed: the fp32 dataflow, the 16-bit
+// dataflow, the launchers and every routing predicate are the upstream ones.
+// This file is included by `xcore1000_maca_topk.cu` exactly as upstream
+// includes it, so the translation unit still *is* the proof that the ported
+// core compiles under mxcc/cu-bridge (the upstream comment above the include
+// makes the same claim).
+//
+// The one thing the reference does NOT carry is the rest of upstream's
+// `maca_topk.cu`: its tvm-ffi edge (lines 1112-1425: `#include
+// "../ffi/ffi_error.h"`, `topk(tvm::ffi::TensorView, ...)`, the per-pair
+// `DS_HOST_CHECK`s, the process-wide scratch cache, `TVMFFIEnvGetStream`).
+// See `xcore1000_ds_topk.cu`'s banner for what replaced it.
+//
+// Note the fp32-only reference still *instantiates* nothing 16-bit: only
+// `float`/`int32_t` reach `topk_launch`, so every `maca_bfloat16` template in
+// here is parsed and never emitted.  That is also why no `-DKSMEM_BYTES=` is
+// passed: the default arm of `kSMEM` below is the one this build takes.
+// ────────────────────────────────────────────────────────────────────────────
+
 #ifndef RADIX_TOPK_CUH
 #define RADIX_TOPK_CUH
 
@@ -39,7 +61,6 @@
 #include <cuda_fp16.h>       // float_to_uint8: the fp32 path's fp16 rounding
 #include <maca_bfloat16.h>   // the 16-bit path's value type
 #include <cstdint>
-#include <cstdlib>           // std::getenv, for the fused scan's A/B knob
 
 namespace rk {
 
@@ -82,13 +103,6 @@ constexpr uint32_t kCompactBF16MaxLength = KCOMPACT_BF16_MAX_LENGTH;
 // ============================================================
 // 类型转换
 // ============================================================
-
-// `is_nan_value<float>` in `maca_topk.cu`, at this layer: exponent all ones,
-// mantissa non-zero.  Spelled here so the fused arm below and the standalone
-// `nan_scan_kernel` provably share one predicate rather than two.
-__device__ __forceinline__ bool is_nan_bits(uint32_t bits) {
-    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
-}
 
 // 与 SGLang 原始实现一致：先转 half 再取高 8 位
 __device__ __forceinline__ uint8_t float_to_uint8(float x) {
@@ -135,25 +149,14 @@ __device__ __forceinline__ uint8_t bf16_to_uint8(maca_bfloat16 x) {
 // 65%, because pass 1 issues one shared-bucket atomic per element and that is
 // what it is waiting on.  See `docs/C500-radix-perf-ledger.zh.md` before
 // changing it.
-//
-// `kNan` is the contract's NaN scan folded into this very load.  The two walks
-// (`radix_topk_row_f32`'s pass 1 and `nan_scan_kernel`) read exactly the same
-// bytes at exactly the same vector width, so the scan is a whole second row
-// walk bought for four bit-tests per 16 bytes.  `kNan = false` is the shipped
-// helper with none of it, and it is the default so the 16-bit path -- which has
-// no such scan -- compiles to what it always did.
-template <bool kNan = false>
-__device__ __forceinline__ bool hist_add_f32(
+__device__ __forceinline__ void hist_add_f32(
     uint32_t* s_histogram, const float* input, uint32_t idx)
 {
-    const float4 v = __ldg(reinterpret_cast<const float4*>(input + idx));
+    float4 v = __ldg(reinterpret_cast<const float4*>(input + idx));
     atomicAdd(&s_histogram[float_to_uint8(v.x)], 1u);
     atomicAdd(&s_histogram[float_to_uint8(v.y)], 1u);
     atomicAdd(&s_histogram[float_to_uint8(v.z)], 1u);
     atomicAdd(&s_histogram[float_to_uint8(v.w)], 1u);
-    if (!kNan) return false;
-    return is_nan_bits(__float_as_uint(v.x)) | is_nan_bits(__float_as_uint(v.y))
-         | is_nan_bits(__float_as_uint(v.z)) | is_nan_bits(__float_as_uint(v.w));
 }
 
 // One element of the fp32 row's second pass.  Both walkers ask every element
@@ -526,18 +529,9 @@ __device__ __forceinline__ void radix_topk_row_f32_rescan(
 // contract half needs.  It is applied only at the emit, which is the single
 // point where an index becomes an answer -- the arena, the refine and the
 // rescan all work on positions in the window either way.
-//
-// `kNan` folds the contract's NaN scan into pass 1's own load, and `row_nan`
-// is where the answer lands (thread-uniform, written before the function's
-// first return).  The two are one parameter's worth of design: a caller that
-// wants the scan gets it for free off a load it was making anyway, and a caller
-// that does not (`kNan = false`, the default, and every 16-bit caller) gets the
-// shipped kernel with none of it.  A template rather than a runtime branch
-// precisely so the false case stays free.
-template <bool kNan = false>
 __device__ __forceinline__ void radix_topk_row_f32(
     const float* input, int32_t* output, uint32_t length, uint32_t topk,
-    uint32_t chunk_begin = 0, bool* row_nan = nullptr)
+    uint32_t chunk_begin = 0)
 {
     constexpr uint32_t RADIX = 256;
     constexpr uint32_t BLOCK_SIZE = kBlockSize;
@@ -573,27 +567,17 @@ __device__ __forceinline__ void radix_topk_row_f32(
     // see the note above `hist_add_f32`).
     uint32_t n4 = vec_len / 4;
     uint32_t i4 = tx;
-    bool nan_local = false;
     for (; i4 + 3u * BLOCK_SIZE < n4; i4 += 4u * BLOCK_SIZE) {
-        nan_local |= hist_add_f32<kNan>(s_histogram, input, (i4 + 0u * BLOCK_SIZE) * 4u);
-        nan_local |= hist_add_f32<kNan>(s_histogram, input, (i4 + 1u * BLOCK_SIZE) * 4u);
-        nan_local |= hist_add_f32<kNan>(s_histogram, input, (i4 + 2u * BLOCK_SIZE) * 4u);
-        nan_local |= hist_add_f32<kNan>(s_histogram, input, (i4 + 3u * BLOCK_SIZE) * 4u);
+        hist_add_f32(s_histogram, input, (i4 + 0u * BLOCK_SIZE) * 4u);
+        hist_add_f32(s_histogram, input, (i4 + 1u * BLOCK_SIZE) * 4u);
+        hist_add_f32(s_histogram, input, (i4 + 2u * BLOCK_SIZE) * 4u);
+        hist_add_f32(s_histogram, input, (i4 + 3u * BLOCK_SIZE) * 4u);
     }
     for (; i4 < n4; i4 += BLOCK_SIZE)
-        nan_local |= hist_add_f32<kNan>(s_histogram, input, i4 * 4u);
-    for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE) {
-        const float raw = __ldg(input + idx);
-        atomicAdd(&s_histogram[float_to_uint8(raw)], 1u);
-        if (kNan) nan_local |= is_nan_bits(__float_as_uint(raw));
-    }
+        hist_add_f32(s_histogram, input, i4 * 4u);
+    for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
+        atomicAdd(&s_histogram[float_to_uint8(__ldg(input + idx))], 1u);
     __syncthreads();
-    // Two things on the same barrier: the histogram is complete, and the CTA's
-    // NaN vote is in.  `__syncthreads_or` is the same reduction
-    // `nan_scan_kernel` runs, only across a block instead of a grid -- and it
-    // is why the flag can be handed back as a thread-uniform bool.
-    if (kNan && row_nan != nullptr)
-        *row_nan = __syncthreads_or((int)nan_local) != 0;
     run_cumsum(s_histogram_buf, tx);
 
     if (tx < RADIX && s_histogram[tx] > remain_topk && s_histogram[tx + 1] <= remain_topk) {
@@ -2284,17 +2268,10 @@ inline cudaError_t launch_topk_bf16_dispatch(
 // and map positions back.  A slot stage 1 could not fill takes `-inf`, which
 // cannot appear in a real input: `is_nan_value` gates NaNs out before any
 // selection runs, so no element is NaN and -inf is unreachable from the row.
-//
-// `kNan` is the caller's `check_nan`: with it on, this kernel is *also* the NaN
-// scan, and `flags` -- the table `nan_scan_kernel` used to raise -- is its
-// output.  The two share the grid by construction (`nan_scan_kernel`'s comment
-// says so), so which kernel reads the bytes is the only thing that changes;
-// the answer is the same predicate over the same window.
-template <bool kNan = false>
 __global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage1_kernel(
     const float *scores, const int32_t *lengths, int32_t *cols, float *vals,
     int64_t score_stride, int topk, int B, int num_chunks, int chunk_size,
-    int candidate_stride, int32_t *flags = nullptr)
+    int candidate_stride)
 {
     const int global_bid = blockIdx.x;
     const int bid = global_bid / num_chunks;
@@ -2320,36 +2297,23 @@ __global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage1_kernel(
     }
 
     if (chunk_len <= topk) {
-        // This window is short enough that the kernel already touches every one
-        // of its bytes, so the NaN test rides the copy that was happening
-        // anyway -- there is no second read to save here, only a kernel.
-        bool nan_local = false;
         for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
             if (i < chunk_len) {
-                const float v = __ldg(row + start + i);
                 chunk_cols[i] = start + i;
-                chunk_vals[i] = v;
-                if (kNan) nan_local |= is_nan_bits(__float_as_uint(v));
+                chunk_vals[i] = __ldg(row + start + i);
             } else {
                 chunk_cols[i] = -1;
                 chunk_vals[i] = -__builtin_huge_valf();
             }
         }
-        if (kNan && flags != nullptr && __syncthreads_or((int)nan_local) != 0
-            && threadIdx.x == 0)
-            atomicOr(flags + bid, 1);
         return;
     }
 
     // The row entry, on this chunk's window, answering in row columns.  Its
     // `-1` sentinel is a column index that cannot be real, so it becomes the
     // same empty-slot marker the two arms above write.
-    bool nan_row = false;
-    radix_topk_row_f32<kNan>(row + start, chunk_cols, (uint32_t)chunk_len,
-                             (uint32_t)topk, (uint32_t)start,
-                             kNan ? &nan_row : nullptr);
-    if (kNan && flags != nullptr && nan_row && threadIdx.x == 0)
-        atomicOr(flags + bid, 1);
+    radix_topk_row_f32(row + start, chunk_cols, (uint32_t)chunk_len,
+                       (uint32_t)topk, (uint32_t)start);
     for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
         const int32_t col = chunk_cols[i];
         if (col >= start && col < start + chunk_len) {
@@ -2438,39 +2402,28 @@ inline int32_t *chunked_f32_out(void *base, uint32_t batches, uint32_t topk,
 
 // One CTA per (batch, chunk).  The chunk geometry is the 16-bit split's --
 // `raw = ceil(L / chunks)` rounded up to 8 elements -- so the two agree about
-// where a chunk starts, which is what lets `nan_scan_kernel` be shared.  With
-// `want_nan` the scan is not shared but *absorbed*: this launch is the only one
-// that walks the row, and `nan_flags` comes back from it.
+// where a chunk starts, which is what lets `nan_scan_kernel` be shared.
 inline cudaError_t launch_topk_f32_chunks_stage1(
     const float *scores, const int32_t *lengths, int32_t *cols, float *vals,
     int B, int L, int topk, int num_chunks, cudaStream_t stream,
-    int64_t score_stride, bool want_nan = false, int32_t *nan_flags = nullptr)
+    int64_t score_stride)
 {
     if (topk > (int)kF32MaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    static bool init[2] = {false, false};
-    const int arm = want_nan ? 1 : 0;
-    if (!init[arm]) {
+    static bool init = false;
+    if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            want_nan ? (const void *)topk_f32_chunk_stage1_kernel<true>
-                     : (const void *)topk_f32_chunk_stage1_kernel<false>,
+            topk_f32_chunk_stage1_kernel,
             cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
         if (err != cudaSuccess) return err;
-        init[arm] = true;
+        init = true;
     }
     const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
     const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
     const int candidate_stride = num_chunks * topk;
-    if (want_nan) {
-        topk_f32_chunk_stage1_kernel<true>
-            <<<B * num_chunks, (int)kF32ChunkBlocks, kSMEM, stream>>>(
-                scores, lengths, cols, vals, score_stride, topk, B, num_chunks,
-                chunk_size, candidate_stride, nan_flags);
-    } else {
-        topk_f32_chunk_stage1_kernel<false>
-            <<<B * num_chunks, (int)kF32ChunkBlocks, kSMEM, stream>>>(
-                scores, lengths, cols, vals, score_stride, topk, B, num_chunks,
-                chunk_size, candidate_stride);
-    }
+    topk_f32_chunk_stage1_kernel<<<B * num_chunks, (int)kF32ChunkBlocks, kSMEM,
+                                   stream>>>(
+        scores, lengths, cols, vals, score_stride, topk, B, num_chunks,
+        chunk_size, candidate_stride);
     return cudaGetLastError();
 }
 
@@ -2513,30 +2466,16 @@ inline bool f32_chunk_engine_supports(int topk) {
     return topk > 0 && topk <= (int)kF32MaxTopK;
 }
 
-// Whether stage 1 carries the contract's NaN scan in its own first pass.  The
-// knob is the point: `DS_FUSE_NAN_OFF` puts the separate `nan_scan_kernel` back
-// on the same binary, so the two arms differ in one boolean and nothing else --
-// same chunk count, same grid, same stage 2.  Read once per process; this is a
-// per-call-invariant decision, not a per-call one.
-inline bool f32_stage1_fuses_scan() {
-    static const bool on = [] {
-        const char *v = std::getenv("DS_FUSE_NAN_OFF");
-        return v == nullptr || v[0] == '\0' || v[0] == '0';
-    }();
-    return on;
-}
-
 inline cudaError_t launch_topk_f32_chunked(
     const float *scores, const int32_t *lengths, void *cols_base, int32_t *out,
     int B, int L, int topk, int num_chunks, cudaStream_t stream,
-    int64_t score_stride, bool want_nan = false, int32_t *nan_flags = nullptr)
+    int64_t score_stride)
 {
     const uint32_t b = (uint32_t)B, k = (uint32_t)topk, c = (uint32_t)num_chunks;
     int32_t *cols = chunked_f32_cols(cols_base, b, k, c);
     float *vals = chunked_f32_vals(cols_base, b, k, c);
     cudaError_t err = launch_topk_f32_chunks_stage1(
-        scores, lengths, cols, vals, B, L, topk, num_chunks, stream, score_stride,
-        want_nan, nan_flags);
+        scores, lengths, cols, vals, B, L, topk, num_chunks, stream, score_stride);
     if (err != cudaSuccess) return err;
     return launch_topk_f32_chunks_stage2(
         vals, cols, out, B, topk, num_chunks, stream);

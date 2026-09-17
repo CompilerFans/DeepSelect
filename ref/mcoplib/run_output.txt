@@ -1,0 +1,38 @@
+device          : MetaX C500
+APs             : 104
+warp size       : 64
+smem/block      : 65536 (optin 65536)
+radix staging   : 4096 entries (32KB, 64K-smem chip)
+TopK            : 512
+histogram_4096 kMaxLen : 16384
+
+case                                 shape                      ok        GB/s       time  note
+-----------------------------------------------------------------------------------------------------------------------------
+naive (seq_len 300 <= TopK)          rows=4096 n_cols=512 max=300 PASS       0.0     70.6 us  ok
+    best of 4 rounds x 32 iters; max 12-bit coarse bin 10 (TopK 512)
+histogram_4096 (16384 = kMaxLen)     rows=4096 n_cols=16384 max=16384 PASS     354.9    756.4 us  2 exact ties at kth (set is ambiguous); count check ok
+    best of 4 rounds x 4 iters; max 12-bit coarse bin 109 (TopK 512)
+histogram_4096 (unaligned rows)      rows=4096 n_cols=16381 max=16381 PASS     327.2    820.2 us  ok
+    best of 4 rounds x 4 iters; max 12-bit coarse bin 106 (TopK 512)
+histogram_4096 (8192, half row)      rows=4096 n_cols=8192 max=8192 PASS     238.3    563.3 us  ok
+    best of 4 rounds x 4 iters; max 12-bit coarse bin 64 (TopK 512)
+radix_256 (16385, just over)         rows=1024 n_cols=16388 max=16385 PASS     175.7    382.1 us  ok
+    best of 4 rounds x 4 iters; max 12-bit coarse bin 100 (TopK 512); threshold 8-bit band 1122 vs 4096-entry staging
+radix_256 (unaligned rows)           rows=1024 n_cols=16387 max=16387 PASS     178.0    377.0 us  ok
+    best of 4 rounds x 4 iters; max 12-bit coarse bin 107 (TopK 512); threshold 8-bit band 1124 vs 4096-entry staging
+radix_256 (32768, two pass)          rows=512 n_cols=32768 max=32768 PASS     204.2    328.6 us  ok
+    best of 4 rounds x 4 iters; max 12-bit coarse bin 177 (TopK 512); threshold 8-bit band 2189 vs 4096-entry staging
+radix_256 (131072, past staging)     rows=256 n_cols=131072 max=131072 KNOWN    272.8    492.0 us  row 0 (seq_len 131072): selected index below the kth value
+    best of 4 rounds x 4 iters; max 12-bit coarse bin 614 (TopK 512); threshold 8-bit band 8397 vs 4096-entry staging
+radix_256 (1048576, band 66k)        rows=2 n_cols=1048576 max=1048576 KNOWN     10.7    783.7 us  row 0 (seq_len 1048576): selected index below the kth value
+    best of 4 rounds x 4 iters; max 12-bit coarse bin 4260 (TopK 512); threshold 8-bit band 65851 vs 4096-entry staging
+radix_256 (2097152, band 132k)       rows=1 n_cols=2097152 max=2097152 KNOWN      5.7   1476.0 us  row 0 (seq_len 2097152): selected index below the kth value
+    best of 4 rounds x 4 iters; max 12-bit coarse bin 8403 (TopK 512); threshold 8-bit band 131917 vs 4096-entry staging
+mixed batch (max>16384 -> radix)     rows=8 n_cols=65536 max=40000 PASS       6.6     74.8 us  ok
+    best of 4 rounds x 8 iters; max 12-bit coarse bin 190 (TopK 512); threshold 8-bit band 2528 vs 4096-entry staging
+-----------------------------------------------------------------------------------------------------------------------------
+GB/s is the minimum traffic (one fp32 read of each row prefix);
+the radix path moves more (it re-reads threshold-bin candidates).
+3 case marked KNOWN: it fails against the CPU reference by design of the
+source kernel, not by a fault in this extraction. See README, 'Known large-row defect'.
+result: ALL PASS

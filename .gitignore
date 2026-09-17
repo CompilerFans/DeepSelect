@@ -13,3 +13,9 @@ compile_commands.json
 # the numbers worth keeping live in docs/C500-radix-perf-ledger.zh.md, which
 # cites the binary md5 they came from.
 /results/
+
+# `ref/`'s drivers are built from the sources next to them (`ref/build_all.sh`);
+# committing the binaries would let the tree disagree with its own README.
+ref/*/main
+ref/*/ds_topk_ref
+ref/*/*.o
