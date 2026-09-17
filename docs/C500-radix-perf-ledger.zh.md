@@ -2078,9 +2078,10 @@ CUDA_VISIBLE_DEVICES=0 ./run_test.sh --test --backend maca_c --sample 200 -rf --
 All 313 cases passed!
 ```
 
-receipt：`/tmp/gate_c12b/deepselect_run_20260917_222045.txt`，
-`extension_md5 2488546456db546435ef23269fc163ff`（9 个 skip 全是 OOM，
-和 §11.5 同一批 `cudaMalloc 16–32 GiB` 撞上已有占用）。
+receipt：`/tmp/gate_smem/deepselect_run_20260918_002625.txt`，
+`extension_md5 bb2e6a3323c1b33e556c48ddfd514070`（9 个 skip 全是 OOM，
+和 §11.5 同一批 `cudaMalloc 16–32 GiB` 撞上已有占用）。§12.11 的设备自适应
+改动之后重跑过一遍，同样是 313 通过。
 
 **C600/C600U 边界**：`csrc/xcore1600/`、`setup.py`、`build.sh`
 `git diff --name-only` 全为空。新增的 `dg_coarse12.cuh` 只在
@@ -2126,7 +2127,7 @@ cold-L2 的 `vectorized_elementwise_kernel_nullary_opt`）。产品那一列**�
 | 6 | 524288 | 2048 | 0.3440 | **0.2796** | 0.4194 | -- |
 | 256 | 16384 | 2048 | **0.0660** | **0.0630** | 0.1324 | -- |
 | 256 | 65536 | 2048 | 0.1760 | **0.1631** | 0.4011 | -- |
-| 256 | 524288 | 2048 | 0.8220 | 0.8473 | 2.0747 | -- |
+| 256 | 524288 | 2048 | **0.8220** | 0.8473 | 2.0747 | -- |
 | 4096 | 16384 | 2048 | 0.7780 | **0.6934** | 1.2333 | -- |
 | 4096 | 65536 | 2048 | 2.1960 | **1.8098** | 3.5932 | -- |
 | 4096 | 524288 | 2048 | 12.1900 | **11.5626** | 29.5755 | -- |
@@ -2140,7 +2141,54 @@ cold-L2 的 `vectorized_elementwise_kernel_nullary_opt`）。产品那一列**�
 `mcoplib` 的 `top_k` 写死 512，且 `k = 512` 三格它**自己的校验器报 `FAIL(self)`**
 （见 `mcoplib-two-topk-ops` 那条已知缺陷），所以它在这张表里没有可比的位置。
 
-**一处 `ref/` 的修复**：`coarse12_port` 的 `main.cu` / `xcore1000_dg_coarse12.cu`
-还在用 8 参数的 `launch_topk_coarse12`，而头文件这一轮加了 `default_length`
-（§12.2 第 4 条），于是 `build_all.sh` 整条链断在那里。改完之后
-`deep_gemm / ds / mcoplib / coarse12_port / c500_gate` 五个 impl 全 `built yes`。
+### 12.11 设备自适应：一次审计，和把「哪个设备」换成「多少预算」
+
+这一节是一次**重审**的结果，不是新功能。起因是问：那些 `sm_count` 判断，有多少
+真的在判断它们以为自己在判断的东西。
+
+**先说结论：编译期 `#ifdef` 加常数宏这条路是死的，不是没试。** 实测（C500，device 0）：
+
+```
+-offload-arch=xcore1000    host pass: __MACA_ARCH__ undefined   device pass: __MACA_ARCH__ = 1000
+-offload-arch=xcore1500    host pass: __MACA_ARCH__ undefined   device pass: (未跑，本机无 1500)
+-offload-arch=xcore1600    host pass: __MACA_ARCH__ undefined   device pass: (同上)
+```
+
+`__MACA_ARCH__` **只在 device pass 定义**，host pass 里三个目标全都 undefined ——
+所以 `#if __MACA_ARCH__ == 1000` 在 host 侧**永远走 `#else`**，不是「取到 1000」，
+是「取不到」。更根本的是：`-offload-arch=xcore1000,xcore1500,xcore1600` 是
+**一次编译、一个 `.so`、三份设备镜像**（`strings` 验过三份都在），而
+`f32_chunk_work_target` / `f32_coarse12_applies` 都是 **host 函数** —— host 代码
+在一份 `.so` 里只有一份，它不可能同时是三个常数。要按架构编译期分叉，得拆成
+三个 artifact，那是 `setup.py` 说的「one source, one extension」整个推翻。
+
+**审计出来的三处，两处改，一处不改：**
+
+1. **coarse12 的「设备」半边：从「是不是 104 个 AP」改成「预算够不够」。**
+   这条门要回答的其实是**共享内存够不够**（那条 16 KB 的 arena 不够就是**错**，
+   不是慢），而它读的是 AP 数。两个数在所有人看过的设备上一致，而那个一致性
+   就是旧写法的全部理由。现在读设备自己的
+   `cudaDevAttrMaxSharedMemoryPerBlockOptin`，和 `max(路线 16384, split 14056)`
+   比 —— 实测 C500 上这个属性是 **65536**。**C500 的路由逐格不变**（阈值是请求的
+   4 倍），而一台「104 个 AP、但 arena 更小」的机器现在拿到 split，
+   而不是一个越界读候选数组的核。
+2. **`kF32OverflowChunkLen` 的第一个因子：从手抄的 `1757` 改成
+   `rk::kF32SmemInputSize`。** 这个值本来就是 `kSMEM` 推出来的（我算过：1757），
+   手抄它正是让 small-batch 那支一直不知道这条界的同一个毛病。现在
+   `-DKSMEM_BYTES=` 一动，这条界跟着动，而不是留在原地。剩下的 `58` 是**唯一的
+   量值**，配一条 `#ifdef KSMEM_BYTES` 的 `static_assert`，只在真正改了 arena 的
+   构建上炸。
+3. **`f32_chunk_work_target` / `f32_chunks_large_batch` 的 `sm_count` 判断：不改，
+   但改名改说法。** 这两个不是「设备分类」，是**出处的戳**：那个 2.5 和那个 58
+   是在哪台机器上量的。常数改叫 `kF32Coarse12MeasuredSmCount`，注释写清它命名的
+   是**测量的来源**而不是设备的类别。这类判断**本来就不该自适应** ——
+   把一条在一台机器上量出来的梯子套到没人量过的机器上，是把猜测包装成规则。
+
+顺带清掉两处**已经不成立**的注释：`csrc/structs.h` 和 `csrc/ffi/ffi_entries.h`
+还在指向 `deep_select/_arch.py`，而那个模块 `a22f5a0`（2026-09-17）已经删了。
+
+**没有改的，记下来**：`wave_filled_chunks`（`chunked_chunks` 用的那个）和
+`f32_chunk_work_target` 仍然是 **AP 数驱动的**，而且它们在 `sm_count != 104` 时
+**不退回保守值** —— 一台 28 AP 的 C600 会拿到 `28*5/2 = 70` 的 work target，
+而不是 C500 的 260。这不是这次审计新引入的（早于 §12），而且**没有 C600/C600U
+上的测量可以判断它对不对**，所以这一节只把它标出来，不改。

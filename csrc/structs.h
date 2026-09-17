@@ -69,14 +69,18 @@ static_assert(MAX_VOCAB_SIZE <= MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION);
 // `DEEP_SELECT_NATIVE_ARCH`.  One extension carries every family's image
 // (`setup.py`: one source, one `-offload-arch` list), so a per-family constant
 // has no build to be baked into; the kernel that needs one takes it as an
-// argument instead.  `deep_select/_arch.py` is where the rows live.
+// argument instead.  There is no architecture table either -- `_arch.py` went
+// on 2026-09-17, and the two device facts the kernels need are read where they
+// are used: the AP count by the caller from `get_device_properties`, the
+// shared-memory budget by the entry point from
+// `cudaDevAttrMaxSharedMemoryPerBlockOptin`.
 //
 // The ported kernels under `csrc/xcore1600/` selected their config tuples
 // against `NATIVE_SHARED_MEMORY_PER_SM_BYTES` (64 KiB for family 1000, 128 KiB
 // for 1500/1600) and asserted at compile time that their staging fitted.  That
 // constant went with the macro: with one extension there is no single capacity
-// to assert against.  The port is off the build either way -- see
-// `deep_select/_arch.py`'s closing note.
+// to assert against.  The port is off the build either way -- see `setup.py`'s
+// note in `build_for_maca`.
 
 
 struct TopkSelectArgs {

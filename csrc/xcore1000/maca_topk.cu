@@ -90,14 +90,21 @@ struct RowParams {
     uint64_t stride_output_index_batch;
     uint32_t vocab_size;
     uint32_t topk;
-    // The one machine number every grid-sizing decision below reads, supplied
-    // by the caller from `deep_select/_arch.py`'s `SM_COUNT`.  An argument
-    // rather than a compile-time constant because one extension serves all
-    // three families, and not read from the driver because the device already
-    // reported its architecture to the caller (torch), which names the family
-    // this is keyed by.  Zero means "unknown", which `resolve_sm_count` turns
-    // into an error rather than a plausible wrong grid.
+    // The AP count every grid-sizing decision below reads, supplied by the
+    // caller from `torch.cuda.get_device_properties(...)`.  An argument rather
+    // than a compile-time constant because one extension serves all three
+    // families.  Zero means "unknown", which `resolve_sm_count` turns into an
+    // error rather than a plausible wrong grid.
     uint32_t sm_count;
+    // The second machine number, and it is read from the device rather than
+    // named here: `cudaDevAttrMaxSharedMemoryPerBlockOptin`, in bytes.  The
+    // 16 KB arena `topk_coarse12` needs is `kSMEM`-sized on C500 and is not on
+    // a device with a smaller budget, and a *named* family (C500 is 104 APs)
+    // only answers that question by coincidence -- the two facts are separate,
+    // and the code below was reading the wrong one.  Zero means "unreadable",
+    // and every consumer treats it as "the budget is not known to be enough"
+    // rather than assuming the device it wants.
+    uint32_t smem_per_ap;
     int32_t idx_fill;
     float value_fill;
     // `check_nan` is whether the row is scanned at all; `abort_on_nan` is what
@@ -728,9 +735,8 @@ namespace {
 // The work target is `f32_chunk_work_target(sm_count)` above -- `sm_count * 5
 // / 2`, the 2.5 being the only fit ever measured (on C500).  This comment sent
 // readers to `deep_select/_arch.py`'s `F32_CHUNK_WORK_TARGET` until
-// 2026-09-16; no such symbol exists there or anywhere, and the table it named
-// was dissolved when the per-architecture builds went (the per-family SM
-// counts it multiplied are what `_arch.py` still carries, in `SM_COUNT`).
+// 2026-09-16; no such symbol exists there or anywhere, and the module itself
+// went on 2026-09-17 -- the SM count is read at the one place it is used.
 //
 // `DEEP_SELECT_F32_CHUNK32` raises the ceiling from 16 to 32 for the b6/V=1M
 // cell the V-sweep flagged (parity plan §17.3).  A ceiling, not a count, so
@@ -924,10 +930,11 @@ inline int f32_topk_chunk_cap(uint32_t topk, uint32_t vocab, uint32_t c_default,
 // is exactly the range this rule decides in (measured with numpy over seeded
 // randn draws, the same distribution `tests/lib.py` generates).
 //
-//     overflow when  L / 58 > kF32SmemInputSize  =>  L > 1757 * 58 = 101906
+//     overflow when  L / 58 > kF32SmemInputSize  =>  L > kF32OverflowChunkLen
 //
 // Both factors are device geometry (`kF32SmemInputSize` from `kSMEM`, `kRadix`)
-// except the 58.  The count is then the smallest `c` that clears it:
+// except the 58, which is the measurement.  The count is then the smallest `c`
+// that clears it:
 //
 //     V = 131072 -> 1.29 -> 2      (unchanged; the sweep is flat here)
 //     V = 262144 -> 2.57 -> 3      (measured optimum 3)
@@ -947,18 +954,52 @@ inline int f32_topk_chunk_cap(uint32_t topk, uint32_t vocab, uint32_t c_default,
 // losing to the row path anyway (`b4096-v65536` is flat at 3.62 ms for every
 // `c`); that is the batch bound at `topk_worth_splitting_f32`, not this.
 //
-// **C500 only, and the discriminator is `sm_count`, not an arch macro.**  Both
-// inputs to the rule are device geometry -- the arena and the AP count the grid
-// is sized against -- and C600/C600U disagree on both (28/32 APs against 104,
-// and a different smem budget).  `__MACA_ARCH__` looks like the obvious gate and
-// is the wrong one: it is defined only in the *device* pass, and this is a host
-// function, so every architecture would take the `#else` branch.  `sm_count` is
-// already the file's own answer to "which part is this" (`f32_chunk_work_target`
-// above, and the grid sizing in `chunked_chunks`), so it is used here too.
-inline constexpr uint32_t kF32OverflowChunkLen = 1757u * 58u;   // 101906
-inline constexpr uint32_t kC500SmCount = 104;
+// **Provenance, not a device test.**  Both inputs to the rule are device
+// geometry -- the arena and the AP count the grid is sized against -- and the
+// two fitted numbers below were read off one machine.  C600/C600U disagree on
+// both (28/32 APs against 104, and a different smem budget), so they keep
+// `c = 2`.  `__MACA_ARCH__` looks like the obvious discriminator and is the
+// wrong one: it is defined only in the *device* pass, and this is a host
+// function, so every architecture would take the `#else` branch.
+//
+// This is the same shape as the coarse12 gate's provenance half: a constant
+// naming *where a number was measured*, not what the device is.  It reads
+// `sm_count` because that is the only machine identity this file has -- unlike
+// the coarse12 gate, there is no budget question here to answer instead, since
+// the rule's own first factor already carries the arena.
+//
+// The first factor is not written down: it is `kF32SmemInputSize`, the arena
+// the kernel actually has, and transcribing its value here is what let the
+// small-batch branch above go without it for so long.  Deriving it means a
+// `-DKSMEM_BYTES=` build moves this bound with the arena instead of leaving it
+// behind -- the two numbers agreed at 1757 only because nothing had changed
+// `kSMEM`.  The second factor, 58, is the one measured quantity here and is
+// the only one that stays a literal.
+inline constexpr uint32_t kF32OverflowChunkLen = rk::kF32SmemInputSize * 58u;
+// The 58 was measured against the default arena, and `f32_chunks_large_batch`
+// applies this bound to *every* `topk` -- so a build that moves `kSMEM` would
+// carry the old ratio into a new arena without anything noticing.  The default
+// build has nothing to check against (58 *is* the measurement); this fires only
+// when `-DKSMEM_BYTES=` has actually moved the arena.
+#ifdef KSMEM_BYTES
+static_assert(rk::kF32SmemInputSize == 1757,
+              "KSMEM_BYTES moved the arena, so kF32OverflowChunkLen's 58 is no "
+              "longer the measured value: re-derive it against the new "
+              "kF32SmemInputSize (the ladder is in the ledger, SS12.5) before "
+              "shipping this build.");
+#endif
+// The AP count the coarse12 ladder was measured on, and the same kind of
+// constant as the `sm_count` test just above -- a number naming a
+// measurement's provenance, not a claim about what a device is.  There used to
+// be a `kC500SmCount` here as well, for the coarse12 gate's device half; that
+// half is now the budget comparison in `f32_coarse12_applies`, and the only
+// question left that `sm_count` can answer is "was this the machine the
+// numbers came from".  One constant, one job.
+inline constexpr uint32_t kF32Coarse12MeasuredSmCount = 104;
 inline int f32_chunks_large_batch(uint32_t vocab_size, uint32_t sm_count) {
-    if (sm_count != kC500SmCount) return 2;   // C600/C600U untouched; see above
+    // Same shape as the coarse12 gate's provenance half, and the same reason:
+    // the `58` below was read off this device.
+    if (sm_count != kF32Coarse12MeasuredSmCount) return 2;
     // `c = 2` is the floor: `launch_topk_f32_chunks_stage1` rejects
     // `num_chunks <= 1`, so fewer than two is not a split at all.
     const int c = (int)((vocab_size + kF32OverflowChunkLen - 1) / kF32OverflowChunkLen);
@@ -1040,22 +1081,46 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // consumes, so it replaces the whole split for the shapes it serves rather than
 // sitting beside it.
 //
-// **C500 only, and for once the reason is not a measurement but a budget.**
+// **Budget-gated, and for once the reason is not a measurement.**
 // The kernel's 16 KB arena holds a 4096-bin coarse histogram first and the
 // candidate array second, so it needs 16 KB of dynamic shared memory.  That is
 // `kF32RowSmemBytes`-sized on C500 and is not on a device with a smaller
 // budget -- and unlike every other C500-only rule in this file, a smaller
-// budget does not make it slower, it makes it **wrong**.  So the gate is the
-// same discriminator the rest of the file uses (`sm_count`, see the
-// `kC500SmCount` note above for why not an arch macro), and the value is
-// required to match rather than being compared as a threshold.
+// budget does not make it slower, it makes it **wrong**.
+//
+// **Two questions, and this predicate used to answer both with one number.**
+//
+// *Does the route fit?*  A budget question, and `params.smem_per_ap` is the
+// device's own answer to it.  The predicate used to read `sm_count != 104`,
+// which is a fact about the C500 that has nothing to do with shared memory;
+// the two agreed on every device anyone had looked at, and that agreement was
+// the whole argument for the old form.  A named family cannot answer a budget
+// question, so this half is now the real one.
+//
+// *Is the route faster here?*  A measurement, and this one is not adaptive --
+// the crossing in the tables above is a C500 ladder, and applying it to a
+// machine nobody measured would be a guess dressed as a rule.  So it is
+// guarded by the device it was measured on, named for what it is.
+//
+// Splitting them is the point: the budget half protects a *different* device
+// with the C500's AP count and a smaller arena, which the old form would have
+// routed into a kernel that reads its candidates out of bounds.
 //
 // Why it is worth having at all: on the shapes deep_gemm routes here it is
 // 2.0-2.3x faster than the row kernel (ledger §12).  The three measured
 // differences are 12 coarse bits against 8, 640 threads against 512, and one
 // 16 KB arena against 14 KB plus a ping-pong refine buffer.
 inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
-    if (params.sm_count != kC500SmCount) return false;
+    // ── the budget half: the device's number against the kernel's request ──
+    // `kSmemBytes` is the route's whole request (histogram over candidates);
+    // `kF32RowSmemBytes` is what the *split* it replaces needs.  Both have to
+    // fit, because which one runs is what this predicate is deciding.
+    const uint32_t needed = (uint32_t)(rk::dg12::kSmemBytes > rk::kF32RowSmemBytes
+                                           ? rk::dg12::kSmemBytes
+                                           : rk::kF32RowSmemBytes);
+    if (params.smem_per_ap < needed) return false;
+    // ── the performance half: where the ladder below was measured ──
+    if (params.sm_count != kF32Coarse12MeasuredSmCount) return false;
     // The arena's bound, not a fitted one: `topk_coarse12_row` serves at most
     // what the candidate half can hold, and there is no overflow path in the
     // *staged* refine that can make a larger answer correct.
@@ -1108,27 +1173,30 @@ int f32_chunked_chunks(uint32_t batches, uint32_t topk, uint32_t vocab_size,
     // never learned it.  The omission is not a slope, it is a cliff, and it
     // lands precisely on the branch boundary: at `V = 524288` the batch rule
     // gives `c = 4` for `33 <= batches <= 64`, which is a 131072-element chunk
-    // against a 101906 bound, so `radix_topk_row_f32_rescan` runs five passes
-    // where it should run two.  Measured, split alone, `k = 2048`:
-    // `b32` is 0.3732 ms (c = 8, 65536/chunk, no rescan) and `b33` is 1.77 ms
-    // (c = 4); `b65` takes the branch above, gets 6, and is fine again.  So the
-    // two branches disagreed about the same row at their own seam.  With the
-    // floor, split alone: `b40` **-77.6%**, `b64` **-72.5%**, and the two
-    // controls that have no overflow (`b32`, `b40 V = 262144`) at -0.1% / -0.3%.
+    // against the `kF32OverflowChunkLen` bound, so `radix_topk_row_f32_rescan`
+    // runs five passes where it should run two.  Measured, split alone,
+    // `k = 2048`: `b32` is 0.3732 ms (c = 8, 65536/chunk, no rescan) and `b33`
+    // is 1.77 ms (c = 4); `b65` takes the branch above, gets 6, and is fine
+    // again.  So the two branches disagreed about the same row at their own
+    // seam.  With the floor, split alone: `b40` **-77.6%**, `b64` **-72.5%**,
+    // and the two controls that have no overflow (`b32`, `b40 V = 262144`) at
+    // -0.1% / -0.3%.
     //
     // Applied *after* the cap and as a floor, not a replacement: the batch rule
     // and the curve still decide the count wherever they are already above the
-    // bound.  Same gate as the branch above -- C600/C600U keep their count.
+    // bound.
     //
-    // **Guarded on `topk` because the bound is.**  `kF32OverflowChunkLen` is
-    // `kF32SmemInputSize * 58`, and that 58 was measured at `k = 2048` (see the
-    // derivation above).  At `k = 512` the threshold bin is narrower, the bound
-    // is looser, and `c = 4` never overflowed -- so applying it there raises the
-    // count for nothing and the merge pays: measured `b64 V = 524288 k = 512`
-    // is **+14.3%** with the floor, against -0.1% / -0.3% on the controls.
-    // Rather than extrapolate a ratio that a measurement just falsified, the
-    // floor applies exactly where its constant was derived.
-    if (sm_count == kC500SmCount && topk == kF32ChunkCurveTopK) {
+    // **The `topk` guard is the measurement; the branch above is geometry.**
+    // `f32_chunks_large_batch` applies the same arena bound to *every* `topk`,
+    // because that is the only way it can be a derivation rather than a table.
+    // Here the bound has to be checked against a measurement instead: the 58 is
+    // a `k = 2048` value, and at `k = 512` the threshold bin is narrower and
+    // `c = 4` never overflowed -- so raising it there is free in the arena and
+    // the merge pays for it, measured `b64 V = 524288 k = 512` at **+14.3%**
+    // against -0.1% / -0.3% on the controls.  So this arm fires where its
+    // constant was derived, and `k = 1024` keeps the `k = 2048` verdict for
+    // want of a measurement rather than for want of a reason.
+    if (topk == kF32ChunkCurveTopK) {
         const uint32_t arena =
             (vocab_size + kF32OverflowChunkLen - 1) / kF32OverflowChunkLen;
         if ((uint32_t)n < arena) n = (int)arena;
@@ -1576,10 +1644,12 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
           const tvm::ffi::Optional<tvm::ffi::TensorView> &output_idx_offset,
           int64_t idx_oob_fill_value, double value_oob_fill_value,
           bool return_value, bool abort_when_nan_found, bool check_nan,
-          // SM count of the device this call runs on, from the caller's
-          // architecture table (`deep_select/_arch.py`).  The last argument
-          // rather than one near `topk` because it is the only one the caller
-          // derives from the *device* rather than from the problem.
+          // AP count of the device this call runs on, from the caller's
+          // `get_device_properties`.  The last argument rather than one near
+          // `topk` because it is the only one the caller derives from the
+          // *device* rather than from the problem.  The shared-memory budget
+          // is the other device-derived number and is read here instead --
+          // see where `p.smem_per_ap` is filled.
           int64_t sm_count) {
     DS_HOST_CHECK(input.ndim() == 2, "input must be 2-D, got ", input.ndim());
     const int64_t batches = dsf::size(input, 0);
@@ -1665,6 +1735,21 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // the device).  Refuse rather than round it to something plausible.
     DS_HOST_CHECK(sm_count > 0, "sm_count must be > 0 (got ", sm_count, ")");
     p.sm_count = (uint32_t)sm_count;
+    // The other machine number, and it is read here rather than passed: the
+    // kernel tree has never asked the driver anything, and the caller would
+    // only be forwarding what the driver already said.  Read once per call,
+    // next to the other device-derived numbers above.  A failure leaves it at
+    // zero, which every consumer reads as "the budget is not known to be
+    // enough" -- the conservative direction, and the same one `sm_count`'s own
+    // zero takes.
+    {
+        int smem_bytes = 0;
+        if (cudaDeviceGetAttribute(&smem_bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin,
+                                   (int)dsf::device_index(input)) == cudaSuccess &&
+            smem_bytes > 0) {
+            p.smem_per_ap = (uint32_t)smem_bytes;
+        }
+    }
     p.idx_fill = (int32_t)idx_oob_fill_value;
     p.value_fill = (float)value_oob_fill_value;
     p.check_nan = check_nan;
