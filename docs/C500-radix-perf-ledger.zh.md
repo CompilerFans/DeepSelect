@@ -2173,27 +2173,13 @@ cold-L2 的 `vectorized_elementwise_kernel_nullary_opt`）。产品那一列**�
 `build.sh` 走 `bdist_wheel` 会带全，`setup.py build_ext` 这条默认路径不会。
 这是**已存在的**构建事实，不是这次改出来的。
 
-**那么"表"应该放在哪？** 放 Python，而且**已经放了**：`deep_gemm/utils/arch_config.py`
-是公开的 family 属性表，`Xcore1000Family.shared_memory_bytes = 64 * 1024`、
-`Xcore1500Family` 和 `Xcore1600Family` 都是 `128 * 1024`，
-`_common.get_device_shared_memory_size()` 就查这张表（先试
-`prop.shared_memory_per_block`，没有才回落到表）。SM 数那张表**在 `a22f5a0`
-删掉了**，因为设备自己会报 —— `multi_processor_count`。
-
-所以对 **SM 数**和**共享内存**这两个量，正确的形态是**运行时、设备自己报**，
-而不是编译期常数：
-
-* AP 数 → `torch.cuda.get_device_properties(...).multi_processor_count`，调用方读；
-* 共享内存 → `cudaDevAttrMaxSharedMemoryPerBlockOptin`，入口点读（本次改的），
-  回落时才是 `arch_config.py` 那张表。
-
-**为什么这次不是"查表"而是"读设备"。** 因为这条门问的是**这台机器够不够**，
-不是**这台机器属于哪个家族**。家族是编译期的（`-offload-arch` 选的），预算是
-运行期的（同一家族不同 SKU 可以不同，SDK 换代也会变）。把预算写成家族常数，
-就是让一个编译期标签去回答一个运行期问题 —— 和原来那个 `sm_count == 104`
-是同一个错误，只是换了个地方。而**表仍然是需要的**：`arch_config.py` 那张表是
-**回落**（设备不报 `shared_memory_per_block` 时用），并且它同时是"新家族该往哪
-加一行"的文档。
+**那么"表"应该放在哪？** 这一节原来的答案是"放 Python，而且已经放了"
+（`deep_gemm/utils/arch_config.py` 的 `shared_memory_bytes`），并据此把共享内存
+改成了入口点读 `cudaDevAttrMaxSharedMemoryPerBlockOptin`。**这个结论在
+2026-09-18 被推翻了** —— 见 §12.12。上面三条理由里的第 1、2 条仍然全部成立
+（它们解释的是**中间形态**为什么不行），但第 3 条不是"不可能"，是**代价**：
+要按架构编译期分叉就得拆成三个 artifact。这一节把那个代价算成了"不可接受"，
+而实际的决定是**接受它**。
 
 **审计出来的三处，两处改，一处不改：**
 
@@ -2225,3 +2211,81 @@ cold-L2 的 `vectorized_elementwise_kernel_nullary_opt`）。产品那一列**�
 **不退回保守值** —— 一台 28 AP 的 C600 会拿到 `28*5/2 = 70` 的 work target，
 而不是 C500 的 260。这不是这次审计新引入的（早于 §12），而且**没有 C600/C600U
 上的测量可以判断它对不对**，所以这一节只把它标出来，不改。
+
+**这一段在 §12.12 之后仍然成立**，而且理由更清楚了：那个 `sm_count` 现在是
+**参数**，不是 `ARCH_SM_COUNT`。§12.12 只把**共享内存预算**搬进了编译期；
+AP 数留在参数上，正是因为这两条规则要填的是调用面前那台机器。
+
+### 12.12 反转：回到「一族一个 artifact」，把族常数变成编译期宏（2026-09-18）
+
+**§12.11 的结论被推翻了，而且推翻它的不是新测量，是要求。** 用户明确指示：
+
+> 不要使用设备运行时读取，须要 build 时根据不同 xcore 配置不同的宏，作为编译常量宏
+
+这不是"再想想"，是**改形态**：共享内存预算不许在入口点问驱动，必须由构建按
+family 烧进镜像。§12.11 论证过"家族是编译期的、预算是运行期的，用编译期标签
+回答运行期问题就是原来 `sm_count == 104` 的同一个错误" —— 这个论证的**前提**
+是"一份 `.so` 带三份设备镜像"。前提一撤，论证就不成立了：**一族一份 `.so` 时，
+host 代码每份产物各有一份**，编译期常数就不是"用一个标签回答三个问题"，而是
+"每份产物回答自己的那一个问题"。
+
+**形态**（`5f5a93c` 之前的样子，回来了）：
+
+| | 中间形态（被换掉） | 现在 |
+| --- | --- | --- |
+| 每次构建的编译次数 | 1 | 每族 1 次 |
+| wheel 里的文件数 | 1 | 每族 1 个（各 ~3.8 MB） |
+| `-offload-arch` | 逗号分隔一条 | 每族一条，配 `-DDEEP_SELECT_ARCH=<N>` |
+| 加载 | 只认名字 | 必须按设备族解析文件 |
+| 每次调用内核额外读设备 | `cudaDeviceGetAttribute`，**0.330 µs** | 无 |
+| 数由谁决定 | **运行时的设备** | **构建** |
+
+`csrc/structs.h` 现在是那张表：`ARCH_FAMILY` / `ARCH_SM_COUNT` /
+`ARCH_SMEM_PER_AP_BYTES`，`#if DEEP_SELECT_ARCH == 1000 / 1500 / 1600`，
+没有 `#else` —— 没设宏或族不认识都是 `#error`（两条都实测会炸）。
+`setup.py` 的 `_family_of_target()` 把 `xcore<N>` 解析成族号，并**拒绝
+`native`**：一份按族产物不能让构建机器决定自己的常数。
+
+**半改而不是全改，这是关键。** `f32_coarse12_applies` 有两条半边：
+
+* **预算半边**（这条路放得下吗）→ 编译期。`if constexpr (ARCH_SMEM_PER_AP_BYTES
+  < max(route 16384, split 14056))` —— 对某个族是**常量假**，那个镜像里这条路
+  根本不存在，不是运行时一个可以被设备说服的分支。
+* **性能半边**（这条梯子在这儿更快吗）→ **仍然是运行期**，仍然由
+  `kF32Coarse12MeasuredSmCount`（104）把守。**几何进编译期，调优还得挣。**
+  只有 1000 那一行有测量；1500/1600 两行是部件自己的 AP 数和 128 KiB 家族的
+  预算，不是"这两台也这样调"。
+
+`sm_count` 也**没有**跟着变成常数：网格要填的是**调用面前那台机器**，不是镜像
+编译时那台。族常数回答**产物**的问题，`sm_count` 回答**这一次运行**的问题。
+`f32_chunk_work_target` 因此继续读参数（并在注释里写明为什么不用 `ARCH_SM_COUNT`）。
+
+**加载器。** `_binding.device_family_suffix()`（sm80/86/87-89 → `_xcore1000` /
+`_xcore1500` / `_xcore1600`，spelling 取自 `deep_gemm/utils/arch_config.py`），
+`family_suffix()` 是它的 `lru_cache` 视图。空后缀**不是通配**：
+`_library_pattern()` 在空后缀时只匹配**不带族后缀**的 `deep_select_maca.so`
+（`/tmp/dsv3/mkvar.sh` 那种临时构建的产物）。原来那个裸
+`deep_select_maca*.so` 会在"读不出设备族"时**挑一个族的镜像装上** —— 那正是
+加载器存在的意义要拒绝的猜测。
+
+**验证（C500，device 0）：**
+
+| 检查 | 结果 |
+| --- | --- |
+| 三族各自编译 | `deep_select_maca_xcore1000/1500/1600.so` 三份都在 |
+| 每份只带自己的镜像 | `strings` 各只有一个目标 |
+| 设备族 → 文件 | `_xcore1000` → `deep_select_maca_xcore1000.so` |
+| 端到端 | 16 格 × i32/i64 **全部 exact**，`BAD 0` |
+| 低宽度梯子（`lovv.py`） | V=2048…3584 × k=2048/1024/512 全 exact，`BAD 0` |
+| 官方门 | `All 313 cases passed!`（`/tmp/gate_arch/deepselect_run_20260918_012532.txt`，md5 `2ce76e3f`） |
+| `#error` 两条 | 不设宏、设 `9999`，都按预期炸 |
+| `ref/c500_gate` | `gate constants consistent`，11 个探针形状全部与门一致 |
+
+**代价，写在明处**：构建时间 ×3（一次构建约 4 分钟 → 约 12 分钟），wheel 从
+一份 ~11 MB 变三份 ~3.8 MB，加载多一次设备查询（`get_device_capability`，比
+`get_device_properties` 便宜），以及 `CUCC_TARGETS=xcore1000` 这样的窄构建
+现在会**只产出一族**、在别的族上按名字报错而不是装错。
+
+**没有变的**：`csrc/xcore1600/` 仍然不编译（它的 `NATIVE_SHARED_MEMORY_PER_SM_BYTES`
+现在就是 `ARCH_SMEM_PER_AP_BYTES`，接回去是一次替换而不是一套新机制）；
+C600U 上仍然**没有任何实测**，这一节的所有 C600U 结论都只是"静态上不会更糟"。

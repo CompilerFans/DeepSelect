@@ -91,23 +91,16 @@ struct RowParams {
     uint32_t vocab_size;
     uint32_t topk;
     // The AP count every grid-sizing decision below reads, supplied by the
-    // caller from `torch.cuda.get_device_properties(...)`.  An argument rather
-    // than a compile-time constant because one extension serves all three
-    // families -- `-offload-arch=xcore1000,xcore1500,xcore1600` is one compile
-    // producing one `.so` with three device images, and host code exists once
-    // in that artifact, so an `#if` on the target cannot be three numbers.
-    // Zero means "unknown", which `resolve_sm_count` turns into an error
-    // rather than a plausible wrong grid.
+    // caller from `torch.cuda.get_device_properties(...)`.  The *family*
+    // constants are compile-time (`csrc/structs.h`) -- this artifact was built
+    // for exactly one family and `_binding.py` loads the one the device
+    // reports -- but the count itself stays an argument: it is the one
+    // grid-sizing input whose value must match the device actually in front of
+    // the call, and a caller that hands this entry a tensor on another part
+    // gets a refusal rather than a grid sized for the artifact's family.
+    // Zero means "unknown", which the entry point refuses outright rather than
+    // rounding to a plausible wrong grid.
     uint32_t sm_count;
-    // The second machine number, and it is read from the device rather than
-    // named here: `cudaDevAttrMaxSharedMemoryPerBlockOptin`, in bytes.  The
-    // 16 KB arena `topk_coarse12` needs is `kSMEM`-sized on C500 and is not on
-    // a device with a smaller budget, and a *named* family (C500 is 104 APs)
-    // only answers that question by coincidence -- the two facts are separate,
-    // and the code below was reading the wrong one.  Zero means "unreadable",
-    // and every consumer treats it as "the budget is not known to be enough"
-    // rather than assuming the device it wants.
-    uint32_t smem_per_ap;
     int32_t idx_fill;
     float value_fill;
     // `check_nan` is whether the row is scanned at all; `abort_on_nan` is what
@@ -604,11 +597,14 @@ inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk)
 constexpr uint32_t kChunkedMaxBatches = 64;
 constexpr uint32_t kChunkedMinVocab = 262144;
 
-// The chunk count is SM-count-sensitive: a grid of `kBatch * chunks` CTAs
-// leaves `ctas mod SM` SMs idle unless it is a whole number of waves, and the
-// same 16 is a different fraction of a wave on a 104-AP C500, a 28-SM C600 and
-// a 32-SM C600U.  `params.sm_count` (the caller's, from the device) makes that
-// decidable at launch time.
+// The split is SM-count-sensitive: a grid of `kBatch * chunks` CTAs leaves
+// `ctas mod SM` SMs idle unless it is a whole number of waves, and the same 16
+// is a different fraction of a wave on a 104-AP C500, a 28-SM C600 and a
+// 32-SM C600U.  `params.sm_count` (the caller's, from the device) makes that
+// decidable at launch time -- and it is the *device's* number rather than
+// `ARCH_SM_COUNT` on purpose, because a caller that hands this entry a tensor
+// on another part should get a grid sized for the part in front of it, not for
+// the family the artifact was compiled for.
 //
 // The rule: **keep the measured count where it already fills at least half of
 // its last wave, and otherwise round up to a whole number of waves.**  The
@@ -620,6 +616,14 @@ constexpr uint32_t kChunkedMinVocab = 262144;
 // what multiple of the SM count it is.  On C500 that fit is 256 (2.46 x 104
 // APs), rounded to 5/2.  A per-family table would be three rows of which one
 // is measured; this is the one measured fact, written once.
+//
+// **It reads the device's count, not `ARCH_SM_COUNT`, and that is deliberate.**
+// The artifact is per-family now, so the macro *could* be used here, and it
+// would be wrong to: this is the one rule whose whole purpose is to fill the
+// machine in front of the call, and a 1600 image reached by a caller with a
+// 1000 tensor would then size the grid for 32 APs on a 104-AP part.  The
+// family constants answer questions about the *artifact*; this answers a
+// question about the *run*.
 inline uint32_t f32_chunk_work_target(uint32_t sm_count) {
     return sm_count * 5 / 2;
 }
@@ -1093,56 +1097,77 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 //
 // **Two questions, and this predicate used to answer both with one number.**
 //
-// *Does the route fit?*  A budget question, and `params.smem_per_ap` is the
-// device's own answer to it.  The predicate used to read `sm_count != 104`,
-// which is a fact about the C500 that has nothing to do with shared memory;
-// the two agreed on every device anyone had looked at, and that agreement was
-// the whole argument for the old form.  A named family cannot answer a budget
-// question, so this half is now the real one.
+// *Does the route fit?*  A budget question, and it is answered against
+// `ARCH_SMEM_PER_AP_BYTES` -- this artifact's own family's budget, a
+// compile-time constant (`csrc/structs.h`).  The predicate used to read
+// `sm_count != 104`, which is a fact about the C500 that has nothing to do
+// with shared memory; the two agreed on every device anyone had looked at, and
+// that agreement was the whole argument for the old form.  In between it read
+// `cudaDevAttrMaxSharedMemoryPerBlockOptin` at the entry point, which is the
+// same number obtained one call later and from the wrong place: the artifact
+// already knows which family it was built for, so asking the driver at launch
+// time was a second source for a fact the build had.
 //
 // *Is the route faster here?*  A measurement, and this one is not adaptive --
 // the crossing in the tables above is a C500 ladder, and applying it to a
 // machine nobody measured would be a guess dressed as a rule.  So it is
 // guarded by the device it was measured on, named for what it is.
 //
-// Splitting them is the point: the budget half protects a *different* device
-// with the C500's AP count and a smaller arena, which the old form would have
-// routed into a kernel that reads its candidates out of bounds.
+// Splitting them is the point, and it still is under the macro: the budget
+// half is now a *compile-time* property of the family, while the performance
+// half stays a runtime property of the machine in front of the call.  A family
+// 1600 image carries the 128 KiB budget without carrying the C500 ladder --
+// the two halves move independently, which is the whole reason they are two
+// halves.  An artifact whose `ARCH_SMEM_PER_AP_BYTES` is too small for the
+// arena takes the `#if` and never routes at all, and that is a *build* fact
+// now: it cannot be talked out of at runtime by a device that reports more.
 //
 // Why it is worth having at all: on the shapes deep_gemm routes here it is
 // 2.0-2.3x faster than the row kernel (ledger §12).  The three measured
 // differences are 12 coarse bits against 8, 640 threads against 512, and one
 // 16 KB arena against 14 KB plus a ping-pong refine buffer.
 inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
-    // ── the budget half: the device's number against the kernel's request ──
+    // ── the budget half: this family's compile-time budget, and the request ──
     // `kSmemBytes` is the route's whole request (histogram over candidates);
     // `kF32RowSmemBytes` is what the *split* it replaces needs.  Both have to
     // fit, because which one runs is what this predicate is deciding.
-    const uint32_t needed = (uint32_t)(rk::dg12::kSmemBytes > rk::kF32RowSmemBytes
-                                           ? rk::dg12::kSmemBytes
-                                           : rk::kF32RowSmemBytes);
-    if (params.smem_per_ap < needed) return false;
-    // ── the performance half: where the ladder below was measured ──
-    if (params.sm_count != kF32Coarse12MeasuredSmCount) return false;
-    // The arena's bound, not a fitted one: `topk_coarse12_row` serves at most
-    // what the candidate half can hold, and there is no overflow path in the
-    // *staged* refine that can make a larger answer correct.
-    if (params.topk > (uint32_t)rk::dg12::kMaxTopK) return false;
-    if (batches == 0) return false;
-    // The original's own width bound (`n_cols >= 2049`).  It matters more now
-    // than it did: the narrow arm below is `return batches >= 16` with no other
-    // `V` test, so without this line a 1024-wide row would route, which is
-    // below every width anyone has measured on either arm.
-    if (params.vocab_size < kF32Coarse12MinVocab) return false;
-    // Route on the shape deep_gemm itself routes on (`select_topk_policy`),
-    // with the floor taken from the measured crossing on this device.  The
-    // narrow-width arm is why there are two arms and not one: at or below
-    // `V = 131072` the route is ahead at `b16` and never measured behind, so
-    // the width decides which floor applies, and only the wide one is a
-    // function of `topk`.  The tables above have both.
-    if (params.vocab_size <= kF32Coarse12NarrowVocab)
-        return batches >= kF32Coarse12MinBatchesNarrow;
-    return (uint64_t)batches * params.topk >= kF32Coarse12WorkTarget;
+    //
+    // `if constexpr`, not a runtime test: on a family whose budget cannot hold
+    // the arena the answer is false for every shape, and the build says so
+    // rather than every call re-deriving it.  It also keeps the comparison
+    // honest -- an unsigned constant against an unsigned constant is decided
+    // by the compiler, so a family that fails this half is a compile-time
+    // fact visible in the generated code rather than a branch.
+    constexpr uint32_t kNeeded =
+        rk::dg12::kSmemBytes > rk::kF32RowSmemBytes
+            ? (uint32_t)rk::dg12::kSmemBytes
+            : (uint32_t)rk::kF32RowSmemBytes;
+    if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) {
+        return false;
+    } else {
+        // ── the performance half: where the ladder below was measured ──
+        if (params.sm_count != kF32Coarse12MeasuredSmCount) return false;
+        // The arena's bound, not a fitted one: `topk_coarse12_row` serves at
+        // most what the candidate half can hold, and there is no overflow path
+        // in the *staged* refine that can make a larger answer correct.
+        if (params.topk > (uint32_t)rk::dg12::kMaxTopK) return false;
+        if (batches == 0) return false;
+        // The original's own width bound (`n_cols >= 2049`).  It matters more
+        // now than it did: the narrow arm below is `return batches >= 16` with
+        // no other `V` test, so without this line a 1024-wide row would route,
+        // which is below every width anyone has measured on either arm.
+        if (params.vocab_size < kF32Coarse12MinVocab) return false;
+        // Route on the shape deep_gemm itself routes on
+        // (`select_topk_policy`), with the floor taken from the measured
+        // crossing on this device.  The narrow-width arm is why there are two
+        // arms and not one: at or below `V = 131072` the route is ahead at
+        // `b16` and never measured behind, so the width decides which floor
+        // applies, and only the wide one is a function of `topk`.  The tables
+        // above have both.
+        if (params.vocab_size <= kF32Coarse12NarrowVocab)
+            return batches >= kF32Coarse12MinBatchesNarrow;
+        return (uint64_t)batches * params.topk >= kF32Coarse12WorkTarget;
+    }
 }
 }  // namespace
 
@@ -1650,9 +1675,12 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
           // AP count of the device this call runs on, from the caller's
           // `get_device_properties`.  The last argument rather than one near
           // `topk` because it is the only one the caller derives from the
-          // *device* rather than from the problem.  The shared-memory budget
-          // is the other device-derived number and is read here instead --
-          // see where `p.smem_per_ap` is filled.
+          // *device* rather than from the problem -- and the only device fact
+          // that stays an argument now that the family constants are
+          // compile-time (`csrc/structs.h`).  The shared-memory budget is
+          // `ARCH_SMEM_PER_AP_BYTES`; the AP count cannot be, because the grid
+          // has to be sized for the part in front of the call and not for the
+          // one the image was built for.
           int64_t sm_count) {
     DS_HOST_CHECK(input.ndim() == 2, "input must be 2-D, got ", input.ndim());
     const int64_t batches = dsf::size(input, 0);
@@ -1738,21 +1766,15 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // the device).  Refuse rather than round it to something plausible.
     DS_HOST_CHECK(sm_count > 0, "sm_count must be > 0 (got ", sm_count, ")");
     p.sm_count = (uint32_t)sm_count;
-    // The other machine number, and it is read here rather than passed: the
-    // kernel tree has never asked the driver anything, and the caller would
-    // only be forwarding what the driver already said.  Read once per call,
-    // next to the other device-derived numbers above.  A failure leaves it at
-    // zero, which every consumer reads as "the budget is not known to be
-    // enough" -- the conservative direction, and the same one `sm_count`'s own
-    // zero takes.
-    {
-        int smem_bytes = 0;
-        if (cudaDeviceGetAttribute(&smem_bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                                   (int)dsf::device_index(input)) == cudaSuccess &&
-            smem_bytes > 0) {
-            p.smem_per_ap = (uint32_t)smem_bytes;
-        }
-    }
+    // The *other* machine number -- the shared-memory budget -- is not read
+    // here and not passed here: it is `ARCH_SMEM_PER_AP_BYTES`, a compile-time
+    // constant of the family this artifact was built for (`csrc/structs.h`).
+    // It used to be a `cudaDeviceGetAttribute` on this line, which is the same
+    // number obtained a call later and from a place that did not need to be
+    // asked: the artifact already knows its family, `_binding.py` loads the
+    // artifact matching the device, and the only way the two can disagree is a
+    // call that crossed devices -- which this file would rather refuse than
+    // silently re-tune for.
     p.idx_fill = (int32_t)idx_oob_fill_value;
     p.value_fill = (float)value_oob_fill_value;
     p.check_nan = check_nan;

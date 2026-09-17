@@ -12,7 +12,11 @@ export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
 export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
 export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
-export CUCC_TARGETS="${CUCC_TARGETS:-native}"
+# Every family, so the in-place build matches what a wheel carries and the
+# artifact the device needs is always present.  `native` is not accepted by
+# setup.py: a per-family artifact must not have its constants chosen by the
+# build machine.
+export CUCC_TARGETS="${CUCC_TARGETS:-xcore1000,xcore1500,xcore1600}"
 
 rm -rf build dist
 rm -rf ./*.egg-info
@@ -23,5 +27,6 @@ echo "develop.sh: CUCC_TARGETS=$CUCC_TARGETS"
 
 python setup.py build_ext --inplace
 
-echo "develop.sh: in-place extension at $(ls deep_select/deep_select_maca*.so)"
+echo "develop.sh: in-place extensions:"
+ls -1 deep_select/deep_select_maca*.so
 cd "$original_dir"

@@ -43,7 +43,12 @@ tvm::ffi::Array<int64_t> get_alignment_requirement();
 // over; `check_nan` is whether each row is scanned for a NaN and
 // `abort_when_nan_found` what happens when the scan finds one (trap, or the
 // `0x3F3F3F3F` guard in `output_index[row, 0]`) -- the second is inert when
-// the first is false.  `sm_count` is the device's, from the caller's `get_device_properties`.
+// the first is false.  `sm_count` is the device's, from the caller's
+// `get_device_properties`.  It is the one device-derived input left as an
+// argument: the *family* constants (`ARCH_SM_COUNT`, `ARCH_SMEM_PER_AP_BYTES`)
+// are compile-time now that there is one artifact per family, but the AP count
+// has to be the count of the part in front of the call rather than of the part
+// the image was built for, or a grid gets sized for the wrong machine.
 //
 // Keep this in step with the definition in `csrc/xcore1000/maca_topk.cu`,
 // parameter for parameter.  It had drifted: `sm_count` was added to the

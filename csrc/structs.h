@@ -11,6 +11,80 @@
 static constexpr uint32_t INPUT_STRIDE_ALIGNMENT_REQUIREMENT = 1024; // In number of bytes
 static constexpr uint32_t OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT = 32; // In number of bytes
 
+// ── the per-family build constants ──────────────────────────────────────────
+//
+// **One artifact per family, and this is the macro that makes it one.**
+// `setup.py` compiles each entry of `CUCC_TARGETS` as its own `-offload-arch`
+// with `-DDEEP_SELECT_ARCH=<family>` alongside it, so every image carries a
+// host half that knows which device it is for.  `_binding.py` loads the
+// artifact matching the family the device reports.
+//
+// This is the form the tree used before `5f5a93c` and it is back for a
+// measured reason, not a stylistic one.  The intermediate form -- one `.so`
+// with three device images -- cannot carry per-family host constants at all:
+// `-offload-arch=a,b,c` is one compilation, host code exists once in it, and
+// `__MACA_ARCH__` is defined in the *device* pass only (measured: all three
+// targets report it undefined in the host pass).  So a `#if` on the target in
+// host code takes the `#else` branch on every architecture, and the constants
+// have to travel as arguments instead.
+//
+// What that bought, and what it cost, so the trade is on the record: the
+// arguments form needs no per-family artifact and no family detection at load
+// time, but it also means the kernel reads two machine facts per call
+// (`cudaDeviceGetAttribute`, 0.330 us) and that the *device* decides which
+// numbers it gets rather than the *build*.  One artifact per family inverts
+// both: the numbers are compile-time constants again, and the price is three
+// compiles per build, three files in the wheel, and a loader that has to name
+// the right one.
+//
+// **Every family must have a row here.**  There is no `#else`: a target added
+// to `CUCC_TARGETS` without a row is a build error naming the macro, which is
+// the point -- the alternative is an image that silently carries family
+// 1000's numbers.
+#ifndef DEEP_SELECT_ARCH
+#error "DEEP_SELECT_ARCH is not set: this source is built one artifact per \
+family, with -DDEEP_SELECT_ARCH=<1000|1500|1600> beside -offload-arch.  See \
+setup.py's build_for_maca."
+#endif
+
+// **Every row here is a claim about a part, and only the first one has a
+// measurement behind it.**  `ARCH_SM_COUNT` sizes the grids
+// (`wave_filled_chunks`, `f32_chunk_work_target`) and `ARCH_SMEM_PER_AP_BYTES`
+// is the budget `f32_coarse12_applies` tests the 16 KB arena against.  The
+// 1500 and 1600 rows are the parts' own AP counts and the 128 KiB every
+// 128 KiB family has; nothing in this tree has been run on either, which is
+// why the *performance* half of every C500-only rule is still guarded by
+// `kF32Coarse12MeasuredSmCount` rather than by this macro -- geometry
+// compiles in, tuning still has to be earned.
+//
+// `ARCH_FAMILY` is what the artifact is *named*, and the loader matches on it:
+// `deep_select_maca_xcore<N>.so` is the file, `_binding.family_suffix()` is
+// the reader, and this constant is the one place the number is written down on
+// the C++ side.  It exists so the pairing can be checked from inside the
+// artifact instead of assumed.
+#if DEEP_SELECT_ARCH == 1000
+static constexpr uint32_t ARCH_FAMILY = 1000;
+static constexpr uint32_t ARCH_SM_COUNT = 104;              // C500
+static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 64 * 1024;
+#elif DEEP_SELECT_ARCH == 1500
+static constexpr uint32_t ARCH_FAMILY = 1500;
+static constexpr uint32_t ARCH_SM_COUNT = 28;               // C600
+static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 128 * 1024;
+#elif DEEP_SELECT_ARCH == 1600
+static constexpr uint32_t ARCH_FAMILY = 1600;
+static constexpr uint32_t ARCH_SM_COUNT = 32;               // C600U / N300U
+static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 128 * 1024;
+#else
+#error "unknown xcore family in DEEP_SELECT_ARCH; add its row here (AP count \
+and per-AP shared memory) and its entry to CUCC_TARGETS in setup.py"
+#endif
+static_assert(ARCH_FAMILY == (uint32_t)DEEP_SELECT_ARCH,
+              "ARCH_FAMILY is the row's own key: it must equal the macro that "
+              "selected the row, or the artifact's name would not name it");
+static_assert(ARCH_SM_COUNT > 0, "ARCH_SM_COUNT must be set per family");
+static_assert(ARCH_SMEM_PER_AP_BYTES > 0,
+              "ARCH_SMEM_PER_AP_BYTES must be set per family");
+
 // The `deep_gemm` selector's perf shapes, transcribed from
 // `deep_gemm/tests/test_indexer_topk_selector.py::SELECTOR_PERF_SHAPES`
 // (test-topk + sglang + dsa), all fp32 and `top_k = 2048`.
@@ -65,22 +139,23 @@ static constexpr uint32_t MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION = 1u << 23;
 static constexpr uint32_t MAX_VOCAB_SIZE = 1u << 23;
 static_assert(MAX_VOCAB_SIZE <= MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION);
 
-// There is no compile-time architecture selection here, and no
-// `DEEP_SELECT_NATIVE_ARCH`.  One extension carries every family's image
-// (`setup.py`: one source, one `-offload-arch` list), so a per-family constant
-// has no build to be baked into; the kernel that needs one takes it as an
-// argument instead.  There is no architecture table either -- `_arch.py` went
-// on 2026-09-17, and the two device facts the kernels need are read where they
-// are used: the AP count by the caller from `get_device_properties`, the
-// shared-memory budget by the entry point from
-// `cudaDevAttrMaxSharedMemoryPerBlockOptin`.
+// The per-family constants are above, in the `DEEP_SELECT_ARCH` table.  They
+// are compile-time constants *because* there is one artifact per family: host
+// code exists once per compilation, so the family the image is for is known
+// when the image is built, and the loader picks the artifact matching the
+// device.  `sm_count` is still an argument (see `ffi_entries.h`) -- not
+// because it cannot be compiled in, but because the entry point must keep
+// working when it is handed a device that is not the one the artifact was
+// built for, and refusing a mismatched grid is a better failure than a grid
+// sized for the wrong part.
 //
 // The ported kernels under `csrc/xcore1600/` selected their config tuples
 // against `NATIVE_SHARED_MEMORY_PER_SM_BYTES` (64 KiB for family 1000, 128 KiB
 // for 1500/1600) and asserted at compile time that their staging fitted.  That
-// constant went with the macro: with one extension there is no single capacity
-// to assert against.  The port is off the build either way -- see `setup.py`'s
-// note in `build_for_maca`.
+// is `ARCH_SMEM_PER_AP_BYTES` now, and the assertion can come back with it:
+// the constant is per-family again, so a 1600 image can check its own tuples
+// against its own budget.  The port is off the build either way -- see
+// `setup.py`'s note in `build_for_maca`.
 
 
 struct TopkSelectArgs {

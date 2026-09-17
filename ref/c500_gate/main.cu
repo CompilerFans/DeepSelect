@@ -2,20 +2,20 @@
 //
 //   ./main
 //
-// The shipping dispatch decides "does the coarse12 route exist on this device"
-// by comparing the device's shared-memory budget against what the kernel asks
-// for, and decides "is this shape worth it" by the measured crossing.  Those
-// are numbers and a boolean, and this driver is the place they are stated
-// together with the device's own report of itself -- so the next person to
-// change a threshold can see what it was, and so `ref_c500_gate` (same
-// expression, second TU) can be cross-checked against the value the gate is
-// *supposed* to produce on this machine.
+// The shipping dispatch decides "does the coarse12 route exist in this image"
+// at *build* time -- `ARCH_SMEM_PER_AP_BYTES` against the kernel's request, a
+// comparison of two compile-time constants (`csrc/structs.h`, `if constexpr`
+// in `f32_coarse12_applies`) -- and "is this shape worth it" by the measured
+// crossing.  Those are numbers and a boolean, and this driver is the place
+// they are stated together with the device's own report of itself, so the next
+// person to change a threshold can see what it was.
 //
-// The device half used to be "is the AP count 104", and this driver printed
-// that comparison.  It now prints the budget the predicate actually reads, and
-// the two requests it is compared against -- because the interesting failure
-// is a device that reports the C500's AP count and a smaller budget, which the
-// old form would have routed into a kernel that reads its arena out of bounds.
+// What this driver checks has changed with the predicate.  It used to feed the
+// device's `cudaDevAttrMaxSharedMemoryPerBlockOptin` *into* the gate; the gate
+// takes no budget now, so the device's report is printed *beside* the constant
+// the gate was compiled with, and the check is that the two agree.  A C500
+// image on a part with a smaller arena is the failure that matters, and it is
+// a mismatch between exactly those two numbers.
 //
 // Build (via ref/build_all.sh):
 //   cucc -O2 -std=c++20 --offload-arch=xcore1000 main.cu xcore1000_gate.cu -o main
@@ -26,14 +26,17 @@
 #include <cstdio>
 #include <cstdlib>
 
-extern "C" bool ref_c500_gate(uint32_t smem_per_ap, uint32_t sm_count,
-                              uint32_t batches, uint32_t vocab_size,
-                              uint32_t topk);
+extern "C" bool ref_c500_gate(uint32_t sm_count, uint32_t batches,
+                              uint32_t vocab_size, uint32_t topk);
 extern "C" int ref_candidate_capacity();
 extern "C" int ref_smem_bytes();
 extern "C" int ref_row_smem_bytes();
 extern "C" int ref_c500_smem_per_ap();
 extern "C" int ref_measured_sm_count();
+extern "C" int ref_arch_smem_per_ap();
+extern "C" int ref_arch_sm_count();
+extern "C" int ref_needed_smem();
+extern "C" int ref_budget_half();
 
 namespace {
 
@@ -72,8 +75,9 @@ int main()
     return 1;
   }
 
-  // The number the predicate reads.  Read the same way the kernel tree reads
-  // it, so this is the device's answer and not a restatement of a constant.
+  // The device's own answer, read the same way a device query would read it.
+  // It is *not* an input to the gate any more -- it is the thing the gate's
+  // compiled-in constant is checked against.
   int smem_per_ap = 0;
   const cudaError_t attr = cudaDeviceGetAttribute(
       &smem_per_ap, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
@@ -81,17 +85,14 @@ int main()
   std::printf("device %s | APs %u\n", prop.name, prop.multiProcessorCount);
   std::printf("smem/AP (optin) %d bytes%s\n", smem_per_ap,
               attr == cudaSuccess ? "" : "  [attribute query FAILED]");
+  std::printf("compiled-in budget (ARCH_SMEM_PER_AP_BYTES) %d bytes\n",
+              ref_arch_smem_per_ap());
   std::printf("the gate compares it against max(route %d, split %d) = %d\n",
-              ref_smem_bytes(), ref_row_smem_bytes(),
-              ref_smem_bytes() > ref_row_smem_bytes() ? ref_smem_bytes()
-                                                      : ref_row_smem_bytes());
+              ref_smem_bytes(), ref_row_smem_bytes(), ref_needed_smem());
   std::printf("arena %d bytes -> %d candidates (a top-k answer must fit here)\n",
               ref_smem_bytes(), ref_candidate_capacity());
-  const bool budget_ok =
-      smem_per_ap >= (ref_smem_bytes() > ref_row_smem_bytes()
-                          ? ref_smem_bytes()
-                          : ref_row_smem_bytes());
-  std::printf("budget half of the gate: %s\n", budget_ok ? "passes" : "FAILS");
+  std::printf("budget half of the gate: %s (a compile-time fact in this image)\n",
+              ref_budget_half() ? "passes" : "FAILS");
   std::printf("provenance half: the ladder was measured at %u APs; this device "
               "reports %u -- %s\n", ref_measured_sm_count(),
               prop.multiProcessorCount,
@@ -103,8 +104,7 @@ int main()
               "why");
   int mismatches = 0;
   for (const Shape &s : kShapes) {
-    const bool got = ref_c500_gate((uint32_t)smem_per_ap,
-                                   (uint32_t)prop.multiProcessorCount,
+    const bool got = ref_c500_gate((uint32_t)prop.multiProcessorCount,
                                    s.batches, s.vocab, s.topk);
     std::printf("%-8u %-8u %-6u %-6s  %s\n", s.batches, s.vocab, s.topk,
                 got ? "yes" : "no", s.why);
@@ -112,8 +112,8 @@ int main()
 
   // The claims the gate's own comments make, checked rather than asserted in
   // prose: the arena holds a whole top-k answer, it holds the 4096-bin coarse
-  // histogram in the same words, and this device's budget is the one the
-  // threshold was written against.
+  // histogram in the same words, and the device's own report is the number the
+  // image was compiled with.
   if (ref_candidate_capacity() < 2048) {
     std::fprintf(stderr, "FAIL: %d candidates cannot hold kMaxTopK=2048\n",
                  ref_candidate_capacity());
@@ -125,7 +125,25 @@ int main()
                  ref_smem_bytes());
     ++mismatches;
   }
-  if (attr == cudaSuccess && smem_per_ap != ref_c500_smem_per_ap()) {
+  if (ref_arch_sm_count() != ref_measured_sm_count()) {
+    std::fprintf(stderr,
+                 "FAIL: the image's AP count (%d) is not the one the ladder was "
+                 "measured on (%d) -- the budget half would pass and the "
+                 "tuning half would silently apply\n",
+                 ref_arch_sm_count(), ref_measured_sm_count());
+    ++mismatches;
+  }
+  // The one that matters: a mismatch here means an image is being run on a
+  // part whose arena is not the one it was compiled for.  On this device the
+  // two agree by construction; the check is that they still do.
+  if (attr == cudaSuccess && smem_per_ap != ref_arch_smem_per_ap()) {
+    std::fprintf(stderr,
+                 "FAIL: this device reports %d bytes/AP but this image was "
+                 "compiled for %d -- `_binding.family_suffix()` should have "
+                 "loaded a different artifact\n",
+                 smem_per_ap, ref_arch_smem_per_ap());
+    ++mismatches;
+  } else if (attr == cudaSuccess && smem_per_ap != ref_c500_smem_per_ap()) {
     std::fprintf(stderr,
                  "NOTE: this device reports %d bytes/AP, not the C500's %d -- "
                  "the threshold still applies, but the ladder behind it was "

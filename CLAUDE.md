@@ -56,9 +56,11 @@ split is the whole interface:
 
 | script | produces | targets default | installs? |
 | --- | --- | --- | --- |
-| `./develop.sh` | `deep_select/deep_select_maca*.so`, in place | `native` (this device) | no |
+| `./develop.sh` | `deep_select/deep_select_maca_xcore<N>.so`, in place | every family | no |
 | `./build.sh` | `dist/*.whl` (+ `${BUILDROOT}/wheel/` if set) | every family | no |
-| `./install.sh` | the same wheel, `pip install`ed | `native` (this device) | yes |
+| `./install.sh` | the same wheel, `pip install`ed | every family | yes |
+
+**All three build every family, and the artifact is named for the family it carries** — `CUCC_TARGETS` defaults to `xcore1000,xcore1500,xcore1600` in all three, because `setup.py` produces one `.so` per family and a wheel that carries one family cannot serve another. `setup.py` **refuses `native`**: a per-family artifact must not have its constants chosen by the build machine. `_binding.family_suffix()` reads the device and loads the matching file.
 
 **`./develop.sh` is the one that writes the in-place extension**, and
 `run_test.sh` calls it when it is passed `--allow-build` and finds nothing.
@@ -180,25 +182,26 @@ because after the `clean` you have to rebuild the in-place extension before
 anything can be measured — `build.sh` leaves you with a wheel and nothing to
 run.
 
-**The target list is an image list, not a build list.** One extension —
-`deep_select/deep_select_maca.so` — carries one
-image per target, because mxcc takes a comma-separated `-offload-arch` and
-compiles each into its own image of the same source. Measured: three targets →
-three images in one file, 11.07 MB against 3.7 MB for one. There is therefore
-**no compile-time architecture selection at all** — a family macro would be a
-lie in two of the three images — and the two numbers the kernel sizes its grids
-against arrive as arguments the caller reads off the device -- see "the arch
-constants are arguments" below.
+**The target list is an artifact list.** One `-offload-arch=xcore<N>` per
+family, each its own compile with `-DDEEP_SELECT_ARCH=<N>` beside it, each
+producing its own `deep_select_maca_xcore<N>.so` (~3.8 MB). **That pairing is
+what makes a compile-time family macro honest** — host code exists once per
+compilation, so the image knows which part it is for. The form this replaced —
+one `.so` with a comma-separated `-offload-arch` — cannot carry them at all:
+`__MACA_ARCH__` is defined in the *device* pass only, so a host `#if` on the
+target takes the `#else` branch in every image. See "the arch constants are
+compile-time" below for the full trade.
 
-**What the wheel carries, and what the target machine must provide.** The
-images for every target are inside, so a C600U loads the `xcore1600` one — but
-*subject to the packaging note above*: build the wheel with `CUCC_TARGETS`
-unset. A wheel built with `CUCC_TARGETS=native` carries one image and will fail
-on another family. Measured on the distribution artifact:
+**What the wheel carries, and what the target machine must provide.** One
+artifact per family is inside, so a C600U loads the `xcore1600` one — build the
+wheel with `CUCC_TARGETS` unset (the default). A wheel built with
+`CUCC_TARGETS=xcore1000` carries one family and will fail on another;
+`_binding.load` says so by name rather than loading a foreign image.
+Measured on the distribution artifact:
 
 | | |
 | --- | --- |
-| tags | `py3-none-linux_x86_64` — the *platform* is real, the interpreter is not. Fixed 2026-09-15: the tag is now upstream tvm-ffi's spelling (`wheel.py-api = "py3"`, i.e. `py3-none-<plat>`) and the extension file is `deep_select_maca.so`. It used to be `cp310-cp310-linux_x86_64` / `deep_select_maca.cpython-310-x86_64-linux-gnu.so`, on a claim about an ABI nothing here uses — the artifact has no `PyInit`. Two causes, both fixed: torch's `BuildExtension.__init__` reads `no_python_abi_suffix` out of its **own kwargs**, so the flag has to go through `with_options` rather than sit on the `Extension` (where nothing read it); and the wheel tag comes from the build interpreter, so it needs a `bdist_wheel` subclass (`_BdistWheel` in `setup.py`). |
+| tags | `py3-none-linux_x86_64` — the *platform* is real, the interpreter is not. Fixed 2026-09-15: the tag is now upstream tvm-ffi's spelling (`wheel.py-api = "py3"`, i.e. `py3-none-<plat>`) and the extension file is `deep_select_maca.so` (now `deep_select_maca_xcore<N>.so`, one per family). It used to be `cp310-cp310-linux_x86_64` / `deep_select_maca.cpython-310-x86_64-linux-gnu.so`, on a claim about an ABI nothing here uses — the artifact has no `PyInit`. Two causes, both fixed: torch's `BuildExtension.__init__` reads `no_python_abi_suffix` out of its **own kwargs**, so the flag has to go through `with_options` rather than sit on the `Extension` (where nothing read it); and the wheel tag comes from the build interpreter, so it needs a `bdist_wheel` subclass (`_BdistWheel` in `setup.py`). |
 | `Requires-Dist` | `torch`, `apache-tvm-ffi` — declared since 2026-09-15, unpinned (the MACA torch builds are metax-suffixed local versions, so a pin would refuse them). `Requires-Python: >=3.9` is the honest floor: the *extension* has no python dependency at all, and 3.9 is the higher of torch 2.6's `>=3.9` and tvm-ffi's `>=3.8`. |
 | `DT_NEEDED` | `libtvm_ffi.so` + the MACA set (`libmcruntime`, `libToolsExt_cu`, `libruntime_cu`, `libmcToolsExt`, `libmccompiler`, `libmaca_mathlib_host`). |
 | `DT_RUNPATH` | `/opt/maca/lib:/opt/maca/mxgpu_llvm/lib` — MACA conventions, and overridable (see trap 8). |
@@ -235,6 +238,8 @@ for you, but a bare `setup.py build_ext --inplace` does not (see the handover
 rm -f deep_select/deep_select_maca*.so \
       build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca*.so
 ```
+
+(One glob still covers every family, and `develop.sh` does this for you.)
 
 `build_ext --inplace` compares timestamps and **silently skips** the copy when the target is newer than `build/lib`. The `.so` lives under `deep_select/` and is gitignored, so it is stale by default. The `.so` md5 is sensitive to source line endings and is usable as a "which source did I actually measure" receipt — **but it is not a content-addressed hash, and a differing md5 is not by itself evidence that the source or the behavior differs.**
 
@@ -299,7 +304,7 @@ The kernel tree is split **by per-SM shared memory**, because that is what a top
 
 | tree | parts | kernel |
 | --- | --- | --- |
-| `csrc/xcore1000/` | C500 (64 KiB/SM), **and C600 / C600U** | `maca_topk.cu`, hand-written for MACA — **what every family builds** |
+| `csrc/xcore1000/` | C500 (64 KiB/SM), **and C600 / C600U** | `maca_topk.cu`, hand-written for MACA — **what every family builds**, one artifact per family |
 | `csrc/xcore1600/` | C600, C600U (128 KiB/SM) | the upstream kernels, ported — **reserved, not built, not reachable** |
 
 **Every family this tree builds compiles `csrc/xcore1000/`, and there is no
@@ -318,23 +323,33 @@ and passing `check_result` on every cell the port fails. Nothing in that tree is
 C500-specific code, and the capacity gate cannot fire in this direction — see
 "Can a C600U run the C500 kernel" below.
 
-`csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel) and `TopkSelectArgs` (the port's params type; `maca_topk.cu` has its own `RowParams`, and `TopkSelectArgs::shared_memory_size_per_sm` is read only by `csrc/xcore1600/`). It carries **no per-architecture constant and no `DEEP_SELECT_NATIVE_ARCH`** — see "the arch constants are arguments".
+`csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel) and `TopkSelectArgs` (the port's params type; `maca_topk.cu` has its own `RowParams`, and `TopkSelectArgs::shared_memory_size_per_sm` is read only by `csrc/xcore1600/`). It also carries **the per-family table** — `ARCH_FAMILY`, `ARCH_SM_COUNT` and `ARCH_SMEM_PER_AP_BYTES`, keyed on `DEEP_SELECT_ARCH` — see "the arch constants are compile-time" below. It used to carry no per-architecture constant at all; that changed on 2026-09-18 when the build went back to one artifact per family.
 
-### The arch constants are arguments
+### The arch constants are compile-time
 
-One extension carries an image per family, so nothing can be specialized at compile time: a `-DDEEP_SELECT_...` family macro would be correct in one image and a lie in the other two. The two numbers the kernel sizes its grids against therefore cross the FFI:
+**One artifact per family**, and that is what makes a family macro honest: `setup.py` compiles each entry of `CUCC_TARGETS` as its own `-offload-arch=xcore<N>` with `-DDEEP_SELECT_ARCH=<N>` beside it, so the *host* half of `deep_select_maca_xcore<N>.so` knows which part it is for. `_binding.family_suffix()` reads the device's sm spelling and loads the matching file.
+
+The form this replaced — one `.so`, one comma-separated `-offload-arch` — **cannot** carry these: that is one compilation, host code exists once in it, and `__MACA_ARCH__` is defined in the *device* pass only (measured: all three targets report it undefined in the host pass). So a host `#if` on the target takes the `#else` branch in every image, and the constants have to travel as arguments instead. That intermediate form is gone; this is the trade on the record:
+
+| | arguments (the form replaced) | compile-time (now) |
+| --- | --- | --- |
+| compiles per build | 1 | one per family |
+| files in the wheel | 1 | one per family |
+| loader | name only | must resolve the device's family |
+| kernel reads per call | `cudaDeviceGetAttribute`, **0.330 us** | nothing |
+| who decides the number | the *device at run time* | the *build* |
 
 | number | source | where it lands |
 | --- | --- | --- |
-| SM count (104/28/32) | the **device reports it** — `torch.cuda.get_device_properties().multi_processor_count`, read at the call site in `interface.py` | `RowParams::sm_count`, one `int64_t` appended to the tvm-ffi entry's positional args |
-| fp32 split work target (260/70/80) | **derived in the kernel**, `sm_count * 5 / 2` | `maca_topk.cu`'s `f32_chunk_work_target` |
+| per-AP shared memory (64/128/128 KiB) | **compile-time**, `ARCH_SMEM_PER_AP_BYTES` per family | `f32_coarse12_applies`'s budget half, an `if constexpr` |
+| AP count (104/28/32) | **compile-time** as `ARCH_SM_COUNT`, but **the running device's** is what the grids use: `torch.cuda.get_device_properties().multi_processor_count`, read at the call site in `interface.py` | `RowParams::sm_count`, one `int64_t` appended to the tvm-ffi entry's positional args; `f32_chunk_work_target` derives the split's work target from it (`sm_count * 5 / 2`) |
 
-Two things this is deliberately not:
+**The AP count stays an argument even though the macro exists**, and that is deliberate: the grid-sizing rules size a grid to fill *the machine in front of the call*, and an image reached with a tensor on another part must size for that part, not for the one it was compiled for. The family constants answer questions about the **artifact**; `sm_count` answers a question about the **run**. A `sm_count = 0` is refused by `DS_HOST_CHECK` rather than defaulted — a zero sizes every grid to nothing, which is an empty answer rather than a crash. It is read at the call site rather than cached: `get_device_properties` is a struct copy out of the driver's cache, **measured at 1.7 us** against a kernel this operator runs in tens to thousands of us (it used to sit behind an `lru_cache`d `_sm_count()` whose only remaining job was memoizing that).
 
-- **Not the build's target list.** `CUCC_TARGETS` says what images were compiled, not what device is in front of you; deriving the grid from it names the wrong artifact as soon as the list does not lead with this device's family (the same defect `perf_snapshot.provenance()` and the two `run_*` scripts each had once). It is also not the `--offload-arch` spelling resolved back: `mxcc`'s `native` is that vocabulary, not this one.
-- **Not a module.** There is no `_arch.py` and no family table: `get_device_properties` is a struct copy out of the driver's cache, **measured at 1.7 us** against a kernel this operator runs in tens to thousands of us, so it is read where it is used (`interface.py`; `perf_snapshot.py` once per record; `_log.py`'s header). It used to be `lru_cache`d behind a `_sm_count()` -- a wrapper whose only remaining job was to memoize a 1.7 us call.
+Two things the family table is deliberately not:
 
-`sm_count = 0` is refused by `DS_HOST_CHECK` rather than defaulted: a zero sizes every grid to nothing, which is an empty answer rather than a crash.
+- **Not the build's target list.** `CUCC_TARGETS` says what images were compiled, not what device is in front of you; deriving the grid from it names the wrong artifact as soon as the list does not lead with this device's family (the same defect `perf_snapshot.provenance()` and the two `run_*` scripts each had once). It is also not the `--offload-arch` spelling resolved back: `mxcc`'s `native` is that vocabulary, not this one — and `setup.py` **refuses `native` outright**, because a per-family artifact must not have its constants chosen by the build machine.
+- **Not a performance table.** Only family 1000's row has a measurement behind it. The other two are the parts' own AP count and the 128 KiB every 128 KiB family has, and **every C500-only *tuning* rule is still guarded by `kF32Coarse12MeasuredSmCount` (104) at run time** rather than by the macro. Geometry compiles in; tuning has to be earned. `ref/c500_gate/` prints both halves against the device's own report.
 
 ### xcore1000 — `maca_topk.cu` + `radix_core.cuh` (the shipping C500 kernel)
 
@@ -452,7 +467,8 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
 - **The SM-count-sensitive numbers are arguments now**, not constants:
   `wave_filled_chunks` (the chunked split's grid) and the fp32 split's work
   target both read `params.sm_count`, which `interface.py` reads off the device
-  at the call site. The work target is `sm_count * 5 / 2` — the 2.5 is the C500 fit,
+  at the call site (the *device's*, not `ARCH_SM_COUNT` — see "the arch constants
+  are compile-time"). The work target is `sm_count * 5 / 2` — the 2.5 is the C500 fit,
   the only one ever measured; the old 70/80 constants were that same
   arithmetic written out. **No C600/C600U measurement stands behind the 2.5**,
   so the caveat is unchanged by having removed the table: the table never had
@@ -477,8 +493,10 @@ it, put `csrc/xcore1600/api.cu` and its `instantiations/` into `SOURCES`, put
 `csrc/xcore1600/` and `csrc/3rdparty/kerutils/include` back on `include_dirs`,
 and re-run `tests/test.py --backend maca_c` on a C600U. It will not
 compile as-is: its `NATIVE_SHARED_MEMORY_PER_SM_BYTES` went with the
-per-architecture build (see "the arch constants are arguments"), so it needs a
-capacity passed at runtime the same way `sm_count` now is.
+per-architecture build, so it needs that constant back — and it is
+`csrc/structs.h`'s `ARCH_SMEM_PER_AP_BYTES` again now that the build is
+per-family, so re-adding it is one substitution rather than a new mechanism
+(see "the arch constants are compile-time").
 
 **A C600U pass is necessary but not sufficient to wire it back in**: switching
 the source tree also changes which kernel serves C600 and C600U production
@@ -1148,7 +1166,7 @@ Facts the CSV records and the traps in reading it:
 5. **Alignment**: rows whose length is a multiple of 8 and offset-16 B-aligned take the vector path, otherwise a scalar fallback (`bf16x8_is_aligned`). Mixed vector + tail was intermittently racy on a 1024-thread block, so odd-length rows uniformly use one load mode.
 6. **mxcc's compile cache** is `~/.deep_gemm/cache` (keyed by entry name + source digest); a source edit recompiles only the affected entry. Counting `kernel.*` dirs under a fresh `DG_JIT_CACHE_DIR` is how you check a routing change did not grow the compiled-kernel count.
 7. `NormalFloatDistribution` (the official table's data) is **not** bit-pattern uniform — many elements per row crowd into one high byte. This is the fact every optimization here is organized around.
-8. **A toolkit mismatch at *run* time reports as `mcErrorInvalidDeviceFunction`, and it looks exactly like a kernel defect.** The extension is linked against `libmcruntime.so` by soname, and the loader finds it through the rpath baked at link time — `/opt/maca/lib:/opt/maca/mxgpu_llvm/lib`. Whether `LD_LIBRARY_PATH` can *override* that depends on the ELF tag, and the two tags differ only in order: **`DT_RPATH`** (0xf) is searched **before** `LD_LIBRARY_PATH`, **`DT_RUNPATH`** (0x1d) **after** it. This file asserted "torch's `-Wl,-rpath` becomes a `DT_RUNPATH`, which `LD_LIBRARY_PATH` overrides" until 2026-09-15; measured at `48611b9` the shipped artifact was **`DT_RPATH`**, and a decoy `libtvm_ffi.so` placed on `LD_LIBRARY_PATH` was **ignored** in favour of the baked path. The trap's own numbers are still explained — both runs named `/opt/maca/lib`, and the symlink at `/opt/maca` is what moved — but the "overrides" half was wrong, and it mattered: with `RPATH` a target machine whose `/opt/maca` is the same path but a different SDK generation **cannot be rescued by the environment**. `setup.py` now passes `-Wl,--enable-new-dtags` and the artifact measures `DT_RUNPATH` with the decoy winning, so the sentence above is true of the build it describes. cucc emits `RUNPATH` on its own (measured on a plain `cucc -shared` link); this link did not, which is why the flag is explicit. Measured 2026-09-15 on this box, the *same* `deep_select_xcore1600*.so` (the per-architecture name the build used until `5f5a93c`; it is `deep_select_maca*.so` now, and the trap is about the library a loaded artifact resolves, so the name is incidental), device 1, one variable changed:
+8. **A toolkit mismatch at *run* time reports as `mcErrorInvalidDeviceFunction`, and it looks exactly like a kernel defect.** The extension is linked against `libmcruntime.so` by soname, and the loader finds it through the rpath baked at link time — `/opt/maca/lib:/opt/maca/mxgpu_llvm/lib`. Whether `LD_LIBRARY_PATH` can *override* that depends on the ELF tag, and the two tags differ only in order: **`DT_RPATH`** (0xf) is searched **before** `LD_LIBRARY_PATH`, **`DT_RUNPATH`** (0x1d) **after** it. This file asserted "torch's `-Wl,-rpath` becomes a `DT_RUNPATH`, which `LD_LIBRARY_PATH` overrides" until 2026-09-15; measured at `48611b9` the shipped artifact was **`DT_RPATH`**, and a decoy `libtvm_ffi.so` placed on `LD_LIBRARY_PATH` was **ignored** in favour of the baked path. The trap's own numbers are still explained — both runs named `/opt/maca/lib`, and the symlink at `/opt/maca` is what moved — but the "overrides" half was wrong, and it mattered: with `RPATH` a target machine whose `/opt/maca` is the same path but a different SDK generation **cannot be rescued by the environment**. `setup.py` now passes `-Wl,--enable-new-dtags` and the artifact measures `DT_RUNPATH` with the decoy winning, so the sentence above is true of the build it describes. cucc emits `RUNPATH` on its own (measured on a plain `cucc -shared` link); this link did not, which is why the flag is explicit. Measured 2026-09-15 on this box, the *same* `deep_select_xcore1600*.so` (the per-architecture name the build used until `5f5a93c`; it is `deep_select_maca*.so` now, one file per family, and the trap is about the library a loaded artifact resolves, so the name is incidental), device 1, one variable changed:
 
    | `MACA_PATH` (and the `LD_LIBRARY_PATH` it derives) | result |
    | --- | --- |
@@ -1421,7 +1439,8 @@ returns `Array<int64_t>` rather than the pybind build's `std::pair` (tvm-ffi
 cannot carry `std::pair`), which `interface.py` normalizes to a tuple. The
 `no_python_abi_suffix` half is no longer true — it *does* take effect, through
 `BuildExtension.with_options(...)` rather than through the `Extension` (torch
-reads the flag from its own kwargs); the artifact is `deep_select_maca.so` and
-the wheel is tagged `py3-none-linux_x86_64` (see the wheel table above).
+reads the flag from its own kwargs); the artifact is `deep_select_maca.so`
+(`deep_select_maca_xcore<N>.so` since 2026-09-18, one per family) and the wheel
+is tagged `py3-none-linux_x86_64` (see the wheel table above).
 
 `csrc/xcore1600/api.cu` is host code but is compiled by mxcc's host pass (clang 19), so `std::format` *is* available there now that the file is a `.cu`. The one check message that needs formatting keeps its `snprintf` anyway: it is the ABI-safe spelling at this boundary (and `<format>` needs GCC 13's libstdc++; the host is GCC 11.4). Do not "fix" it back. Anything including `<cuda_runtime_api.h>` must not depend on cu-bridge's compatibility layer for `__nv_bfloat16`: `csrc/structs.h` includes `<maca_bfloat16.h>` so that `api.cu` and every instantiation TU see the *same* `maca_bfloat16`, and `TopkSelectConfig<maca_bfloat16, ...>`'s template entity is one symbol on both sides.

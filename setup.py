@@ -30,6 +30,37 @@ SOURCES = [
 DEFAULT_TARGETS = "xcore1000,xcore1500,xcore1600"
 
 
+def _family_of_target(target, this_dir):
+    """The xcore family a `-offload-arch` spelling names, as an integer.
+
+    `xcore<N>` is mxcc's own vocabulary, so the family is the suffix -- but it
+    is parsed rather than sliced, because a target this file cannot turn into a
+    family is a build that must fail here.  `csrc/structs.h` refuses an unknown
+    `DEEP_SELECT_ARCH` with its own `#error`; this is the same refusal one step
+    earlier, where the message can name the offending `CUCC_TARGETS` entry.
+
+    `native` is deliberately not accepted.  It is a real mxcc spelling and it
+    would resolve to *this* host's family, which is the one thing a build
+    artifact must not depend on: a wheel built on a C500 would carry the C500's
+    numbers under a name that claims to be whatever the target machine is.
+    """
+    prefix = "xcore"
+    if not target.startswith(prefix) or not target[len(prefix):].isdigit():
+        raise RuntimeError(
+            f"CUCC_TARGETS entry {target!r} does not name an xcore family; this "
+            f"build produces one artifact per family and needs the family from "
+            f"the target spelling (expected `xcore<N>`, e.g. xcore1000)"
+        )
+    family = int(target[len(prefix):])
+    if family not in (1000, 1500, 1600):
+        raise RuntimeError(
+            f"CUCC_TARGETS entry {target!r} names family {family}, which has no "
+            f"row in csrc/structs.h (AP count and per-AP shared memory); add "
+            f"one there before building it"
+        )
+    return family
+
+
 def _tvm_ffi_root():
     """Where `tvm_ffi` keeps its headers and shared library.
 
@@ -74,21 +105,35 @@ def _maca_root() -> str:
 
 
 def build_for_maca():
-    """Build the one extension: `SOURCES` compiled for every target.
+    """Build one extension per family: `SOURCES` compiled once per target.
 
-    **This is a csrc compile and nothing else.**  One `.cu`, one `.so`;
-    everything under `deep_select/` is Python and reaches the artifact through
-    `tvm_ffi.load_module`.
+    **This is a csrc compile and nothing else.**  One `.cu`, one `.so` per
+    target; everything under `deep_select/` is Python and reaches an artifact
+    through `tvm_ffi.load_module`.
 
-    `CUCC_TARGETS` becomes one comma-separated `-offload-arch`, which mxcc takes
-    as a set of images of the same source in one file.  Unset means
-    `DEFAULT_TARGETS` below, one target per family, so a build host needs no
-    MACA card; `native` is mxcc's own spelling for the local part and is passed
-    through untouched.  An unrecognized target is rejected by mxcc.
+    `CUCC_TARGETS` is a list of `xcore<N>` spellings, and **each one is its own
+    `-offload-arch` compile** carrying `-DDEEP_SELECT_ARCH=<N>` beside it.  That
+    pairing is what makes the host half of an image agree with its device half:
+    `csrc/structs.h` reads the macro for the family's AP count and per-AP shared
+    memory, and refuses a target with no row.  Unset means `DEFAULT_TARGETS`
+    below, one target per family, so a build host needs no MACA card.
 
-    Nothing is specialized per architecture at compile time, and nothing can
-    be: a family macro would be a lie in two of the three images.  The two
-    numbers the kernel sizes its grids against travel as arguments instead.
+    **`native` is not accepted here**, which is a change from the form that
+    took one comma-separated `-offload-arch`.  `native` resolves to *this* host's
+    family, and a per-family artifact must not have its constants chosen by the
+    build machine -- a wheel built on a C500 would carry the C500's numbers
+    under a name that claims to be the target machine's.  `develop.sh` /
+    `install.sh` therefore build every family and let the *loader* pick; a
+    narrow `CUCC_TARGETS=xcore1000` is still allowed, and produces a wheel that
+    serves one family and names it in the error on any other.
+
+    The two numbers the kernel sizes its grids against are compile-time
+    constants again (`ARCH_SM_COUNT`, `ARCH_SMEM_PER_AP_BYTES`), which is the
+    reason for one artifact per family.  The form this replaced -- one file,
+    one comma-separated `-offload-arch`, three device images -- cannot carry
+    them: `__MACA_ARCH__` is defined in the device pass only, so a host `#if` on
+    it takes the `#else` branch on every architecture, and host code exists once
+    in a fat binary regardless.
 
     `csrc/xcore1600/` is not built: its source is off `SOURCES` and its
     `kerutils` include is off `include_dirs` below.  Re-adding both is what
@@ -157,10 +202,9 @@ def build_for_maca():
         # `value_oob_fill_value` -- stays exact for a denormal fill.  The
         # ranking path is pure integer key manipulation and cannot care.
         "-Xclang", "-fdenormal-fp-math-f32=ieee",
-        # One comma-separated list: mxcc compiles each architecture into its
-        # own image of the same source, in one extension.
-        f"-offload-arch={','.join(targets)}",
     ]
+    # `-offload-arch` and `-DDEEP_SELECT_ARCH` are per-Extension, not shared:
+    # one artifact per family, each its own compile.  See the loop below.
     # No `-I` here: `include_dirs=` above/below is what carries them, and torch
     # already turns that into `-I` on the device pass.  Spelling them in both
     # places put every one of them on the command line twice.
@@ -176,6 +220,16 @@ def build_for_maca():
         ]
         return ext
 
+    # **One Extension per family.**  The pair `(-offload-arch=xcore<N>,
+    # -DDEEP_SELECT_ARCH=<N>)` is what makes the host half of the image agree
+    # with its device half; `csrc/structs.h` turns a target with no row into a
+    # build error.  The intermediate form -- one Extension, one comma-separated
+    # `-offload-arch` -- cannot carry per-family host constants at all: that is
+    # one compilation, host code exists once in it, and `__MACA_ARCH__` is
+    # defined in the device pass only, so an `#if` on the target takes the
+    # `#else` branch on every architecture.  Reverting to it means the
+    # constants travel as arguments again and every reader of this file needs
+    # to know why -- see `csrc/structs.h`'s block and CLAUDE.md.
     ext_modules = [
         strip_torch_libs(CUDAExtension(
                 # The artifact has no `PyInit` and is NOT an importable python
@@ -187,15 +241,22 @@ def build_for_maca():
                 # wheel through `_BdistWheel` at the bottom.  The floor is then
                 # `python_requires` in `setup()`.
                 #
-                # Named for the *package*, not for an architecture: there is
-                # one of these and it serves every family it carries an image
-                # for.  `deep_select_maca` matches the C++ namespace.
-                name="deep_select.deep_select_maca",
+                # One artifact per family, named for the family it carries.
+                # `deep_select_maca` (the C++ namespace) plus the suffix
+                # `_binding.py` globs and the loader resolves -- the device's
+                # family has to name the file, because the file's *host* half
+                # is what holds that family's constants.
+                name=f"deep_select.deep_select_maca_xcore{target_family}",
                 sources=SOURCES,
                 # Every source is a `.cu`, so the `nvcc` list is the only one
                 # torch reads, and its contents are mxcc's dialect because
-                # `$nvcc` resolves to cucc.
-                extra_compile_args={"nvcc": nvcc_args},
+                # `$nvcc` resolves to cucc.  The two per-family flags are
+                # appended here rather than shared, which is the whole point of
+                # one Extension per target.
+                extra_compile_args={"nvcc": nvcc_args + [
+                    f"-offload-arch={target}",
+                    f"-DDEEP_SELECT_ARCH={target_family}",
+                ]},
                 # The MACA catalogue, the tvm-ffi headers the binding edge
                 # needs, and torch's own paths.
                 include_dirs=include_dirs + [os.path.join(tvm_ffi_root, "include")],
@@ -220,8 +281,11 @@ def build_for_maca():
                     "-Wl,--enable-new-dtags",
                 ],
             ))
+        for target in targets
+        for target_family in [_family_of_target(target, this_dir)]
     ]
-    print(f"deep_select: compiling {', '.join(SOURCES)} for {','.join(targets)}")
+    print(f"deep_select: compiling {', '.join(SOURCES)} once per family, "
+          f"for {','.join(targets)}")
 
     # `no_python_abi_suffix` belongs *here*, not on the Extension above: torch's
     # `BuildExtension.__init__` reads it out of its own kwargs

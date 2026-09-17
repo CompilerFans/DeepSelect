@@ -29,9 +29,14 @@
 // (`topk_kernel_radix`) can treat them exactly like the split's answer.
 //
 // The gate that keeps it off C600U is in `maca_topk.cu` (`f32_coarse12_applies`),
-// keyed on `sm_count` -- not on an arch macro, for the reason recorded at
-// `maca_topk.cu`'s `kC500SmCount`: `__MACA_ARCH__` is device-pass only, so a
-// host `#ifdef` on it is dead in every image (see the memory note
+// and it has two halves.  The *budget* half -- does this part's shared memory
+// hold the arena -- is a compile-time constant of the artifact's family
+// (`ARCH_SMEM_PER_AP_BYTES`, `csrc/structs.h`), which is possible because
+// `setup.py` builds one artifact per family.  The *tuning* half -- is the
+// measured crossing the right one here -- stays a runtime test on `sm_count`,
+// because a ladder read off one machine does not transfer by arithmetic.
+// Neither half is an arch macro: `__MACA_ARCH__` is device-pass only, so a host
+// `#ifdef` on it is dead in every image (see the memory note
 // `maca-arch-macro-and-torch-free-builds`).  Nothing in this file reads the
 // architecture, so no other target's code changes when it is enabled: the
 // kernels are only ever launched from the gated route.

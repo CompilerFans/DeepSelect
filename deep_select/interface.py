@@ -190,9 +190,13 @@ def topk(
         # operator's contract, so nothing here reads it.
         #
         # The SM count is the odd one out: the only argument derived from the
-        # *device* rather than the problem.  `maca_topk.cu` sizes its grids in
-        # CTAs against it and one extension serves every part, so it cannot be
-        # compiled in -- the device reports it, and there is no table behind it.
+        # *device* rather than the problem.  It stays an argument even now that
+        # the artifact carries its family's constants as compile-time values
+        # (`csrc/structs.h`), because it is the one number that has to describe
+        # the machine in front of the call and not the machine the image was
+        # built for -- the grid-sizing rules size a grid to fill *this* part,
+        # and `_binding.family_suffix()` guarantees only that the image matches
+        # its family, not that every call is on the device that picked it.
         # Read here rather than cached: `get_device_properties` is a struct
         # copy from the driver's cache, measured at 1.7 us against a kernel
         # this operator runs in tens to thousands of us.  The kernel refuses a
