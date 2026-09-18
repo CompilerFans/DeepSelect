@@ -46,6 +46,7 @@
 // the bf16 selection path below is a header-only dependency.
 #include "radix_core.cuh"
 #include "dg_coarse12.cuh"
+#include "dg_chunks.cuh"
 
 namespace deep_select_maca {
 
@@ -1193,6 +1194,71 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         return (uint64_t)batches * params.topk >= kF32Coarse12WorkTarget;
     }
 }
+
+// ── the deep_gemm chunks route: the `b <= 2` band ───────────────────────────
+//
+// `dg_chunks.cuh` carries `topk_chunks`, deep_gemm's third kernel family, in the
+// same shape as `dg_coarse12.cuh` carries the second.  It is here because the
+// two arms this file already has are both the wrong shape at one or two rows,
+// and that is measured rather than argued (ledger §12.16.6, interleaved five
+// rounds on device 2, `k = 2048`):
+//
+//     b     V        split    deep_gemm    dg/split
+//     1     66551     90.8      53.0        0.584x
+//     2     66551     93.4      54.1        0.580x
+//     4     66551     93.8     360.8        3.844x
+//     1    107520    174.8      60.6        0.347x
+//     1    131072    135.0      62.7        0.464x
+//
+// **The cliff is deep_gemm's, at `b = 4`.**  Its own `topk_chunks_compact_refine`
+// goes from 24.4 us at one row to 310.7 us at sixteen -- 12.7x per row -- while
+// the CTA count only goes from 6 to 96 on a 104-AP part.  So this is not a
+// fallback to reach for whenever we are behind: it is a `b <= 2` special case,
+// and the batch bound below is sited on the measured step, not on a guess.
+//
+// Why it wins there: deep_gemm walks the row a second time and writes every
+// element **above** the threshold bin straight to the output in that same walk
+// (its `guaranteed` half), staging only the threshold bin's members.  The split
+// instead materializes `num_chunks * topk` candidates and merges them, and at
+// `k = 2048, V = 66551` the elements above the threshold bin are already almost
+// the whole answer -- which is why the sweep over `DEEP_SELECT_F32_CHUNKS`
+// (2..32, ledger §12.16.6) moves the split by 46% and never reaches this.
+//
+// **Not `constexpr`-gated, and it does not need to be**: the arena is 32 KB and
+// every family this repository builds has at least 64 KB per AP
+// (`csrc/structs.h`), so the budget half of `f32_coarse12_applies` would be
+// satisfied by all three.  The one question is whether the machine in front of
+// the call is one this was measured on, which is the same `sm_count` test the
+// coarse12 tuning half uses and for the same reason.
+inline constexpr uint32_t kF32ChunksMaxBatches = 2;
+inline constexpr uint32_t kF32ChunksMinVocab = 2048;
+
+// `DEEP_SELECT_F32_CHUNKS_ROUTE`: `1` forces this arm on, `0` denies it, unset
+// takes the band.  Same shape and same reason as `DEEP_SELECT_F32_COARSE12` --
+// the band is a measured step and re-siting it means measuring the arm on the
+// batches it declines.  It replaces the band and nothing else.
+inline int f32_chunks_route_override() {
+    static const int v = [] {
+        const char *s = std::getenv("DEEP_SELECT_F32_CHUNKS_ROUTE");
+        if (s == nullptr || s[0] == '\0') return -1;
+        return std::atoi(s) != 0 ? 1 : 0;
+    }();
+    return v;
+}
+
+inline bool f32_chunks_applies(const RowParams &params, uint32_t batches) {
+    // ── the provenance half: where the b1/b2 ladder was measured ──
+    if (params.sm_count != kF32Coarse12MeasuredSmCount) return false;
+    if (params.topk > (uint32_t)rk::dgchunks::kMaxTopK) return false;
+    // The original's own width bound, as on the coarse12 arm: `2048`, not
+    // `2049`, because the facade already rejects a stride that is not a
+    // multiple of 256 floats.
+    if (params.vocab_size < kF32ChunksMinVocab) return false;
+    // ── the measured band ──
+    if (f32_chunks_route_override() >= 0) return f32_chunks_route_override() != 0;
+    if (batches == 0 || batches > kF32ChunksMaxBatches) return false;
+    return true;
+}
 }  // namespace
 
 // `topk` and `vocab_size` are parameters here, not read off `params`, because
@@ -1488,6 +1554,49 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     // already does for the split.  Writing them straight into `output_index`
     // would be wrong for int64 (`int32_t*` arithmetic over an int64 buffer), so
     // the scratch is not an optimization here, it is what makes the arm legal.
+    // ── the `b <= 2` arm: deep_gemm's chunks kernel ────────────────────────
+    // Same handoff as the coarse12 arm below it -- answer in row columns, staged
+    // through the scratch, contract half reads the per-row `-1` -- because it is
+    // the same class of kernel: one CTA per row, walking the row itself.  Tested
+    // *before* coarse12 so the two cannot both claim a cell; the batch bands are
+    // disjoint by construction (`<= 2` here, `>= 16` or a 114688 product there),
+    // but the order makes that a fact about the code rather than about two
+    // constants that have to keep agreeing.
+    if (value_dtype == 0 && detail::f32_chunks_applies(params, n)) {
+        int32_t *const staging = params.coarse12_cols;
+        if (staging != nullptr) {
+            const cudaError_t rc = rk::dgchunks::launch_topk_chunks(
+                (const float *)params.input, params.end_ptr, staging,
+                params.scan_flags, (int)n, (int)params.topk,
+                (int64_t)(params.stride_input_batch / sizeof(float)),
+                (int)params.vocab_size, cuda_stream);
+            if (rc == cudaSuccess) {
+                RowParams merged = params;
+                merged.preselected = staging;
+                merged.nan_flags = params.scan_flags;
+                if (index_dtype == 0) {
+                    detail::launch_typed_radix<float, int32_t>(
+                        merged, n, cuda_stream, sorted_index, sorted_value, rv,
+                        block, /*preselected=*/true);
+                } else {
+                    detail::launch_typed_radix<float, int64_t>(
+                        merged, n, cuda_stream, sorted_index, sorted_value, rv,
+                        block, /*preselected=*/true);
+                }
+                return;
+            }
+        }
+        if (index_dtype == 0) {
+            detail::launch_typed_radix<float, int32_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
+                /*preselected=*/false);
+        } else {
+            detail::launch_typed_radix<float, int64_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
+                /*preselected=*/false);
+        }
+        return;
+    }
     if (value_dtype == 0 && detail::f32_coarse12_applies(params, n)) {
         int32_t *const staging = params.coarse12_cols;
         if (staging != nullptr) {
@@ -1864,15 +1973,18 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // `f32_coarse12_applies`), so the class is the right place to draw the line.
     const bool needs_scan_table =
         check_nan && (bf16_split || f32_split ||
-                      (value_dtype == 0 && detail::f32_coarse12_applies(p, (uint32_t)batches)));
+                      (value_dtype == 0 && (detail::f32_coarse12_applies(p, (uint32_t)batches) ||
+                                            detail::f32_chunks_applies(p, (uint32_t)batches))));
     // The coarse12 answer buffer, allocated by the same rule: a call the route
     // can reach gets one, so `topk_launch` can stage the columns it ranks
     // whatever the caller's index width is.  Allocated up front rather than
     // inside the dispatch because the dispatch is the kernel layer and this is
     // a host allocation, and because a failure here has to fall back to the row
-    // path rather than fault.
+    // path rather than fault.  The `b <= 2` chunks arm shares it -- same kind of
+    // answer (row columns), same contract half, and the two gates are disjoint.
     const bool needs_coarse12_cols =
-        value_dtype == 0 && detail::f32_coarse12_applies(p, (uint32_t)batches);
+        value_dtype == 0 && (detail::f32_coarse12_applies(p, (uint32_t)batches) ||
+                             detail::f32_chunks_applies(p, (uint32_t)batches));
     if (needs_coarse12_cols) {
         const size_t need_cols = (size_t)batches * (size_t)p.topk;
         if (need_cols > scratch.coarse12_cols_count) {
