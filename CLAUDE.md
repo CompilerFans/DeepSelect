@@ -1054,6 +1054,32 @@ Writes `perf_data/<device>/<YYYYmmdd_HHMMSS>/` — following mcDeepGEMM's
 a `baseline` symlink under `perf_data/<device>/` and compares against it with
 `tools/compare_snapshots.py`.
 
+**Two comparators, and they answer different questions.** `compare_snapshots.py`
+compares two *recorded* sessions. A recorded session is a session, so two
+snapshots taken hours apart differ by whatever the box was doing in between —
+and a per-cell tolerance cannot separate that drift from the change. The tell is
+the control backend: on 2026-09-18 the 09-15 baseline vs. the 09-16 snapshot
+moved `torch` by a median **+1.2%**, regressing 26 cells and improving **none**,
+against a `maca_c` median of +0.53%. `torch` is a bare `torch.topk` the change
+cannot touch, so one-directional movement there is the session. That snapshot's
+`REGRESSED` verdict is that artifact, not a regression.
+
+`tools/ab_snapshot.py` removes the session instead of correcting for it:
+
+```bash
+tools/ab_snapshot.py --arm old=/path/to/checkout --arm new=/path/to/checkout \
+                     --snapshot perf_data/MetaX_C500/<run> --rounds 3
+```
+
+Both artifacts run **in one session, alternating**, one process per (arm, round),
+so clock and thermals land on both arms; the child asserts which package it
+loaded and prints the md5 of the `.so` it resolved, so an arm cannot silently
+measure the other's binary. It also records **which route served each cell**
+(`c12` / `split` / `row`, by kernel name) — two arms can agree on every clock and
+still have made different decisions. Reach for it whenever the question is "did
+this change help", and for `compare_snapshots.py` when it is "is the tree still
+where it was".
+
 **`<device>` is the device's own name, not an arch family** (`MetaX C500` ->
 `MetaX_C500`). The directory has to answer *which board was measured on* —
 `MetaX C600` and `MetaX C600-U` are both xcore1600 but have different clocks, a

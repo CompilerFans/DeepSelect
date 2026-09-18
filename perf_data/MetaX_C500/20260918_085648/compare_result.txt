@@ -1,0 +1,80 @@
+# compare: 20260918_085648 vs baseline 20260915_003809
+# base      perf_data/MetaX_C500/baseline  (95 cells)
+# candidate perf_data/MetaX_C500/20260918_085648  (107 cells)
+# matched   95   only-in-candidate 12   only-in-base 0   tolerance ±3.0%
+
+# cells the candidate added (cannot be compared):
+#   + deep_gem lightn float32  b1-v107520-k2048
+#   + deep_gem lightn float32  b1-v131072-k2048
+#   + deep_gem lightn float32  b1-v66551-k2048
+#   + deep_gem lightn float32  b132-v107520-k2048
+#   + deep_gem lightn float32  b132-v131072-k2048
+#   + deep_gem lightn float32  b132-v66551-k2048
+#   + deep_gem lightn float32  b16-v66551-k2048
+#   + deep_gem lightn float32  b256-v107520-k2048
+#   + deep_gem lightn float32  b256-v131072-k2048
+#   + deep_gem lightn float32  b4096-v107520-k2048
+#   + deep_gem lightn float32  b4096-v131072-k2048
+#   + deep_gem lightn float32  b512-v66551-k2048
+
+=== maca_c ===
+    13 regressed / 10 improved / 72 noise   (0 not comparable)
+    total 147090.0 -> 144984.5 us (-1.43%)
+    improved  official sample float32  b512-v129280-k512      772.6 ->      503.3 us    -34.9%
+    improved  official sample float32  b768-v129280-k512     1100.2 ->      745.8 us    -32.2%
+    improved  official sample float32  b256-v129280-k512      424.0 ->      288.1 us    -32.1%
+    improved  official sample float32  b4096-v129280-k512     6192.7 ->     4255.3 us    -31.3%
+    improved  official lightn bfloat16 b256-v256-k1024        6.5 ->        5.1 us    -21.2%
+    improved  official lightn bfloat16 b256-v1024-k1024        6.2 ->        5.2 us    -16.9%
+    regressed official lightn bfloat16 b512-v1024-k512       40.4 ->       46.1 us    +14.2%
+    improved  official lightn bfloat16 b512-v1024-k1024        7.7 ->        6.8 us    -11.7%
+    regressed official lightn bfloat16 b768-v1024-k512       52.5 ->       58.2 us    +10.9%
+    regressed official lightn bfloat16 b512-v4096-k512       51.6 ->       57.2 us    +10.9%
+    improved  official lightn bfloat16 b512-v256-k512         7.7 ->        7.0 us     -9.6%
+    improved  official lightn bfloat16 b256-v256-k512         6.2 ->        5.7 us     -8.6%
+    regressed official lightn bfloat16 b256-v4096-k1024       41.1 ->       44.5 us     +8.3%
+    regressed official lightn bfloat16 b512-v4096-k1024       56.8 ->       61.4 us     +8.2%
+    regressed official lightn bfloat16 b768-v4096-k512       69.4 ->       74.9 us     +7.9%
+    regressed official sample float32  b6-v129280-k512       93.3 ->      100.5 us     +7.6%
+    regressed official lightn bfloat16 b256-v16384-k1024       67.7 ->       72.5 us     +7.0%
+    regressed official lightn bfloat16 b768-v4096-k1024       73.5 ->       78.3 us     +6.5%
+    regressed official lightn bfloat16 b512-v16384-k512       95.2 ->      100.6 us     +5.7%
+    regressed official lightn bfloat16 b512-v16384-k1024      100.7 ->      106.2 us     +5.4%
+    regressed official lightn bfloat16 b768-v16384-k512      133.3 ->      138.4 us     +3.8%
+    improved  official lightn bfloat16 b6-v1024-k512         16.5 ->       15.9 us     -3.6%
+    regressed official lightn bfloat16 b6-v4096-k1024        18.6 ->       19.1 us     +3.2%
+
+=== torch ===
+    26 regressed / 0 improved / 59 noise   (10 not comparable)
+    total 653644.2 -> 656058.2 us (+0.37%)
+    regressed official lightn bfloat16 b6-v65536-k1024      149.5 ->      179.8 us    +20.2%
+    regressed official lightn bfloat16 b6-v131072-k1024      193.3 ->      226.0 us    +16.9%
+    regressed official sample float32  b6-v129280-k512      307.9 ->      356.2 us    +15.7%
+    regressed official lightn bfloat16 b256-v4096-k1024      184.5 ->      211.8 us    +14.8%
+    regressed official lightn bfloat16 b512-v4096-k512      229.7 ->      255.8 us    +11.4%
+    regressed official lightn bfloat16 b6-v262144-k1024      240.6 ->      264.3 us     +9.8%
+    regressed official lightn bfloat16 b512-v4096-k1024      233.5 ->      256.3 us     +9.8%
+    regressed official lightn bfloat16 b768-v4096-k1024      285.1 ->      311.5 us     +9.3%
+    regressed official lightn bfloat16 b256-v16384-k1024      295.9 ->      321.4 us     +8.6%
+    regressed official lightn bfloat16 b256-v1024-k1024       51.8 ->       56.0 us     +8.0%
+    regressed official lightn bfloat16 b6-v524288-k1024      278.3 ->      299.1 us     +7.5%
+    regressed official lightn bfloat16 b768-v4096-k512      288.9 ->      310.1 us     +7.3%
+    regressed official lightn bfloat16 b4096-v1024-k512      357.2 ->      382.8 us     +7.2%
+    regressed official lightn bfloat16 b4096-v1024-k1024      358.8 ->      384.0 us     +7.0%
+    regressed official lightn bfloat16 b6-v1048576-k1024      351.0 ->      373.7 us     +6.5%
+    regressed official lightn bfloat16 b512-v16384-k1024      442.8 ->      468.5 us     +5.8%
+    regressed official lightn bfloat16 b512-v16384-k512      439.8 ->      464.8 us     +5.7%
+    regressed official lightn bfloat16 b512-v1024-k512       87.5 ->       91.8 us     +4.9%
+    regressed official lightn bfloat16 b768-v16384-k1024      651.0 ->      676.9 us     +4.0%
+    regressed official lightn bfloat16 b4096-v4096-k1024      685.8 ->      711.3 us     +3.7%
+    regressed official lightn bfloat16 b768-v1024-k1024      113.3 ->      117.4 us     +3.7%
+    regressed official lightn bfloat16 b512-v1024-k1024       83.4 ->       86.5 us     +3.7%
+    regressed official lightn bfloat16 b4096-v4096-k512      681.1 ->      706.0 us     +3.6%
+    regressed official lightn bfloat16 b256-v65536-k1024      696.9 ->      721.2 us     +3.5%
+    regressed official lightn bfloat16 b768-v16384-k512      660.1 ->      682.6 us     +3.4%
+    regressed official sample float32  b256-v129280-k512     1539.4 ->     1586.1 us     +3.0%
+
+=== deep_gemm ===
+    no comparable cells (95 skipped: official lightn bfloat16 b256-v1024-k1024 (not timed: unsupported); official lightn bfloat16 b256-v1024-k512 (not timed: unsupported); official lightn bfloat16 b256-v1048576-k1024 (not timed: unsupported) ...)
+
+# VERDICT: REGRESSED (maca_c beyond ±3.0% or a status change)

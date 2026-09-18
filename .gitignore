@@ -14,6 +14,12 @@ compile_commands.json
 # cites the binary md5 they came from.
 /results/
 
+# `perf_data/<device>/baseline` is a symlink `run_bench.sh --set-baseline`
+# rewrites in place.  It points at one of the snapshot directories beside it,
+# which *are* committed -- the pointer is machine-local state, and tracking it
+# would dirty the tree on every re-baseline.
+perf_data/*/baseline
+
 # `ref/`'s drivers are built from the sources next to them (`ref/build_all.sh`);
 # committing the binaries would let the tree disagree with its own README.
 ref/*/main
