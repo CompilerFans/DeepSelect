@@ -1126,6 +1126,25 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // 2.0-2.3x faster than the row kernel (ledger §12).  The three measured
 // differences are 12 coarse bits against 8, 640 threads against 512, and one
 // 16 KB arena against 14 KB plus a ping-pong refine buffer.
+// `DEEP_SELECT_F32_COARSE12`: `1` forces the route onto every shape that is
+// otherwise *legal* for it, `0` denies it, unset takes the ladder.  In the same
+// shape as `DEEP_SELECT_F32_CHUNKS` below, and for the same reason: the ladder
+// is a set of measured crossings, and re-siting one means measuring the route on
+// the shapes the current floor declines -- which is otherwise a source edit and a
+// three-artifact rebuild per probe.  It replaces the floor and **nothing else**:
+// the arena budget, the `topk` bound and the width bound are still enforced, so
+// a forced route is a legal route.  It does not change any default, and it
+// cannot reach a family the ladder was not measured on -- the `sm_count` test
+// above it runs first.
+inline int f32_coarse12_override() {
+    static const int v = [] {
+        const char *s = std::getenv("DEEP_SELECT_F32_COARSE12");
+        if (s == nullptr || s[0] == '\0') return -1;
+        return std::atoi(s) != 0 ? 1 : 0;
+    }();
+    return v;
+}
+
 inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
     // ── the budget half: this family's compile-time budget, and the request ──
     // `kSmemBytes` is the route's whole request (histogram over candidates);
@@ -1157,6 +1176,11 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         // no other `V` test, so without this line a 1024-wide row would route,
         // which is below every width anyone has measured on either arm.
         if (params.vocab_size < kF32Coarse12MinVocab) return false;
+        // The two arms below are the only part of this predicate that is a
+        // *measured floor* rather than a bound -- everything above is a limit
+        // the route would be wrong or impossible outside of.  So this is where
+        // the A/B knob goes, and it is the whole of what it replaces.
+        if (f32_coarse12_override() >= 0) return f32_coarse12_override() != 0;
         // Route on the shape deep_gemm itself routes on
         // (`select_topk_policy`), with the floor taken from the measured
         // crossing on this device.  The narrow-width arm is why there are two
