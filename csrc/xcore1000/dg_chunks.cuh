@@ -312,16 +312,29 @@ constexpr size_t chunks_workspace_bytes_for() {
     return sizeof(TopKChunksWorkspace<ChunkCount>);
 }
 
-// The dispatcher's sizing entry: the same `select_chunk_count` the launch uses,
-// so the allocation and the launch cannot disagree about which instantiation is
-// in play.  `sm_count` is the device's, as everywhere else in this file.
+// The dispatcher's sizing entry: one `TopKChunksWorkspace<NChunks>` per row,
+// for whichever `NChunks` `select_chunk_count` resolves the shape to.  The
+// launch is given the same `select_chunk_count`, so the allocation and the grid
+// cannot disagree about which instantiation is in play.
+//
+// **`batches` multiplies, and it is not decoration.**  The first version of
+// this returned `sizeof(TopKChunksWorkspace<NChunks>)` alone -- one row's worth
+// -- while the kernels index `workspaces[row]`.  At the band this arm shipped
+// with (`batches <= 2`) that is a two-row overflow of a one-row buffer, which
+// is why it took a batch the band excludes to see it: `topk_chunks_init` zeroes
+// `arrival`/`declined` for row 1 just past the end of the arena, and whether
+// that is fatal depends on what the allocator put there and on how many calls
+// have run since.  deep_gemm's own sizing has the factor
+// (`n_rows * sizeof(...)`); this is the port's copy of it.
+//
+// `sm_count` is the device's, as everywhere else in this file.
 inline size_t chunks_workspace_bytes(uint32_t batches, uint32_t vocab_size,
                                      uint32_t sm_count) {
     switch (select_chunk_count((int64_t)batches, (int64_t)vocab_size, (int)sm_count)) {
-        case 3: return chunks_workspace_bytes_for<3>();
-        case 4: return chunks_workspace_bytes_for<4>();
-        case 5: return chunks_workspace_bytes_for<5>();
-        case 6: return chunks_workspace_bytes_for<6>();
+        case 3: return (size_t)batches * chunks_workspace_bytes_for<3>();
+        case 4: return (size_t)batches * chunks_workspace_bytes_for<4>();
+        case 5: return (size_t)batches * chunks_workspace_bytes_for<5>();
+        case 6: return (size_t)batches * chunks_workspace_bytes_for<6>();
         default: return 0;
     }
 }
