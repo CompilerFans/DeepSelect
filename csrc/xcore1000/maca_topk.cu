@@ -86,6 +86,10 @@ struct RowParams {
     // route can reach; null otherwise, which the route reads as "not staged"
     // and answers with the row path.
     int32_t *coarse12_cols;
+    // The chunks route's per-row workspaces, `n_rows * sizeof(TopKChunksWorkspace<NChunks>)`
+    // bytes as `void*` so `structs.h` does not have to see the layout.  Null
+    // means the allocation failed and the route answers with the row path.
+    void *chunks_workspace;
     uint64_t stride_input_batch;
     uint64_t stride_output_value_batch;
     uint64_t stride_output_index_batch;
@@ -1567,9 +1571,10 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
         if (staging != nullptr) {
             const cudaError_t rc = rk::dgchunks::launch_topk_chunks(
                 (const float *)params.input, params.end_ptr, staging,
-                params.scan_flags, (int)n, (int)params.topk,
+                params.scan_flags, params.chunks_workspace, (int)n,
+                (int)params.topk,
                 (int64_t)(params.stride_input_batch / sizeof(float)),
-                (int)params.vocab_size, cuda_stream);
+                (int)params.vocab_size, (int)params.sm_count, cuda_stream);
             if (rc == cudaSuccess) {
                 RowParams merged = params;
                 merged.preselected = staging;
@@ -1785,6 +1790,14 @@ struct ChunkedScratch {
     // interleave.  Grown like the rest and never shrunk.
     int32_t *coarse12_cols = nullptr;
     size_t coarse12_cols_count = 0;
+    // The chunks route's per-row workspaces.  Separate from `coarse12_cols`
+    // because the two have different shapes and different lifetimes: this one
+    // is `n_rows * sizeof(TopKChunksWorkspace<NChunks>)` of opaque bytes, that
+    // one is `n_rows * topk` int32 columns of answer.  One byte buffer serves
+    // every `NChunks` instantiation -- the launch knows which one it is, and
+    // the layout is identical for all of them.
+    void *chunks_workspace = nullptr;
+    size_t chunks_workspace_bytes = 0;
 };
 
 ChunkedScratch &chunked_scratch() {
@@ -1997,6 +2010,24 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             scratch.coarse12_cols_count = need_cols;
         }
     }
+    // The chunks route's workspace, on the same rule: sized for the row count
+    // this call has, allocated once and grown, and its absence is a fallback to
+    // the row path rather than a fault.  The count itself comes from
+    // `select_chunk_count`, which needs the device's SM count -- read here
+    // rather than passed in, because this is the sizing half and the launch
+    // half has to agree with it exactly.
+    if (value_dtype == 0 && detail::f32_chunks_applies(p, (uint32_t)batches)) {
+        const size_t need_ws = rk::dgchunks::chunks_workspace_bytes(
+            (uint32_t)batches, p.vocab_size, p.sm_count);
+        if (need_ws > scratch.chunks_workspace_bytes) {
+            void *grown = nullptr;
+            DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need_ws));
+            if (scratch.chunks_workspace)
+                DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.chunks_workspace));
+            scratch.chunks_workspace = grown;
+            scratch.chunks_workspace_bytes = need_ws;
+        }
+    }
     if (bf16_split || f32_split) {
         const int f32_chunks =
             detail::f32_chunked_chunks((uint32_t)batches, p.topk,
@@ -2095,6 +2126,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
                                               stream));
     }
     if (needs_coarse12_cols) p.coarse12_cols = scratch.coarse12_cols;
+    if (value_dtype == 0 && detail::f32_chunks_applies(p, (uint32_t)batches))
+        p.chunks_workspace = scratch.chunks_workspace;
 
     // The cached branch hands out the scratch's pointers directly, so the guard
     // must not free them -- it owns only what this call allocated itself (the
