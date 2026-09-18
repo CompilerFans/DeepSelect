@@ -285,7 +285,26 @@ struct TopKChunksWorkspace {
     int boundary_take;
     int candidate_count;
     int arrival;
-    alignas(16) int candidate_indices[kCandidateCapacity];
+    // The row's window, resolved once by `topk_chunks_init` and read by both
+    // later kernels.  It is here rather than passed as an argument because the
+    // three kernels have to agree on it and only the first one has the table in
+    // hand -- and because the *refine* needs it to decide, per row, whether the
+    // row is one this kernel serves at all.
+    int row_length;
+    // Set by the coarse merge when the threshold bin is wider than the staging
+    // arena.  deep_gemm re-reads the row under a narrowing prefix in that case
+    // (its `rescanned` path); this port does not carry that path, so a row it
+    // cannot stage is **declined** -- the whole row goes back to the row path,
+    // which is a coverage statement and never a wrong answer.
+    int declined;
+    // Two halves, because the refine ping-pongs them: `[0]` receives the coarse
+    // stage's members (written by the coarse kernel's merge CTA, hence device
+    // memory rather than shared -- the chunks are separate CTAs) and the two
+    // alternate from there.  deep_gemm spells this as
+    // `extern __shared__ int staged_indices[][kCandidateCapacity]`, i.e. also
+    // two rows; sizing it as one is what made `write_buf[put]` run off the end
+    // of the workspace and into the next row's.
+    alignas(16) int candidate_indices[2][kCandidateCapacity];
 };
 
 template <int ChunkCount>
@@ -311,6 +330,14 @@ inline size_t chunks_workspace_bytes(uint32_t batches, uint32_t vocab_size,
 // deep_gemm's Wave-0/Wave-1 shape is kept even though this port has no
 // page-table half to resolve in Wave 1 -- the second warp's slot is simply
 // unused, and keeping the block shape means the arrival protocol below matches.
+//
+// The window is clamped into `[0, default_length]` and **stored**, because it
+// is the only place the three kernels can agree on it: `lengths` is a table
+// that says how much of each row is live (`end` in the public API), while
+// `default_length` is how wide the row is.  Reading the table as the *width*,
+// or the width as the length, is wrong for every call that has an `end` -- and
+// a row whose window is no longer than `topk` is not this kernel's to answer at
+// all (see `declined` below).
 template <int ChunkCount>
 __global__ void topk_chunks_init(TopKChunksWorkspace<ChunkCount> *workspaces,
                                  const int32_t *lengths, int rows,
@@ -320,8 +347,10 @@ __global__ void topk_chunks_init(TopKChunksWorkspace<ChunkCount> *workspaces,
     if (row >= rows) return;
     if (threadIdx.x == 0) {
         const int32_t raw = lengths == nullptr ? default_length : __ldg(lengths + row);
+        const int length = raw < 0 ? 0 : (raw > default_length ? default_length : raw);
+        workspaces[row].row_length = length;
         workspaces[row].arrival = 0;
-        (void)raw;
+        workspaces[row].declined = 0;
     }
 }
 
@@ -337,7 +366,33 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     const int row = blockIdx.y;
     const int tid = threadIdx.x;
     TopKChunksWorkspace<ChunkCount> &workspace = workspaces[row];
-    const int length = default_length;
+    // The row's *window*, resolved once by `topk_chunks_init`.  Not
+    // `default_length` (the tensor's width, which is an upper bound on the
+    // window and equal to it only when the caller passed no `end`), and not
+    // `stride` (a property of the tensor, larger than either for a column
+    // slice).  Both substitutions read correctly on a full-width, no-`end`
+    // tensor, which is why the difference is invisible until it is not.
+    const int length = workspace.row_length;
+    // A row this kernel does not serve contributes nothing: every member of it
+    // writes the same per-chunk coarse histogram as an empty one, and the merge
+    // below declines the whole row before it computes anything from it.  The
+    // early exit is what keeps a window shorter than a chunk from being read
+    // past, and it has to be here rather than in the merge because the merge
+    // only runs on the last chunk to arrive.
+    if (length <= topk) {
+        if (tid < kCoarseBins) workspace.coarse[chunk][tid] = 0;
+        __threadfence();
+        __syncthreads();
+        __shared__ int trivial_last;
+        if (tid == 0) trivial_last = atomicAdd(&workspace.arrival, 1) == ChunkCount - 1;
+        __syncthreads();
+        if (!trivial_last) return;
+        if (tid == 0) {
+            workspace.declined = 1;
+            workspace.arrival = 0;
+        }
+        return;
+    }
 
     __shared__ int histogram[kCoarseBins + kHistogramPadding];
     for (int bin = tid; bin < kCoarseBins; bin += kThreads) histogram[bin] = 0;
@@ -430,6 +485,15 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
         workspace.guaranteed_count = guaranteed_base;
         workspace.boundary_take = topk - guaranteed_base;
         workspace.candidate_count = boundary_base;
+        // A threshold bin wider than the staging arena is a row this port does
+        // not serve: deep_gemm re-reads the row under a narrowing prefix in
+        // that case (its `rescanned` path), and this port does not carry that
+        // path, so the row is handed back whole.  Declining is a *coverage*
+        // decision -- `launch_topk_chunks`' caller turns it into the per-row
+        // `-1` that sends the row down the row path -- and it must be taken
+        // here, before the refine walks anything, because a truncated arena
+        // would otherwise answer for an arbitrary subset of the bin.
+        workspace.declined = boundary_base > kCandidateCapacity;
         workspace.arrival = 0;
     }
     (void)total;
@@ -448,18 +512,31 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_compact_refine(
     const int row = blockIdx.y;
     const int tid = threadIdx.x;
     TopKChunksWorkspace<ChunkCount> &workspace = workspaces[row];
-    const int length = default_length;
+    const int length = workspace.row_length;
     const int chunk_begin = (int)((int64_t)length * chunk / ChunkCount);
     const int chunk_end = (int)((int64_t)length * (chunk + 1) / ChunkCount);
     const float *const row_input = scores + (int64_t)row * stride;
     int32_t *const row_output = out + (int64_t)row * topk;
 
+    // A row the coarse stage declined -- a window no longer than `topk`, or a
+    // threshold bin wider than the arena -- is answered by the row path, so
+    // this kernel writes nothing for it but the per-row `-1` that routes it
+    // there.  Chunk 0 owns that write so the row is touched once; the other
+    // chunks return without reading the row at all, which is also what keeps a
+    // window shorter than a chunk from being read past.
+    if (workspace.declined) {
+        if (chunk == 0) {
+            for (int i = tid; i < topk; i += kThreads) row_output[i] = -1;
+        }
+        return;
+    }
+
     // The arena is the workspace's own `candidate_indices`, aliased as two
     // halves for the ping-pong below.  It is *device* memory rather than shared
     // here because the chunks are separate CTAs: a shared buffer would not be
     // visible to the CTA that does the merge.
-    int *const staging_a = workspace.candidate_indices;
-    int *const staging_b = workspace.candidate_indices + kCandidateCapacity;
+    int *const staging_a = workspace.candidate_indices[0];
+    int *const staging_b = workspace.candidate_indices[1];
     int *read_buf = staging_a;
     int *write_buf = staging_b;
 
@@ -507,7 +584,10 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_compact_refine(
             const int local_pos = atomicAdd(&boundary_counter, 1);
             const int global_pos = boundary_base + local_pos;
             if (global_pos < kCandidateCapacity) {
-                workspace.candidate_indices[global_pos] = column;
+                // Into the *first* arena row: the refine below starts with
+                // `read_buf == staging_a`, exactly as the original does with
+                // `staged_indices[0]`.
+                staging_a[global_pos] = column;
             }
         }
     };
@@ -601,8 +681,7 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_compact_refine(
             if (put < kCandidateCapacity) {
                 write_buf[put] = column;
                 atomicAdd(&histogram[(key >> 16) & 0xffu], 1);
-            }
-        }
+            }        }
     }
     __syncthreads();
     { int *const t = read_buf; read_buf = write_buf; write_buf = t; }

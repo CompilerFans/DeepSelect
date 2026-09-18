@@ -3055,3 +3055,94 @@ tie-tolerant 全过（`b >= 3` 走旧路径作控制）。路由判据是 kernel
    不是 `DEEP_SELECT_F32_CHUNKS_ROUTE=0`（**路由**的开关），所以两条臂
    跑的是同一条路径。**比值恒等于 1.000x 是「两条臂其实是一条」的信号，
    不是「没有差别」的信号。**
+
+#### 12.17.7 上面那版的 chunks arm 是**错的**，而门禁看不见（2026-09-18）
+
+§12.17.5 的性能数字是实测的，但**那个 kernel 有三处正确性缺陷**，而且
+`--sample 200` 的门禁只抓到其中一处的尾巴（`batch_size=2, vocab_size=225467,
+topk=231, seed=9` 报 `index range` 错 96 个）。根因是跑 harness 时才暴露的：
+**官方抽样表里 b<=2 且 V>=2048 的 fp32 格，全 322 格里只有那一格**，
+其余 `b <= 2` 的格子要么 `V < 2048`（arm 的门槛外），要么 bf16。
+
+**缺陷一：staging arena 少了一行。** deep_gemm 写的是
+`extern __shared__ int staged_indices[][kCandidateCapacity]` —— **两行**，
+refine 的 ping-pong 在它们之间来回。这个 port 把它写成了
+`int candidate_indices[kCandidateCapacity]` 一行，于是
+`write_buf = candidate_indices + kCandidateCapacity` 每轮越界 4096 个 int，
+**正好落进下一行的 `coarse[]`**。症状不是崩溃，是答案里出现重复索引 ——
+和 §12.17.2 记的那次字节错位同一个症状，所以容易被当成同一个 bug。
+
+**缺陷二：把 tensor 宽度当成了 row 窗口。** 三个 kernel 全都用
+`default_length`（= `vocab_size`）当长度，`lengths`（`end_ptr`）读出来后
+`(void)raw` 丢掉。任何带 `end` 的调用都在排**整行**，包括窗口外的列。
+`coarse12` 那条臂没这个问题（它把 `end_ptr` 传下去），所以只有 chunks 臂错。
+
+**缺陷三：两条 decline 路径都不存在。** deep_gemm 的
+`topk_chunks_init` 存 `row_length`、refine 在 `row_length <= top_k` 时
+直接返回；coarse merge 里 `candidate_count > kCandidateCapacity` 时它走
+`rescanned` 重扫。这个 port 两条都没有：`length <= topk` 会越界读，
+超宽 bin 会**拿截断的 arena 作答**（对 bin 的一个任意子集给答案）。
+
+**修法**：`TopKChunksWorkspace` 加 `row_length` / `declined` 两个字段。
+`init` 解析 `lengths[row]` 并 clamp 进 `[0, default_length]`；`coarse_hist`
+在 `length <= topk` 时置 `declined`，在 merge 里用
+`boundary_base > kCandidateCapacity` 置 `declined`；`refine` 对 declined 行
+只在 chunk 0 写 per-row `-1`，交给 row path —— 这是**覆盖性**声明，
+不是错误答案。
+
+**门禁收据**（`--sample 200 --seed 0 -rf`，device 2，`md5 1cbc997c`）：
+**312 pass / 0 check_fail / 10 skip**，10 条 skip 记录与 `b8e04a36` /
+`980584ed` 两次基线逐条相同（都是 `cudaMalloc` OOM）。
+
+**官方判据 harness**：`tests/cases/chunks_arm_official.py` 直接调
+`tests/test.py:check_result`，不复制断言。新 build **59/59 ALL PASS**
+（band × `si`/`rv`/`end` 组合、两条 decline、两个控制）；同一个 harness 打
+修复前的 build 是 **17 项 FAIL** —— 全部 `end=1` 的格、全部 wide-bin
+decline、`end<=topk`。**这就是"门禁看不见"的证据：同一个缺陷，官方抽样表
+只碰到一次，而定向 harness 一碰就穿。**
+
+**回归 A/B**（`tools/ab_snapshot.py`，5 轮交替，device 2，94 格）：
+`median 1.0013x [0.974, 1.043]`，按路由 c12 `1.0003` / row `1.0013` /
+split `1.0068`。固定开销没有回归。
+
+**band 的性能**（`kk.bench` 的 `"topk"` span，5 轮交替，device 2，
+`k = 2048`，`old` = 修复前、`new` = 修复后）：
+
+| b | V | old us | new us | new/old |
+|---|---|---|---|---|
+| 1 | 66551 | 67.81 | 68.97 | 1.0170 |
+| 1 | 107520 | 75.57 | 76.60 | 1.0136 |
+| 1 | 131072 | 78.18 | 79.05 | 1.0111 |
+| 2 | 66551 | 67.74 | 68.86 | 1.0166 |
+| 2 | 107520 | 75.90 | 76.83 | 1.0121 |
+| 2 | 131072 | 78.16 | 79.36 | 1.0154 |
+
+**+1.1% ~ +1.7%**，六格一致。这 1.5% 是 `declined` 判断和 `row_length`
+读取的价格 —— 也是**把两个错误答案换成一个正确答案**的价格。
+（注意 `old` 在这把尺上是 67.8 / 75.6 / 78.2，而 §12.17.5 记的是
+64.9 / 72.5 / 75.0：**同一版二进制、不同会话的绝对水平差 3–4 µs**。
+所以 §12.17.5 那张表的绝对值只能和它自己那一轮的 split/dg 列比，
+不能和别轮混用 —— 这六个比值才是这一轮唯一可比的量。）
+
+**对 deep_gemm 的 1.19–1.23x 固定差距没有动。** 上面这 1.5% 之后仍然在。
+
+#### 12.17.8 这一轮踩的四个**测量**坑（比 kernel 本身花的时间多）
+
+1. **`t.input[:, :V]` 是视图，不是切片。** `generate_testcase` 造的是
+   `torch.empty((b, ceil(V/al)*al))[:, :V]`，stride 是 66560 而不是 66551。
+   我自己的比对脚本里写 `torch.topk(t.input[:, :V])`，在 **V 上取 slice**
+   又造了一层 —— 而 `deep_select` 扫的是 stride 那一整行。
+   **`deep_select` 是对的，harness 是错的。**
+2. **`-1` 填充的参考答案不能直接 `sort`。** 参考答案里超出
+   `min(window, topk)` 的槽位是 `-1`，`sort` 会把它们排到最前面，
+   于是每一格都报 `diff = topk - 1`。要按 live prefix 掩码后再比。
+3. **探针没设 `torch.set_default_device("cuda")`。** `generate_testcase`
+   返回的是 **CPU tensor**（`torch.set_default_device` 在 `test.py` 的
+   `__main__` 里，不在 `lib.py` 里）。CPU tensor 传给 `deep_select` 是
+   未定义行为，表现为"只有 `generate_testcase` 造的数据必崩、`randn` 不崩"
+   —— 看着像数据相关的越界，其实和数值无关。
+4. **同一版二进制、不同会话差 3–4 µs。** 见上。**跨会话只能比比值。**
+
+前三条各自都足以伪造一个"kernel 有 bug"的结论。这就是为什么
+`tests/cases/chunks_arm_official.py` 调的是官方 `check_result` 而不是
+我手写的比较 —— 手写的那个已经错了两次。
