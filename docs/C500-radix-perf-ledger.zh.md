@@ -2846,3 +2846,37 @@ Coarse12 分支的宽度/`topk` 条件逐条对应。所以：
 **结论**：b ≥ 128 的 fp32 格子上，我们跑的就是 deep_gemm 的代码；
 b16 上我们的门比它的策略好 4.1 倍；b1 是唯一值得继续挖的格子，
 而它的根因（chunk 边界）已经在 §12.14 定位。
+
+#### 12.16.5 §12.16.2 的差异查到了：**不是测量问题，是 deep_gemm 自己的内核**
+
+逐 kernel 拆开（`kk.bench` 20 iter，device 2，`maca_policy=None`）：
+
+```
+b1   V=66551   init 3.6 + coarse_hist 20.1 + compact_refine  24.4  = 54.0 us
+b16  V=66551   init 3.6 + coarse_hist 40.7 + compact_refine 310.7  = 360.7 us
+```
+
+**`topk_chunks_compact_refine` 在 16 行时是 310.7 µs，1 行时是 24.4 µs —— 每行慢 12.7 倍。**
+CTAs 从 6（1 行 × 6 chunk）涨到 96（16 × 6），在 104 AP 的机器上仍是**一波**，
+所以这不是并行度。四次独立进程重复都是 360.4 / 360.6 / 360.9 / 362.2 µs；
+`flush_l2=False` 是 362.2，排除 L2 flush。**这是 deep_gemm 这个内核在 16 行上的
+真实行为，不是我的 harness。**
+
+排除掉的其它解释：
+
+- **不是两个 deep_gemm 树。** `site-packages/deep_gemm` 和
+  `/home/compiler_gfx/mcDeepGemm/deep_gemm` 是同一份（`sys.path` 两种顺序都解析到
+  `mcDeepGemm`，`0.5.0`），实测 53.9/360.6/1242.7/5748.8 对
+  53.9/360.9/1246.9/5745.2，逐格一致。
+- **不是 `maca_policy` 走错分支。** 显式 `maca_policy="chunks"` 得到同一组
+  kernel（`topk_chunks_*`）和同一时间（54.3 / 361.3 / 1116.9 / 22186.1）。
+- **不是 L2 flush。**
+
+**所以 snapshot 里 b16 那格记的 54.0 µs 无法复现，而 54.0 恰好等于 b1 的值
+（54.1）** —— 两个可能的来源，都没验证：snapshot 那一格被写成了 b1 的数，
+或者当时的构建不是现在这个。**在查清之前，snapshot 的 deep_gemm 列按 §12.16.2
+作废；要用 deep_gemm 的数，用本节这份逐 kernel 拆解。**
+
+**这一条对「要不要移植 chunks」有直接影响**：`topk_chunks_compact_refine` 在
+16 行上比 1 行慢 12.7 倍/行，所以「deep_gemm 的 chunks 内核比我们快」只在
+**b1** 成立，b16 起就反过来（360.9 对我们 86.7）。
