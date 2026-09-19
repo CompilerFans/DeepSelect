@@ -20,6 +20,20 @@ and nothing else.
 ./run_all.sh --dev N    # which device (default 0) — check mx-smi first
 ```
 
+**Two more directories are here and are *not* in that table.** `build_all.sh`
+builds every subdirectory with a `main.cu`, so they compile, but
+`crosscheck.py`'s `IMPLS` is the three above and `run_all.sh` prints nothing
+about them. They answer different questions:
+
+| dir             | what it is | why it is separate |
+|-----------------|------------|--------------------|
+| `c500_gate/`     | the dispatch gate, printed | It prints `ARCH_SMEM_PER_AP_BYTES` beside the device's own `cudaDevAttrMaxSharedMemoryPerBlockOptin` and evaluates `ref_c500_gate` over a shape sweep. It measures nothing — it is the place a threshold change is read against the constant it was compiled with. |
+| `coarse12_port/` | the *ported* coarse12 kernel, driven directly | `rk::dg12::launch_topk_coarse12` with no gate, no dispatch and no contract half, so the kernel itself can be timed against `deep_gemm/`'s original and its whole `top_k` range exercised. This is the only place the port runs without the facade around it. |
+
+Both are referenced from `maca_topk.cu`'s gate comments; neither is part of the
+three-way comparison, and a number from either is not comparable to the table
+below (different shapes, different work).
+
 ---
 
 ## 1. The table

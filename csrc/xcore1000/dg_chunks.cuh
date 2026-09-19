@@ -36,22 +36,29 @@
 //   * the `Transform` page-table half, which needs the `page_table` /
 //     `cu_seqlens_row` / `q_positions` plumbing this repository does not
 //     synthesize (the same subtraction `ref/` and `dg_coarse12.cuh` make);
-//   * the **multi-CTA chunking**.  deep_gemm splits a row across
-//     `NChunks in [3, 6]` CTAs with a per-row workspace, an `arrival` counter
-//     and a cross-CTA merge.  This port is one CTA per row, so it needs no
-//     workspace, no arrival protocol and no per-row allocation -- and at
-//     `b <= 2` the chunking buys at most 6 CTAs on a 104-AP part, which is
-//     the one thing it cannot be buying.  The second pass over the row is
-//     unchanged either way: deep_gemm reads each chunk twice too, so the two
-//     have the same traffic.
+//   * the `rescanned` branch, where deep_gemm re-walks the row when the
+//     threshold bin is wider than `kCandidateCapacity`.  This port **declines**
+//     the row instead: the coarse merge sets `workspace.declined`, the refine
+//     leaves that row's output at `-1`, and the contract half re-ranks it on
+//     the row path.  That changes coverage, not correctness, and the branch it
+//     removes only fires on a bin wider than 4096, which `randn` at these
+//     widths does not produce (the same measurement `kF32OverflowChunkLen`
+//     rests on, `maca_topk.cu`).
 //
-// The `rescanned` branch is also dropped: deep_gemm re-walks the row when the
-// threshold bin is wider than `kCandidateCapacity`, and this port **returns
-// false** instead, which the caller turns into the per-row `-1` the contract
-// half already understands -- that row is then re-ranked by the row path.  It
-// changes coverage, not correctness, and the branch it removes only fires on a
-// bin wider than 4096, which `randn` at these widths does not produce (the
-// same measurement `kF32OverflowChunkLen` rests on, `maca_topk.cu`).
+// **The multi-CTA chunking was originally dropped here and has since been
+// restored.**  The paragraph that used to sit in this list said the port was
+// one CTA per row, "so it needs no workspace, no arrival protocol and no
+// per-row allocation -- and at `b <= 2` the chunking buys at most 6 CTAs on a
+// 104-AP part, which is the one thing it cannot be buying."  Every clause of
+// that is wrong about the shipped code: the three `topk_chunks_*` kernels
+// below are deep_gemm's, with `NChunks in [3, 6]` from `select_chunk_count`,
+// the per-row `TopKChunksWorkspace` arena, the `arrival` counter and the
+// cross-CTA merge -- see `chunks_workspace_bytes`.  The count was the wrong
+// thing to count: without chunking a row is **one** CTA on a 104-AP part, and
+// the one-CTA version measured slower than the split it was meant to replace
+// at every width (ledger §12.17).  The history is kept in the `chunked form`
+// note further down; this list is what the *shipped* code drops, and the only
+// thing on it is the `Transform` half and `rescanned`.
 
 #pragma once
 
@@ -703,8 +710,9 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_compact_refine(
 
     // The fine histograms are merged here, and `count` is the *staged* width --
     // capped at `kCandidateCapacity`, unlike `workspace.candidate_count` which
-    // is the true width.  A bin wider than the arena is declined by the caller
-    // (see `chunks_row_served`), so the two agree whenever this runs.
+    // is the true width.  The caller declines a bin wider than the arena
+    // (`workspace.declined`, set by the coarse merge), so the two agree
+    // whenever this runs.
     if (tid < kFineBins) {
         int sum = 0;
 #pragma unroll

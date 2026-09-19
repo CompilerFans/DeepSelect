@@ -52,7 +52,8 @@ namespace dg12 {
 // ── deep_gemm's `detail` constants, verbatim ───────────────────────────────
 //
 // `kMaxTopK` is 2048 in the original and the arena below is sized from
-// `kCoarse12SmemBytes`, so this port serves `topk <= 2048`.  That is also
+// `kSmemBytes` (the original's `kCoarse12SmemBytes`, renamed here), so this
+// port serves `topk <= 2048`.  That is also
 // where deep_gemm's own dispatch stops consulting coarse12 for `top_k`, so
 // the boundary is the original's rather than a new one.  Callers gate on it
 // (`f32_coarse12_applies`), and this header asserts it rather than trusting
@@ -164,10 +165,14 @@ __device__ __forceinline__ void warp_cumsum_histogram_256(int (&histogram)[kRadi
 // passes produce, exactly as in the original: the caller compares as
 // multisets, not elementwise.
 //
-// Returns false when the shape is outside what the arena can serve, in which
-// case nothing is written and the caller must take the row path.  deep_gemm
-// asserts instead (its dispatch never picks coarse12 there); returning makes
-// the bound checkable at the call site rather than a trap in the field.
+// **Always returns true, and every `return` below is that same `true`.**  The
+// original's out-of-arena case is handled by the caller rather than here:
+// `topk_coarse12_kernel` checks `length <= topk` (the padding contract) and
+// `topk <= kMaxTopK` before calling, and falls back to a `-1`-filled row if
+// the call declines -- a `served` variable that is constant today.  The
+// `bool` is kept so that the day the arena bound moves back inside this
+// function, the call site does not have to change.  deep_gemm asserts instead
+// (its dispatch never picks coarse12 there).
 __device__ __forceinline__ bool topk_coarse12_row(
     const float *__restrict__ input, int32_t *__restrict__ output,
     int length, int requested_topk, int32_t *__restrict__ nan_flag)
@@ -176,10 +181,14 @@ __device__ __forceinline__ bool topk_coarse12_row(
     const unsigned int u_length = static_cast<unsigned int>(length);
 
     // The arena does double duty: the first pass writes a 4096-wide coarse
-    // histogram into it, the second overwrites it with candidates.  The two
-    // never overlap in time, which is why one buffer is enough and why the
-    // coarse histogram is `kCoarseBins` words of a `kCandidateCapacity`-word
-    // region.
+    // histogram into it, the second overwrites it with candidates.  One buffer
+    // is enough because the **only** state live across that boundary is
+    // `histogram[]` -- the 256-bin fold and the 12-bit narrow both finish with
+    // `wide_histogram` before the first `candidate_indices` write, and nothing
+    // reads the arena again after it.  The overflow handler below re-walks the
+    // row with `candidate_indices` live, but it accumulates into `histogram[]`
+    // and never touches the arena, which is what keeps that true.  The coarse
+    // histogram is `kCoarseBins` words of a `kCandidateCapacity`-word region.
     extern __shared__ int shared_arena[];
     int *wide_histogram = shared_arena;
     int *candidate_indices = shared_arena;
@@ -510,6 +519,10 @@ __global__ __launch_bounds__(kThreads) void topk_coarse12_kernel(
         return;
     }
 
+    // Constant today -- `topk_coarse12_row` has no `return false` -- so the
+    // `-1` fill below is dead code kept as the seam for the day the arena bound
+    // moves back inside the row function.  Named rather than inlined so that
+    // seam stays visible.
     const bool served = topk_coarse12_row(row_input, row_out, length, topk, row_nan);
     if (!served) {
         for (int i = threadIdx.x; i < topk; i += kThreads) row_out[i] = -1;

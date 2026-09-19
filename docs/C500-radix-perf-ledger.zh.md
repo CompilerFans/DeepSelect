@@ -3666,3 +3666,158 @@ in `mcGraphExecDestroy`）；改动前它报 MATCH。
 `--set-baseline`）。它与 144454 是同一份代码（只差一段注释），
 144454 → 150115 的对比是 3 regressed / 1 improved / 103 noise、总量 −0.00%
 —— 同二进制、同 md5 家族、±3% 里漂的仍然是那 3–58 µs 的小格。
+
+## 12.20 十个审计 agent 扫出来的东西：路由安全、说谎的注释、死引用（2026-09-19，device 2）
+
+§12.19 修完之后，把 `csrc/xcore1000/` 和 `ref/` 按片分给十个 agent 重扫了一遍
+（chunks / coarse12 / radix-fp32 / radix-bf16 / dispatch / scratch / build /
+docs / crossfile，外加一个复核）。十条里有四条把范围外的"缺陷"报了回来，
+逐条读过源码后**驳掉**：`audit-chunks` 的 C1（NaN 契约在另外两条路由上也是
+断的）和 C2（两处调用点传错 `vocab_size`）、`audit-scratch` 的 F7（读的是
+`b986ff9` 之前的行）、`audit-build` 的 `develop.sh` glob 说法。
+下面七条是我自己读过代码确认过的，按危害排序，全部已修。
+
+### 12.20.1 路由安全（三条，都只影响可选的 A/B 开关或线程安全，不影响默认路径）
+
+**S1 — `DEEP_SELECT_NO_SCRATCH_CACHE=1` 会把锁丢掉。**
+`maca_topk.cu` 的 `ScratchGuard` 是按 `kCacheScratch ? &scratch.mu : nullptr`
+构造的，而那个 flag 选的是**分配策略**（借缓存 vs 每次 `cudaMalloc`），
+不是"要不要碰共享状态"：`coarse12_cols`、`chunks_workspace`、`scan_flags`、
+`retired` 四个字段在**两条分支上**都会被改，而且 `!kCacheScratch` 那条分支
+改得最多（它每次调用都 malloc + retire）。上一行注释写的却是"the scratch
+carries its own lock rather than assuming the caller serializes"。改成永远加锁；
+`ScratchGuard` 里的 `if (m)` 也一并去掉——它存在的唯一理由就是那个 `nullptr`。
+
+**S2 — scratch 的高水位上界写的是错的门。**
+注释说峰值由 `chunked_bf16_applies`（`batches <= 64`、`topk <= 1024`）
+封顶在 ~6.3 MB。那个门**管不着 fp32 split**：fp32 走 `chunked_f32_applies`
+（`batches <= 4096`、`vocab_size >= 32768`、`topk <= kF32MaxTopK`），
+两条分支共用同一个 `workspace` 字段。实测峰值在 perf grid 上是
+`b4096 V131072 k2048` = **160 MiB**（进程生命周期内一直持有），
+门自身的边界（`b4096 k4096` 配大 `V`）是 GB 级——只是那种 tensor 在本机
+放不下。另外 fp32 split **没有 `sm_count` 守卫**（见 §12.20.3），
+所以 1600 的镜像会走同一条分支。注释改成真实上界，并写明
+`DEEP_SELECT_NO_SCRATCH_CACHE=1` 是给内存预算不够的调用方留的出口。
+
+**S3 — `DEEP_SELECT_F32_CHUNKS_ROUTE=1` 绕过了 batch 上界。**
+`f32_chunks_applies` 里 override 那一行在 `batches > kF32ChunksMaxBatches`
+之前 `return`，所以 `=1` 能把这条臂强推到任意 batch 上——包括它自己的
+chunk 数规则从没推导过的 batch。coarse12 那条臂（`f32_coarse12_applies`）
+的顺序是对的：override 在 `batches == 0` 之后。把两行调换，
+让 override 只替换"量出来的那段带"，这也正是它自己注释里写的话。
+
+**这条的修法是"把已经写在注释里的不变式搬到代码里"，所以它必须证明自己
+没把开关弄死。** A/B（device 2，`b=4 V=66551 k=2048`，30 次中位数）：
+
+| `DEEP_SELECT_F32_CHUNKS_ROUTE` | 修前 | 修后 |
+|---|---|---|
+| unset（band：b=4 拒绝 chunks） | 225.28 µs | 224.00 µs |
+| `1` | **188.67 µs**（被强推到 chunks 臂） | 225.54 µs |
+| `0` | 224.51 µs | 226.56 µs |
+
+修后三行落在同一档，说明 `=1` 在带外不再改变路由。同一支二进制在**带内**
+（`b=1`）的对照：unset 186.62 / `1` 187.14 / `0` **224.51** µs——
+开关该动的地方照旧动，只是不再越界。
+
+### 12.20.2 与代码相反的注释（五条，其中三条是我在 §12.19 自己写下的）
+
+**S4 — `dg_coarse12.cuh` 的 arena 别名注释。**
+原文："The two never overlap in time, which is why one buffer is enough"。
+**不成立**：overflow 分支（`num_input[0] > kCandidateCapacity`）会把
+`candidate_indices` 写满 2048 个槽、然后整行重扫，此时 `candidate_indices`
+是活的，而它和 `wide_histogram` 是同一块内存——重扫往 `histogram[]` 里累加，
+不碰 arena，正确性因此守住了，但"从不重叠"这句话是假的。改成真实理由：
+跨越那条边界的活状态只有 `histogram[]`，且 arena 在第一次写候选之后再也没有读者。
+
+同一文件还有两处：`:167` 写"Returns false when the shape is outside what the
+arena can serve"，而 `topk_coarse12_row` 里是 5 个 `return true`、0 个
+`return false`（越界由调用方在 `length <= topk` 处兜）；`:513` 的 `served`
+是常量。两处都改成实情，并说明那个 `bool` 和 `-1` 填充是留给"arena 上界搬回
+函数里"那天的接缝。
+
+**S5 — `dg_chunks.cuh` 的文件头说它丢掉了多 CTA chunking。**
+`:39-46` 原文："This port is one CTA per row, so it needs no workspace, no
+arrival protocol and no per-row allocation -- and at `b <= 2` the chunking buys
+at most 6 CTAs on a 104-AP part, which is the one thing it cannot be buying."
+**每一句都和下面的代码相反**：三个 `topk_chunks_*` 核就是 deep_gemm 的，
+带 `NChunks in [3,6]`、per-row `TopKChunksWorkspace` arena、`arrival` 计数器和
+跨 CTA merge。而且那个"最多 6 个 CTA"数错了对象——不 chunk 的话一行只有
+**一个** CTA。这段是移植初版的历史，`§12.17` 已经记过它错在哪；
+`chunked form` 那一段还留着正确的历史。改成"这份列表是**已发布代码**丢掉的东西"，
+上面只列 `Transform` 半边和 `rescanned`。顺带修掉 `:707` 的悬空引用
+`chunks_row_served`（该符号树里不存在）。
+
+**S6 — 两处指向已删东西的引用。**
+`maca_topk.cu:1772` 的 "The epoch fields above describe the old policy"——
+那些字段在 `b986ff9` 里被我删掉了，句子现在自相矛盾（上面没有字段）。
+`dg_coarse12.cuh:55` 引用 `kCoarse12SmemBytes`——树里没有这个符号，
+常量叫 `kSmemBytes`（`kCoarse12SmemBytes` 是 deep_gemm 原版的名字）。
+
+### 12.20.3 构建与宏的说明和实际接线对不上（三条）
+
+**S7a — `ARCH_SM_COUNT` 没有任何行为消费者。**
+`structs.h:51` 说它"sizes the grids (`wave_filled_chunks`,
+`f32_chunk_work_target`)"，但这两个函数收的都是**运行期**的 `params.sm_count`
+（这是刻意的，`maca_topk.cu` 里 `f32_chunk_work_target` 上方有一段专门解释
+为什么不用宏）。`ARCH_SMEM_PER_AP_BYTES` 才是这张表里唯一有行为消费者的常量
+（`f32_coarse12_applies` 的 `if constexpr`）。注释按实情重写。
+
+**S7b — `maca_topk.cu:996` 的 `#ifdef KSMEM_BYTES` 断言在任何一次构建里都不会触发。**
+`KSMEM_BYTES` 默认未定义（`radix_core.cuh` 的 `#ifndef` 在 `__MACACC__` 下选
+16 KB），而 `setup.py` 的 `build_for_maca`、`CUCC_TARGETS` 和本仓任何脚本都
+没有传 `-DKSMEM_BYTES=`。所以它是给一个没人跑的构建留的陷阱，**发布的那次
+构建把断言整个编掉了**。留着（那天真有人传这个 flag，58 就不再是测量值，
+编译错好过一个错的界），但注释要说明它现在不设防。
+
+**S7c — 1600 那两处 `static_assert` 还在用未定义的宏。**
+`structs.h:164` 说这个断言"can come back with" `ARCH_SMEM_PER_AP_BYTES`，
+但 `csrc/xcore1600/v3/topk_select.cuh:143` 和 `v3_fp32/topk_select.cuh:582`
+上的 `static_assert` 仍然写着 `NATIVE_SHARED_MEMORY_PER_SM_BYTES`，
+而这个标识符树里没有定义——那棵树一旦回到 `SOURCES` 就编不过。
+改注释：改名是"重新加回这棵树"的一部分，不是读者可以假设已经做完的事。
+
+### 12.20.4 顺带：`ref/README.md` 漏掉了两个目录
+
+`ref/build_all.sh` 按"有 `main.cu`"构建**全部五个**子目录，`crosscheck.py`
+的 `IMPLS` 只有三个，`run_all.sh` 的表也只打三行。`c500_gate/`（打印门，
+不测性能）和 `coarse12_port/`（直接驱动移植后的 coarse12 核，无门无 dispatch
+无契约半边）因此既不在表里、也没有一句话说它们存在。补一张表说明这两个目录
+回答的是别的问题，并且它们的数字和下面那张表不可比。
+
+### 12.20.5 这一批的验证
+
+`CUCC_TARGETS=xcore1000 ./develop.sh`（**`develop.sh`，不是 `build.sh`**：
+`build.sh` 走 `bdist_wheel`，`.so` 只落在 `build/` 和 `dist/`，而 `run_bench.sh`
+的 freshness 检查看的是 `deep_select/*.so`，所以那一次门其实跑在旧二进制上——
+见下）编过，无错。`run_bench.sh` 七段：
+
+- `correctness` rc=1，判定 `OK`：4 crash + 20 skip 全是 OOM，`check_fail 0`。
+- `cases_chunks` **ALL PASS**（含 §12.19 的 12 个 NaN 格）。
+- `cases_graph` / `_cold` / `_grow` **ALL PASS**，grow probe 四个中间 shape
+  全 MATCH。
+- `official` / `official_fp32` 各 30/30 pass。
+
+**性能：`1 regressed / 1 improved / 105 noise`，总量 +0.06%**（maca_c，
+107 格）。唯一越界的格是 `b256-v256-k1024`（bf16、`V=256`、`k=1024`，
+kernel 时间 **5.8–6.0 µs**、wall ~40 µs）：baseline 5.811 → 5.990 µs。
+把最近四次运行的同一个格排开看，它自己的抖动是
+5.658 / 5.811 / 5.862 / 5.990 —— ±3% 的容差本来就是按 ">100 µs 的格" 定的
+（§12.18.6），在 6 µs 上它只是一把错的尺子。这个格走 bf16 的 row/radix 路径
+（`V=256` 远低于 `kChunkedMinVocab`，两条 split 都不进），**七处改动没有一处
+碰得到它**。
+
+**注意 `run_bench.sh` 的 freshness 检查是 mtime 比较，不是 md5。**
+第一次跑门时 `.so` 是 14:58 的，源码是 17:16 的，于是它打了警告——
+而 `build.sh` 恰好不会更新那个 `.so`（它在 `build/lib.../deep_select/` 和
+`dist/` 里）。改 `develop.sh` 之后警告消失，说明门跑的确实是当前源码。
+`build.sh` 和 `develop.sh` 的这个差异值得记住：门只看 in-place 的那一份。
+
+### 12.20.6 这一批没动的两件事
+
+- **`f32_coarse12_applies` / `f32_chunks_applies` 的 provenance 半边是
+  `sm_count`，而 `chunked_f32_applies` / `chunked_bf16_applies` 没有。**
+  这不是笔误，是缺口：§12.19 里我说过"C600U 不欠验证"，
+  **那句话在这条路由上站不住**。补注释说明缺口在哪（§12.20.3 的 S7a 里），
+  不动代码——加守卫会改变 C600U 的行为，而手上没有 C600U 可以量。
+- **`retired` 列表永不释放。** 它是 §12.19.2 的修复代价：被图记录过的
+  指针不能 free，所以只增不减。注释里已说明。

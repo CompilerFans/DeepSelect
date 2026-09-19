@@ -990,9 +990,20 @@ inline int f32_topk_chunk_cap(uint32_t topk, uint32_t vocab, uint32_t c_default,
 inline constexpr uint32_t kF32OverflowChunkLen = rk::kF32SmemInputSize * 58u;
 // The 58 was measured against the default arena, and `f32_chunks_large_batch`
 // applies this bound to *every* `topk` -- so a build that moves `kSMEM` would
-// carry the old ratio into a new arena without anything noticing.  The default
-// build has nothing to check against (58 *is* the measurement); this fires only
-// when `-DKSMEM_BYTES=` has actually moved the arena.
+// carry the old ratio into a new arena without anything noticing.
+//
+// **The guard below cannot fire in any build this tree has.**  `KSMEM_BYTES`
+// is undefined by default (`radix_core.cuh`'s `#ifndef KSMEM_BYTES` picks 16 KB
+// for `__MACACC__` and 48 KB otherwise), and no entry in `setup.py`'s
+// `build_for_maca`, no `CUCC_TARGETS` value and no script in this repository
+// passes `-DKSMEM_BYTES=`.  So it is a trap for a build nobody runs, and the
+// default build -- the one that ships -- has the assert compiled out.  It is
+// kept because the day someone does pass the flag is exactly the day the 58
+// stops being the measurement, and a silent wrong bound is worse than a
+// compile error.  Making it fire would take an `#else` branch asserting the
+// default `1757`, which is the same check written twice; the honest statement
+// is that the default is unguarded and `radix_core.cuh`'s `kSMEM` is the one
+// place to read what the arena is.
 #ifdef KSMEM_BYTES
 static_assert(rk::kF32SmemInputSize == 1757,
               "KSMEM_BYTES moved the arena, so kF32OverflowChunkLen's 58 is no "
@@ -1241,6 +1252,15 @@ inline constexpr uint32_t kF32ChunksMinVocab = 2048;
 // takes the band.  Same shape and same reason as `DEEP_SELECT_F32_COARSE12` --
 // the band is a measured step and re-siting it means measuring the arm on the
 // batches it declines.  It replaces the band and nothing else.
+//
+// **"And nothing else" is a property of where `f32_chunks_applies` calls it,
+// not of this function.**  Every bound above the band still applies: the AP
+// count the ladder was measured on, `kMaxTopK`, the width floor, and
+// `batches <= kF32ChunksMaxBatches`.  In particular the AP-count test comes
+// first, so this knob **cannot reach a C600U** -- a 32-AP image takes the row
+// path at every batch, whatever the variable is set to.  `DEEP_SELECT_F32_CHUNKS=n`
+// is the knob for a different chunk *count*; this one only decides whether the
+// arm is entered at all.
 inline int f32_chunks_route_override() {
     static const int v = [] {
         const char *s = std::getenv("DEEP_SELECT_F32_CHUNKS_ROUTE");
@@ -1251,16 +1271,30 @@ inline int f32_chunks_route_override() {
 }
 
 inline bool f32_chunks_applies(const RowParams &params, uint32_t batches) {
-    // ── the provenance half: where the b1/b2 ladder was measured ──
+    // ── the limits: outside these the route is wrong or impossible ──
     if (params.sm_count != kF32Coarse12MeasuredSmCount) return false;
     if (params.topk > (uint32_t)rk::dgchunks::kMaxTopK) return false;
     // The original's own width bound, as on the coarse12 arm: `2048`, not
     // `2049`, because the facade already rejects a stride that is not a
     // multiple of 256 floats.
     if (params.vocab_size < kF32ChunksMinVocab) return false;
-    // ── the measured band ──
-    if (f32_chunks_route_override() >= 0) return f32_chunks_route_override() != 0;
     if (batches == 0 || batches > kF32ChunksMaxBatches) return false;
+    // ── the measured band, and the A/B knob over it ──
+    // **The override replaces the band and only the band**, which is why it
+    // sits below the bounds rather than among them.  `batches <= 2` here is a
+    // *limit*, not the band: the chunks kernel is one CTA per row and its
+    // scratch sizing (`chunks_workspace_bytes`) is `batches *` one row's
+    // workspace, so a batch past this is a route that was never sized for.
+    // What the override moves is the step between "the row path" and "the
+    // chunks arm" at the batch the arm was measured on, and the coarse12 arm
+    // orders the same two pieces the same way (`f32_coarse12_applies` puts its
+    // `batches == 0` test above its `f32_coarse12_override`).
+    //
+    // **The AP-count test above is a limit for the same reason, and it is why
+    // the knob cannot reach a C600U**: `f32_chunks_route_override()` is read
+    // only from here, so `DEEP_SELECT_F32_CHUNKS_ROUTE=1` on a 32-AP image
+    // changes nothing.  See `structs.h`'s note on the family table.
+    if (f32_chunks_route_override() >= 0) return f32_chunks_route_override() != 0;
     return true;
 }
 }  // namespace
@@ -1754,13 +1788,31 @@ namespace dsf = deep_select::ffi;
 //     is `[vocab_size] * batches`, a pure function of that pair, so the pair
 //     *is* the content; see `lengths_table`.
 //
-// The high-water mark is bounded by the gate that admits the split
-// (`chunked_bf16_applies`: batches <= 64, topk <= 1024) -- ~6.3 MB of workspace
-// held for the life of the process, plus `batches * 4` bytes per distinct shape
-// for the row tables.  A bounded, one-time footprint in exchange for removing a
-// per-call host cost larger than the kernel it fronts.  Freeing instead of
-// holding gives most of the win back: free-then-malloc *should* be cheap, and
-// measured on this runtime it is not.
+// The high-water mark is **not** bounded by one gate, and the number below is
+// the one to check against a memory budget rather than the smallest one.
+// `chunked_bf16_applies` (`batches <= 64`, `topk in {512, 1024}`) does bound
+// the bf16 split at ~6.3 MB, but it does not govern the fp32 one: the fp32
+// split is admitted by `chunked_f32_applies` (`batches <= 4096`,
+// `vocab_size >= 32768`, `topk <= kF32MaxTopK`), which is a far wider gate, and
+// the two branches below share this one `workspace` field.  The fp32 split also
+// carries no `sm_count` test -- unlike `f32_coarse12_applies` and
+// `f32_chunks_applies`, whose provenance halves are `kF32Coarse12MeasuredSmCount`
+// -- so a C600U image takes this same branch with its own chunk count.
+//
+// The footprint is `batches * chunks * topk * 8` bytes for the candidates plus
+// `batches * topk * 4` for the merged answer.  On the perf grid that peaks at
+// `b4096 V131072 k2048` = **160 MiB** (held for the life of the process); at
+// the gate's own edge it is `b4096 k4096` with a large `V`, which is gigabytes
+// but also needs a tensor that does not fit on this box.  Plus `batches * 4`
+// bytes per distinct `(batches, vocab_size)` for the row tables, which at
+// `b4096` is 16 KB per shape visited.
+//
+// A bounded, one-time footprint in exchange for removing a per-call host cost
+// larger than the kernel it fronts -- 265 us of host floor in front of a 96 us
+// kernel.  Freeing instead of holding gives most of that back: free-then-malloc
+// *should* be cheap, and measured on this runtime it is not.  A caller that
+// cannot afford the peak has `DEEP_SELECT_NO_SCRATCH_CACHE=1`, which allocates
+// per call and keeps only `retired` alive.
 
 struct ChunkedScratch {
     std::mutex mu;
@@ -1769,10 +1821,10 @@ struct ChunkedScratch {
     // The row tables, one per distinct `(batches, vocab_size)` this process has
     // asked for, each holding `[vocab_size] * batches`.
     //
-    // **A table is never rewritten for a different key.**  The epoch fields
-    // above describe the old policy -- one buffer, refilled when the pair moved
-    // -- and that policy is correct only for a caller that runs one shape at a
-    // time.  A caller that has recorded the pointer (a CUDA graph) keeps
+    // **A table is never rewritten for a different key.**  The policy this
+    // replaced was one buffer plus an epoch, refilled whenever the pair moved
+    // -- correct only for a caller that runs one shape at a time.  A caller
+    // that has recorded the pointer (a CUDA graph) keeps
     // reading the address it captured, so rewriting that address with another
     // shape's lengths silently re-scopes the row the graph ranks: measured, a
     // `b132 V66551` capture replayed after a `b16 V131072` call ranked a
@@ -2018,13 +2070,22 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // contract of their own, so the scratch carries its own lock rather than
     // assuming the caller serializes.  Held across the launches, because the
     // buffers are not done being read when this function returns.
+    //
+    // **The lock is taken on both branches, `kCacheScratch` or not.**  The
+    // flag selects the *allocation policy* -- borrow from the cache versus
+    // `cudaMalloc` per call -- and not whether the shared state is touched:
+    // `coarse12_cols`, `chunks_workspace`, `scan_flags` and `retired` are
+    // mutated below on either branch, and the `!kCacheScratch` branch is
+    // exactly the one that allocates and retires most.  Passing `nullptr` here
+    // when the flag was set left those four unguarded while the comment above
+    // claimed otherwise.
     struct ScratchGuard {
         std::mutex *m;
-        explicit ScratchGuard(std::mutex *mu) : m(mu) { if (m) m->lock(); }
-        ~ScratchGuard() { if (m) m->unlock(); }
+        explicit ScratchGuard(std::mutex *mu) : m(mu) { m->lock(); }
+        ~ScratchGuard() { m->unlock(); }
     };
     ChunkedScratch &scratch = chunked_scratch();
-    ScratchGuard scratch_guard(kCacheScratch ? &scratch.mu : nullptr);
+    ScratchGuard scratch_guard(&scratch.mu);
     bool scratch_borrowed = false;
 
     int32_t *lengths = nullptr;

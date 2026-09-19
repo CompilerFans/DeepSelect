@@ -48,14 +48,26 @@ setup.py's build_for_maca."
 #endif
 
 // **Every row here is a claim about a part, and only the first one has a
-// measurement behind it.**  `ARCH_SM_COUNT` sizes the grids
-// (`wave_filled_chunks`, `f32_chunk_work_target`) and `ARCH_SMEM_PER_AP_BYTES`
-// is the budget `f32_coarse12_applies` tests the 16 KB arena against.  The
-// 1500 and 1600 rows are the parts' own AP counts and the 128 KiB every
+// measurement behind it.**  `ARCH_SMEM_PER_AP_BYTES` is the budget
+// `f32_coarse12_applies` tests the 16 KB arena against, and it is the one
+// constant in this table with a behavioral consumer.  `ARCH_SM_COUNT` is
+// **not** consumed by any rule: `wave_filled_chunks` and
+// `f32_chunk_work_target` take the *runtime* `params.sm_count`, deliberately,
+// so that a caller handing this entry a tensor on another part gets a grid
+// sized for the part in front of it (see the note above `f32_chunk_work_target`
+// in `maca_topk.cu`).  The macro is the family's own AP count for the record
+// and for a reader; the grids do not read it.
+//
+// The 1500 and 1600 rows are the parts' own AP counts and the 128 KiB every
 // 128 KiB family has; nothing in this tree has been run on either, which is
 // why the *performance* half of every C500-only rule is still guarded by
 // `kF32Coarse12MeasuredSmCount` rather than by this macro -- geometry
-// compiles in, tuning still has to be earned.
+// compiles in, tuning still has to be earned.  **The split predicates are the
+// exception and the gap**: `chunked_f32_applies` and `chunked_bf16_applies`
+// have no such guard, so a 1600 image does route its fp32 split on the C500
+// chunk counts (`f32_chunks_large_batch` and `wave_filled_chunks` do branch on
+// `sm_count`, so the count is adapted, but the *band* was never measured off
+// this part).  Nothing has been validated on C600U for either route.
 //
 // `ARCH_FAMILY` is what the artifact is *named*, and the loader matches on it:
 // `deep_select_maca_xcore<N>.so` is the file, `_binding.family_suffix()` is
@@ -154,8 +166,16 @@ static_assert(MAX_VOCAB_SIZE <= MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION);
 // for 1500/1600) and asserted at compile time that their staging fitted.  That
 // is `ARCH_SMEM_PER_AP_BYTES` now, and the assertion can come back with it:
 // the constant is per-family again, so a 1600 image can check its own tuples
-// against its own budget.  The port is off the build either way -- see
-// `setup.py`'s note in `build_for_maca`.
+// against its own budget.
+//
+// **The port is off the build, and the rename has not been done.**  Two
+// `static_assert`s in that tree still name the old
+// `NATIVE_SHARED_MEMORY_PER_SM_BYTES` -- `v3/topk_select.cuh` and
+// `v3_fp32/topk_select.cuh`, one each -- and that identifier is defined
+// nowhere, so those files would not compile if `csrc/xcore1600/` went back on
+// `SOURCES`.  The rename is part of re-adding the tree, not something a
+// reader can assume is already done; see `setup.py`'s note in
+// `build_for_maca` for what re-adding takes.
 
 
 struct TopkSelectArgs {
