@@ -1,0 +1,24 @@
+# compare: 20260919_150115 vs baseline 20260919_144454
+# base      perf_data/MetaX_C500/baseline  (107 cells)
+# candidate perf_data/MetaX_C500/20260919_150115  (107 cells)
+# matched   107   only-in-candidate 0   only-in-base 0   tolerance ±3.0%
+
+=== maca_c ===
+    3 regressed / 1 improved / 103 noise   (0 not comparable)
+    total 152835.7 -> 152832.1 us (-0.00%)
+    regressed official lightn bfloat16 b256-v256-k512         5.9 ->        6.3 us     +6.1%
+    improved  official lightn bfloat16 b256-v1024-k1024        5.8 ->        5.6 us     -4.0%
+    regressed official lightn bfloat16 b512-v4096-k512       56.8 ->       58.7 us     +3.4%
+    regressed official lightn bfloat16 b512-v256-k1024        8.1 ->        8.3 us     +3.2%
+
+=== torch ===
+    0 regressed / 0 improved / 97 noise   (10 not comparable)
+    total 700586.7 -> 700681.1 us (+0.01%)
+    (no cell beyond tolerance)
+
+=== deep_gemm ===
+    0 regressed / 0 improved / 12 noise   (95 not comparable)
+    total 7310.2 -> 7295.7 us (-0.20%)
+    (no cell beyond tolerance)
+
+# VERDICT: REGRESSED (maca_c beyond ±3.0% or a status change)

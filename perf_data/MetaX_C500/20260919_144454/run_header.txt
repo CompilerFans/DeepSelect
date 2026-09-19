@@ -1,0 +1,51 @@
+# run_bench.sh    device_dir=MetaX_C500
+# timestamp_utc   2026-09-19T06:44:54Z
+# host            sw-R5300-G6
+# extension       /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+# extension_md5   0945e13370b6d0c0c6deefadeaa6ebf5
+# cuda_visible_devices 2
+# backends        maca_c,torch,deep_gemm
+# STALE           no
+# ---
+# mx-smi
+mx-smi  version: 2.3.1
+
+=================== MetaX System Management Interface Log ===================
+Timestamp                                         : Sat Sep 19 14:44:54 2026
+
+Attached GPUs                                     : 4
++---------------------------------------------------------------------------------+
+| MX-SMI 2.3.1                       Kernel Mode Driver Version: 3.8.23           |
+| MACA Version: 3.7.0.36             BIOS Version: 1.33.4.0                       |
+|------------------+-----------------+---------------------+----------------------|
+| Board       Name | GPU   Persist-M | Bus-id              | GPU-Util      sGPU-M |
+| Pwr:Usage/Cap    | Temp       Perf | Memory-Usage        | GPU-State            |
+|==================+=================+=====================+======================|
+| 0     MetaX C500 | 0           Off | 0000:1b:00.0        | 0%          Disabled |
+| 41W / 350W       | 34C          P0 | 858/65536 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+| 1     MetaX C500 | 1           Off | 0000:21:00.0        | 0%          Disabled |
+| 47W / 350W       | 34C          P0 | 858/65536 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+| 2     MetaX C500 | 2           Off | 0000:24:00.0        | 0%          Disabled |
+| 46W / 350W       | 35C          P0 | 858/65536 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+| 3     MetaX C500 | 3           Off | 0000:25:00.0        | 0%          Disabled |
+| 41W / 350W       | 35C          P0 | 858/65536 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+
++---------------------------------------------------------------------------------+
+| Process:                                                                        |
+|  GPU                    PID         Process Name                 GPU Memory     |
+|                                                                  Usage(MiB)     |
+|=================================================================================|
+|  no process found                                                               |
++---------------------------------------------------------------------------------+
+
+End of Log
+# pgrep -af python
+#   2598017 python3 /home/compiler_gfx/.claude/plugins/cache/omc/oh-my-claudecode/4.14.0/bridge/gyoshu_bridge.py /run/user/1005/omc/6dd037b09ba5/bridge.sock
+
+# ---
+# run_bench.sh: finished rc=0
+# out             perf_data/MetaX_C500/20260919_144454

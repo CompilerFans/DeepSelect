@@ -3545,3 +3545,118 @@ b256-v131072-k2048 上两个钟：
 最大 1.3%），**在小格上它本来就是错的尺子**。
 
 `--set-baseline` 仍然执行（语义是"这个二进制、这台机器、今晚"）。
+
+## 12.19 两个可达缺陷：chunks 臂丢 NaN 契约，以及捕获图读已回收的 scratch（2026-09-19，device 2）
+
+§12.18 说的是"报告的 span 不是算子成本"。这一节说的是**两个真实缺陷**，
+它们都在 v1.0.0（tag 已打）里可达，而**门一个都没报**。
+
+### 12.19.1 P0：chunks 臂把 NaN 契约丢了
+
+`csrc/xcore1000/dg_chunks.cuh:207` 收下 `int32_t *nan_flags` 之后写的是
+`(void)nan_flags;`，文件里 `is_nan_value` 零调用点。隔壁 `dg_coarse12.cuh`
+正好相反（`:223-245`，把扫描折进 pass 1，`atomicOr` 抬旗）。
+
+这条路不是"不扫也没事"。`maca_topk.cu:1578-1581` 把 kernel 的答案当
+`preselected` 交给契约半边，并 `merged.nan_flags = params.scan_flags`；而
+契约半边的 preselected 分支（`:463`）是**读表**、不扫行：
+
+```cpp
+if constexpr (kPreSelected) {
+    nan_local = params.check_nan && params.nan_flags[row] != 0;
+}
+```
+
+**没人写它**，所以 NaN 行被正常服务。A/B（`b1 V66551 k2048`，row 0 一个
+NaN，用官方谓词）：
+
+| 路由 | 谓词 | `idx[0,0]` |
+|---|---|---|
+| 默认（chunks 带） | **False** | 0 |
+| `DEEP_SELECT_F32_CHUNKS_ROUTE=0` | True | `0x3F3F3F3F` |
+| `DEEP_SELECT_F32_CHUNKS_ROUTE=1` | **False** | 0 |
+
+出货带（b∈{1,2} × V∈{2048,8192,66551,131072,262144} × k∈{512,1024,2048}）
+一 NaN 行的扫描：**18 FAIL / 30**。V≥66551 全挂；V≤8192 过（那些由行
+kernel 回答，没进这条路）。`abort_when_nan_found=True`（默认）也不抛。
+
+**修法**：把扫描折进 `topk_chunks_coarse_hist` 的 pass 1，每个 CTA 只 OR
+自己那一行（chunk 是独立 CTA，所以用 `atomicOr` 而不是 store），
+`row_nan == nullptr` 时整个谓词跳过 —— 与 split 的 `f32_stage1_fuses_scan()`
+同一套口径，`check_nan=False` 的调用方不该为它拒掉的契约付钱。
+
+修后：出货带扫描 **30 PASS / 30**（官方谓词），A/B 三档全 `0x3F3F3F3F`，
+正负 NaN、b=1/2、V 到 262144 全过。
+
+**代价**：这段谓词是本路自己时间的 **~2.3–3.5%**（b1-v66551 69.6 → 71.8 µs，
+b1-v131072 79.6 → 82.4 µs，snapshot 钟，device 2，交错多轮）。和 §10.7 量到的
+"pass 1 的 ~3%"同量级 —— 这是契约的价格，不是这次移植的瑕疵。
+
+### 12.19.2 P1：捕获图读一个后来被移动过的 scratch
+
+捕获本身没问题（四个路由格 capture/replay 全 MATCH，`21900da`）。危险的是
+**capture 之后在别的形状上再调一次**。两个机制，都在这次修掉：
+
+1. **增长时 `cudaFree` 了旧 buffer**。`ChunkedScratch` 只增不减，旧 buffer
+   直接还给驱动，而图记的是它的裸地址。修法：`scratch_retire` —— 旧 buffer
+   退休进一个进程级列表，峰值保留（缓存本来就对"从不缩小的形状"这么做）。
+2. **行长度表被原地重写**。原来是**一个** `lengths` buffer + 一个
+   `(batches, vocab_size)` epoch，换形状就往**同一个地址**写不同的长度。
+   图重放时读到的就是别人的窗口。实测（`b132 V66551` 捕获，中间插一次
+   `b16 V131072`）：**132 行里 131 行错**。修法：表按形状键控
+   （`ChunkedScratch::lengths_table`），一个 key 永不复用另一个 key 的地址。
+
+这条 hazard 原报告的 `--grow-probe` **看不见**：它把 eager 参考取在重放之前，
+而那个 eager 调用本身就把表刷回了正确长度 —— 探针在坏内核上照样绿。改法是
+参考取图自己的第一次重放（输入此后不再改写），比较用 bitwise（`sorted_index=True`）。
+**实测：在 HEAD 的未修版本上，这个探针现在会崩**（`mcErrorIllegalAddress`
+in `mcGraphExecDestroy`）；改动前它报 MATCH。
+
+### 12.19.3 为什么门没报 —— 两个缺陷的同一个原因
+
+`run_bench.sh` 用 `tests/test.py --perf-only -nc` 做门，而 `--perf-only`
+把 `testcases` 过滤成 `num_runs > 0`，也就是**只有 perf 网格**。正确性表
+（真正带 NaN 用例的 `UintDistributionWithHotspotAndSpecifiedPivot(..., True)`）
+`num_runs=0`，从来没被跑到。perf 网格的输入是 `NormalFloatDistribution` =
+`randn_like`，**没有 NaN**。全树也**没有任何测试捕获图**，所以 P1 同样不可见。
+
+补的门（`run_bench.sh`，`--skip-gate` 之外都会跑）：
+
+| 阶段 | 抓什么 |
+|---|---|
+| `correctness` | `tests/test.py --seed 20260911 --sample 400 -rf`，判据是**无 `check_fail`** 且**无"非 OOM 的 crash"** |
+| `cases_chunks` | `tests/cases/chunks_arm_official.py`，含 12 条 NaN 用例（两种符号 × b∈{1,2} × V∈{66551,131072,262144}） |
+| `cases_graph` | `tests/cases/graph_capture.py`，四个路由格 + 冷 scratch 探针 + 多形状重放探针 |
+
+`correctness` 阶段**不能直接用 harness 的退出码**：`tests/test.py` 对任何
+非 pass 桶都返回 1，而这台机器（63.6 GiB、共享）永远跑不完抽样里那几个
+`b=4096 V~1e6` 的 fp32 格（单张 15 GiB、同时活三张）。它们落进 `crash`
+而不是 `skip`，因为失败的分配是**算子的** `cudaMalloc`，不是 torch 的，
+`torch.cuda.OutOfMemoryError` 根本没被抛出。所以脚本自己读 harness 的汇总块：
+`check_fail` 必须为 0，且每条 `crash` 的细节行必须是 out of memory。
+
+**负对照**（这是"测试有没有用"的唯一证据）：把树退回 HEAD，
+`chunks_arm_official.py` 在 12 条 NaN 用例上 **12 FAIL**；退回改动前的
+`--grow-probe` 写法，未修版本报 MATCH，改成 replay-first 之后 **崩**。
+
+### 12.19.4 代价与基线
+
+三个 chunks 带格子（v1.0.0 → 修后，snapshot 钟）：
+
+| 格 | v1.0.0 | 修后 | Δ |
+|---|---|---|---|
+| b1-v66551-k2048 | 65.5 | 67.3 | +2.7% |
+| b1-v131072-k2048 | 75.8 | 78.7 | +3.8% |
+| b1-v107520-k2048 | 73.0 | 76.3 | +4.5% |
+
+`check_nan=False` 的调用方不受影响（59.2 vs 59.5 µs，b1-v66551）。
+
+其余"regressed"格全是 bf16 的 3–10 µs 小格和 `b6-*`，和这两处改动
+无关（都是 row/radix 路径，没碰过）；§12.18.6 已经记过：±3% 的容差是按
+">100 µs 的格"定的，在 3–10 µs 上它本来就是错的尺子。同一次运行里
+`torch` 列 0 regressed / 97 noise，总量 +0.09%。
+
+**基线移到 `perf_data/MetaX_C500/20260919_150115`**（md5 `d9fa0a45`，
+`--set-baseline`）。它与 144454 是同一份代码（只差一段注释），
+144454 → 150115 的对比是 3 regressed / 1 improved / 103 noise、总量 −0.00%
+—— 同二进制、同 md5 家族、±3% 里漂的仍然是那 3–58 µs 的小格。
