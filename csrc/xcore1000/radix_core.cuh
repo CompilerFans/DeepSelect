@@ -352,6 +352,22 @@ static_assert(kCoarse12ArenaEntries * sizeof(uint32_t) >= (size_t)kSmemInputSize
               "the 16-bit arena must not be smaller than the region it aliases");
 
 // 12 位粗层：一次 uint4 搬 8 个元素，每个元素一个原子加。
+//
+// Measured, so the next person does not re-open the merge idea (ledger §12.23).
+// Same vectorized walk, same 4,096-bin coarse level, 134.2M elements, uniform
+// bf16 keys, device 2: walk with no atomic 88.3 us, walk + one shared atomic
+// per element 183.6 us.  So this loop is **95 us of atomic** and 88 us of walk
+// -- the atomic is half the cost, which is what makes the merge idea tempting.
+//
+// It does not work.  `__match_any_sync` on MACA is a 32-iteration `cmp_lg_u32`
+// software loop (2,048 instructions per 64-element warp step, 16/element); the
+// atomic it would save is ~0.7/element.  Match-and-merge measures 2,133 us
+// against the walk's 88 -- 20x, and identical for uniform and clustered keys
+// because the loop is fixed-length.  Removing the atomic from the merge (1 us
+// saved) is what proves the 2,045 us is the match itself.  Any de-atomized
+// form has to skip `__match_any_sync` entirely: a per-thread private histogram
+// with one flush at the end is the only shape left, and its risk is the
+// per-element register dependency chain, not conflicts (that is what P4 hit).
 __device__ __forceinline__ void hist_add_bf16_wide(
     uint32_t* s_wide, const maca_bfloat16* input, uint32_t idx)
 {
