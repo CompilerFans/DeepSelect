@@ -1749,30 +1749,65 @@ namespace dsf = deep_select::ffi;
 //   * the split's kernels write every slot they read back -- stage 1 fills each
 //     candidate slot it is asked for, and `nan_flags` is memset per call --
 //     so nothing is inherited from the previous call.
-//   * the lengths table is skipped only when `(batches, vocab_size)` -- both
-//     arguments of this call -- already match the pair it was last filled for.
-//     Its content is `[vocab_size] * batches`, a pure function of that pair, so
-//     the pair *is* the content; see `lengths_epoch` at the fill.
+//   * the lengths table is keyed by `(batches, vocab_size)` -- both arguments of
+//     this call -- and a key it has not seen gets its own buffer.  Its content
+//     is `[vocab_size] * batches`, a pure function of that pair, so the pair
+//     *is* the content; see `lengths_table`.
 //
 // The high-water mark is bounded by the gate that admits the split
 // (`chunked_bf16_applies`: batches <= 64, topk <= 1024) -- ~6.3 MB of workspace
-// and 256 B of table, held for the life of the process.  A bounded, one-time
-// footprint in exchange for removing a per-call host cost larger than the
-// kernel it fronts.  Freeing instead of holding gives most of the win back:
-// free-then-malloc *should* be cheap, and measured on this runtime it is not.
+// held for the life of the process, plus `batches * 4` bytes per distinct shape
+// for the row tables.  A bounded, one-time footprint in exchange for removing a
+// per-call host cost larger than the kernel it fronts.  Freeing instead of
+// holding gives most of the win back: free-then-malloc *should* be cheap, and
+// measured on this runtime it is not.
 
 struct ChunkedScratch {
     std::mutex mu;
     void *workspace = nullptr;
     size_t workspace_bytes = 0;
-    int32_t *lengths = nullptr;
-    size_t lengths_count = 0;
-    // The `(batches, vocab_size)` the device table was last **filled** for.
-    // `kNoEpoch` means "unknown, must refill"; it is not a fabricated `(0, 0)`,
-    // which a call with `batches == 0` would match and then skip the fill on.
-    static constexpr int64_t kNoEpoch = -1;
-    int64_t lengths_epoch_batches = kNoEpoch;
-    int64_t lengths_epoch_vocab = kNoEpoch;
+    // The row tables, one per distinct `(batches, vocab_size)` this process has
+    // asked for, each holding `[vocab_size] * batches`.
+    //
+    // **A table is never rewritten for a different key.**  The epoch fields
+    // above describe the old policy -- one buffer, refilled when the pair moved
+    // -- and that policy is correct only for a caller that runs one shape at a
+    // time.  A caller that has recorded the pointer (a CUDA graph) keeps
+    // reading the address it captured, so rewriting that address with another
+    // shape's lengths silently re-scopes the row the graph ranks: measured, a
+    // `b132 V66551` capture replayed after a `b16 V131072` call ranked a
+    // 131072-wide window against a 66551-wide row and 131 of 132 rows differed.
+    // Retiring the old buffer does not help -- nothing was freed, the content
+    // was overwritten -- so the fix is to stop reusing the address at all.
+    //
+    // The footprint is `batches * 4` bytes per distinct shape and the split's
+    // own gate bounds `batches` at 64, so this is a few hundred bytes for every
+    // shape a process visits, held for its life.
+    struct LengthsEntry {
+        int64_t batches;
+        int64_t vocab;
+        int32_t *table;
+    };
+    std::vector<LengthsEntry> lengths_tables;
+
+    // The table for `(batches, vocab)`, allocated and filled on first use.  The
+    // caller holds `mu` (`ScratchGuard`), which is what makes the vector safe
+    // without a lock of its own.  `stream` orders the fill against the kernel
+    // that will read it -- the same ordering the single-buffer version had.
+    int32_t *lengths_table(int64_t batches, int64_t vocab, cudaStream_t stream) {
+        for (LengthsEntry &e : lengths_tables) {
+            if (e.batches == batches && e.vocab == vocab) return e.table;
+        }
+        int32_t *table = nullptr;
+        DS_CUDA_RUNTIME_CHECK(
+            cudaMalloc(&table, (size_t)batches * sizeof(int32_t)));
+        std::vector<int32_t> host_lengths((size_t)batches, (int32_t)vocab);
+        DS_CUDA_RUNTIME_CHECK(cudaMemcpyAsync(table, host_lengths.data(),
+                                              (size_t)batches * sizeof(int32_t),
+                                              cudaMemcpyHostToDevice, stream));
+        lengths_tables.push_back(LengthsEntry{batches, vocab, table});
+        return table;
+    }
     // One `int32_t` per row, zeroed once per call that scans.  This is the
     // table `topk_kernel_radix`'s preselected arm reads to decide whether the
     // row is poisoned -- and it is *read on every preselected path*, while
@@ -1798,7 +1833,37 @@ struct ChunkedScratch {
     // the layout is identical for all of them.
     void *chunks_workspace = nullptr;
     size_t chunks_workspace_bytes = 0;
+    // Every buffer this allocator has **grown past**, held for the life of the
+    // process rather than freed.  See `scratch_retire` for why.
+    std::vector<void *> retired;
 };
+
+// Grow-only scratch, and "grow" means "allocate and *retire* the old one", not
+// "allocate and free it".
+//
+// `cudaFree` here hands the page back to the driver, and a CUDA graph captured
+// against the smaller shape recorded the raw address of the buffer it was
+// launched against -- `ChunkedScratch` is process-wide and its pointers are
+// handed to the kernel layer directly, so the address a graph froze is the
+// address the driver is now free to hand to the next allocation of that size.
+// Every replay after a growth reads whatever the allocator put there.  Measured
+// (`tests/cases/graph_capture.py --grow-probe`, three runs): capture at
+// `b132 V66551`, grow with `b4096 V131072`, replay -> **~262k of 270336 indices
+// differ**, deterministically.  A replay that happens to match means the page
+// was not reused, not that this is safe.
+//
+// So the peak is held.  The cost is bounded by the number of distinct sizes one
+// process grows through -- one or two in every workload measured -- and it buys
+// the operator being capturable at all, which is the price a caller integrating
+// it into a decode loop actually cares about.  This is not a leak in the
+// sense that matters: it is a high-water mark, and it is the same policy the
+// cache already applies to a shape that never shrinks.
+//
+// The mutex is held by the caller (`ScratchGuard`), which is what makes the
+// push safe without a lock of its own.
+inline void scratch_retire(std::vector<void *> &retired, void *buffer) {
+    if (buffer != nullptr) retired.push_back(buffer);
+}
 
 ChunkedScratch &chunked_scratch() {
     static ChunkedScratch s;
@@ -2004,8 +2069,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             int32_t *grown = nullptr;
             DS_CUDA_RUNTIME_CHECK(
                 cudaMalloc(&grown, need_cols * sizeof(int32_t)));
-            if (scratch.coarse12_cols)
-                DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.coarse12_cols));
+            scratch_retire(scratch.retired, scratch.coarse12_cols);
             scratch.coarse12_cols = grown;
             scratch.coarse12_cols_count = need_cols;
         }
@@ -2022,8 +2086,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         if (need_ws > scratch.chunks_workspace_bytes) {
             void *grown = nullptr;
             DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need_ws));
-            if (scratch.chunks_workspace)
-                DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.chunks_workspace));
+            scratch_retire(scratch.retired, scratch.chunks_workspace);
             scratch.chunks_workspace = grown;
             scratch.chunks_workspace_bytes = need_ws;
         }
@@ -2055,41 +2118,36 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             workspace_bytes = need_workspace;
         } else {
             // Grow-only.  A `cudaFree` here would be correct but would give back
-            // exactly the cost this buffer exists to avoid, so the peak is held.
+            // exactly the cost this buffer exists to avoid, so the peak is held
+            // -- and the old buffer is *retired* rather than freed, because a
+            // captured graph may have recorded it (`scratch_retire`).
             if (need_workspace > scratch.workspace_bytes) {
                 void *grown = nullptr;
                 DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need_workspace));
-                if (scratch.workspace) DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.workspace));
+                scratch_retire(scratch.retired, scratch.workspace);
                 scratch.workspace = grown;
                 scratch.workspace_bytes = need_workspace;
             }
-            if (need_lengths > scratch.lengths_count * sizeof(int32_t)) {
-                int32_t *grown = nullptr;
-                DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need_lengths));
-                if (scratch.lengths) DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.lengths));
-                scratch.lengths = grown;
-                scratch.lengths_count = (size_t)batches;
-                scratch.lengths_epoch_batches = ChunkedScratch::kNoEpoch;
-                scratch.lengths_epoch_vocab = ChunkedScratch::kNoEpoch;
-            }
             if (!end.has_value()) {
-                // `[vocab_size] * batches` is a pure function of two arguments of
-                // this call, so "is the table already right" is a question about
-                // that pair -- `lengths_epoch` is set only by the fill below, and
-                // clearing it on a resize makes "no epoch" mean "must refill"
-                // rather than a fabricated `(0, 0)`.
-                if (scratch.lengths_epoch_batches != batches ||
-                    scratch.lengths_epoch_vocab != (int64_t)vocab_size) {
-                    std::vector<int32_t> host_lengths((size_t)batches,
-                                                      (int32_t)vocab_size);
-                    DS_CUDA_RUNTIME_CHECK(cudaMemcpy(scratch.lengths,
-                                                     host_lengths.data(),
-                                                     need_lengths,
-                                                     cudaMemcpyHostToDevice));
-                    scratch.lengths_epoch_batches = batches;
-                    scratch.lengths_epoch_vocab = (int64_t)vocab_size;
-                }
-                p.end_ptr = scratch.lengths;
+                // The row table, keyed by the *pair* that is its content.
+                //
+                // It used to be one buffer plus an epoch: refill when
+                // `(batches, vocab_size)` differs from what was last written.
+                // That is correct for a caller that runs one shape at a time
+                // and wrong for a caller that has *recorded a pointer* -- a CUDA
+                // graph.  Capture freezes `end_ptr` at the address this call
+                // handed out; a later call at another shape then rewrote that
+                // same address in place (measured: `b132 V66551` captured, a
+                // `b16 V131072` call in between, replay -> row 0 ranked a
+                // 131072-wide window against a 66551-wide row, 131 of 132 rows
+                // differ).  `scratch_retire` does not help here: nothing was
+                // freed, the content was overwritten.
+                //
+                // So the table is per-key and never reused across keys.  The
+                // footprint is `batches * 4` bytes per distinct shape, and the
+                // gate that admits the split bounds `batches` at 64 -- a few
+                // hundred bytes for every shape a process visits.
+                p.end_ptr = scratch.lengths_table(batches, (int64_t)vocab_size, stream);
             }
             workspace = scratch.workspace;
             workspace_bytes = need_workspace;
@@ -2114,8 +2172,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             if ((size_t)batches > scratch.scan_flags_count) {
                 int32_t *grown = nullptr;
                 DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, (size_t)batches * sizeof(int32_t)));
-                if (scratch.scan_flags)
-                    DS_CUDA_RUNTIME_CHECK(cudaFree(scratch.scan_flags));
+                scratch_retire(scratch.retired, scratch.scan_flags);
                 scratch.scan_flags = grown;
                 scratch.scan_flags_count = (size_t)batches;
             }

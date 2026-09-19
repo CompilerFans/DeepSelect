@@ -191,8 +191,9 @@ __device__ __forceinline__ void block_cumsum_histogram_1024(
 // it, so a `false` is a coverage statement, never a wrong answer.
 template <int ChunkCount>
 inline cudaError_t launch_topk_chunks_impl(
-    const float *scores, const int32_t *lengths, int32_t *out, void *workspace,
-    int B, int topk, int64_t stride, int default_length, cudaStream_t stream);
+    const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
+    void *workspace, int B, int topk, int64_t stride, int default_length,
+    cudaStream_t stream);
 
 __host__ __forceinline__ int chunks_for_shape(int rows, int64_t n_cols, int num_sms);
 
@@ -204,19 +205,22 @@ inline cudaError_t launch_topk_chunks(
     void *workspace, int B, int topk, int64_t stride, int default_length,
     int num_sms, cudaStream_t stream)
 {
-    (void)nan_flags;
     if (topk > kMaxTopK) return cudaErrorInvalidValue;
     if (workspace == nullptr) return cudaErrorInvalidValue;
     const int chunks = chunks_for_shape(B, (int64_t)default_length, num_sms);
     switch (chunks) {
-        case 3: return launch_topk_chunks_impl<3>(scores, lengths, out, workspace,
-                                                  B, topk, stride, default_length, stream);
-        case 4: return launch_topk_chunks_impl<4>(scores, lengths, out, workspace,
-                                                  B, topk, stride, default_length, stream);
-        case 5: return launch_topk_chunks_impl<5>(scores, lengths, out, workspace,
-                                                  B, topk, stride, default_length, stream);
-        case 6: return launch_topk_chunks_impl<6>(scores, lengths, out, workspace,
-                                                  B, topk, stride, default_length, stream);
+        case 3: return launch_topk_chunks_impl<3>(scores, lengths, out, nan_flags,
+                                                  workspace, B, topk, stride,
+                                                  default_length, stream);
+        case 4: return launch_topk_chunks_impl<4>(scores, lengths, out, nan_flags,
+                                                  workspace, B, topk, stride,
+                                                  default_length, stream);
+        case 5: return launch_topk_chunks_impl<5>(scores, lengths, out, nan_flags,
+                                                  workspace, B, topk, stride,
+                                                  default_length, stream);
+        case 6: return launch_topk_chunks_impl<6>(scores, lengths, out, nan_flags,
+                                                  workspace, B, topk, stride,
+                                                  default_length, stream);
         default: return cudaErrorInvalidValue;
     }
 }
@@ -373,12 +377,39 @@ __global__ void topk_chunks_init(TopKChunksWorkspace<ChunkCount> *workspaces,
 template <int ChunkCount>
 __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     const float *__restrict__ scores, TopKChunksWorkspace<ChunkCount> *workspaces,
-    int topk, int64_t stride, int default_length)
+    int32_t *__restrict__ nan_flags, int topk, int64_t stride,
+    int default_length)
 {
     const int chunk = blockIdx.x;
     const int row = blockIdx.y;
     const int tid = threadIdx.x;
     TopKChunksWorkspace<ChunkCount> &workspace = workspaces[row];
+    // This row's slot in the caller's per-row scan table, zeroed by the caller
+    // before this kernel runs.  Null means "the caller is not scanning at all"
+    // (`check_nan` false), which is the only case where the contract half does
+    // not read the table either.
+    //
+    // The flag is not decoration and it is not ours to skip: the caller hands
+    // this kernel's answer to the contract half as `preselected`
+    // (`maca_topk.cu:1578-1581`), and that arm **reads** the slot instead of
+    // scanning the row:
+    //
+    //     if constexpr (kPreSelected)
+    //         nan_local = params.check_nan && params.nan_flags[row] != 0;
+    //
+    // So a row this arm answers without writing its slot is served a normal
+    // top-k, silently, with `abort_when_nan_found` -- the default -- inert.
+    // Raising it here is what makes the route enterable under `check_nan` at
+    // all, and it is why the scan is folded into pass 1 below rather than left
+    // to a separate pass: `dg_coarse12.cuh:223-245` pays the same predicate on
+    // words it is already loading (ledger §10.7, ~3% of that pass), and this
+    // kernel is already walking the row twice.
+    //
+    // The `length <= topk` arm above returns *before* this point and writes no
+    // slot.  That is not a gap: the contract half's shortcut arm runs before its
+    // NaN block (`maca_topk.cu:427` against `:462`) and returns the whole window
+    // as the answer without ever reading a flag.
+    int32_t *const row_nan = nan_flags == nullptr ? nullptr : nan_flags + row;
     // The row's *window*, resolved once by `topk_chunks_init`.  Not
     // `default_length` (the tensor's width, which is an upper bound on the
     // window and equal to it only when the caller passed no `end`), and not
@@ -426,18 +457,54 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     const int vector_length = (chunk_length - prefix) / 4;
     const int tail = prefix + vector_length * 4;
 
-    for (int index = tid; index < prefix; index += kThreads)
-        atomicAdd(&histogram[coarse_bin(chunk_input[index])], 1);
+    // Pass 1, with the contract half's NaN scan folded into it: one predicate
+    // per element on words this kernel is already loading, against a whole
+    // separate pass over the row.  Each CTA covers its own chunk and ORs its
+    // own slot, so the flag is raised by whichever chunk saw the NaN and the
+    // last one to arrive does not have to be the one that did.
+    //
+    // **Guarded on the caller's table, not unconditional.**  `row_nan ==
+    // nullptr` is exactly "the caller is not scanning" (`check_nan` false), and
+    // a caller that has already established its input is NaN-free should not
+    // pay four bit-tests per 16 bytes for a contract it declined -- the same
+    // reason `f32_stage1_fuses_scan()` exists on the split.  The branch is
+    // uniform and loop-invariant, so it costs a predicate register.
+    //
+    // What it costs when it *is* on: measured, ~2.3-3.5% of this route's own
+    // time (b1-v66551 69.6 -> 71.8 us, b1-v131072 79.6 -> 82.4 us, snapshot
+    // clock, device 2, interleaved rounds).  That is the same order as the ~3%
+    // of pass 1 `dg_coarse12.cuh` measured for the same fold (ledger §10.7);
+    // it is the price of the contract rather than an artifact of this port.
+    const bool scan_nan = row_nan != nullptr;
+    bool nan_found = false;
+    for (int index = tid; index < prefix; index += kThreads) {
+        const float value = chunk_input[index];
+        if (scan_nan) nan_found |= is_nan_value(value);
+        atomicAdd(&histogram[coarse_bin(value)], 1);
+    }
     for (int index = tid; index < vector_length; index += kThreads) {
         const float4 values = vector_input[index];
+        if (scan_nan)
+            nan_found |= is_nan_value(values.x) || is_nan_value(values.y)
+                         || is_nan_value(values.z) || is_nan_value(values.w);
         atomicAdd(&histogram[coarse_bin(values.x)], 1);
         atomicAdd(&histogram[coarse_bin(values.y)], 1);
         atomicAdd(&histogram[coarse_bin(values.z)], 1);
         atomicAdd(&histogram[coarse_bin(values.w)], 1);
     }
-    for (int index = tail + tid; index < chunk_length; index += kThreads)
-        atomicAdd(&histogram[coarse_bin(chunk_input[index])], 1);
-
+    for (int index = tail + tid; index < chunk_length; index += kThreads) {
+        const float value = chunk_input[index];
+        if (scan_nan) nan_found |= is_nan_value(value);
+        atomicAdd(&histogram[coarse_bin(value)], 1);
+    }
+    // Raised here rather than in the merge because the merge runs in one CTA
+    // per row and this predicate is per element: `__syncthreads_or` reduces
+    // over this block, and every chunk's block gets its own chance to raise
+    // the row's flag.  `atomicOr` rather than a store for the same reason --
+    // the other chunks of this row are concurrent with this one.
+    if (scan_nan && __syncthreads_or((int)nan_found) != 0) {
+        if (tid == 0) atomicOr(row_nan, 1);
+    }
     __syncthreads();
     if (tid < kCoarseBins) workspace.coarse[chunk][tid] = histogram[tid];
     __threadfence();
@@ -772,8 +839,9 @@ __host__ __forceinline__ int chunks_for_shape(int rows, int64_t n_cols,
 
 template <int ChunkCount>
 inline cudaError_t launch_topk_chunks_impl(
-    const float *scores, const int32_t *lengths, int32_t *out, void *workspace,
-    int B, int topk, int64_t stride, int default_length, cudaStream_t stream)
+    const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
+    void *workspace, int B, int topk, int64_t stride, int default_length,
+    cudaStream_t stream)
 {
     auto *ws = reinterpret_cast<TopKChunksWorkspace<ChunkCount> *>(workspace);
     const dim3 grid(ChunkCount, (unsigned)B);
@@ -781,7 +849,7 @@ inline cudaError_t launch_topk_chunks_impl(
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return err;
     topk_chunks_coarse_hist<ChunkCount><<<grid, kThreads, 0, stream>>>(
-        scores, ws, topk, stride, default_length);
+        scores, ws, nan_flags, topk, stride, default_length);
     err = cudaGetLastError();
     if (err != cudaSuccess) return err;
     topk_chunks_compact_refine<ChunkCount><<<grid, kThreads, 0, stream>>>(
