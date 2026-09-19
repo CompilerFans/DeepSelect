@@ -3853,7 +3853,65 @@ official 30/30）。性能 **1 regressed / 2 improved / 104 noise，总量 +0.02
 `b1-v107520-k2048` 76.237 → 75.853（−0.50%）。
 所以修这个缺陷**在快照钟上量不出代价**，也量不出收益。
 
-### 12.20.7 这一批没动的两件事
+### 12.20.7 `radix_core.cuh` 的注释清理（审计 #2–#15，2026-09-19）
+
+`audit-radix-fp32` 剩下的 14 条里，6 条是注释与代码不符，3 条是死代码。逐条
+grep 过符号之后：**全部只改注释，零代码改动**（`git diff` 过滤掉 `//` 行之后
+是空的），所以这一节没有性能数字要记。
+
+**改掉的 6 条注释：**
+
+| # | 位置 | 原文说的 | 实际是 |
+|---|---|---|---|
+| 2 | `kF32MaxTopK` 上方 | "chunk 数的上限，64 覆盖 dispatcher 可能选的任何值" | 那是 **topk** 上界 4096，和 chunk 数无关；且 `DEEP_SELECT_F32_CHUNKS` 允许 [2,256]，"64 覆盖任何"本身就假 |
+| 3 | `run_cumsum_warp` docstring | "fp32 uses this; the 16-bit path uses run_cumsum" | **反了**：`run_cumsum` 只在 `radix_topk_row_f32` 里（:502/:610/:669），`run_cumsum_warp` 全在 bf16 行入口（6 处）加死的 k2048 对 |
+| 4 | `hist_add_f32` 上方 | "call sites walk `input + tx*4`" | pass 1 已经是 `(i4 + q*BS)*4` 的单位跨步；`tx*4` 是两个**不调用这个函数**的 pass 2 循环 |
+| 5 | `kSMEM` 上方 | "RTX 4080: 48KB / MetaX C500: 32KB" | 本仓没有任何构建传 `-DKSMEM_BYTES`，走的是 `__MACACC__` 分支 = **16 KB**；48 KB 是没人走的 `#else`；32 KB 根本编不过（`ref/ds/README.md` §5） |
+| 12 | `is_nan_bits` | "provably share one predicate rather than two" | 是**拷贝**不是调用，编译器管不着两份是否一致 |
+| 10 | `s_high_threshold_bin_id` | — | fp32 路径里**只写不读**（声明 + :650 赋值，无读者）；读者是 bf16 行入口自己的同名变量 |
+
+第 3 条还顺带修了一个**计数错误**：docstring 说 "two `__syncthreads`"，
+实际三个（:403、:419、:427）。多出来那个是**必需的**（:423 读 warp 总数
+不能和 :417 的写竞争），所以是句子数错，不是设计声明错——记在这里免得被
+后来人当成正确性缺陷重新发现。
+
+**三条死代码，处置是"记录"而不是"删除"：**
+
+- **`kF32K2048` 全族（~380 行）**：`launch_topk_f32_k2048_b1024_c500` 没有任何
+  调用者，两个 kernel 编进去但从不 dispatch。注释里写明了这件事、写明了
+  删除是**故意的**（"intentionally narrow ... without changing the generic
+  dispatch paths"）、并指向 `ref/ds/README.md`——那份 README 自己列了这两个
+  kernel 的寄存器/smem 资源数，并说它们 "unreachable from `ds_topk`"。
+  **不删**：这个族存在的意义是"SGLang 那个形状和通用行比，是不是退化"，
+  答案活在资源数里，不在调用图里；删掉 380 行省不下任何可测的东西，却把
+  那个答案一起删了。另外 `kBlockSize` 改动时要知道这两处
+  `__launch_bounds__(kF32K2048BlockSize)` 会跟着动。
+- **`hist_add_bf16`**：无调用者。活的 bf16 walker 自己测
+  `bf16x8_is_aligned` 然后直接调 `hist_add_bf16_aligned`（:1367 等），
+  这个 wrapper 是那次检查的非内联形式。**不删**：它是"对齐快路径 + 标量
+  兜底"这一对作为**一个单位**被写下来的唯一地方，而 fp32 缺的正是这个形状
+  （§12.20.6）。
+- **`hist_add_bf16_reg` / `hist_reg_to_smem`**：无调用者，而且文件里早就写了
+  **NOT IMPLEMENTED**（每次 shuffle 只搬一个元素，warp 只记到 1/64；
+  `docs/C500-radix-handover.zh.md` §9 量到 1.5%）。**不删**，但注释补了一句
+  "grep the names before assuming otherwise"——这是全文件唯一一处**既死又已知
+  是坏的**代码。
+
+**验证。** 门七段全过（correctness OK、cases_chunks / graph 三段 ALL PASS、
+official 30/30）。性能 **1 regressed / 3 improved / 103 noise，总量 +0.05%**；
+越界的那格 `b4096-v256-k512`（bf16、`V=256`，row/radix 路径）kernel 时间
+最近五次是 31.437 / 31.821 / 31.488 / 32.077 / 32.435 —— 单调往上飘，
+这是基线自己老化的漂移，不是这三次提交里的任何一处。**并且这一整批
+`git diff` 去掉注释行之后是空的**（唯一的非注释行是同一条
+`constexpr size_t kF32ChunkBlocks = kBlockSize;`，只改了行尾注释）——
+注释不可能改变 kernel 时间，所以这格越界与本次改动无关，这一点是
+可以不用测量就断言的。
+
+**#13–#15 是外观级的**（`kF32ChunkBlocks` 这个名字带 "Blocks" 其实是线程数；
+两处 `__launch_bounds__` 的取值在 ledger 里找不到依据）。#14 随 #6 一起变成
+moot，只改了 #13 的注释。
+
+### 12.20.8 这一批没动的两件事
 
 - **`f32_coarse12_applies` / `f32_chunks_applies` 的 provenance 半边是
   `sm_count`，而 `chunked_f32_applies` / `chunked_bf16_applies` 没有。**

@@ -54,9 +54,23 @@ constexpr int kChunkBlockSize = 1024;
 #else
 constexpr int kChunkBlockSize = KCHUNK_BLOCK_SIZE;
 #endif
-// smem 大小：可通过编译参数 -DKSMEM_BYTES=32768 覆盖
-// RTX 4080: 48KB (100KB/SM, 选48KB放2 block/SM)
-// MetaX C500: 32KB (高延迟，选32KB增加并行度)
+// smem 大小：可通过编译参数 -DKSMEM_BYTES= 覆盖
+//
+// **The two lines this comment used to carry were wrong about the shipped
+// build.**  They read "RTX 4080: 48KB" and "MetaX C500: 32KB", but nothing in
+// this tree passes `-DKSMEM_BYTES` and no build entry defines it -- so the
+// `__MACACC__` arm is what ships, and that is **16 KB**, not 32.  The 48 KB
+// arm is the non-MACA fallback that no build here takes.
+//
+// 32 KB was not merely unused, it is unbuildable: `ref/ds/README.md` §5 records
+// `-DKSMEM_BYTES=32768` failing outright against the `kSmemStaticBytes` assert
+// below (`16384 >= 46824`), because `kF32StaticBytes` (2328 B) plus the
+// 16-bit static state leaves too little of a 32 KB arena for the input region
+// the fp32 row sizes itself from.  Read `kF32SmemInputSize` at :436 for what
+// 16 KB actually buys.
+//
+// `maca_topk.cu`'s `#ifdef KSMEM_BYTES` assert has the same shape of problem
+// from the other side -- see the note there.
 #ifndef KSMEM_BYTES
 #ifdef __MACACC__
 constexpr size_t kSMEM = 16 * 1024;
@@ -83,9 +97,18 @@ constexpr uint32_t kCompactBF16MaxLength = KCOMPACT_BF16_MAX_LENGTH;
 // 类型转换
 // ============================================================
 
-// `is_nan_value<float>` in `maca_topk.cu`, at this layer: exponent all ones,
-// mantissa non-zero.  Spelled here so the fused arm below and the standalone
-// `nan_scan_kernel` provably share one predicate rather than two.
+// `is_nan_value<float>` in `maca_topk.cu` (:164), at this layer: exponent all
+// ones, mantissa non-zero.  Spelled here so the fused arm below and the
+// standalone `nan_scan_kernel` share one predicate *within this translation
+// unit* -- every in-file caller (:176, :627, :2389) goes through this, and
+// `nan_scan_kernel` is the same file's.
+//
+// **It is a copy, not a call, and the compiler cannot check that the two
+// agree.**  The `maca_topk.cu` specialization is templated on the value type
+// and takes a `ValueT`, so this file cannot call it without pulling that
+// header's type machinery in.  The bodies are identical today (compare the two
+// by hand if you touch either); nothing ties them, which is what the old
+// wording -- "provably share one predicate" -- claimed and did not deliver.
 __device__ __forceinline__ bool is_nan_bits(uint32_t bits) {
     return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
 }
@@ -125,12 +148,19 @@ __device__ __forceinline__ uint8_t bf16_to_uint8(maca_bfloat16 x) {
 // 向量化直方图 (smem atomicAdd)
 // ============================================================
 
-// `hist_add_f32`'s call sites walk `input + tx*4`: one thread takes four
-// CONSECUTIVE float4 per leg, so adjacent lanes of a single load instruction
-// are 64 bytes apart and a 128-byte segment carries 32 useful bytes.
+// `hist_add_f32`'s call sites are the *unit-strided* walk: pass 1 (:584-590)
+// takes `tx, tx+BS, tx+2BS, tx+3BS` float4 units per lane, so adjacent lanes of
+// one load instruction are 16 bytes apart and a 128-byte segment carries 128
+// useful bytes.
 //
-// That stride is real and deliberate -- but it is NOT why pass 1 is short of
-// the wall.  Coalescing this walk is a 65% win in a microbench and -0.7% in
+// **The `tx*4` walk this note used to describe is a different loop.**  It is
+// pass 2's two open-coded `__ldg(float4*)` loops (:626, :641), which take four
+// CONSECUTIVE float4 per thread -- 64 bytes between adjacent lanes, 32 useful
+// bytes per 128-byte segment.  They do not call this function, and they were
+// left alone on purpose when pass 1 was coalesced (`eaa0131`).
+//
+// The stride is real and deliberate -- but it is NOT why pass 1 is short of
+// the wall.  Coalescing that walk is a 65% win in a microbench and -0.7% in
 // the kernel: at the kernel's occupancy the two patterns are 7% apart, not
 // 65%, because pass 1 issues one shared-bucket atomic per element and that is
 // what it is waiting on.  See `docs/C500-radix-perf-ledger.zh.md` before
@@ -202,6 +232,14 @@ __device__ __forceinline__ void hist_add_bf16_aligned(
 
 // Public standalone helper: retain vector loads for aligned offsets and avoid
 // an illegal uint4 access when a caller supplies an odd row stride.
+//
+// **No call sites in this tree.**  The live bf16 walkers test
+// `bf16x8_is_aligned` themselves and call `hist_add_bf16_aligned` directly
+// (:1367, :1140, :1547 and the bf16 row entries), so this wrapper is the
+// un-inlined form of a check they already make.  Kept because it is the one
+// place the "aligned fast path, scalar fallback" pair is stated as a unit, and
+// because the fp32 lane's missing guard is the bug this shape would have
+// prevented (ledger §12.20.6).
 __device__ __forceinline__ void hist_add_bf16(
     uint32_t* s_histogram, const maca_bfloat16* input, uint32_t idx)
 {
@@ -223,9 +261,14 @@ __device__ __forceinline__ void hist_add_bf16(
  * bins per thread, each element's bin shuffled to its owner thread, reduced
  * within the warp and written to smem once -- no shared atomicAdd at all.
  *
- * NOT IMPLEMENTED.  The bodies below move one element per shuffle, so each
- * warp records about 1/64 of what it reads.  They are kept as the shape of the
- * idea, not as a working histogram; see `docs/C500-radix-handover.zh.md` §9.
+ * NOT IMPLEMENTED, AND NOT CALLED.  The bodies below move one element per
+ * shuffle, so each warp records about 1/64 of what it reads.  They are kept as
+ * the shape of the idea, not as a working histogram; see
+ * `docs/C500-radix-handover.zh.md` §9 for the measurement (1.5%) that killed it.
+ * `hist_add_bf16_reg` and `hist_reg_to_smem` have **no call sites anywhere in
+ * this tree** -- grep the names before assuming otherwise.  They are the only
+ * block in this file that is both dead and known-broken, which is why the
+ * warning is here and not on the k2048 kernels below.
  */
 
 #ifdef __MACACC__
@@ -353,11 +396,16 @@ __device__ __forceinline__ void run_cumsum(
  * run_cumsum_warp: 256-element reverse inclusive scan, one buffer, warp
  * shuffles.  Each warp scans its own 32 elements, the warp totals go to
  * s_histogram_buf[0][257..264] (256 stays a sentinel), warp 0 scans those
- * eight, and each warp adds its offset -- two __syncthreads, against eight in
+ * eight, and each warp adds its offset -- three __syncthreads (the two above
+ * plus the one that publishes the per-bin result at :427), against eight in
  * the naive form.  Returns the calling thread's bin suffix so the caller can
  * avoid reading a neighbouring bin before another barrier.
  *
- * fp32 uses this; the 16-bit path uses run_cumsum.
+ * **The 16-bit path uses this, not fp32.**  Every call site is a bf16 row
+ * entry -- :1204, :1299, :1407, :1493, :1614, :1653 -- plus the dead k2048 pair
+ * at :965/:1015.  `run_cumsum` (the double-buffered Hillis-Steele form above)
+ * is what `radix_topk_row_f32` calls, at :502, :610 and :669.  The sentence
+ * here used to say the reverse, which is the kind of thing a reader trusts.
  */
 __device__ __forceinline__ uint32_t run_cumsum_warp(
     uint32_t s_histogram_buf[2][256 + 32], uint32_t tx, uint32_t& exclusive_suffix)
@@ -552,6 +600,13 @@ __device__ __forceinline__ void radix_topk_row_f32(
     __shared__ uint32_t s_histogram_buf[2][RADIX + 32];
     __shared__ uint32_t s_counter;
     __shared__ uint32_t s_threshold_bin_id;
+    // **Write-only in this function.**  Set at :650 alongside
+    // `s_threshold_bin_id`, never read in `radix_topk_row_f32`, its rescan or
+    // `stage_f32_lane` -- the fp32 path narrows with `s_histogram` directly.
+    // The readers are the 16-bit row entries, which declare their own copy
+    // (:1178, :1401).  Kept because the static-smem accounting above is
+    // written against this declaration list: deleting it would move
+    // `kF32StaticBytes` and with it `kF32SmemInputSize`.
     __shared__ uint32_t s_high_threshold_bin_id;
     __shared__ uint32_t s_num_input[2];
     __shared__ int32_t s_last_remain;
@@ -703,6 +758,24 @@ __device__ __forceinline__ void radix_topk_row_f32(
 // FP32 k=2048 path shaped after SGLang's original TopK kernel.
 // This is intentionally narrow: it targets SGLang-shape correctness/perf
 // comparison without changing the generic FP32/FP16 dispatch paths.
+//
+// **Dead in this tree, and kept on purpose.**  Nothing calls
+// `launch_topk_f32_k2048_b1024_c500` -- the only entry that would launch the
+// two kernels below -- so `radix_topk_row_f32_k2048_b1024` and its warp-scan
+// twin are compiled but never dispatched.  This block was the first shape of
+// the fp32 row and the generic `radix_topk_row_f32` (:538) replaced it; the
+// refactor that removed the dispatch left the kernels, and the removal was
+// deliberate rather than an oversight.  `ref/ds/README.md` lists both in its
+// resource table and says the same thing, so this is the port's only
+// *recorded* dead code.
+//
+// It is not removed because the question it exists to answer is not "is it
+// called" but "was the generic row a regression against SGLang's shape" --
+// and the answer lives in the two kernels' resource numbers, not in a call
+// graph.  Deleting ~380 lines to save nothing measurable would also delete
+// that.  A reader looking for what is *live* should start at
+// `radix_topk_row_f32`; a reader changing `kBlockSize` should know these
+// two carry `__launch_bounds__(kF32K2048BlockSize)` and will move with it.
 constexpr int kF32K2048BlockSize = 1024;
 constexpr int kF32K2048TopK = 2048;
 #ifndef KF32_K2048_SMEM_BYTES
@@ -2403,13 +2476,12 @@ __global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage2_kernel(
 //
 // The chunk count, the work target behind it and the reason a short batch is
 // split at all are the caller's (`maca_topk.cu`'s `f32_chunk_work_target`).
-constexpr size_t kF32ChunkBlocks = kBlockSize;   // `radix_topk_row_f32`'s width
-// The split's chunk count is the caller's (`chunked_chunks`: 16 on C500, and
-// rounded to fill a wave elsewhere, which is also what `nan_scan_kernel` is
-// launched with).  It is only ever used for *sizing* here -- the kernels take
-// it as an argument -- so this header does not need the caller's value, just a
-// ceiling to bound `uint32_t` arithmetic with.  64 covers any the dispatcher
-// could pick.
+constexpr size_t kF32ChunkBlocks = kBlockSize;   // the launch width, named once
+// The array bound the engine is built to, and the only thing this header needs
+// to know about the caller's `topk`: `chunked_f32_workspace_bytes` takes the
+// real value as an argument, so the constant is here to bound the `uint32_t`
+// arithmetic in this file and to be the `<=` in `f32_chunk_engine_supports`.
+// It is a *topk* bound, not a chunk-count one.
 constexpr uint32_t kF32MaxTopK = 4096u;
 
 inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
