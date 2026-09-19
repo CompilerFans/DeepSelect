@@ -3522,3 +3522,26 @@ b256-v131072-k2048 上两个钟：
 `compare_snapshots.py --clock wall` 走墙钟；**默认仍是 kernel 钟**，所以
 既有的判定和回归路径行为不变。`csv_format_version` 1 → 2：v1 快照没有
 `wall_us`，在墙钟下读作"未测量"（工具现在会这么写，而不是"无可比格"）。
+
+### 12.18.6 重录 baseline（`c3c91ba` 之后）：同二进制、同 md5、还是 REGRESSED
+
+`c3c91ba` 只动了计时与快照脚本，**扩展的 md5 没变**（`e550877d`，前后一致）。
+重录（`--set-baseline`，device 2）：
+
+```
+5 regressed / 1 improved / 101 noise        total 152726.6 -> 152705.3 us (-0.01%)
+  improved  b6-v256-k512        3.6 ->  3.4 us  -5.0%
+  regressed b512-v1024-k1024    6.7 ->  7.0 us  +5.0%
+  regressed b512-v256-k1024     6.9 ->  7.1 us  +4.1%
+  regressed b512-v256-k512      7.0 ->  7.3 us  +4.0%
+  regressed b256-v1024-k512    33.2 -> 34.3 us  +3.5%
+  regressed b4096-v1024-k1024  31.8 -> 32.8 us  +3.3%
+```
+
+**同二进制、同 md5、总量 −0.01%，而 6 格越过 ±3%。** 与 §12.17.13 同一类：
+那一次是 `torch`/`deep_gemm` 两列同时在漂（这次两列都干净，说明机器是稳的），
+**而 `maca_c` 自己在 3–34 µs 的小格上漂 3–5%**。±3% 的容差是按
+">100 µs 的格"定的（见 `compare_snapshots.py --tol` 的注释：中位 0.25%、
+最大 1.3%），**在小格上它本来就是错的尺子**。
+
+`--set-baseline` 仍然执行（语义是"这个二进制、这台机器、今晚"）。
