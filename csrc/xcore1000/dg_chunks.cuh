@@ -176,23 +176,75 @@ __device__ __forceinline__ void warp_cumsum_histogram_256(
     __syncthreads();
 }
 
-// The same suffix sum over the 1024-bin coarse level, run by the whole block:
-// bins are strided across `kThreads` and the scan is a straight shared-memory
-// two-level walk rather than a warp shuffle, because 1024 bins over 64 lanes
-// would need 16 items per lane and the extra registers buy nothing here (this
-// runs once per row).
+// The same suffix sum over the 1024-bin coarse level: deep_gemm's
+// `warp_cumsum_histogram<kCoarseBins>`, i.e. its **coarse** arm.
+//
+// **This used to be a block-wide Hillis-Steele walk and that was the wrong
+// shape.**  `kCoarseBins` is 1024 and `kThreads` is 1024, so `histogram[tid]`
+// is already a complete per-thread value; the coarse arm needs no
+// `kItemsPerLane` at all.  The old comment here justified the walk by "1024
+// bins over 64 lanes would need 16 items per lane", which describes the *fine*
+// arm (`Bins == kFineBins == 256`, 4 items per lane) -- the coarse arm is
+// `kWarps = 1024 / 64 = 16` warps each owning 64 consecutive bins.  The
+// `static_assert(kWarps <= kWarpSize)` the arm carries (16 <= 64) holds here,
+// and `dg_chunks.cuh`'s own `blockDim >= kCoarseBins` assert is what makes
+// `histogram[tid]` readable by every thread.
+//
+// The barrier count is the point, not the instruction count.  The walk was
+// 10 rounds x 2 `__syncthreads()` plus one before the loop = **21 barriers**,
+// all of them block-wide, in the merge CTA -- the one CTA that every other CTA
+// of the row has already finished waiting for.  This arm is **3** (`:237`,
+// `:249`, `:253` in the original).  `docs/C500-radix-profile.zh.md` §5.3
+// measures the fp32 row's own residual the same way: of its ~104 us
+// unaccounted, ~103 us is barrier wait and ~1 us is atomics.  Barriers are the
+// cost this path was paying.
+//
+// The padding slot `histogram[kCoarseBins]` is written here rather than
+// before a barrier, because the arm's read of it (`lane < kWarps ? ... : 0`
+// covers lanes 16..63, which read `warp_totals`, not `histogram`) never
+// touches it and the two `__syncthreads()` inside the arm order it against
+// every later reader.
 __device__ __forceinline__ void block_cumsum_histogram_1024(
     int (&histogram)[kCoarseBins + kHistogramPadding])
 {
+    constexpr int kWarpSize = 64;
+    constexpr uint64_t kWarpMask = 0xffffffffffffffffULL;
+    constexpr int kWarps = kCoarseBins / kWarpSize;
+    static_assert(kCoarseBins % kWarpSize == 0, "coarse bins must fill whole waves");
+    static_assert(kWarps <= kWarpSize, "the second pass is one warp over kWarps lanes");
+    static_assert(kCoarseBins == kThreads,
+                  "every thread must own one bin for the coarse arm to be exact");
+
+    __shared__ int warp_totals[kWarps];
+
     const int tid = threadIdx.x;
+    const int lane = tid % kWarpSize;
+    const int warp = tid / kWarpSize;
+
+    int warp_suffix = histogram[tid];
+#pragma unroll
+    for (int offset = 1; offset < kWarpSize; offset <<= 1) {
+        const int other = __shfl_down_sync(kWarpMask, warp_suffix, offset, kWarpSize);
+        if (lane + offset < kWarpSize) warp_suffix += other;
+    }
+    if (lane == 0) warp_totals[warp] = warp_suffix;
+    __syncthreads();
+
+    if (warp == 0) {
+        const int warp_total = lane < kWarps ? warp_totals[lane] : 0;
+        int block_suffix = warp_total;
+#pragma unroll
+        for (int offset = 1; offset < kWarpSize; offset <<= 1) {
+            const int other = __shfl_down_sync(kWarpMask, block_suffix, offset, kWarpSize);
+            if (lane + offset < kWarpSize) block_suffix += other;
+        }
+        if (lane < kWarps) warp_totals[lane] = block_suffix - warp_total;
+    }
+    __syncthreads();
+
+    histogram[tid] = warp_suffix + warp_totals[warp];
     if (tid == 0) histogram[kCoarseBins] = 0;
     __syncthreads();
-    for (int offset = 1; offset < kCoarseBins; offset <<= 1) {
-        const int value = tid < kCoarseBins - offset ? histogram[tid + offset] : 0;
-        __syncthreads();
-        if (tid < kCoarseBins - offset) histogram[tid] += value;
-        __syncthreads();
-    }
 }
 
 // One row of `[0, length)`, ranking `requested_topk` of it.
@@ -254,10 +306,34 @@ inline cudaError_t launch_topk_chunks(
 // and the conclusion recorded there, that chunking "buys at most 6 CTAs" at
 // `b <= 2`, counted the wrong thing: without it the count is **one**.
 //
-// `select_chunk_count` is deep_gemm's own, verbatim, including its constants.
-// It is a *scheduling* heuristic rather than a shape rule: it only adds chunks
-// when the last scheduling wave would otherwise be under-filled, which is
-// exactly the situation at one or two rows.
+// `select_chunk_count` is deep_gemm's own, including its constants.  It is a
+// *scheduling* heuristic rather than a shape rule: it only adds chunks when the
+// last scheduling wave would otherwise be under-filled, which is exactly the
+// situation at one or two rows.
+//
+// **"Including its constants" used to overstate this, and the two missing
+// stages were a real divergence.**  The port stopped at `return max_chunks`
+// while the original (`ref:1495-1518`) has two more: the largest count that
+// still fits a single wave, and -- when no count fits one -- the smallest whose
+// tail fills at least half a wave, else the widest tail seen.  Both are
+// *scheduling* refinements rather than shape rules, which is why they are worth
+// having: the comment above them in the original says the waves/chunks-only
+// model misses the fixed histogram, arrival and merge cost that every chunk
+// pays regardless of how much of the row it walks.
+//
+// **At this port's band the two stages are inert, and that is a checked claim
+// rather than an assumption.**  `b <= 2` against `num_sms = 104` gives 6 either
+// way, and an exhaustive walk of `b in {1,2} x V in [2048, 2e6)` at
+// `sm_count in {104, 28, 32}` finds **zero** disagreements -- so no measurement
+// in this ledger moves, on any of the three families this repository builds.
+//
+// It is carried anyway because the divergence is **latent**: `chunks_for_shape`
+// is reachable at any `b`, and it is *not* inert away from the band -- at
+// `sm_count = 104` the two functions disagree on 834 of 1,393 `(b, V)` pairs
+// over `b in [1,199]` (e.g. `b18-v66551`: 6 before, 5 after).  Those shapes do
+// not reach here today because `f32_chunks_applies` stops at `b <= 2`; a future
+// widening of that bound would have been silently mis-sized by a function whose
+// comment claimed to be the original's.
 
 constexpr int kMinChunkCount = 3;
 constexpr int kMaxChunkCount = 6;
@@ -276,13 +352,40 @@ __host__ __forceinline__ int select_chunk_count(int64_t n_rows, int64_t n_cols,
         return static_cast<int>(blocks - static_cast<int64_t>(waves - 1) * num_sms);
     };
 
-    // An exact multiple occupies a full last wave, so it never needs chunks.
+    // Chunks add initialization, synchronization, and merge work.  Only use
+    // them when at least one candidate fills the last scheduling wave better
+    // than the single-CTA-per-row launch.  An exact multiple occupies a full
+    // last wave, so it never needs chunks.
     const int single_tail = tail_blocks(n_rows);
     int best_chunk_tail = 0;
     for (int chunks = kMinChunkCount; chunks <= max_chunks; ++chunks)
         best_chunk_tail = max(best_chunk_tail, tail_blocks(n_rows * chunks));
     if (best_chunk_tail <= single_tail) return 0;
-    return max_chunks;
+
+    // Within a single wave, use as many chunks as possible to expose row-level
+    // parallelism without adding another scheduling wave.
+    int single_wave_chunks = 0;
+    for (int chunks = kMinChunkCount; chunks <= max_chunks; ++chunks) {
+        const int64_t blocks = n_rows * chunks;
+        if (blocks <= num_sms) single_wave_chunks = chunks;
+    }
+    if (single_wave_chunks != 0) return single_wave_chunks;
+
+    // For multi-wave launches, prefer the smallest chunk count with a
+    // sufficiently populated tail.  This accounts for the fixed histogram,
+    // arrival, and merge cost that a waves/chunks-only model misses.
+    int selected = 0;
+    int best_tail = -1;
+    for (int chunks = kMinChunkCount; chunks <= max_chunks; ++chunks) {
+        const int64_t blocks = n_rows * chunks;
+        const int tail = tail_blocks(blocks);
+        if (2 * tail >= num_sms) return chunks;
+        if (tail > best_tail) {
+            selected = chunks;
+            best_tail = tail;
+        }
+    }
+    return selected;
 }
 
 // One row's shared state between the three kernels, one entry per row.
@@ -545,16 +648,28 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     // `boundary` members go in the row's output.  Every count here is the
     // *true* count, which is what lets the refine below decide without a second
     // merge.
-    int total = 0;
-#pragma unroll
-    for (int source = 0; source < ChunkCount; ++source)
-        total += workspace.coarse[source][tid < kCoarseBins ? tid : 0];
-    if (tid < kCoarseBins) histogram[tid] = 0;
-    __syncthreads();
+    //
+    // **One pass, not two.**  This used to sum into a `total` local, then
+    // re-run the identical `ChunkCount`-deep loop into `histogram`, with the
+    // first result discarded (`(void)total`).  The original sums once
+    // (`ref:1149-1154`, `histogram[tid] = total`).  The loop reads
+    // `ChunkCount * kCoarseBins` ints of **device** memory -- 24 KB per row at
+    // `ChunkCount == 6` -- so the duplicate was a second device-memory pass
+    // over the whole coarse workspace, taken in the one CTA every other CTA of
+    // the row has already finished waiting for.
+    //
+    // The `tid < kCoarseBins ? tid : 0` guard the duplicate carried is dead at
+    // this width (`kThreads == kCoarseBins`, and the cumsum below asserts it);
+    // the padding slot `histogram[kCoarseBins]` is written by the cumsum.
+    // No barrier is needed between the write and the cumsum: each thread reads
+    // back only its own slot, and the cumsum's own leading `__shfl_down_sync`
+    // is wave-synchronous.
     if (tid < kCoarseBins) {
+        int total = 0;
 #pragma unroll
         for (int source = 0; source < ChunkCount; ++source)
-            histogram[tid] += workspace.coarse[source][tid];
+            total += workspace.coarse[source][tid];
+        histogram[tid] = total;
     }
     block_cumsum_histogram_1024(histogram);
     if (tid < kCoarseBins && histogram[tid] >= topk && histogram[tid + 1] < topk) {
@@ -597,7 +712,6 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
         workspace.declined = boundary_base > kCandidateCapacity;
         workspace.arrival = 0;
     }
-    (void)total;
 }
 
 // The second row walk: writes every element above the threshold bin straight to
