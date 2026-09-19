@@ -3801,6 +3801,8 @@ plan §18.1 的静态数 `2600 B` 与行号 `:253` 都是旧的。**探针重跑
 | plan | `:2052` 的 `kSmemStaticBytes = 2600`/`:253` | 2596（编译器）/ `:328` | 探针重跑过两版，见上 |
 | ledger | §12.19.1 的现在时 | 加了过去时抬头 | `b986ff9` 已修，正文保留作历史 |
 | ledger | `:3556` 的现在时 | 同上 | 同上 |
+| ledger | `:1772` 的 "epoch fields" | 句子本身已删 | `b986ff9` 删字段时删了它；行号留作历史，见 §12.20.2 的注 |
+| ledger | `:996` 的 `#ifdef KSMEM_BYTES` | `:1041` | 本批注释编辑推的 |
 | CLAUDE.md | `maca_topk.cu:1205`/`:1201` | `:1214`/`:1210` | 容量闸的行号（本批注释上移所致） |
 | SKILL.md | §8.2 整张表 | 重核 2026-09-19 | 拆成 已修 / 仍在 / 引用过期 三段 |
 
@@ -3820,7 +3822,30 @@ plan §18.1 的静态数 `2600 B` 与行号 `:253` 都是旧的。**探针重跑
   曾按它推成"每 SM 5 个 CTA"，而 §6 与 `CLAUDE.md:392` 记的是 3，
   三者（5 / 3 / 实测 4）此前没有对齐过。现在只有实测的 4 还在。
 
-### 12.21.5 审计报过、核完是**错的**，不改
+### 12.21.5 一批引用是**这一批自己弄歪的**，不是"过期"
+
+§12.21 开头那条"注释上移推歪引用"值得单独留一条**可复现的**：把
+`radix_core.cuh` 与 `maca_topk.cu` 的改动按行区间列出来，落在常量**上方**的
+插入就是凶手。
+
+| 文件 | 落在哪个块上方 | 插入了多少行 | 谁过期了 |
+|---|---|---|---|
+| `radix_core.cuh` | `kMaxTopK` 说明（`:47-50` 之后） | +10 | 该常量以下的一切引用 |
+| `radix_core.cuh` | `kSMEM` 说明（`:78-83` 之后） | +14 | 同上，且更深 |
+| `maca_topk.cu` | `RowParams` 字段说明 | +3 | `scan_flags` 以下 |
+| `maca_topk.cu` | 行核注释 | +1 | — |
+| `maca_topk.cu` | `launch_topk_bf16_*` 注释 | +11 | `kF32OverflowChunkLen` 以下 |
+| `maca_topk.cu` | `KSMEM_BYTES` 断言说明 | +9 | 断言本身（`:996`→`:1041`） |
+| `maca_topk.cu` | `f32_chunks_applies` 注释 | +2 | 该函数以下 |
+| `dg_chunks.cuh` | `kSmemBytes` 说明 | +11 | `TopKChunksWorkspace` 以下 |
+| `dg_chunks.cuh` | 工作区注释 | +3 | 同上 |
+
+**合计 +64 行注释，推歪了 §12.21.3 那张表里的每一行。** 这不是"引用过期"，
+是**同一批改动**同时改源码和改引用时自己造成的。规矩很简单，但没有工具强制：
+**在 `csrc/xcore1000/` 里加注释之后，提交前 grep 一遍 `docs/` 里的
+`radix_core.cuh:` / `maca_topk.cu:` / `dg_chunks.cuh:`，把命中逐个复核。**
+
+### 12.21.6 审计报过、核完是**错的**，不改
 
 按 §12.20 的规矩，反证掉的也记下来：
 
@@ -3829,7 +3854,7 @@ plan §18.1 的静态数 `2600 B` 与行号 `:253` 都是旧的。**探针重跑
 - "`nan_flags` 的语义"、"`dg_chunks.cuh:410`"、"`kSmemBudgetBytes` vs `kSMEM`"——
   核完都与源码一致。
 
-### 12.21.6 这一批里**唯一一次被自己抓住的错**
+### 12.21.7 这一批里**唯一一次被自己抓住的错**
 
 §12.21.2 写完之后，我把 plan §18.1 的静态共享内存从 2600 改成
 `kSmemStaticBytes` 的 **2328** —— 理由看起来很硬："常量优先于旧数字"。
@@ -3846,7 +3871,7 @@ plan §18.1 的静态数 `2600 B` 与行号 `:253` 都是旧的。**探针重跑
 常量，而不是去问编译器**"。占用率这种量，问驱动（`cudaOccupancyMax...`）
 和问编译器（`--resource-usage`）都比读常量可靠。
 
-### 12.21.7 门
+### 12.21.8 门
 
 `4525a1ed075097b57531b5cb64d4adda`（`deep_select_maca_xcore1000.so`，
 20:26:46），`run_bench.sh` 全绿。
@@ -3959,6 +3984,11 @@ at most 6 CTAs on a 104-AP part, which is the one thing it cannot be buying."
 `dg_coarse12.cuh:55` 引用 `kCoarse12SmemBytes`——树里没有这个符号，
 常量叫 `kSmemBytes`（`kCoarse12SmemBytes` 是 deep_gemm 原版的名字）。
 
+> **`maca_topk.cu:1772` 这个行号是"当时"的，现在两边都不成立了**（§12.21.3
+> 重核时发现）：那个句子本身在修它的时候被删掉了（`grep "epoch fields"` 在
+> `csrc/` 里零命中），而 `:1772` 现在是 `if (index_dtype == 0) {`。
+> 这条记录的价值在于"它错过"，不在那个坐标 —— 所以行号保持原样，不再校正。
+
 ### 12.20.3 构建与宏的说明和实际接线对不上（三条）
 
 **S7a — `ARCH_SM_COUNT` 没有任何行为消费者。**
@@ -3969,6 +3999,7 @@ at most 6 CTAs on a 104-AP part, which is the one thing it cannot be buying."
 （`f32_coarse12_applies` 的 `if constexpr`）。注释按实情重写。
 
 **S7b — `maca_topk.cu:996` 的 `#ifdef KSMEM_BYTES` 断言在任何一次构建里都不会触发。**
+（`:996` 是**写这条时的**行号；本批的注释编辑把它推到了 `:1041`，见 §12.21.5。）
 `KSMEM_BYTES` 默认未定义（`radix_core.cuh` 的 `#ifndef` 在 `__MACACC__` 下选
 16 KB），而 `setup.py` 的 `build_for_maca`、`CUCC_TARGETS` 和本仓任何脚本都
 没有传 `-DKSMEM_BYTES=`。所以它是给一个没人跑的构建留的陷阱，**发布的那次
