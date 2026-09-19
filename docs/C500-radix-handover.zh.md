@@ -92,7 +92,9 @@ walk 合计 283 µs，对两趟下界 233.4 = 82% 可达速率。要看"下一�
         （s_wide_above = 严格在阈值之上的元素数）
 趟 2    遍历整行：key>>4 > 阈值 -> 直接写 output
                   key>>4 == 阈值 -> 存进 arena + 统计低 4 位（16 桶细直方图）
+屏障    趟 2 结束的 __syncthreads()（:1369）——细直方图到此才对所有线程可见
 refine  细直方图再做一次 256 宽扫描（只前 16 桶非零），得到 4 位细阈值
+         （扫描后还有一道 __syncthreads()，:1383，因为阈值由 thread 0 写）
 输出    arena 内：低 4 位 > 细阈值 -> 输出；== -> 用 s_last_remain 补尾
 溢出    arena 放不下（s_num_input > 4096）才回退整行重扫一遍
 ```
@@ -219,8 +221,9 @@ PYTHONPATH=$PWD python tests/test.py --perf-only    # 95 个用例，先验后�
 - 为什么：老做法的代价，带实测数字；
 - before→after 表（7 个代表 cell，µs + GB/s 双币种），并注明两个数各是什么口径、
   两侧二进制分别来自哪棵树；
-- **roofline 判定**：这格是不是带宽受限——逻辑单趟 GB/s 乘趟数，对 1,487 GB/s
-  只读墙的占比；不是的话写清绑定在什么上；
+- **roofline 判定**：这格是不是带宽受限——逻辑单趟 GB/s 乘趟数，对 **1,650 GB/s**
+  只读墙的占比（不是 1,487：见 `C500-to-parity-plan.zh.md` §7.1 的更正）；
+  不是的话写清绑定在什么上；
 - 门的结果（95/95 + 82170/82170）；
 - 架构边界声明（只动 `csrc/xcore1000/` ⇒ xcore1600 逐字节不变 ⇒ 不欠 C600U 验证）。
 
@@ -264,8 +267,8 @@ git -C $D push origin main
 >
 > **归因查过了，不要按"我们读两趟"去改**（这条是写本节时先猜、随后被源码否掉的）：
 > `b4096-v131072` 上 `launch_topk_f32_chunked` 对输入行只有**一趟**——
-> `topk_f32_chunk_stage1_kernel` 走 chunk（`radix_core.cuh:2249`，读 `scores`），
-> `stage2` 只在候选缓冲 `vals`/`cols` 上跑 `radix_topk_row_f32`（`:2309`，不碰行）。
+> `topk_f32_chunk_stage1_kernel` 走 chunk（`radix_core.cuh:2404`，读 `scores`），
+> `stage2` 只在候选缓冲 `vals`/`cols` 上跑 `radix_topk_row_f32`（`:2489`，不碰行）。
 > 我们那多出来的一趟是 **NaN 扫描**（ledger §8 的 A/B：1612 µs，恒定 ~20%）。
 > 也就是说：**单趟对单趟，我们 334 GB/s，对方 659 GB/s**（2.147 GB / 6425 µs
 > vs / 3260 µs，1,650 GB/s 墙的 20% vs 40%）。差在那**每元素的活**上
@@ -282,7 +285,7 @@ git -C $D push origin main
    arena emit。
 2. **pass 1 的原子发射（102.5 µs）——但 lever 2 那条"现成的寄存器直方图"是
    假的，不能照抄。** 真值 102.5 µs 仍然成立，是内核里最大的已识别单项；可
-   `radix_core.cuh:239` 的 `hist_add_bf16_reg` **不是**一个可用的替代实现。
+   `radix_core.cuh:365` 的 `hist_add_bf16_reg` **不是**一个可用的替代实现。
    它是**逐元素的传输，不是直方图**：每个元素做 8 次 shuffle，每次 shuffle
    只让**一个 lane**（那个 bin 的 owner）自增一个寄存器，于是一个 warp 处理一个
    元素只记 1 个数；而且 `recv_bin % kBinsPerThread` 不是 owner 自己的槽位

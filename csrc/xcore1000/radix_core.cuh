@@ -44,13 +44,23 @@
 namespace rk {
 
 // The *static-k* dispatch's arm limit -- not the array bound, and not the
-// public contract.  Every reader of this constant is one of the arms that
-// instantiates `topk` at compile time: `launch_topk_bf16_runtime`'s guard, the
-// `static_assert(TOPK <= kMaxTopK)` in `radix_topk_row_bf16_k`, and the chunked
-// entries.  The runtime-k row entries (`radix_topk_row_bf16_b`,
+// public contract.  Every reader of this constant is on the way to an arm that
+// instantiates `topk` at compile time: the
+// `static_assert(TOPK <= kMaxTopK)` in `radix_topk_row_bf16_k`, and the two
+// chunked entries.  The runtime-k row entries (`radix_topk_row_bf16_b`,
 // `radix_topk_row_f32`) do **not** read it, and the public contract is
 // `deep_select_maca::kMaxTopK` = 4096 in `maca_topk.cu` -- which is why the fp32
 // side has its own `kF32MaxTopK` (4096) below rather than reusing this.
+//
+// **`launch_topk_bf16_runtime` also reads it, and that reader is dead.**
+// Nothing in this tree calls `launch_topk_bf16_dispatch`, its only caller, so
+// the whole static-k family below -- k50/k100/…/k2048, `k2048_compact`, the
+// warp-scan pair, and `launch_topk_bf16_runtime` itself -- is compiled-in dead
+// weight of the same class as the `kF32K2048` block.  A 4096 bf16 topk reaches
+// `radix_topk_row_bf16_b` and is answered there; this constant does not bound
+// it.  That guard is the most misleading thing in the file for a reader asking
+// "what is the top-k limit", so it is called out here rather than left to be
+// discovered.
 //
 // There are four constants with this name in the tree (2048 here,
 // `dg_chunks.cuh`, `dg_coarse12.cuh`; 4096 in `maca_topk.cu`) and nothing links
@@ -75,12 +85,26 @@ constexpr int kChunkBlockSize = KCHUNK_BLOCK_SIZE;
 // `__MACACC__` arm is what ships, and that is **16 KB**, not 32.  The 48 KB
 // arm is the non-MACA fallback that no build here takes.
 //
-// 32 KB was not merely unused, it is unbuildable: `ref/ds/README.md` §5 records
-// `-DKSMEM_BYTES=32768` failing outright against the `kSmemStaticBytes` assert
-// below (`16384 >= 46824`), because `kF32StaticBytes` (2328 B) plus the
-// 16-bit static state leaves too little of a 32 KB arena for the input region
-// the fp32 row sizes itself from.  Read `kF32SmemInputSize` at :436 for what
-// 16 KB actually buys.
+// 32 KB was not merely unused, it is unbuildable -- and so is 48 KB, the
+// `#else` arm below.  Neither is reachable through a build entry here, but a
+// reader who reaches for `-DKSMEM_BYTES` should know the ceiling is not a
+// preference.  Measured on this tree, both passes, with `-fsyntax-only`:
+//
+//     -DKSMEM_BYTES=16384  compiles
+//     -DKSMEM_BYTES=32768  static_assert fails: '16384 >= 30440'
+//     -DKSMEM_BYTES=49152  static_assert fails: '16384 >= 46824'
+//
+// The failing assert is `kCoarse12ArenaEntries * 4 >= kSmemInputSize * 4` at
+// :350 -- the 16-bit coarse level's 12-bit histogram aliases the *whole*
+// dynamic arena, so 4096 bins (16,384 B) is a hard floor and any `kSMEM` that
+// grows the arena past it fails to compile.  `kSmemInputSize` is
+// `(kSMEM - kSmemStaticBytes) / 4`, i.e. 14,056 B / 30,440 B / 46,824 B for
+// the three values above.  So the 16 KB arm is not a conservative choice that
+// a bigger part could raise: on this source it is the only buildable one.
+// (`ref/ds/README.md` §5 recorded the 32 KB failure; the 48 KB `#else` fails
+// the same way, which is why it is unbuilt rather than merely untaken.)
+//
+// Read `kF32SmemInputSize` at :521 for what 16 KB actually buys.
 //
 // `maca_topk.cu`'s `#ifdef KSMEM_BYTES` assert has the same shape of problem
 // from the other side -- see the note there.

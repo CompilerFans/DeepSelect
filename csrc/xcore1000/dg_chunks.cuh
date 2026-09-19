@@ -75,6 +75,17 @@ constexpr int kCoarseBins = 1024;
 constexpr int kFineBins = 256;
 constexpr int kCandidateCapacity = 4096;
 constexpr int kHistogramPadding = 1;
+// **UNUSED, and it has no call sites anywhere in this tree** -- grep the name
+// before assuming otherwise.  It is deep_gemm's own name for the two-half
+// staging arena, and it does not describe this port's: the arena here is
+// `TopKChunksWorkspace::candidate_indices` below, **device** memory in the
+// workspace rather than a shared buffer, and all three launches pass `0`
+// dynamic shared memory.  Nothing else reads it either -- the three
+// `static_assert`s beneath it are about `kCandidateCapacity` and the block
+// width, not about this.  Kept rather than deleted only because it is
+// deep_gemm's own constant and a reader comparing the two files should find it
+// where the original has it; see `radix_core.cuh`'s `kF32K2048` block for the
+// same treatment of a dead constant.
 constexpr size_t kSmemBytes = 2 * (size_t)kCandidateCapacity * sizeof(int32_t);
 constexpr float kNegativeInfinity = -__builtin_huge_valf();
 
@@ -282,9 +293,12 @@ __host__ __forceinline__ int select_chunk_count(int64_t n_rows, int64_t n_cols,
 // instantiations, which is what lets the dispatcher allocate one byte buffer
 // sized for whichever `NChunks` this call resolves to.
 //
-// `candidate_indices` is deep_gemm's own `alignas(16)`, and it is what forces
-// the dynamic shared memory below: the array is 16 KB, and the refine stages
-// alias it as two 8 KB halves.
+// `candidate_indices` is deep_gemm's own `alignas(16)`, and it is the *arena*:
+// 16 KB, which the refine stages alias as two 8 KB halves.  It lives here in
+// the workspace, as **device** memory, and not in shared -- the three kernels
+// are separate CTAs, so a shared buffer would not be visible to the one that
+// does the merge (see the member's own note below).  Nothing here asks for
+// dynamic shared memory: all three launches pass `0`.
 template <int ChunkCount>
 struct TopKChunksWorkspace {
     int coarse[ChunkCount][kCoarseBins];

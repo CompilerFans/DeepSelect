@@ -262,8 +262,26 @@ specific to this bug class and belong in the record:
 
 ## 8. Worked example: `csrc/xcore1600/` in this repository
 
-The tree this skill was written against. **Not fixed yet** — this is the
-measurement and the diagnosis, recorded so the fix starts from evidence.
+The tree this skill was written against. **Partly fixed since** — the scan
+helper, the warp-count derivation and most of the masks have been repaired, and
+the site inventory in §8.2 was re-verified against the current sources rather
+than carried over. Read §8.2 before acting on §8.1: the primitive semantics
+measured there are unchanged and still the reason the bugs happened, but
+several of the sites they were measured against no longer exist.
+
+The measurement and the diagnosis below are kept as written, because they are
+what the fix started from.
+
+One caveat before you quote §8.1's verdict line: the probe's scan block is
+**self-contained**, not a call into `csrc/xcore1600/utils.cuh` — it carries its
+own copy of the pre-fix 32-lane helper (`wave64_probe.cu:105-132`, `as_port[tx]
+= scan32<int>(1, tx % 32)`) and its own 64-lane replacement. So it still prints
+`VERDICT: port scan wrong on 32/64 lanes` **on a tree where that scan is fixed**
+(re-measured 2026-09-19 on MACA 3.7.0.36 / xcore1000: `as_port` restarts at 1
+above lane 31, `as_fixed` matches `expected` 64/64). The verdict is a statement
+about the *shape of the bug*, not about the current file. The primitive rows
+above it — ballot, reduce, `__any_sync`, the shuffles — are measured against the
+real builtins and are current.
 
 Symptom, on a MetaX C600-U (reports `sm89` → family 1600):
 
@@ -303,42 +321,85 @@ __shfl_up_sync(full mask, v, 1)    lane 63 -> 62    (same)
 __shfl_up_sync(full, v, 1, /*width=*/32)  lane 32 -> 32  (grouped, opt-in)
 ```
 
-So `utils.cuh`'s scan is wrong for **three independent reasons**, and a fix
-that addresses fewer than all three leaves it wrong:
+So `utils.cuh`'s scan was wrong for **three independent reasons**, and a fix
+that addressed fewer than all three would have left it wrong:
 
 1. the mask `0xFFFFFFFFu` excludes lanes 32..63, so they gather from themselves;
 2. the loop bound `i <= 16` is a 5-step Hillis-Steele, correct for 32 lanes;
    64 needs `i <= 32`;
 3. the guard `lane_idx + i < 32` (suffix scan) discards everything above lane 31.
 
+**All three were fixed, and they were fixed in one place rather than three**:
+`utils.cuh` now defines the wave width and the full mask once
+(`MACA_WARP_SIZE 64u` at `:11`, `MACA_FULL_MASK` at `:15`) and every scan
+spells the bound in terms of them — `i <= MACA_WARP_SIZE / 2` at `:22` and
+`:39`, `lane_idx + i < MACA_WARP_SIZE` at `:41`. That is the shape §3 argues
+for: widen the model, not the literal.
+
 ### 8.2 Site inventory
 
-| site | current | why it is wrong |
+**Re-verified 2026-09-19 against the current `csrc/xcore1600/`**:
+`common_parts.cuh` is 1433 lines, `utils.cuh` 51. The table is split into what
+is fixed, what remains, and what was a stale citation — the rows that were
+stale are kept rather than deleted, because a reader who follows an old link
+should land on the reason it no longer resolves.
+
+**Fixed**
+
+| site | what it is now | what the fix was |
 | --- | --- | --- |
-| `utils.cuh:20`, `:37` | `for (i = 1; i <= 16; i <<= 1)` | a 5-step scan is 32-lane; 64 needs `i <= 32` |
-| `utils.cuh:39` | `if (lane_idx + i < 32)` | guard discards data the shuffle actually delivered |
-| `utils.cuh:21`, `:38` | `__shfl_*(0xFFFFFFFFu, …)` | lane 32+ reads its own value instead of its neighbour; the mask is why |
-| `utils.cuh:7-15` | the comment | states the **false premise** ("ballot/reduce/shfl group by 32, so a 32-written scan is correct"), then contradicts itself two lines later. Delete it, do not preserve it |
-| `common_parts.cuh:312` | `NUM_WARPS = NUM_THREADS / 32` | **doubles** — feeds `:421` |
-| `common_parts.cuh:421` | `static_assert(NUM_SEGS_PER_ROUND == NUM_WARPS)`, `:697` `local_seg_idx = warp_idx`, `:696` `SEGS_PER_WARP == 1` | **the reachable uninitialized read.** `NUM_SEGS_PER_ROUND = elements_per_round / 512 = NUM_THREADS*16/512`, which is `NUM_THREADS/32` — right for 32-lane warps, **twice the real warp count** for 64. On a 256-thread config that is 8 segments per round and 4 real warps, so segments 4..7 are never loaded and the consumer reads uninitialized shared memory. Also makes `is_warp_active` (`v3/topk_select.cuh:92`, `v3_fp32:481`) and the permuted position arithmetic wrong by the same factor |
-| `common_parts.cuh:121`, `:122` | `NUM_WARPS = NUM_THREADS / 32`, `static_assert(NUM_THREADS % 32 == 0)` | same `/32`; the assert encodes the wrong width |
-| `common_parts.cuh:225` | `if (warp_idx < NUM_WARPS/2)` | with the doubled count this is true for **every** real warp, so the `else` branch that loads `input_values` never runs — `sorted_value` sorts an unloaded buffer |
-| `common_parts.cuh:488/496/497/581/784/791/1432/1440/1469` | `__reduce_add_sync(0xFFFFFFFF, …)`, `__reduce_or_sync(0xFFFFFFFFu, …)` | mask honored → sums the low half only |
-| `common_parts.cuh:1463` | `__ballot_sync(0xFFFFFFFF, …)`, `(1u << lane_idx) - 1u` | two defects: the mask drops the high half, and the 32-bit shift is UB for `lane_idx >= 32` |
-| `common_parts.cuh:1464` | `__popc(bit)` | 32-bit; applied to a 64-lane ballot it truncates silently → `__popcll` |
-| `common_parts.cuh:684` | `for (c = lane_idx; c < num_chunks; c += 32u)` | **decide, do not edit.** Chunks per segment is 64 (bf16) / 128 (fp32), so the stride must become 64 — but today the loop only covers chunks 0..31 idempotently (two aliasing lanes copy each chunk), which is why it is not the crash site |
-| `common_parts.cuh:536`, `:538`, `:566` | `static_assert(NUM_RECONSTRUCT_BUCKETS == 32*8)`, `bucket_counter + lane_idx * 8`, `lane_idx * 8 + j` | the histogram-to-lane mapping is 32-lane-shaped. `NUM_RECONSTRUCT_BUCKETS` is `1 << NUM_RECONSTRUCT_RADIX_BITS` (`:385`) — it comes from the radix config, **not** the lane count, so the fix is 4 buckets per lane over 64 lanes, not a bigger structure |
-| `common_parts.cuh:448`, `:490/786/1434` exchange | `warp_cnt[NUM_WARPS]`, `lane_idx < NUM_WARPS` | sized and indexed by the doubled count; the "lane i holds warp i's total" convention is 32-lane. With 64 lanes the totals arrive in both halves, so the exchange has to be re-derived, not resized |
-| `v3/topk_select.cuh:53-54`, `v3_fp32/topk_select.cuh:89-90` | `canonical_warp_idx_sync()` + `threadIdx.x % 32` | the lane index; and see the next row |
-| `kerutils/.../device/cuda/common.h:89` | `return threadIdx.x / 32u;` | **outside `csrc/xcore1600/` but in the compiled path** (`common_parts.cuh:4` includes it). Returns a warp index twice the hardware's, so `warp_idx` and `lane_idx` name different groupings and no consistent relabeling of one alone can work |
+| `utils.cuh:11`, `:15` | `#define MACA_WARP_SIZE 64u`, `#define MACA_FULL_MASK ((uint64_t)0xFFFFFFFFFFFFFFFFull)` | the file's one statement of the wave width and the full mask; the comment that used to claim "ballot/reduce/shfl group by 32, so a 32-written scan is correct" is gone |
+| `utils.cuh:22`, `:39` | `for (uint32_t i = 1; i <= MACA_WARP_SIZE / 2; i <<= 1)` | the 5-step `i <= 16` became a 6-step bound derived from the wave width |
+| `utils.cuh:41` | `if (lane_idx + i < MACA_WARP_SIZE)` | the suffix-scan guard no longer discards lanes 32..63 |
+| `utils.cuh:23`, `:40` | `__shfl_*(MACA_FULL_MASK, …)` | the mask now names all 64 lanes (cosmetic on the shuffle, load-bearing on the guard above it) |
+| `common_parts.cuh:105`, `:281` | `NUM_WARPS = NUM_THREADS / MACA_WARP_SIZE` | the `/32` is gone at both sites; `:106` carries the matching `NUM_THREADS % MACA_WARP_SIZE == 0` |
+| `common_parts.cuh:502`, `:503` | `static_assert(NUM_RECONSTRUCT_BUCKETS % MACA_WARP_SIZE == 0)`, `COUNTS_PER_LANE = NUM_RECONSTRUCT_BUCKETS / MACA_WARP_SIZE` | the histogram-to-lane mapping was re-derived rather than widened: 4 buckets per lane over 64 lanes, `:506` `bucket_counter + lane_idx * COUNTS_PER_LANE`, `:534` `lane_idx * COUNTS_PER_LANE + j` |
+| `common_parts.cuh:650` | `for (uint32_t c = lane_idx; c < num_chunks; c += MACA_WARP_SIZE)` | the `+= 32u` stride is gone, so the tail chunks of a segment are copied instead of silently skipped |
+| `common_parts.cuh:1386`, `:1388` | `__ballot_sync(MACA_FULL_MASK, …) & ((1ull << lane_idx) - 1ull)`, `__popcll(bit)` | 64-bit end to end: the 32-bit shift UB and the `__popc` truncation are both gone |
+| `common_parts.cuh:451`, `:459`, `:460`, `:548`, `:748`, `:755`, `:1353`, `:1361`, `:1393` | `__reduce_add_sync(MACA_FULL_MASK, …)`, `__reduce_or_sync(MACA_FULL_MASK, …)` | the 32-bit literals are gone from `common_parts.cuh` — these nine are every collective in the file, and each names all 64 lanes |
+| `common_parts.cuh:616`, `:668` | `SEGS_PER_WARP = NUM_SEGS_PER_ROUND / NUM_WARPS`, `local_seg_idx = warp_idx + s * NUM_WARPS` | **the uninitialized read is closed**: with the real warp count each warp now takes `SEGS_PER_WARP` segments (`:667` loop) instead of the top half of the round going unloaded |
+| `v3/topk_select.cuh:57-58`, `v3_fp32/topk_select.cuh:88-89` | `warp_idx = threadIdx.x / MACA_WARP_SIZE`, `lane_idx = threadIdx.x % MACA_WARP_SIZE` | both call sites stopped calling kerutils' `canonical_warp_idx_sync()`; the two lines of comment above them say why |
+
+**Remains**
+
+| site | current | why it is still wrong |
+| --- | --- | --- |
+| `v3_fp32/topk_select.cuh:483`, `:504`, `:508` | `__reduce_add_sync(0xFFFFFFFF, …)` | **the fp32 reconstruct scan was not carried over.** These are the only 32-bit collectives left in the tree, and the reduce honors its mask, so they sum the low half of the wave only — the same defect as the `common_parts.cuh` rows that were fixed. `MACA_FULL_MASK` is already in scope (`v3_fp32/topk_select.cuh` includes `utils.cuh` via `common_parts.cuh`), so this is a three-literal edit, not a port |
+| `common_parts.cuh:449`, `:754`, `:1359`, `v3_fp32/topk_select.cuh:502` | `static_assert(NUM_WARPS <= 32);` | the bound is now true but it is the wrong bound: it exists because `warp_cnt` is exchanged through the *lanes* of one wave (`:458`, `:1360` — one lane reads one warp's total), so the real limit is `NUM_WARPS <= MACA_WARP_SIZE`. `common_parts.cuh:1062` spells that same bound against `NUM_RECONSTRUCT_BUCKETS` for the same exchange; these four are left over from when 32 was the wave width. Harmless today (the configs are 256 and 512 threads, so `NUM_WARPS` is 4 or 8) and a trap the day a wider block is tried |
+
+**Checked and not a defect**
+
+| site | verdict |
+| --- | --- |
+| `common_parts.cuh:197` `if (warp_idx < NUM_WARPS/2) {` | **not a defect any more.** This is the row the old table called "true for every real warp, so the `else` branch never runs". With `NUM_WARPS` derived from `MACA_WARP_SIZE` (`:281`) and asserted even (`:107`), the split is at the real half-wave and both branches are reachable for the 256- and 512-thread configs `:283` allows (4 or 8 warps). The upstream pairing is intact: the `if` half (`threadIdx.x` in `[0, NUM_THREADS/2)`) writes `smem_index_buf` at stride `NUM_THREADS/2` (`:199`), the `else` half (`threadIdx.x - NUM_THREADS/2`, same stride, `:205`) fills `smem_value_buf` from `input_values` — two different buffers, each half covering its own disjoint slice. Nothing to change |
+
+**Stale citations — the code they named no longer exists**
+
+| site | what happened |
+| --- | --- |
+| `utils.cuh:20`, `:37`, `:39`, `:21`, `:38`, `:7-15` | all six are the pre-fix scan and the pre-fix comment; the file is 51 lines and those line numbers now hold the wave-width block and the fixed loops (see Fixed, above) |
+| `common_parts.cuh:312` | `NUM_WARPS` moved to `:281`; `:312` is now `NUM_128b_PER_SEG` |
+| `common_parts.cuh:121`, `:122` | `NUM_WARPS` in `EpilogueRunner` is at `:105`, the assert at `:106`; `:121`/`:122` are the `BlockRadixSortT` block |
+| `common_parts.cuh:421`, `:697`, `:696` | the `NUM_SEGS_PER_ROUND == NUM_WARPS` assert is gone — `:390`/`:391` now assert `>=` and `%` instead — and `local_seg_idx = warp_idx` is at `:668` |
+| `common_parts.cuh:225` | no such site; the `NUM_WARPS/2` split is at `:197` |
+| `common_parts.cuh:488/496/497/581/784/791/1432/1440` | the mask rows moved to `:451/460/548/748/1353/1361`; `:1432`/`:1440` and the `1463`/`1464`/`1469` rows were **past EOF** — the file is 1433 lines, so the `__ballot_sync`/`__popc` pair they described is the one now at `:1386`/`:1388` |
+| `common_parts.cuh:684` | the chunk loop is at `:650` and its stride is `MACA_WARP_SIZE`; the "decide, do not edit" note was decided |
+| `common_parts.cuh:536`, `:538`, `:566` | the reconstruct mapping moved to `:502`, `:503`, `:506`, `:534`; `NUM_RECONSTRUCT_BUCKETS` is still `1 << NUM_RECONSTRUCT_RADIX_BITS` at `:351`, and the fix was indeed 4 buckets per lane over 64 lanes |
+| `common_parts.cuh:448`, `:490/786/1434` exchange | the exchange now lives at `:411` (`warp_cnt[NUM_WARPS]`), `:453`, `:750`, `:1355`; it was re-derived for 64 lanes, not resized |
+| `kerutils/.../device/cuda/common.h:89` | **still `return threadIdx.x / 32u;`** — but it is no longer in the compiled path: its only callers were the two `v3*` entries, and both now derive `warp_idx`/`lane_idx` from `MACA_WARP_SIZE` directly (`v3/topk_select.cuh:57-58`, `v3_fp32/topk_select.cuh:88-89`), with a comment at `:53-54` / `:84-85` recording why |
 
 ### 8.3 Not to be "fixed"
 
-`bit_utils.cuh:43/149` (`>> 31`, `0x80000000u`) are the fp32 sign bit;
-`common_parts.cuh:1397/1459` `static_assert(NUM_ELEMS_PER_THREAD_PER_ROUND < 32)`
+Line numbers re-checked 2026-09-19 alongside §8.2; the `common_parts.cuh` rows
+below moved with the fixes there.
+
+`bit_utils.cuh:37/127` (`>> 31`, `0x80000000u`) are the fp32 sign bit;
+`common_parts.cuh:1379` `static_assert(NUM_ELEMS_PER_THREAD_PER_ROUND < 32)`
 is a per-**thread** element count with a per-thread `hit_mask`, not a lane mask;
-`:88` `NUM_BYTES_TO_STORE == 32` is a store width; `:306`/`:1081`/`:1476` and
-`v3_fp32:79` are pair packing; `__syncthreads_or` is block-wide with no mask.
+`common_parts.cuh:75/76` `NUM_BYTES_TO_STORE == 32` is a store width;
+`common_parts.cuh:402/403` (the `pair(64b)` layout comment) and
+`v3_fp32/topk_select.cuh:73/74` are pair packing; `__syncthreads_or` is
+block-wide with no mask (`v3/topk_select.cuh:105`, `v3_fp32/topk_select.cuh:544`).
 `cub::BlockRadixSort` is **width-correct** on MACA (CUB's `WARP_THREADS` is 64
 and it uses `0xffffffffffffffffull` masks) — slow, but not part of this bug.
 
@@ -347,6 +408,7 @@ and it uses `0xffffffffffffffffull` masks) — slow, but not part of this bug.
 Nothing routes to this tree any more: `setup.py` builds
 `csrc/xcore1000/maca_topk.cu` for every family, and that is the hand-written
 64-lane kernel, which passes the slice 200/200 on a C600U (and is faster there).
-To work this tree, point `setup.py`'s `sources =` line at
-`_xcore1600_sources()` and re-run the slice when done -- there is no environment
-variable for it, by design.
+There is no `_xcore1600_sources()` to point at any more — the port's sources are
+off `SOURCES` and its `kerutils` include is off `include_dirs`, and re-adding
+both is what building it again would take. There is no environment variable for
+it, by design.

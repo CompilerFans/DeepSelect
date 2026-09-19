@@ -131,12 +131,21 @@ shape-keyed instantiation axis. Within that budget:
 
 ### The balance is per-part, and 128 KiB parts are not solved by scaling
 
-The `NATIVE_*` constants in `csrc/structs.h` are one row per family on purpose.
-C500's `NATIVE_F32_CHUNK_WORK_TARGET = 260` is **2.5 × its 104 APs, fitted over
-24 measured points**; the C600 (70) and C600U (80) rows are **scaled
-reservations, not measurements**, and the doc comment says so. The ratio
+The family constants in `csrc/structs.h` are one row per family on purpose, but
+the work target is **not** one of them -- it is derived from the device's AP
+count at launch, not tabled: `f32_chunk_work_target(sm_count)` in `maca_topk.cu`
+returns `sm_count * 5 / 2`, so C500's 104 APs give **260**, C600's 28 give 70
+and C600U's 32 give 80. C500's 260 is **2.5 × its 104 APs, fitted over 24
+measured points**; the other two are **the same formula evaluated, not
+measurements**, and nothing in this tree has been run on either part. The ratio
 `K / SM_COUNT` is precisely the thing the C500 data cannot tell us -- and the
 whole chunk policy is that one ratio.
+
+(`csrc/structs.h` carries `ARCH_FAMILY`, `ARCH_SM_COUNT` and
+`ARCH_SMEM_PER_AP_BYTES`, and of those only the last has a behavioral consumer.
+There are no `NATIVE_*` constants left in this tree; the name survives only in
+two `static_assert`s under the unbuilt `csrc/xcore1600/`, where it is
+undefined -- see that header's own note.)
 
 What changes on a 128 KiB part, and in which direction:
 
@@ -267,13 +276,20 @@ BUILDROOT=/out ./build.sh              # ...and copy it to /out/wheel/
 ```
 
 `CUCC_TARGETS` is the whole build interface (the same variable and meaning as
-mcDeepGEMM's `build.sh`). Unset means `xcore1000,xcore1500,xcore1600` in
-`build.sh` -- one target per family, the same *set* of families mcDeepGEMM's
-default names, minus its per-part aliases, which `mxcc` rejects outright
-(`xcore1008`, `xcore1610`, `xcore1620`) -- and `native`, mxcc's own spelling
-for the local part, in `develop.sh` and `install.sh`. The difference is deliberate: a wheel has to
-carry every family to be shippable, while a local build only has to carry the
-board in front of you. `CUCC_TARGETS=xcore1600 ./develop.sh` is the one-family
+mcDeepGEMM's `build.sh`). Unset means `xcore1000,xcore1500,xcore1600` in every
+script here -- `build.sh`, `develop.sh` and `install.sh` all default to the same
+three families, one per family, the same *set* mcDeepGEMM's default names, minus
+its per-part aliases, which `mxcc` rejects outright (`xcore1008`, `xcore1610`,
+`xcore1620`).
+
+**`native` is not accepted**, and `develop.sh` / `install.sh` say so in their
+own comments: `setup.py` raises on any target that is not `xcore<N>`, so
+`CUCC_TARGETS=native ./develop.sh` is a hard build error rather than a local
+build. That used to be the difference between the wheel scripts and the local
+ones -- a local build only had to carry the board in front of you -- but the
+arch constants are per-family now, so a one-family artifact must not have its
+constants chosen by the build machine. `CUCC_TARGETS=xcore1600 ./develop.sh` is
+the one-family
 form when you want it explicitly.
 
 **The target list is a list of images, not of builds.** One extension,
@@ -321,9 +337,10 @@ indifferent either way, and the flag keeps the fill-value conversion exact for a
 denormal `value_oob_fill_value`. `api.cu` is host code, spelled `.cu` so torch
 routes it to the device rule rather than to `$cxx`.
 
-`pip install .` does not currently work, for a reason inherited from upstream:
-`setup.py` stamps the version with `datetime.now()` (upstream `setup.py:204`,
-used at `:214`), and a PEP 517 install runs `setup.py` once for metadata and
+`pip install .` does not currently work, and the reason is **this** `setup.py`,
+not upstream's: `:368` stamps the version with `datetime.now()`
+(`datetime_rev = datetime.now().strftime("%Y%m%d.%H%M%S")`, used in the
+`version=` at `:405`), and a PEP 517 install runs `setup.py` once for metadata and
 again for the wheel -- when the two runs straddle a second boundary the wheel is
 rejected as misnamed (`Wheel has unexpected file name`). Build isolation adds a
 second, unrelated failure (torch is not in pip's isolated build environment),
@@ -456,7 +473,7 @@ then.
 
 | variable | default | effect |
 | --- | --- | --- |
-| `CUCC_TARGETS` | `xcore1000,xcore1500,xcore1600` (`build.sh`); `native` (`develop.sh`, `install.sh`) | which `-offload-arch` images go into the one extension; `native` = the local part, in mxcc's own spelling. An unrecognized target is rejected by `mxcc` |
+| `CUCC_TARGETS` | `xcore1000,xcore1500,xcore1600` (all three scripts) | which `-offload-arch` images go into the one extension. `native` is **not** a target: `setup.py` raises on anything that is not `xcore<N>`, and an unrecognized target is rejected by `mxcc` |
 | `MACA_PATH` | `/opt/maca` | the MACA toolkit root, and the authority for it. All three scripts derive `CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`/`LD_LIBRARY_PATH` from it, since a stale one of those in the caller's shell silently beats it |
 | `BUILDROOT` | unset | `build.sh` only. When set, the wheel is also copied to `${BUILDROOT}/wheel/` — the host repository's own destination, so one packaging step can collect both wheels by pointing a single `BUILDROOT` at both trees |
 | `MACA_HOME` | — | toolkit root too, consulted when `MACA_PATH` is unset. `MACA_PATH` wins if both are set |

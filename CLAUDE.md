@@ -457,16 +457,18 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
   anywhere in the tree; every cross-lane primitive is already 64-lane
   (`radix_core.cuh`'s `kWarpSize = 64` under `__MACACC__`); the ranking is
   integer key manipulation with no float math to differ per part.
-- **Capacity cannot fire in this direction, and there is no capacity constant
-  to fire.** `NATIVE_SHARED_MEMORY_PER_SM_BYTES` and the
+- **Capacity cannot fire in this direction, and there is no config-sized
+  capacity constant left to fire.** `NATIVE_SHARED_MEMORY_PER_SM_BYTES` and the
   `-DDEEP_SELECT_NATIVE_ARCH` that selected it went with the per-architecture
   builds (2026-09-15, `5f5a93c`) — and the constant came back on 2026-09-18 as
   `csrc/structs.h`'s `ARCH_SMEM_PER_AP_BYTES`, per family, now that the build
   is one artifact per family again (see "the arch constants are compile-time").
-  The gate it implemented — reject an oversized config at compile time — was
-  the port's own; `maca_topk.cu` has no capacity gate by design, and its one
-  budget test (`f32_coarse12_applies`) is an `if constexpr` against that same
-  constant.
+  The gate it implemented — reject an oversized config at compile time — came
+  back with it, as the budget half of `maca_topk.cu`'s `f32_coarse12_applies`:
+  `if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) return false;` (`:1214`,
+  `kNeeded` at `:1210`). It is a compile-time property of the family, so a
+  128 KiB part satisfies it for every shape and it cannot fire — which is the
+  direction this bullet is about.
 - **The SM-count-sensitive numbers are arguments now**, not constants:
   `wave_filled_chunks` (the chunked split's grid) and the fp32 split's work
   target both read `params.sm_count`, which `interface.py` reads off the device
@@ -478,9 +480,13 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
   evidence for those two rows either.
 - What is given up is exactly the port's reason for existing: `topk` in
   `(1024, 4096]` and `vocab_size >= 2^23` are the *ported* kernel's limits, and
-  `maca_topk.cu` has neither (it has no capacity gate by design — "a 128 KiB SM
-  runs it with room to spare"). bf16 `sorted_value`, rejected by the port, is
-  accepted here. Neither limit is reached by the official grid.
+  `maca_topk.cu` has neither. Its capacity gate is a *compile-time* one rather
+  than an absent one — `f32_coarse12_applies` rejects at build time with
+  `if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) return false;`
+  (`maca_topk.cu:1214`, `kNeeded` at `:1210`), keyed on the family's own smem
+  budget rather than on the config, so "a 128 KiB SM runs it with room to
+  spare" is a fact the compiler already decided. bf16 `sorted_value`, rejected
+  by the port, is accepted here. Neither limit is reached by the official grid.
 
 So the default is not a workaround standing in for a broken kernel: it is the
 shipping kernel, on a part it is correct and faster on. There is no override to
@@ -1173,7 +1179,7 @@ Facts the CSV records and the traps in reading it:
   not the kernel's roof.** `Byte(MB)` counts the input read plus the outputs
   written, which is the quantity `tests/test.py:138` prints as TB/s; it is
   recomputed per cell from the shape, so it is comparable across backends. It is
-  NOT the pure-read wall: for the official grid a median 19% of the 1,487 GB/s
+  NOT the pure-read wall: for the official grid a median 19% of the 1,650 GB/s
   C500 wall, because 54 of 108 cells are under 16M elements and the grid is
   weighted by batch rather than bytes (the 17 cells at batch 4096 are 152.6 ms
   of the 200.5 ms total). The same kernel's pass 1 measures 94.9–97.9% of the
@@ -1210,7 +1216,7 @@ Beyond mcDeepGEMM's general rules (state the principle and the magnitude; keep r
 
 - A one-line imperative title stating the **principle**, not "optimized X".
 - Why: the old approach's cost, with measured numbers.
-- A before→after table over the representative cells, in **both currencies** — µs **and** GB/s, with the trip count and the % of the read-only wall. Logical GB/s is `B × V × 2 B ÷ kernel time`; the wall is a measured **1,487 GB/s streaming read** on C500 (1,344 GB/s mixed) — do not back it out of the kernel. **The wall is per-part; measure it for the part you are on.** On C600U it is **1,545 GB/s**, measured with a purpose-written `uint4` grid-stride read kernel (`/tmp/readwall.cu` in the session that took it — a torch reduction measures 274 GB/s on the same device and is *not* the wall): 224 blocks → 1,545, 448 → 1,532, 896 → 1,523, 1792 → 1,401. The two numbers being close is a coincidence of these two parts, not a constant.
+- A before→after table over the representative cells, in **both currencies** — µs **and** GB/s, with the trip count and the % of the read-only wall. Logical GB/s is `B × V × 2 B ÷ kernel time`; the wall is a measured **1,650 GB/s streaming read** on C500 (1,344 GB/s mixed) — do not back it out of the kernel. **1,487 was the old number and it is wrong** — it is the 104-block point on the ramp, not the wall; `C500-to-parity-plan.zh.md` §7.1 retracts it (104 blocks 767 GB/s, 208 → 1,298, 416 → 1,650, 832 → 1,641), and that retraction applies to every citation of 1,487 in this repo. **The wall is per-part; measure it for the part you are on.** On C600U it is **1,545 GB/s**, measured with a purpose-written `uint4` grid-stride read kernel (`/tmp/readwall.cu` in the session that took it — a torch reduction measures 274 GB/s on the same device and is *not* the wall): 224 blocks → 1,545, 448 → 1,532, 896 → 1,523, 1792 → 1,401. The two numbers being close is a coincidence of these two parts, not a constant.
 - A **roofline verdict** for the affected cell: if it is not bandwidth-bound, say what it *is* bound on (currently: per-CTA dependency chain — `load → key transform → compare → shared atomic` — and serialized shared atomics).
 - The gate results. Both suites: `95/95` perf (`./run_test.sh --perf`, ~100 s) **and** a correctness suite — `82170/82170` for the full-table 4-shard run on C500 (`~17.5 min`), or `200/200` for the seeded sample (`./run_test.sh --test`, ~63 s on C600U) when the change is being iterated rather than landed. Say which one you ran.
 - An architecture-boundary statement: changes confined to `csrc/xcore1000/` leave xcore1600 byte-identical, so **no C600U validation is owed**. Say so explicitly when true. (Byte-identical is still the right claim — but as of this writing xcore1600 is *not itself validated*, so "no C600U validation is owed" is an argument about the byte-identity of the artifact, not a claim that xcore1600 works. See Known holes.)

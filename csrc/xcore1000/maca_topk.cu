@@ -70,12 +70,15 @@ struct RowParams {
     // Null everywhere else.
     const int32_t *preselected;
     const int32_t *nan_flags;
-    // The per-row scan table the *other* new route needs: unlike `nan_flags`
+    // The per-row scan table the *other* routes need: unlike `nan_flags`
     // (owned by whichever split built it, inside that split's workspace), this
     // one is allocated and zeroed by the dispatcher for any call that can
-    // reach a route answering a row without ranking it -- currently the
-    // coarse12 arm, which folds the scan into its own pass 1.  Written by that
-    // kernel, read by the contract half.  Null when nothing scans.
+    // reach a route answering a row without ranking it.  There are **two** such
+    // routes and both fold the scan into their own pass 1 -- the coarse12 arm
+    // (`rk::dg12`) and the chunks arm (`rk::dgchunks`); `needs_scan_table`
+    // below is the single place that decides, and it names both.
+    // Written by that kernel, read by the contract half.  Null when nothing
+    // scans.
     int32_t *scan_flags;
     // The coarse12 route's staging buffer: `n_rows * topk` int32 columns, the
     // row positions that kernel ranks.  It cannot be `output_index` itself
@@ -282,14 +285,26 @@ static __device__ __forceinline__ void radix_layout(
 
 // Both row entries cover every key length and every k **up to the public
 // `kMaxTopK` (4096)**, not `rk::kMaxTopK` (2048).  The header's 2048 is the
-// *static-k* dispatch's arm limit -- `launch_topk_bf16_runtime`'s guard, the
-// `static_assert(TOPK <= kMaxTopK)` in `radix_topk_row_bf16_k`, and the chunked
-// entries -- and neither of the two entries called here is one of those:
+// *static-k* dispatch's arm limit, and every reader of it is on the way to an
+// arm that instantiates `topk` at compile time: the
+// `static_assert(TOPK <= kMaxTopK)` in `radix_topk_row_bf16_k`, and the two
+// chunked entries.  Neither of the two entries called here is one of those:
 // `radix_topk_row_bf16_b` takes `topk` at runtime and `radix_topk_row_f32` does
 // too, so a 4096 answer is legal for both and `radix_layout` sizes `selected`
 // and `sort_buf` for it.  This comment said `rk::kMaxTopK` until the public
 // entry's 4096 was traced through the row path; see the note above
 // `deep_select_maca::kMaxTopK` for why the two constants differ.
+//
+// **One name in that list is unreachable, and the distinction is the point.**
+// `launch_topk_bf16_runtime` (`radix_core.cuh`) *is* a runtime-k entry and it
+// *does* reject `topk > kMaxTopK` -- but nothing in this tree calls it:
+// `launch_topk_bf16_dispatch`, its only caller, has no caller either, so the
+// whole static-k family (k50/k100/…/k2048, `k2048_compact`, the warp-scan pair)
+// is the same class of compiled-in dead weight as the `kF32K2048` block.  So
+// the header's 2048 bounds **nothing reachable**: a 4096 bf16 topk arrives here
+// and `radix_topk_row_bf16_b` answers it, which is why the public contract can
+// be 4096 while the header still says 2048.  A reader who finds the guard and
+// concludes "2048 is the real limit" has found a dead path's guard.
 //
 // Both also resolve a threshold bin too large for the arena by re-walking the
 // row rather than by ranking a truncated candidate set.
@@ -1014,6 +1029,15 @@ inline constexpr uint32_t kF32OverflowChunkLen = rk::kF32SmemInputSize * 58u;
 // default `1757`, which is the same check written twice; the honest statement
 // is that the default is unguarded and `radix_core.cuh`'s `kSMEM` is the one
 // place to read what the arena is.
+//
+// **A `-DKSMEM_BYTES=` build cannot get that far anyway**, which is a stronger
+// statement than "nobody passes it": `radix_core.cuh`'s `kCoarse12ArenaEntries`
+// assert (:350) fails for both 32 KB and 48 KB, so the only value that compiles
+// is the 16 KB default.  This assert is therefore unreachable twice over --
+// once because nothing sets the macro, and once because setting it to anything
+// else does not build.  Measured on this tree with `-fsyntax-only`, both
+// passes: `16384` compiles, `32768` fails `'16384 >= 30440'`, `49152` fails
+// `'16384 >= 46824'`.
 #ifdef KSMEM_BYTES
 static_assert(rk::kF32SmemInputSize == 1757,
               "KSMEM_BYTES moved the arena, so kF32OverflowChunkLen's 58 is no "
@@ -1249,12 +1273,14 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
 // the whole answer -- which is why the sweep over `DEEP_SELECT_F32_CHUNKS`
 // (2..32, ledger §12.16.6) moves the split by 46% and never reaches this.
 //
-// **Not `constexpr`-gated, and it does not need to be**: the arena is 32 KB and
-// every family this repository builds has at least 64 KB per AP
-// (`csrc/structs.h`), so the budget half of `f32_coarse12_applies` would be
-// satisfied by all three.  The one question is whether the machine in front of
-// the call is one this was measured on, which is the same `sm_count` test the
-// coarse12 tuning half uses and for the same reason.
+// **Not `constexpr`-gated, and it does not need to be**: the arena here is
+// **device** memory in the per-row workspace (`TopKChunksWorkspace::candidate_indices`,
+// `dg_chunks.cuh`), not a shared buffer -- all three launches pass `0` dynamic
+// shared memory -- and every family this repository builds has at least 64 KB
+// per AP (`csrc/structs.h`), so the budget half of `f32_coarse12_applies` would
+// be satisfied by all three.  The one question is whether the machine in front
+// of the call is one this was measured on, which is the same `sm_count` test
+// the coarse12 tuning half uses and for the same reason.
 inline constexpr uint32_t kF32ChunksMaxBatches = 2;
 inline constexpr uint32_t kF32ChunksMinVocab = 2048;
 

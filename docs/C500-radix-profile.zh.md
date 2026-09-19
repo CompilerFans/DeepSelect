@@ -33,7 +33,7 @@ flush，每格固定种子，两侧二进制分别现构（md5 在文末）。�
 | 两趟 DRAM 下界 | 233.4 | 上面 ×2（内核每行读两趟） |
 | 行集 | 128 MiB | 4096 × 16384 × 2 B，是 8 MiB L2 的 16 倍 |
 
-注意这个 1,149.8 GB/s 与账本里那个 1,487 GB/s 的 8 GB 流式墙**不是一回事**：
+注意这个 1,149.8 GB/s 与账本里那个 1,650 GB/s 的流式墙**不是一回事**：
 前者是"这个形状上可达的持续读速率"，分母更紧、更不利，所以本记录里的
 "占墙百分比"比账本更保守。
 
@@ -120,7 +120,7 @@ emit 的 36）和设备侧刷新一趟两趟之外的工作。
    多一倍比较，反而慢 38 µs），但没证明减少原子**次数**不划算。唯一有支撑的
    方向是 §5 第 2 条：
 2. **pass 1 的寄存器直方图 —— 现成代码不能用，要重写（复核见下）。**
-   `radix_core.cuh:239` 的 `hist_add_bf16_reg` 曾被引为"已躺在文件里、只差接线"
+   `radix_core.cuh:365` 的 `hist_add_bf16_reg` 曾被引为"已躺在文件里、只差接线"
    的替代实现；**复核后它不成立**：它是逐元素 shuffle 传输，不是直方图。
    每个元素 8 次 shuffle，每次只让那个 bin 的 owner **一个 lane** 自增，于是一个
    warp 处理一个元素只记 1 个数（真内核 `lane == owner` 的 1/64 就是它的上界）；
@@ -172,7 +172,7 @@ topk_kernel_radix<__maca_bfloat16, i32, 512, ...>
 
 1. 它是 arena 槽位的**单调计数器**，**故意允许超过 `SMEM_INPUT_SIZE`**——写入被
    `pos < SMEM_INPUT_SIZE` 夹住，而 `overflow = s_num_input[0] > SMEM_INPUT_SIZE`
-   正是**溢出检测**（`radix_core.cuh:1154`）。
+   正是**溢出检测**（`radix_core.cuh:1373`）。
 2. 但 refine 之后同一段代码拿它当**无夹紧的循环上界**读 arena：
 
 ```c
@@ -230,7 +230,7 @@ for (uint32_t i = tx; i < num; i += BLOCK_SIZE)
 
 §5.2 末句把 "屏障等待" 和 "细直方图的原子" 并列，暗示两项同量级。**不是。**
 数一下原子就知道：细直方图的原子只在**阈值桶的成员**上触发（`radix_core.cuh`
-`:1122`/`:1134`/`:1146`），而阈值桶每行只有约 150 个成员。
+`:1341`/`:1353`/`:1365`），而阈值桶每行只有约 150 个成员。
 
 计数方法（`/tmp/dsab/count_atomics.py`）：**阈值取自内核自己返回的下标**。
 把返回的 index 拿去 gather 出选中键，取其中**最小者**即 `remain_topk == 0`
@@ -339,13 +339,13 @@ CUB 在本平台可用（`/opt/maca/include/cub`），但**不是绕过这一条
 `cub::BlockRadixSort`。MACA 的 CUB 至少宽度是对的：`CUB_LOG_WARP_THREADS`
 硬编码成 **6**（`cub/util_arch.cuh:91-99`），即 64。
 
-本仓现状：`csrc/xcore1000/radix_core.cuh` 的 3 处（`:255` 死代码
-`hist_add_bf16_reg`，`:339`/`:358` 在 `run_cumsum_warp` 里、被生产路径
+本仓现状：`csrc/xcore1000/radix_core.cuh` 的 3 处（`:365` 死代码
+`hist_add_bf16_reg`，`:462`/`:481` 在 `run_cumsum_warp` 里、被生产路径
 `radix_topk_row_bf16_b` **每行调用两次**）是 wrapper 写法。但它们**不是热区**：
 每 CTA 约 96 条 shuffle 操作，对比 pass 1 的**每元素一次**共享原子
 （profile 行上 16,384 次，即实测的 102.5 µs）。改它们是收尾清洁，不是优化杠杆。
 
-**wave 宽度是 64**（`radix_core.cuh:187`，`kWarpSize`）。所以 mask 必须写
+**wave 宽度是 64**（`radix_core.cuh:312`，`kWarpSize`）。所以 mask 必须写
 `0xFFFFFFFFFFFFFFFFULL` 或 `__activemask()`，**不能写 `0xFFFFFFFFu`**：32 位
 mask 会把同一 wave 的另外 32 个 lane 悄悄截掉，直方图少数一半，**不报错、
 top-k 只是错**。这一条是本轮差一点踩进去的坑，值得单独留档。

@@ -28,8 +28,11 @@
 | 数据类型 | bf16 输入，`indices_type=int32`，`sorted=False`（除非另行注明） |
 | GB/s 口径 | **逻辑行长**：`B × V × 2 B ÷ kernel time`。行被读几趟见每格的"趟数" |
 
-**roofline 分母**：C500 实测**流式只读 1,487 GB/s**（8 GB 张量实测；读写混合
-1,344 GB/s）。这个数**不要**从内核反推。
+**roofline 分母**：C500 实测**流式只读 1,650 GB/s**（与尺寸无关，见
+`C500-to-parity-plan.zh.md` §7.1 的 104/208/416/832 blocks 扫描；读写混合
+1,344 GB/s）。**1,487 是错的** —— 那是 104 blocks 的爬坡段读数，
+plan §7.1 已作废它，并写明适用于本仓所有引用 1,487 的地方。
+这个数**不要**从内核反推。
 
 **这些 cell 没有算力 roofline**：内核每个元素只做几次比较 + 一次直方图自增，
 没有 FLOP。所以"双币种"落地为：**逻辑单趟 GB/s × 趟数 = 实际 DRAM 流量**
@@ -797,8 +800,8 @@ xcore1600 逐字节不变，**不欠 C600U 验证**。本题不涉及 FP8。
 **根因是一条门槛，不是一处错误**：
 
 ```cpp
-constexpr uint32_t kChunkedMaxBatches = 64;      // maca_topk.cu:598
-constexpr uint32_t kChunkedMinVocab   = 262144;  // maca_topk.cu:599
+constexpr uint32_t kChunkedMaxBatches = 64;      // maca_topk.cu:627
+constexpr uint32_t kChunkedMinVocab   = 262144;  // maca_topk.cu:628
 inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
     if (batches == 0 || batches > kChunkedMaxBatches) return false;   // <= 64
     if (params.vocab_size < kChunkedMinVocab) return false;           // >= 262144
@@ -998,7 +1001,7 @@ session、同种子、每格 15 rep 取中位数、两侧都过契约检查）�
 
 （复现：`/tmp/dsab/ab.py`，两侧 `.so` 存 `/tmp/dsab/{base,candA,candB}.so`，
 `md5(base)=396b5e9b883faedd957d50f0b717e0d8`、`md5(candA)=4b2c52081635d4e18c547f514fd814b0`、
-`md5(candB)=c961c161c38ae0f1bdbe3ed1e3d91ab0`。变体只改 `radix_core.cuh:2090` 的
+`md5(candB)=c961c161c38ae0f1bdbe3ed1e3d91ab0`。变体只改 `radix_core.cuh:2306` 的
 `needs_long_row_bf16` 一个比较，其余逐字节相同。）
 
 **这一轮的设备声明**：上面这组数是在**默认设备（GPU 0）**上取的（当时 0 空闲，
@@ -1063,7 +1066,8 @@ maca_c 是**一个融合 kernel 读一遍输入**（1619 µs / 2.0 GiB ≈ 1.33 
 `DS_TOPK_EXP_NO_NAN_SCAN=1` 是**临时实验开关，已还原**（`git checkout
 csrc/` + 重建，`grep -c EXP_NO_NAN_SCAN` = 0）。它是安全的：在 chunked 路径上
 `ws.lengths` / `ws.nan_flags` 只是 memset 成 0、之后按行 OR 的 flag 表
-（`maca_topk.cu:858`），跳过扫描就保持全 0 = "未发现 NaN"。
+（`maca_topk.cu:1537` 的 memset，然后是 `:1539` 的 `nan_scan_kernel`，把
+`ws.lengths` 抬成 flag 表），跳过扫描就保持全 0 = "未发现 NaN"。
 `deep_gemm` 侧无法改包，改测**它自己的选择 kernel**（直接调
 `fp32_indexer_topk_selector`，绕开它 Python 层的扫描）。
 
@@ -1091,7 +1095,7 @@ csrc/` + 重建，`grep -c EXP_NO_NAN_SCAN` = 0）。它是安全的：在 chunk
 只读墙；对方 **659 GB/s ≈ 40%**。两边都离墙很远，对方近一倍。
 **这个"单趟对单趟"是查过源码的，不是假设**：`launch_topk_f32_chunked` 对输入行
 只有一趟（`topk_f32_chunk_stage1_kernel` 走 chunk，`stage2` 只在候选缓冲上跑
-radix，`radix_core.cuh:2249` / `:2309`），我们多出来的那一趟就是 NaN 扫描。
+radix，`radix_core.cuh:2404` / `:2477`），我们多出来的那一趟就是 NaN 扫描。
 所以差距在**每元素的活**（stage1 的阈值/staging 原子）上，不在趟数上——
 一开始的"我们读两趟"猜测是错的，已在此更正。
 
@@ -1191,7 +1195,8 @@ e2e - Σkernel`。**一个必须记住的坑**：`kk.bench` 每次调用前会�
 不符，但**实测站在代码这边**，所以先不改，只把注释与代码的落差记在这里。
 
 **假设二（对，而且便宜）**：瓶颈是 **merge 的量 `num_chunks × topk`**
-（`candidate_stride = num_chunks * topk`，`radix_core.cuh:2421`），而
+（`candidate_stride = num_chunks * topk`，`radix_core.cuh:2620` 的 stage1 与
+`:2648` 的 stage2），而
 `f32_chunked_chunks` **只看 batch，不看 `topk`**。
 
 `DEEP_SELECT_F32_CHUNKS`（已有的 sweep 旋钮）扫出来：
@@ -1275,7 +1280,7 @@ batch 规则原本要返回的值。
 `V = 66551` 那三格是 `DEEP_GEMM_SELECTOR_PERF_SHAPES` 里的格子（k=2048），所以它
 们的输入是 `lib.generate_testcase` 返回的**带 padding 的视图**——`stride(0)` 被
 round 到 1024 B 契约上（66560 而不是 66551）。探针脚本里一个 `.contiguous()` 会把
-这层 padding 抹掉，于是 b≥2 全部撞 `maca_topk.cu:1153: input.stride(0) must be a
+这层 padding 抹掉，于是 b≥2 全部撞 `maca_topk.cu:2014: input.stride(0) must be a
 multiple of 1024 bytes`；b=1 不会（单行的 `stride(0)` 无所谓）。这是探针的 bug，
 不是算子的，记在这里免得下一个人再写一遍。
 
@@ -1313,7 +1318,7 @@ b1/b6/b16 三个 batch 上，最优都是 **batch 规则自己的 16**——那�
 `before` = `a48c6836cdae3723888ab2bde44748d9`（HEAD 源码），`after` =
 `68c873a56438b1ab043952bad6b3a6bf`；`/tmp/dsab2/ab.py`：5 轮轮转、每轮换序，比值取
 每轮配对比值的中位数，极差是同 5 个比值的 `(max−min)/median`，两臂每一格都过契约
-检查）。逻辑 GB/s = `B × V × 4 ÷ kernel 时间`，墙是 C500 的 1487 GB/s：
+检查）。逻辑 GB/s = `B × V × 4 ÷ kernel 时间`，墙是 C500 的 1,650 GB/s（见开头那条更正）：
 
 | cell | before µs | after µs | 比值 | 极差 | GB/s 前 → 后 | %墙(后) |
 |---|---|---|---|---|---|---|
@@ -1388,7 +1393,8 @@ b1/b6/b16 三个 batch 上，最优都是 **batch 规则自己的 16**——那�
 
 `radix_topk_row_f32` 把粗阈值 bin 的成员塞进 `kF32SmemInputSize` 个槽的
 arena；**装不下就掉进 `radix_topk_row_f32_rescan`**，那是"每个 key 字节重扫
-一遍整个 window、无提前退出"的路径——`radix_core.cuh:605`。
+一遍整个 window、无提前退出"的路径——定义在 `radix_core.cuh:546`，调用点在
+`radix_topk_row_f32` 里的 `:736`。
 装得下是两趟，装不下是五趟。
 
 **直接量：把那条 `if` 关掉（`if (false && s_num_input[0] > SMEM_INPUT_SIZE)`，
@@ -1682,7 +1688,7 @@ stage2 与对端 merge 的差**（0.2202 ms，`c=6`，见 §8.5）。这一档**
 | 门 | 结果 |
 |---|---|
 | 官方抽样 `run_test.sh --test --backend maca_c --sample 300` | **406 pass / 0 check_fail / 4 crash / 12 skip，422 跑**（`md5 = 229efa0c6f658326de1e8552a515cda1`，`CUDA_VISIBLE_DEVICES=0`）|
-| 那 4 个 crash | **全部是 `cudaMalloc ... out of memory`**（`maca_topk.cu:1376` 的 workspace 扩容 / 直接 CUDA OOM），与本次改动无关；同一根二进制在 device 0/2 上跑出同样的 4 个 OOM |
+| 那 4 个 crash | **全部是 `cudaMalloc ... out of memory`**（`maca_topk.cu:2196` 的 chunks workspace 扩容 / 直接 CUDA OOM），与本次改动无关；同一根二进制在 device 0/2 上跑出同样的 4 个 OOM |
 | `--test` 官方 200 例样本 | 同一种子、同一 `--sample 300` 的切片里 **58 例含 NaN**（`allow_nan=True`），全部计入上面的 406 pass / 0 check_fail |
 | NaN 契约（同一二进制两臂） | 干净行：两臂都返回、`exact=True`、无哨兵；含 NaN 行（默认 `abort_when_nan_found=True`）：**两臂都 `__trap()`**（`RuntimeError: device-side assert`）。见下方记录 |
 | `-inf` 与 NaN 的区分 | 测试数据里同时放了 `-inf`（row 19）与 NaN（row 7）：`-inf` 被正常选中，只有 NaN 触发 abort——`is_nan_value` 的位测试没被 `--use-fast-math` 的 FTZ 影响 |
@@ -2912,21 +2918,37 @@ b16 上 chunk 数完全不敏感。**所以「照 `select_chunk_count` 改 chunk
 在这些格子上是 0。**
 
 **deep_gemm 快在哪，从 kernel 结构看是清楚的**（`fp32_topk.cu:1167` 的
-`topk_chunks_compact_refine`）：它把整个 `length` 扫**一遍**，**同一次扫描里**
-同时做两件事 —— bin 高于阈值的**直接写进 `row_output`**（`guaranteed`，
-不必二次遍历），bin 等于阈值的进 histogram 和 `candidate_indices`。
+`topk_chunks_compact_refine`）：它的 **compact 阶段**把整个 `length` 扫**一遍**，
+**同一次扫描里**同时做两件事 —— bin 高于阈值的**直接写进 `row_output`**
+（`guaranteed`，不必二次遍历），bin 等于阈值的进 histogram 和
+`candidate_indices`。
 
+**但这一趟是"第二趟"，不是唯一一趟。** 它前面还有 `fp32_topk.cu:1048` 的
+`topk_chunks_coarse_hist`，那一趟是每 (row, chunk) 一个 CTA 的**独立直方图遍历**
+（`:1094`/`:1097`/`:1107` 三个 walk），compact 不读它的直方图就没法知道阈值。
+所以"单趟"省掉的是 **guaranteed 的二次遍历**（元素直接落位，不再进候选缓冲），
+不是对行的一次读。
+
+我们移植的这份（`csrc/xcore1000/dg_chunks.cuh:607`）就是同一个结构：
+`compact`（`:695`/`:697`/`:705` 三个 walk）走完之后，只有当 coarse bin 比
+`kCandidateCapacity` 窄时后续才只读 staging；**bin 更宽时 refine 是在行上重扫的**
+—— `:757`/`:775` 与 `:809`/`:825` 的 `row_input[column]` 循环，每一轮 refine
+（`:793` 的 `round = 0..2`）都按已解析的字节重新过滤一遍整行。deep_gemm 原版
+同理（`for_each_candidate` 的 `rescanned` 分支，`fp32_topk.cu:1297`）。
 我们的 split 是**两趟**：stage1 直方图（b1 V=66551 上 34.4 µs），
 stage2 再合并出 `num_chunks * topk` 个候选（43.9 µs），合计 78.3 µs。
 
 **`guaranteed` 这一招在 b1 上特别值钱**：`k = 2048`、`V = 66551`，
 threshold bin 之上的元素本来就接近 `k`，所以「一次扫完 + 直接落位」省掉的是
-整个第二趟。而 `V = 107520 / 131072` 上我们更差（0.347x / 0.464x）还有第二个
+**整个候选缓冲那一趟**（两边的 coarse histogram 都要扫，这一趟谁都省不掉）。
+而 `V = 107520 / 131072` 上我们更差（0.347x / 0.464x）还有第二个
 原因：`ceil(V / 101906)` 在那里给 20 个 chunk，`select_chunk_count` 给 3–6
 （见 §12.14.7 —— 强制 c = 4 时 139 µs 对 168 µs）。
 
-**结论：要追上 b1，需要移植的是 `topk_chunks_*` 那套「单趟扫描 + guaranteed 直写」
-的结构，不是 chunk 数的启发式。** 规模约 450–500 行（`TopKChunksWorkspace`
+**结论：要追上 b1，需要移植的是 `topk_chunks_*` 那套「guaranteed 直写 +
+紧凑候选缓冲」的结构（行仍要走两趟：coarse histogram 一趟、compact 一趟，
+只有 bin 宽到装不下时才在 refine 里再扫行），不是 chunk 数的启发式。**
+规模约 450–500 行（`TopKChunksWorkspace`
 含 `candidate_indices[4096]`，三个 kernel，两个 launcher），照 `dg_coarse12.cuh`
 的先例做，**并且只对 b ≤ 2 开放** —— b ≥ 4 上它慢 3.8–4.2 倍，而我们的
 split 在 b16 只要 86.8 µs。
@@ -3551,9 +3573,17 @@ b256-v131072-k2048 上两个钟：
 §12.18 说的是"报告的 span 不是算子成本"。这一节说的是**两个真实缺陷**，
 它们都在 v1.0.0（tag 已打）里可达，而**门一个都没报**。
 
-### 12.19.1 P0：chunks 臂把 NaN 契约丢了
+### 12.19.1 P0：chunks 臂把 NaN 契约丢了（**已在 `b986ff9` 修掉**）
 
-`csrc/xcore1000/dg_chunks.cuh:207` 收下 `int32_t *nan_flags` 之后写的是
+> **下面这一段记的是 v1.0.0 里的缺陷本身，不是当前代码。** 修它的是落地
+> "把扫描折进 pass 1" 的那次提交 `b986ff9`（fix(c500): the chunks arm's NaN
+> contract, and two scratch pointers a graph freezes）：现在
+> `dg_chunks.cuh:433` 取 `row_nan`，`:499` 的 `scan_nan` 把它变成 pass 1 的
+> 谓词，`:526` 用 `__syncthreads_or` + `atomicOr` 抬旗，注释块 `:408-432`
+> 说明为什么这个旗不能省。行号按当时的树读，**不要照抄到今天的源码上**。
+
+v1.0.0 的 `launch_topk_chunks`（当时在 `dg_chunks.cuh:207`，今天同一个包装在
+`:221`）收下 `int32_t *nan_flags` 之后写的是
 `(void)nan_flags;`，文件里 `is_nan_value` 零调用点。隔壁 `dg_coarse12.cuh`
 正好相反（`:223-245`，把扫描折进 pass 1，`atomicOr` 抬旗）。
 
@@ -3666,6 +3696,136 @@ in `mcGraphExecDestroy`）；改动前它报 MATCH。
 `--set-baseline`）。它与 144454 是同一份代码（只差一段注释），
 144454 → 150115 的对比是 3 regressed / 1 improved / 103 noise、总量 −0.00%
 —— 同二进制、同 md5 家族、±3% 里漂的仍然是那 3–58 µs 的小格。
+
+> **后续（`b44bea4`）**：那次提交把基线重新钉到 `20260919_160228`（同 md5
+> `d9fa0a45`，只差一段注释），`perf_data/MetaX_C500/baseline` 现在指向它。
+> 数字全部不变，指向变了。
+
+## 12.21 第三轮：文档与注释里的引用，逐条对着源码核（2026-09-19，device 2）
+
+§12.20 修的是**代码**。这一节修的是**引用**：三份设计文档、`README.md`、
+`CLAUDE.md`、`skills/maca-wave64-port/SKILL.md` 里那些"见 `radix_core.cuh:NNN`"
+的行号与它们所声称的事实。起因是 §12.20 的审计 agent 顺手把引用也扫了一遍，
+报回来的条目里**有真有假**，所以这一节按"核过的"写，不按"报过的"写。
+
+### 12.21.1 roofline 分母：1,487 是错的，1,650 才是墙
+
+这是唯一一条会改变数字的更正。`C500-to-parity-plan.zh.md` §7.1 已经量过：
+`readwall.cu` 在 104 / 208 / 416 / 832 blocks 上给出 **767 / 1,298 / 1,650 /
+1,641 GB/s** —— **墙与尺寸无关，1,650**；1,487 是 104 blocks 的爬坡段读数。
+plan 里写明"这条更正适用于**本仓所有引用 1,487 的地方**"，而当时漏了三处：
+
+- `C500-radix-perf-ledger.zh.md` 开头的 roofline 分母（本文件 §1 那张表上面）
+- 同文件 §21 附近"墙是 C500 的 1487 GB/s"（一处分母说明）
+- `C500-radix-handover.zh.md` 的提交模板，"对 1,487 GB/s 只读墙的占比"
+- `CLAUDE.md` 两处（CSV 口径说明里的 19% 分母、提交模板那条）
+
+外加 `C500-radix-profile.zh.md` 里"与账本里那个 1,487 GB/s 的流式墙"一句——
+那一句本来就是在**对比**两个不同的数（1,149.8 是本形状上的持续读速率），
+改成分母之后对比关系不变，所以只换了数字。
+
+**没有一处是"重算"**：这些地方的 GB/s 数字都是相对墙的占比，
+把分母从 1,487 换成 1,650 之后占比整体下降约 10%，但**表格里的 µs 与
+绝对 GB/s 一个都没动**——那是实测值，与分母无关。这也正是这次更正的性质：
+它不是重测，是**换分母**。
+
+### 12.21.2 `kSMEM = 48 KiB` 是错的，而且是**编译不过**的
+
+`C500-to-parity-plan.zh.md` §20.2 把本仓行核的 arena 写成
+"`kSMEM = 48 KiB`（`radix_core.cuh:75`）"，据此推出"每 SM 5 个 CTA"。
+两处都错：
+
+- **值**：`radix_core.cuh` 的 `kSMEM` 在 `#ifdef __MACACC__` 下是 **16 KiB**，
+  那才是本仓 ship 的臂；48 KiB 是 `#else`（非 MACA）臂，**本仓没有任何构建走它**。
+- **行号**：那个 `#ifndef KSMEM_BYTES` 块现在在 `:111-119`。
+
+更值得记下来的是：**48 KiB 不只是"没走"，它是编译不过的**。本次实测
+（`-fsyntax-only`，两个 pass，`csrc/xcore1000/radix_core.cuh`）：
+
+| `-DKSMEM_BYTES=` | 结果 |
+|---|---|
+| 16384 | 编译通过 |
+| 32768 | `static_assert` 失败：`'16384 >= 30440'` |
+| 49152 | `static_assert` 失败：`'16384 >= 46824'` |
+
+失败的是 `kCoarse12ArenaEntries * 4 >= kSmemInputSize * 4`（`:350`）——
+16 位粗层那 4096 个 12 位桶**别名整个动态 arena**，所以 16,384 B 是硬地板，
+任何把 arena 撑过它的 `kSMEM` 都编不过。`ref/ds/README.md` §5 记过 32 KB 的
+那次失败（`'16384 >= 46824'`，那是**当年** `kSmemStaticBytes` 还没分家时的数），
+48 KB 失败方式相同、数字不同。所以 16 KB 不是"保守选择"，在这份源码上它是
+**唯一可编译的**值。这条已经写进 `radix_core.cuh` 和 `maca_topk.cu` 两处注释。
+
+### 12.21.3 其余：逐条核过的引用更正
+
+`kSmemStaticBytes` 的真值是 **2,328 B**（`radix_core.cuh:328`），
+plan §18.1 的 `2600 B` 是旧的、且行号 `:253` 也旧（那个占用率探针
+`/tmp/dsab/occ_probe.cu` 的 static 参数摆的是 2600，**探针本身也该改**——
+本次没有重跑它，因为结论"pass 1 的占用率是 4"不依赖 2600 与 2328 之差：
+两者都在同一个占用率台阶内，见那张表的 13,788/14,056 两行都判 4）。
+
+其余更正的引用（每一条都是 grep 到真行号才改的）：
+
+| 文件 | 旧引用 | 真行号 | 是什么 |
+|---|---|---|---|
+| handover | `:87-97` 数据流图 | `:1369`/`:1383` | 细直方图与 refine 之间漏画的两道 `__syncthreads()` |
+| handover | `:2390`/`:2463` | `:2404`/`:2489` | stage1 核 / stage2 里 `radix_topk_row_f32` 的调用 |
+| handover | `:285` 的 `hist_add_bf16_reg` | `:365` | 函数定义（`:291` 只是**关于**它的注释） |
+| profile | `:187` `kWarpSize` | `:312` | 定义（`:314` 是 32 位臂） |
+| profile | `:123` 同上 | `:365` | 同上 |
+| profile | §5.3 的 `:1122`/`:1134`/`:1146` | `:1341`/`:1353`/`:1365` | 细直方图的三处 `atomicAdd` |
+| profile | `:1154` | `:1373` | `overflow = s_num_input[0] > SMEM_INPUT_SIZE` |
+| ledger | `:605` | `:546` | `radix_topk_row_f32_rescan` 的定义 |
+| ledger | `maca_topk.cu:598/599` | `:627`/`:628` | `kChunkedMaxBatches`/`kChunkedMinVocab` 的定义 |
+| README | `setup.py:204`/`:214` | `setup.py:368`/`:405` | `datetime.now()` 的版本戳 |
+
+### 12.21.4 两条不是行号、是**事实**的更正
+
+- **`chunks` 臂不是"扫一遍"**。ledger §21.4 引 deep_gemm 的
+  `topk_chunks_compact_refine` 说它"把整个 length 扫一遍"。本仓那份
+  （`dg_chunks.cuh:593`）的 **compact 阶段**确实是一趟，但 **refine 会
+  再走一遍行**——`:761` 与 `:743` 都在 `row_input[column]` 上取值。
+  所以"一趟"是对 compact 说的，对整核不成立。
+- **`maca_topk.cu` 的容量闸是编译期的，不是没有**。`CLAUDE.md` 与
+  `README.md` 都写过"no capacity gate by design"。它有：
+  `if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) return false;`
+  （`:1214`，`kNeeded` 在 `:1210`）。128 KiB 的部件对这个闸"每个形状都满足、
+  因此永不触发"——**这才是原话想说的意思**，而"没有闸"是反的。
+
+### 12.21.5 审计报过、核完是**错的**，不改
+
+按 §12.20 的规矩，反证掉的也记下来：
+
+- "四个 `kMaxTopK` 不同步"——它们分属四个 namespace，是 upstream 自己的切分。
+- "`dg_coarse12.cuh:31` 的 C600U 说法有问题"——原句正确。
+- "`nan_flags` 的语义"、"`dg_chunks.cuh:410`"、"`kSmemBudgetBytes` vs `kSMEM`"——
+  核完都与源码一致。
+
+### 12.21.6 门
+
+`4525a1ed075097b57531b5cb64d4adda`（`deep_select_maca_xcore1000.so`，
+20:26:46），`run_bench.sh` 全绿。
+
+> 门之后又补了三处**纯注释/文档**的改动（`kCoarse12ArenaEntries` 断言的行号
+> `:336`→`:350`、`kF32SmemInputSize` 的 `:507`→`:521`、profile 里三处
+> `hist_add_bf16_reg`/`kWarpSize`/细直方图原子的行号），重新构建得到
+> `460cf22b2b82314a9190483ca5f95121`。**没有重跑门**：这一批一行指令都不改
+> （只有注释与 markdown），而上一根二进制已经把这批改动的**语义**验过了。
+> 记下 md5 是为了让"哪根二进制被门验过"这件事可查，而不是为了声称这一根也验过。
+
+- 正确性：`498 pass / 0 check_fail / 4 crash / 20 skip`（4+20 全是 OOM，
+  和 §11.5 同一批 `cudaMalloc 16–32 GiB` 撞上已有占用）
+- `cases_chunks` ALL PASS、`cases_graph` 4/4 capture + 4/4 replay MATCH、
+  `cases_graph_cold` OK、`cases_graph_grow` OK
+- 官方网格 30/30
+- 性能：**0 regressed / 2 improved / 105 noise，总量 +0.04%**，
+  `VERDICT: OK`。两个 improved（−6.9%、−5.4%）是 bf16 小格，
+  本次改动**只碰注释**，所以它们是噪声落在容差外的那一侧——
+  §12.18.6 已经记过 ±3% 的容差是按 ">100 µs 的格" 定的。
+
+**这批改动没有一行进代码路径**：8 个文件里 3 个是 `csrc/`（全是注释），
+5 个是文档。所以"逐字节不变"这条在 `maca_topk.o` 上不成立（注释会改
+`__LINE__`，也改调试信息），但在**生成的指令**上成立——这也是为什么
+重跑门是**确认**而不是**必需**。
 
 ## 12.20 十个审计 agent 扫出来的东西：路由安全、说谎的注释、死引用（2026-09-19，device 2）
 

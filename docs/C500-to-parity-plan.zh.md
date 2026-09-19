@@ -2049,8 +2049,10 @@ chunks 变）与 dispatcher 里那处一起算 chunks 的调用。
 ### 18.1 先修前提：fp32 pass 1 的占用率是 4，不是 3
 
 `/tmp/dsab/occ_probe.cu`（新）用 `cudaOccupancyMaxActiveBlocksPerMultiprocessor`
-直接问驱动，静态共享内存按 `radix_core.cuh:253` 的 `kSmemStaticBytes = 2*(256+32)*4
-+ 4*4 + 4 = 2600 B` 摆：
+直接问驱动，静态共享内存按 `radix_core.cuh:328` 的
+`kSmemStaticBytes = 2*(256+32)*4 + 4 + 4 + 4 + 2*4 + 4 = **2328 B**` 摆
+（初版写 2600 B，那是把表达式数错了；探针里摆的也是 2600，**探针本身待改** ——
+但两者落在同一个占用率台阶内，下表 13,788/14,056 两行都判 4，结论不变）：
 
 | 动态 B | 合计 B | 驱动给的 CTAs/SM |
 |---|---|---|
@@ -2314,11 +2316,14 @@ split 有没有开**。
 同一份 DRAM 流量，两边都不可能突破同一个约 2.7% 的指令开销（§18.2），
 剩下的差距只能来自**在飞字节数与 kernel 道数**，而这两项在别的方面被钉住了：
 
-- **本仓一条行**：`kSMEM = 48 KiB`（`radix_core.cuh:75`）→ arena 13,784 B、
-  `1,563.9 B` 粒度下 **每 SM 5 个 CTA**；512 线程。
+- **本仓一条行**：`kSMEM = 16 KiB`（`radix_core.cuh:113`，`__MACACC__` 臂 ——
+  48 KiB 是没人走的 `#else`，且实测**编译不过**，见 §20.2 末尾）→
+  arena 13,784 B、`1,563.9 B` 粒度下 **每 SM 4 个 CTA**；512 线程。
   （host clamp 是 100–200 KB/SM，对 65,536 与 131,072 给出同一个数 ——
   **这条数据无法区分这两种 AP**，所以用 host 源里可验证的那个事实：
-  `kSMEM = 48 KiB`、`kThreads = 512`、两趟读。）
+  `kThreads = 512`、两趟读。占用率不是推的，是 §18.1 的探针问驱动问出来的：
+  13,788 B 动态 + 2,328 B 静态 = 16,388 B，**4 个 CTA/SM**。
+  `kSMEM = 48 KiB` 是本节初版写错的，已改。）
 - **host 一条行**：单趟、`kThreads = 1024`、`kCoarse12SmemBytes = 16 KiB`
   的 arena、`kCoarse12Threads = 640`。
 - 一道 1024 线程的 CTA **就是一个 SM 的满配**（2048 线程）。
