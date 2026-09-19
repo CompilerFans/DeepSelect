@@ -21,6 +21,22 @@ an error, not a default.
 
 Output, following mcDeepGEMM's `deep_gemm/tests/perf_data/` layout:
 `perf_data/<device>/<YYYYmmdd_HHMMSS>/` (`deepselect_perf.csv`, `manifest.json`).
+
+**Two clocks, and they answer different questions.**  `time(us)` is the official
+kernel clock: `kk.bench` under `tests/test.py`'s matching rule.  It is the quiet
+one -- repeat a single cell and it moves by a fraction of a percent -- and it is
+the right clock for asking whether a change to *this repository's* kernels helped,
+because it holds everything else still.  It is also, by construction, blind to
+every kernel the matching rule does not name.  `wall_us` is an event pair around
+the whole call with the L2 flush outside the span (`wall_clock_time`, the shape of
+deep_gemm's `bench_time`): every kernel the operator launches, plus launch and
+sync.  **It is noisier and it is not "more accurate"** -- it measures a different
+thing, and it is the only one of the two that can compare two *backends* fairly,
+because the excluded kernels are not the same size on both sides.  On
+`b256-v131072-k2048` the `deep_gemm` column reads 241 us by the kernel clock and
+~6.7 ms by the wall clock, and the ~5.4 ms difference is its NaN scan, which the
+matching rule does not name.  Read `wall_relative_pct_vs_maca_c` for that
+comparison and `relative_pct_vs_maca_c` for regressions.
 `<device>` is the **device name torch reports** (`MetaX C500` -> `MetaX_C500`),
 never the arch family: the folder answers "which board did I measure on", and two
 boards of one family (both xcore1600) share an ISA but not a clock, a wall or an
@@ -99,11 +115,60 @@ def call_topk(p, t, backend: str):
         if type(exc).__name__ == "UnsupportedByBackend":
             raise Unsupported(str(exc).strip()) from None
         raise
-def time_operator(p, t, backend: str) -> Optional[float]:
-    """`kk.bench` over the operator, with `tests/test.py`'s matching rule."""
-    usage, _ = official.bench_topk(
-        lambda: call_topk(p, t, backend), p, t, None, None)
-    return usage
+def wall_clock_time(fn, num_iters: int = 10) -> float:
+    """Seconds per call, events around the loop, L2 flushed *outside* the span.
+
+    deep_gemm's `testing/bench.py::bench_time` is the shape: one start/end event
+    pair around `num_iters` calls, elapsed time divided by the count.  Two
+    departures, both because this measures an *operator* and not one kernel:
+
+      * `torch.cuda.synchronize()` before the loop, so the elapsed time cannot
+        absorb work the caller queued earlier;
+      * the L2 flush sits **outside** the event pair.  `kk.bench` flushes inside
+        its own span and then subtracts the matched kernels' time, which is why
+        it can be the official clock; a wall clock that included an 8 GB memset
+        would be measuring the memset.
+
+    **This is not a more accurate clock than `kk.bench`** -- it is a *different
+    quantity*.  It sees every kernel the operator launches, including the ones
+    that do not match `"topk"`, plus launch and sync.  That is exactly what the
+    official clock is defined to exclude, and it is why the two disagree by more
+    than an order of magnitude on the `deep_gemm` column (see the module
+    docstring).  Compare **across backends** on this; compare **one `maca_c`
+    build against another** on `time(us)`, which is quieter.
+    """
+    for _ in range(3):
+        fn()
+    torch.cuda.synchronize()
+    flush = torch.empty(int(8e9 // 4), dtype=torch.int, device="cuda")
+    flush.zero_()
+    torch.cuda.synchronize()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(num_iters):
+        fn()
+    end.record()
+    torch.cuda.synchronize()
+    del flush
+    return start.elapsed_time(end) / num_iters / 1e3
+
+
+def time_operator(p, t, backend: str):
+    """Both clocks for one (cell, backend): (official kernel clock, wall clock).
+
+    The first is `kk.bench` under `tests/test.py`'s matching rule -- the number
+    the official harness prints and the one this CSV has always carried.  The
+    second is `wall_clock_time` over the same callable.  Neither is derived from
+    the other; each answers a question the other cannot (module docstring).
+    """
+    call = lambda: call_topk(p, t, backend)          # noqa: E731
+    usage, _ = official.bench_topk(call, p, t, None, None)
+    try:
+        wall = wall_clock_time(call)
+    except Exception:
+        wall = None
+    return usage, wall
 def measure(p, t, backend: str) -> Dict[str, Any]:
     """One (cell, backend) result: status first, then the numbers."""
     row: Dict[str, Any] = {"status": "pass", "error_type": "", "error_message": ""}
@@ -120,6 +185,9 @@ def measure(p, t, backend: str) -> Dict[str, Any]:
             return row
         try:
             row["time(us)"] = _us(official.bench_torch_reference(p, t))
+            run = lambda: torch.topk(t.input, p.topk, dim=1,  # noqa: E731
+                                     sorted=p.sorted_value)
+            row["wall_us"] = _us(wall_clock_time(run))
         except Exception as exc:
             row["status"], row["error_type"] = "fail", type(exc).__name__
             row["error_message"] = str(exc)[:200]
@@ -148,7 +216,9 @@ def measure(p, t, backend: str) -> Dict[str, Any]:
     # Still timed when it can be: "selects wrong" and "slow" are different
     # defects; dropping the time answers neither.
     try:
-        row["time(us)"] = _us(time_operator(p, t, backend))
+        kernel_us, wall_us = time_operator(p, t, backend)
+        row["time(us)"] = _us(kernel_us)
+        row["wall_us"] = _us(wall_us)
     except Exception as exc:
         row["error_message"] = (row["error_message"] + "; " if row["error_message"]
                                 else "") + f"{type(exc).__name__}: {str(exc)[:120]}"
@@ -304,8 +374,8 @@ COLUMNS = ["chip", "device_name", "sm_count", "git_commit", "extension_md5",
            "case_source", "family", "n_rows", "n_cols", "top_k",
            "sorted_value", "return_value", "input_dtype", "index_dtype",
            "num_runs", "backend", "status", "error_type", "error_message",
-           "time(us)", "throughput(TB/s)", "bandwidth(GB/s)", "Byte(MB)",
-           "relative_pct_vs_maca_c", "note"]
+           "time(us)", "wall_us", "throughput(TB/s)", "bandwidth(GB/s)", "Byte(MB)",
+           "relative_pct_vs_maca_c", "wall_relative_pct_vs_maca_c", "note"]
 
 
 def rows_for(p, source: str, note: str, got: Dict[str, Dict[str, Any]],
@@ -318,6 +388,7 @@ def rows_for(p, source: str, note: str, got: Dict[str, Dict[str, Any]],
               * (p.dtype.itemsize * int(p.return_value)
                  + p.out_idx_dtype.itemsize))
     ref = got.get("maca_c", {}).get("time(us)")
+    ref_wall = got.get("maca_c", {}).get("wall_us")
     out = []
     for backend in BACKENDS:
         g = got.get(backend)
@@ -343,7 +414,7 @@ def rows_for(p, source: str, note: str, got: Dict[str, Dict[str, Any]],
             "error_message": g.get("error_message", ""),
             "note": note,
         })
-        for k in ("time(us)", "Byte(MB)"):
+        for k in ("time(us)", "wall_us", "Byte(MB)"):
             if g.get(k):
                 row[k] = g[k]
         us = g.get("time(us)")
@@ -351,6 +422,10 @@ def rows_for(p, source: str, note: str, got: Dict[str, Dict[str, Any]],
             row["throughput(TB/s)"] = round(nbytes / (us * 1e-6) / 1e12, 6)
             row["bandwidth(GB/s)"] = round(nbytes / (us * 1e-6) / 1e9, 3)
             row["relative_pct_vs_maca_c"] = round(ref / us * 100, 2) if ref else ""
+        wall = g.get("wall_us")
+        if wall:
+            row["wall_relative_pct_vs_maca_c"] = (
+                round(ref_wall / wall * 100, 2) if ref_wall else "")
         out.append(row)
     return out
 
@@ -402,7 +477,8 @@ def main() -> int:
     rows: List[Dict[str, Any]] = []
     print(f"chip {prov['chip']}  device {prov['device_name']}  sm {sm_count}  "
           f"backends {backends}  cases {len(cases)}", flush=True)
-    print(f"{'case':<46}{'backend':<10}{'status':<12}{'us':>12}{'GB/s':>10}",
+    print(f"{'case':<46}{'backend':<10}{'status':<12}{'kernel us':>12}"
+          f"{'wall us':>12}{'GB/s':>10}",
           flush=True)
     for i, (source, note, p) in enumerate(cases):
         if p.seed == -1:
@@ -421,6 +497,7 @@ def main() -> int:
                      f"b{p.batch_size}-v{p.vocab_size}-k{p.topk}")
             print(f"{label:<46}{backend:<10}{g['status']:<12}"
                   f"{g.get('time(us)', '')!s:>12}"
+                  f"{g.get('wall_us', '')!s:>12}"
                   f"{(g.get('bandwidth(GB/s)') or '')!s:>10}"
                   + (f"  [{g['error_message'][:34]}]" if g.get("error_message") else ""),
                   flush=True)
@@ -451,16 +528,25 @@ def main() -> int:
         "cases": len(cases),
         "rows": len(rows),
         "status_counts": {f"{k[0]}/{k[1]}": v for k, v in sorted(counts.items())},
-        "csv_format_version": 1,
+        "csv_format_version": 2,
         # The selector cells are not an axis any more: whether they are added is
         # `deep_select.deep_gemm_available()`'s answer, and `cases` below records
         # how many there turned out to be.  Naming a flag here would be naming
         # one that no longer exists.
         "case_source": "tests/test.py::performance_cases() (+ the selector grid "
                        "when the deep_gemm package can serve it, + --cases-file)",
-        "measurement": ("tests/test.py's own: one 'topk'-matching kernel's time, "
-                        "else the e2e span over the matching kernels; p.num_runs "
-                        "reps, L2 flushed (kk.bench). Correctness: "
+        "measurement": ("two clocks per cell.  `time(us)` is tests/test.py's own: "
+                        "one 'topk'-matching kernel's time, else the e2e span over "
+                        "the matching kernels; p.num_runs reps, L2 flushed "
+                        "(kk.bench).  `wall_us` is an event pair around the whole "
+                        "call, L2 flushed outside the span -- every kernel the "
+                        "operator launches, plus launch and sync.  **They are not "
+                        "the same quantity and neither is derived from the other**: "
+                        "`time(us)` excludes kernels the matching rule does not "
+                        "name (which is where deep_gemm's NaN scan lives, ~5.4 ms "
+                        "on b256-v131072), `wall_us` includes them.  Compare "
+                        "across backends on `wall_us`; compare one `maca_c` build "
+                        "against another on `time(us)`.  Correctness: "
                         "tests/test.py::check_result / check_call_contract, "
                         "applied to every backend except `torch`, whose column is a "
                         "bare torchtopk the official harness does not check "

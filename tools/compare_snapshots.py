@@ -40,6 +40,10 @@ KEY = ("case_source", "family", "n_rows", "n_cols", "top_k", "sorted_value",
 # The column a run is compared on.  `relative_pct_vs_maca_c` is derived and
 # `speedup_vs_torch` depends on another backend's row -- recomputed, not diffed.
 REQUIRED = "time(us)"
+# The whole-call wall clock, offered as `--clock wall`.  Kept out of the default
+# path deliberately: it is the fair *cross-backend* number and a much noisier
+# *same-backend* one, and this tool's exit status is a regression verdict.
+WALL = "wall_us"
 
 
 def load(directory: str) -> Dict[Tuple, Dict[str, Dict[str, str]]]:
@@ -70,10 +74,18 @@ def label(cell: Tuple) -> str:
     return f"{source[:8]:<8} {fam[:6]:<6} {dtype:<8} b{n_rows}-v{n_cols}-k{top_k}"
 
 
-def compare_one(base: Dict[str, str], cand: Dict[str, str], tol: float):
-    """(base_us, cand_us, delta, verdict) -- or None when not comparable."""
-    b_us = base.get(REQUIRED, "")
-    c_us = cand.get(REQUIRED, "")
+def compare_one(base: Dict[str, str], cand: Dict[str, str], tol: float,
+                column: str = REQUIRED):
+    """(base_us, cand_us, delta, verdict) -- or None when not comparable.
+
+    `column` is the clock to compare on.  The default is the official kernel
+    clock, which is the quiet one and the one a regression verdict is about.
+    `WALL` compares the whole-call wall clock instead -- noisier by an order of
+    magnitude, and the only one that is fair *across backends* (see
+    `scripts/perf_snapshot.py`'s module docstring for why the two differ).
+    """
+    b_us = base.get(column, "")
+    c_us = cand.get(column, "")
     if not b_us or not c_us:
         return None
     b, c = float(b_us), float(c_us)
@@ -94,7 +106,17 @@ def main() -> int:
                          "(default 0.03; the official harness re-run, same "
                          "binary and same device, was measured at a median "
                          "0.25%% and a max 1.3%% per cell above 100us)")
+    ap.add_argument("--clock", choices=("kernel", "wall"), default="kernel",
+                    help="which clock to compare on.  'kernel' (default) is "
+                         "tests/test.py's matching rule -- quiet, and the one a "
+                         "regression verdict is about.  'wall' is the whole-call "
+                         "event pair -- noisier, and the only fair comparison "
+                         "*across backends*, because the kernels the matching "
+                         "rule excludes are not the same size on both sides.  A "
+                         "snapshot older than csv_format_version 2 has no "
+                         "wall_us and compares as 'not measured'.")
     args = ap.parse_args()
+    column = WALL if args.clock == "wall" else REQUIRED
 
     base = load(args.base)
     cand = load(args.candidate)
@@ -131,7 +153,7 @@ def main() -> int:
             if b_st != c_st:
                 status_changes.append((cell, b_st, c_st))
                 continue
-            got = compare_one(b_row, c_row, args.tol)
+            got = compare_one(b_row, c_row, args.tol, column)
             if got is None:
                 skipped.append(f"{label(cell)} (not timed: {c_st or '?'})")
                 continue
@@ -143,7 +165,11 @@ def main() -> int:
             if backend == "maca_c":
                 failed = True
         if not results:
-            print(f"    no comparable cells ({len(skipped)} skipped: "
+            # Name the clock: "no comparable cells" on `--clock wall` almost
+            # always means the *base* predates `wall_us`, not that the cells
+            # disagree, and the two read the same otherwise.
+            print(f"    no comparable cells on the '{column}' clock "
+                  f"({len(skipped)} skipped: "
                   f"{'; '.join(skipped[:3])}{' ...' if len(skipped) > 3 else ''})")
             continue
         n_reg = sum(1 for r in results if r[4] == "regressed")
