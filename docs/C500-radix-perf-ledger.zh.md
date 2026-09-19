@@ -3812,7 +3812,48 @@ kernel 时间 **5.8–6.0 µs**、wall ~40 µs）：baseline 5.811 → 5.990 µs
 `dist/` 里）。改 `develop.sh` 之后警告消失，说明门跑的确实是当前源码。
 `build.sh` 和 `develop.sh` 的这个差异值得记住：门只看 in-place 的那一份。
 
-### 12.20.6 这一批没动的两件事
+### 12.20.6 审计的第二批：fp32 split 的 `vals` 没有对齐（2026-09-19）
+
+`audit-radix-fp32` 的第一条，也是这批里唯一一条**正确性**缺陷。
+
+**事实。** `topk_f32_chunk_stage2_kernel` 把 `vals + bid * candidate_stride`
+交给 `radix_topk_row_f32`，而后者整个走 `__ldg(reinterpret_cast<const float4*>)`
+且**没有任何对齐检查**（`hist_add_f32`、pass 2 的两个循环）。bf16 那条线有检查
+（`bf16x8_is_aligned`，四处使用），fp32 这条从来没有。
+
+**规则，不是两个例子。** `vals` 相对 arena 基址的偏移是
+`batches*4 + batches*chunks*topk*4 = 4*batches*(1 + chunks*topk)`。
+`f32_chunked_chunks` 只返回偶数（2 的幂，或 `f32_chunk_round_even` 的结果），
+`topk >= 512`，所以 `1 + chunks*topk` 是**奇数**，偏移是 16 的倍数
+**当且仅当 `batches % 4 == 0`**。其余 batch 全部落在 `%16 == 8`（batch ≡ 2）
+或 `%16 == 4`（batch 为奇）。算过全部 13 个 fp32 perf 格：**3 个落在错位分支**
+（`b1-v66551-k2048`、`b1-v131072-k2048`、`b1-v107520-k2048`，都是 `%16 == 4`），
+其余 10 个（b16/b132/b256/b4096，batch 是 4 的倍数）恰好对齐。
+行内 stride 是 16 的倍数，所以每行的对齐由行 0 决定。
+
+**为什么没炸。** MACA 容忍这个 load —— 这是"能跑通的 UB"，不是一次可见的算错，
+也正因如此它活了下来。
+
+**修法。** 加了 `chunked_f32_vals_offset()`（`radix_core.cuh`）：把 `cols` 占的
+字节数向上取整到 16，`chunked_f32_vals` 用它，`chunked_f32_workspace_bytes`
+的第一项也换成它。同时把 `rk::launch_topk_f32_chunked` 的签名从
+`void *cols_base` 改成 `int32_t *cols, float *vals, int32_t *out` —— 它原来在
+内部**重新推导**一遍布局，而调用方 `ChunkedF32Workspace` 也推导一遍，两份
+算术只因为写法相同才一致；pad 正是其中一份会漏掉的那类东西。现在只有一个
+组合点（`chunked_f32_workspace`），arena 的三段由 `chunked_f32_cols` /
+`_vals_offset` / `_out` 定义。
+
+**验证。** 门七段全过（correctness OK、cases_chunks / graph 三段 ALL PASS、
+official 30/30）。性能 **1 regressed / 2 improved / 104 noise，总量 +0.02%**；
+唯一越界的格 `b512-v256-k1024` 是 **bf16、V=256**，走 row/radix 路径，
+本次改动一处都碰不到（它自己的抖动：8.346 / 8.346 / 8.397 / 8.422 / 8.602 µs）。
+**改动真正够得着的三个格**（fp32 split 自己的行）：
+`b1-v66551-k2048` 67.328 → 67.277（−0.08%）、
+`b1-v131072-k2048` 78.771 → 79.258（+0.62%）、
+`b1-v107520-k2048` 76.237 → 75.853（−0.50%）。
+所以修这个缺陷**在快照钟上量不出代价**，也量不出收益。
+
+### 12.20.7 这一批没动的两件事
 
 - **`f32_coarse12_applies` / `f32_chunks_applies` 的 provenance 半边是
   `sm_count`，而 `chunked_f32_applies` / `chunked_bf16_applies` 没有。**

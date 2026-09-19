@@ -2393,6 +2393,7 @@ __global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage2_kernel(
 // split carries the columns alongside the values:
 //
 //   cols[batches * chunks * topk]  int32  the row columns stage 1 selected
+//   (pad to a 16-byte boundary)            -- see `chunked_f32_vals_offset`
 //   vals[batches * chunks * topk]  float  their values, -inf for an empty slot
 //   out [batches * topk]           int32  the merge's answer, one column each
 //
@@ -2412,22 +2413,70 @@ constexpr size_t kF32ChunkBlocks = kBlockSize;   // `radix_topk_row_f32`'s width
 constexpr uint32_t kF32MaxTopK = 4096u;
 
 inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
-                                          uint32_t chunks) {
-    const size_t candidates = (size_t)batches * chunks * topk;
-    return candidates * sizeof(int32_t) + candidates * sizeof(float) +
-           (size_t)batches * topk * sizeof(int32_t);
-}
+                                          uint32_t chunks);
 
+// The three regions of the fp32 split's arena, in order, as the *caller* must
+// carve them (`chunked_f32_workspace_bytes` is the total):
+//
+//   cols[candidates]  int32  the row columns stage 1 selected
+//   (pad to 16)              -- see `chunked_f32_vals_offset`
+//   vals[candidates]  float  their values, -inf for an empty slot
+//   out [candidates]  int32  the merge's answer, one column per row
+//
+// `out` is `candidates` wide here rather than `batches * topk` because that is
+// the slot the caller actually has: `merged` sits directly after `vals`, and
+// `candidates = batches * chunks * topk >= batches * topk` since `chunks >= 2`.
+// The merge only writes `batches * topk` of it.
+//
+// `chunked_f32_cols` is the identity on the arena base; it exists so the
+// offset that *does* need explaining has somewhere to point.
 inline int32_t *chunked_f32_cols(void *base, uint32_t batches, uint32_t topk,
                                  uint32_t chunks) {
     (void)batches; (void)topk; (void)chunks;
     return (int32_t *)base;
 }
 
+// `vals` must start on a 16-byte boundary.  `radix_topk_row_f32` -- which
+// stage 2 hands it to -- walks it with `__ldg(reinterpret_cast<const float4*>)`
+// and has **no** alignment guard (`hist_add_f32`, pass 2's two loops); the
+// 16-bit lane guards the same hazard (`bf16x8_is_aligned`), this one never
+// learned to.  The arena base is a `cudaMalloc`, so it is aligned; what is not
+// is the offset `cols` occupies, which is `batches * chunks * topk` int32.
+//
+// `chunks` is even by construction (`f32_chunked_chunks` returns a power of two
+// or `f32_chunk_round_even`'s result) and `topk >= 512` on every arm the split
+// is measured on, so `chunks * topk` is even and the offset is a multiple of 8
+// bytes -- the padding is `0` or `8`, and the answer is determined by
+// `batches & 1u`.  Written as a round-up so it stays correct if `chunks` ever
+// becomes odd.
+//
+// Without it the base is 16-byte aligned iff `batches % 4 == 0`, and the gate's
+// `b1-*` fp32 cells (`b1-v66551-k2048`, `b1-v131072-k2048`, `b1-v107520-k2048`
+// -- all in the perf grid) take the misaligned branch on every run.  MACA
+// tolerates the load, which is exactly why this survived: it is UB that works,
+// not a visible mis-computation.
+inline size_t chunked_f32_vals_offset(uint32_t batches, uint32_t topk,
+                                      uint32_t chunks) {
+    const size_t bytes = (size_t)batches * chunks * topk * sizeof(int32_t);
+    return (bytes + 15u) & ~(size_t)15u;
+}
+
 inline float *chunked_f32_vals(void *base, uint32_t batches, uint32_t topk,
                               uint32_t chunks) {
-    return (float *)(chunked_f32_cols(base, batches, topk, chunks) +
-                     (size_t)batches * chunks * topk);
+    return (float *)((char *)base + chunked_f32_vals_offset(batches, topk, chunks));
+}
+
+inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
+                                          uint32_t chunks) {
+    const size_t candidates = (size_t)batches * chunks * topk;
+    // cols (padded) + vals + the merge's answer.  The last term is slack rather
+    // than a separate region: `chunked_f32_workspace` places `merged` directly
+    // after `vals`, and `candidates >= batches * topk` because `chunks >= 2`,
+    // so the answer always fits in the `candidates`-wide slot -- this keeps the
+    // bound it has always had rather than tightening it.
+    return chunked_f32_vals_offset(batches, topk, chunks) +
+           candidates * sizeof(float) + candidates * sizeof(int32_t) +
+           (size_t)batches * topk * sizeof(int32_t);
 }
 
 inline int32_t *chunked_f32_out(void *base, uint32_t batches, uint32_t topk,
@@ -2527,13 +2576,17 @@ inline bool f32_stage1_fuses_scan() {
 }
 
 inline cudaError_t launch_topk_f32_chunked(
-    const float *scores, const int32_t *lengths, void *cols_base, int32_t *out,
-    int B, int L, int topk, int num_chunks, cudaStream_t stream,
+    const float *scores, const int32_t *lengths, int32_t *cols, float *vals,
+    int32_t *out, int B, int L, int topk, int num_chunks, cudaStream_t stream,
     int64_t score_stride, bool want_nan = false, int32_t *nan_flags = nullptr)
 {
-    const uint32_t b = (uint32_t)B, k = (uint32_t)topk, c = (uint32_t)num_chunks;
-    int32_t *cols = chunked_f32_cols(cols_base, b, k, c);
-    float *vals = chunked_f32_vals(cols_base, b, k, c);
+    // The three arenas are **arguments, not derived here**.  The caller already
+    // owns the workspace and places the split's regions inside it alongside its
+    // own state (the row-length table, the per-row NaN flags), so it is the one
+    // that knows the layout; re-deriving it here was a second copy of the same
+    // arithmetic, and the two agreed only because they were written the same
+    // way.  `chunked_f32_cols` / `chunked_f32_vals` / `chunked_f32_out` remain
+    // as the definition of the layout, and the caller uses them.
     cudaError_t err = launch_topk_f32_chunks_stage1(
         scores, lengths, cols, vals, B, L, topk, num_chunks, stream, score_stride,
         want_nan, nan_flags);

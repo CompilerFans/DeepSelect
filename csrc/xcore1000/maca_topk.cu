@@ -1440,6 +1440,15 @@ inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
            (size_t)batches * sizeof(int32_t);
 }
 
+// The workspace's layout.  `rk::chunked_f32_cols` / `_vals_offset` / `_out` are
+// the *definition* of it -- the split's own region order and the 16-byte pad
+// `radix_topk_row_f32`'s unguarded `float4` walkers need -- and this function
+// is the one place that composes them with the caller's own state in front
+// (the row-length table).  It used to re-derive the same arithmetic by hand
+// while `rk::launch_topk_f32_chunked` re-derived it a second time from the
+// arena base; those two copies agreed only because they were written the same
+// way, and the pad is exactly the kind of thing one of them would have missed.
+// The launch now takes the three pointers, so there is one composition site.
 struct ChunkedF32Workspace {
     int32_t *lengths;
     int32_t *cols;
@@ -1450,10 +1459,11 @@ struct ChunkedF32Workspace {
 inline ChunkedF32Workspace chunked_f32_workspace(void *base, uint32_t batches,
                                                  uint32_t topk, int chunks) {
     ChunkedF32Workspace ws{};
-    const size_t candidates = (size_t)batches * chunks * topk;
+    const uint32_t b = batches, k = (uint32_t)topk, c = (uint32_t)chunks;
+    const size_t candidates = (size_t)b * c * k;
     ws.lengths = (int32_t *)base;
     ws.cols = ws.lengths + batches;
-    ws.vals = (float *)(ws.cols + candidates);
+    ws.vals = rk::chunked_f32_vals(ws.cols, b, k, c);
     ws.merged = (int32_t *)(ws.vals + candidates);
     return ws;
 }
@@ -1497,7 +1507,8 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
         }
     }
     const cudaError_t rc = rk::launch_topk_f32_chunked(
-        (const float *)params.input, params.end_ptr, ws.cols, ws.merged,
+        (const float *)params.input, params.end_ptr, ws.cols, ws.vals,
+        ws.merged,
         (int)batches, (int)params.vocab_size, (int)params.topk, chunks, stream,
         // The row stride is in bytes at this layer and in elements there.
         (int64_t)(params.stride_input_batch / sizeof(float)),
