@@ -43,6 +43,19 @@
 
 namespace rk {
 
+// The *static-k* dispatch's arm limit -- not the array bound, and not the
+// public contract.  Every reader of this constant is one of the arms that
+// instantiates `topk` at compile time: `launch_topk_bf16_runtime`'s guard, the
+// `static_assert(TOPK <= kMaxTopK)` in `radix_topk_row_bf16_k`, and the chunked
+// entries.  The runtime-k row entries (`radix_topk_row_bf16_b`,
+// `radix_topk_row_f32`) do **not** read it, and the public contract is
+// `deep_select_maca::kMaxTopK` = 4096 in `maca_topk.cu` -- which is why the fp32
+// side has its own `kF32MaxTopK` (4096) below rather than reusing this.
+//
+// There are four constants with this name in the tree (2048 here,
+// `dg_chunks.cuh`, `dg_coarse12.cuh`; 4096 in `maca_topk.cu`) and nothing links
+// them.  That is deliberate -- each is its own arm's bound -- but it means a
+// grep for `kMaxTopK` does not answer "what is the top-k limit".
 constexpr int kMaxTopK = 2048;
 #ifndef KBLOCK_SIZE
 constexpr int kBlockSize = 512;

@@ -3911,7 +3911,65 @@ official 30/30）。性能 **1 regressed / 3 improved / 103 noise，总量 +0.05
 两处 `__launch_bounds__` 的取值在 ledger 里找不到依据）。#14 随 #6 一起变成
 moot，只改了 #13 的注释。
 
-### 12.20.8 这一批没动的两件事
+### 12.20.8 `kMaxTopK` 的四处同名：第三处注释与代码不符（2026-09-19）
+
+`audit-crossfile` 迟迟没交报告，我自己顺着这条线查了一遍——它的范围里最该
+查的就是这个：树里**四个** `kMaxTopK`，2048 在 `radix_core.cuh` / `dg_chunks.cuh` /
+`dg_coarse12.cuh`，4096 在 `maca_topk.cu`，互不链接。
+
+`maca_topk.cu` 的注释是**对的**，而且写得很好（它明确说 `rk::kMaxTopK` 是
+静态-k 分派的臂上界、不是行入口的）。但 `radix_select_row` 上方那句写的是：
+
+> Both row entries cover every key length and every k up to `rk::kMaxTopK`
+
+**这句是错的。** 它下面调的 `radix_topk_row_bf16_b` 和 `radix_topk_row_f32`
+都收运行期 `topk`；`radix_core.cuh` 里 2048 的四个读者全是**编译期实例化 k**
+的那几个臂（`launch_topk_bf16_runtime` 的守卫、`radix_topk_row_bf16_k` 的
+`static_assert`、两个 chunked 入口），行入口一个都不在里面。公共契约是 4096
+（`topk()` 里 `DS_HOST_CHECK(topk <= kMaxTopK)`），而 `radix_layout` 按 topk
+给 `selected` 和 `sort_buf` 定尺寸——4096 时 32768 + 16384 = **49152 B**，
+正好是 `kSmemBudgetBytes` 预留的 48 KB。所以 4096 在这条路径上是**成立的**，
+那句注释把它说小了一半。
+
+**修法**：改注释（`radix_select_row` 上方 + `radix_core.cuh` 的 `kMaxTopK`
+上方加一段说明它是臂上界、以及四个同名常量的存在）。**没有加断言**——
+`rk::kMaxTopK` 是 `constexpr int`，`if constexpr` 和 `static_assert` 都能编，
+但两者的语义差别要花一段注释才说得清，而这句话的价值在注释里，不在代码里。
+
+**顺带量了一次这条路径**（device 2，`B=8 V=32768`）：`topk=4096` 在两个
+dtype 上都跑得通，选出来的**值序列**和 `torch.topk` 逐位相等
+（k=512 / 2048 / 4096 各三个 dtype 全 True）。bf16 的**下标**和 torch 不同
+——但 k=512 时也差 4083 个位置，而边界 tie 只有 153 个，所以那是 torch 自己
+的 tie 顺序，不是 4096 特有的问题；判定用值序列，不用下标。
+
+### 12.20.9 那个越界格是**测量问题**，不是回归（2026-09-19）
+
+§12.20.8 那次门报 `1 regressed`，是 `b6-v129280-k512`（fp32 sampler，
+100.7 → 115.6 µs，+14.8%）。它**是**对齐修复够得着的格——`b=6` 被
+`kF32ChunksMaxBatches=2` 挡在 chunks 臂外，coarse12 的窄臂要 `b>=16`，
+所以它落在我刚改过的 **fp32 split** 上。所以这条必须查清楚。
+
+**同一支二进制，隔 3 分钟再测一次**（`scripts/perf_snapshot.py`，
+`CUDA_VISIBLE_DEVICES=2`），同一个格 **100.48 µs** —— 比 115.61 低 13.1%，
+比它"回归"前的 100.7 还低。整个 grid 上：107 格里 7 格超过 ±3%，
+包括 `b132-v66551-k2048` −3.6% 和三个 3–10 µs 的小格。
+
+**五次同一族二进制的读数**：100.685 / 100.608 / 101.120 / 100.301 /
+**115.61**。前四次全在 0.8% 以内，第五次跳出去 15%。这是一次**孤立的
+测量事件**，不是漂移也不是回归。
+
+**为什么这很重要**：`run_bench.sh` 的 VERDICT 是对**单次快照**和基线的比较，
+±3% 容差是按 ">100 µs 的格" 定的（§12.18.6），而这次是一个 100 µs 的格
+在**同二进制**上跳 15%。门读的是 `snapshot.log`，快照每格只测一遍
+（`num_runs=10` 是 `kk.bench` 内部的重复，不是跨格重复），所以一次异常
+就足以把一个正确的改动判成 REGRESSED。
+
+**结论**：这一批（§12.20.7 的注释 + §12.20.8 的两处文档修正）**没有回归**。
+判决依据不是那一次的 VERDICT，而是"同二进制重测回到 100.48"。顺带记一条
+纪律：**门报 REGRESSED 时，先在同二进制上重测那个格**，再决定要不要去查代码
+——`perf_snapshot.py` 单跑一次的成本远低于顺着一条假的回归线查下去。
+
+### 12.20.10 这一批没动的两件事
 
 - **`f32_coarse12_applies` / `f32_chunks_applies` 的 provenance 半边是
   `sm_count`，而 `chunked_f32_applies` / `chunked_bf16_applies` 没有。**

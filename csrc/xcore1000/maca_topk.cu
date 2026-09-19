@@ -280,9 +280,19 @@ static __device__ __forceinline__ void radix_layout(
         base + (sort_bytes > arena_bytes ? sort_bytes : arena_bytes));
 }
 
-// Both row entries cover every key length and every k up to `rk::kMaxTopK`, and
-// both resolve a threshold bin too large for the arena by re-walking the row
-// rather than by ranking a truncated candidate set.
+// Both row entries cover every key length and every k **up to the public
+// `kMaxTopK` (4096)**, not `rk::kMaxTopK` (2048).  The header's 2048 is the
+// *static-k* dispatch's arm limit -- `launch_topk_bf16_runtime`'s guard, the
+// `static_assert(TOPK <= kMaxTopK)` in `radix_topk_row_bf16_k`, and the chunked
+// entries -- and neither of the two entries called here is one of those:
+// `radix_topk_row_bf16_b` takes `topk` at runtime and `radix_topk_row_f32` does
+// too, so a 4096 answer is legal for both and `radix_layout` sizes `selected`
+// and `sort_buf` for it.  This comment said `rk::kMaxTopK` until the public
+// entry's 4096 was traced through the row path; see the note above
+// `deep_select_maca::kMaxTopK` for why the two constants differ.
+//
+// Both also resolve a threshold bin too large for the arena by re-walking the
+// row rather than by ranking a truncated candidate set.
 template <typename ValueT, int BLOCK>
 static __device__ __forceinline__ void radix_select_row(
     const ValueT *input_row, uint32_t length, int32_t *out_idx, uint32_t topk) {
