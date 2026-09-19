@@ -23,6 +23,16 @@ see `chunks_arm_official.py`).  The replay-vs-eager comparison is the suite's
 the same bytes must give the same bytes, and "close enough" would hide a graph
 that replayed a stale answer.
 """
+# **This file measures the checkout, not the installed wheel.**  It puts the
+# *repository* on `sys.path` (below), which is the only way a `deep_select`
+# import can resolve to a tree that also carries `kernelkit` and `lib` -- the
+# two modules this case is built on.  That is deliberate, and it is also the
+# trap: a bare `python tests/cases/foo.py` run from the repository root gets
+# `.` on `sys.path` from the interpreter, and with the package importable from
+# site-packages the name can resolve there instead.  Run these with
+# `PYTHONPATH=.` and read the `artifact=` line every one of them prints, or
+# `run_bench.sh`, which resolves the extension the same way and records its
+# md5 in the run header.
 import os, sys, traceback, torch
 torch.set_default_device("cuda")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -88,10 +98,17 @@ def capture(p, t, k, si, rv, idx_dtype):
     return g, val, idx
 
 
-def _pair(b, V, k):
+def _pair(b, V, k, si=False):
     """A bare (input, callable) pair for the probes, which do not need a
     `TestParam` -- they are about the scratch allocator, not about correctness
-    against the suite's predicate."""
+    against the suite's predicate.
+
+    `si=True` is what makes a replay comparison bitwise: the unsorted path
+    writes its indices in atomic order, so two calls on the same bytes are not
+    bitwise equal (measured: 261k of 270336 slots differ) and only a multiset
+    comparison is fair.  The four cells above run sorted for that reason; the
+    probe runs sorted too, because its whole question is whether the graph read
+    the same thing twice."""
     import math
     al = deep_select.get_stride_requirement()[0] // 4
     vr = int(math.ceil(V / al)) * al
@@ -99,7 +116,7 @@ def _pair(b, V, k):
 
     def fn():
         return deep_select.topk(x, k, backend="maca_c",
-                                indices_type=torch.int32, sorted_index=False,
+                                indices_type=torch.int32, sorted_index=si,
                                 return_value=False, abort_when_nan_found=False)
     return x, fn
 
@@ -249,49 +266,84 @@ if __name__ == "__main__" and "--probe" in sys.argv:
     print(f"  cold-scratch  capture={state}" + (f"  {first}" if first else ""))
     sys.exit(0)
 
-# ── probe: grow the scratch AFTER capture, then replay ─────────────────────
-# The stale-pointer probe, and the one case the four cells cannot reach: they
-# all capture a shape they already warmed, and none of them calls a *larger*
-# shape afterwards.  `ChunkedScratch` is grow-only (`maca_topk.cu:2003-2011`:
-# `if (need_cols > scratch.coarse12_cols_count) { cudaMalloc; cudaFree(old); }`),
-# so a later wider call frees the buffer the captured graph recorded -- and the
-# graph goes on reading that address.
+# ── probe: call another shape AFTER capture, then replay ───────────────────
+# The probe the four cells cannot reach: they all capture a shape they already
+# warmed and then stay at it.  A captured graph freezes every *host* decision the
+# call made -- the route predicate, the scratch pointer, the `end` table pointer
+# -- so the question this asks is whether a later call at another shape can move
+# what the graph recorded out from under it.
 #
-# **Measured: MISMATCH, deterministically.**  `replay=MISMATCH`, ~262k of 270336
-# indices differ, reproduced three times.  This is the hazard realised, not a
-# theoretical one.
+# Two hazards were found here, and both are fixed:
 #
-# The first version of this probe *passed*, because it compared replay against
-# an eager call that had itself re-warmed the scratch at the same shape -- so
-# both sides read the same (stale but intact) buffer and agreed.  The eager
-# reference has to be taken on data the replay was never run against, which is
-# what `xs.normal_()` before `small()` below does: the graph re-reads the
-# buffer it recorded, the eager call reads the one the allocator handed back
-# for the same shape afterwards.  A comparator that lets the two agree by
-# accident is the same failure this repository has now made three times.
+#   1. **The scratch was freed on growth.**  `ChunkedScratch` was grow-only with
+#      a `cudaFree` of the old buffer, and the graph had recorded that buffer's
+#      address.  Fixed by *retiring* the old buffer (`scratch_retire`) instead of
+#      freeing it -- the peak is held, which is what the cache already does for a
+#      shape that never shrinks.
+#   2. **The row table was rewritten in place.**  One `lengths` buffer plus an
+#      epoch keyed on `(batches, vocab_size)` meant a call at another shape wrote
+#      the *same address* with different lengths, and the graph re-read it: a
+#      `b132 V66551` capture replayed after a `b16 V131072` call ranked a
+#      131072-wide window against a 66551-wide row, **131 of 132 rows wrong**.
+#      Fixed by keying the table on its shape (`ChunkedScratch::lengths_table`),
+#      so a key never reuses another key's address.
+#
+# **What this probe can and cannot see.**  It compares *multisets*, because the
+# `return_value=False` path writes its indices in atomic order and two eager
+# calls on the same bytes are not bitwise equal either (measured: the control
+# below differs in 261k of 270336 slots, exactly as the probe does).  A bitwise
+# comparator here would be red on a correct kernel; a multiset comparator is
+# still sharp enough for both hazards, because both corrupt *which columns are
+# selected* -- hazard 2 turned 131 rows into a different window's answer, and a
+# freed-and-reused scratch turns rows into whatever the allocator left there.
+# What it would miss is a reordering-only corruption, which is what
+# `sorted_index=True` exists to rule out (the four cells above run that mode and
+# do compare bitwise).
 def grow_probe():
-    xs, small = _pair(132, 66551, 2048)
+    """Every intervening shape that has a distinct table, then a replay.
+
+    The shapes are not arbitrary.  The second hazard above is keyed on
+    `(batches, vocab_size)`, so a probe that changes only one of the two -- or
+    changes neither, like the shipped one did -- cannot see it.
+
+    **No eager call at the captured shape may run between the intervening call
+    and the replay.**  That is not a detail; it is the difference between a
+    probe that works and one that cannot.  Under the old policy the eager call
+    *is* the repair: `small()` refills the one table back to `V=66551`, so a
+    probe that takes its reference first (as the shipped version did) hands the
+    graph a correct table and goes green on a broken kernel.  Measured: the
+    version with the reference taken first reports MATCH on the pre-fix build.
+
+    So the reference is the graph's own first replay, on input that is never
+    written to again, and the comparison is bitwise.  `sorted_index=True` is
+    what makes bitwise the right relation here: the same kernel on the same
+    bytes must give the same bytes, and the unsorted path's atomic write order
+    would not.
+    """
+    xs, small = _pair(132, 66551, 2048, si=True)
     small(); torch.cuda.synchronize()
     g, val_c, idx_c = capture_plain(small)
     g.replay(); torch.cuda.synchronize()
-    xb, big = _pair(4096, 131072, 2048)
-    big(); torch.cuda.synchronize()          # grows -> cudaFree(captured buffer)
-    xs.normal_(); torch.cuda.synchronize()
-    # Take the reference FIRST, on the new data, so `small()` here is what
-    # re-allocates the same shape's scratch -- and then replay reads the
-    # address the graph froze, not the one this call just used.
-    val_e, idx_e = small()
-    torch.cuda.synchronize()
-    g.replay(); torch.cuda.synchronize()
-    return bool(kk.check_is_bitwise_equal("grow-probe replay vs eager", idx_c, idx_e))
+    ref = idx_c.clone()
+    ok = True
+    for ib, iV in ((4096, 131072), (16, 131072), (1, 262144), (64, 131072)):
+        xb, big = _pair(ib, iV, 2048, si=True)
+        big(); torch.cuda.synchronize()      # the shape that used to move the table
+        g.replay(); torch.cuda.synchronize()
+        same = bool(kk.check_is_bitwise_equal(
+            f"replay after b={ib} V={iV} vs the first replay", idx_c, ref))
+        ok &= same
+        print(f"    after an intervening b={ib} V={iV}: "
+              f"{'MATCH' if same else 'MISMATCH'}")
+        idx_c.copy_(ref)                     # each shape gets its own replay
+    return ok
 
 
 if __name__ == "__main__" and "--grow-probe" in sys.argv:
-    print("probe: capture small, grow the scratch with a wider call, then replay")
+    print("probe: capture small, call another shape, then replay (bitwise)")
     ok = grow_probe()
-    print(f"  grow-scratch  replay={'MATCH' if ok else 'MISMATCH'}  "
-          f"(a MATCH means the freed page was not reused, not that this is safe)")
-    sys.exit(0)
+    print(f"  grow-scratch  replay={'MATCH' if ok else 'MISMATCH'}")
+    sys.exit(0 if ok else 1)
 
 print()
 print("=" * 78)

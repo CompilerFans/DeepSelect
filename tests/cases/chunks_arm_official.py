@@ -9,12 +9,22 @@ a hand-written one is how a harness artifact gets mistaken for a kernel bug
 (twice, in this session: a `[:, :V]` slice that made a strided view, and a
 `-1`-padded reference whose sort put the padding first).
 """
+# **This file measures the checkout, not the installed wheel.**  It puts the
+# *repository* on `sys.path` (below), which is the only way a `deep_select`
+# import can resolve to a tree that also carries `kernelkit` and `lib` -- the
+# two modules this case is built on.  That is deliberate, and it is also the
+# trap: a bare `python tests/cases/foo.py` run from the repository root gets
+# `.` on `sys.path` from the interpreter, and with the package importable from
+# site-packages the name can resolve there instead.  Run these with
+# `PYTHONPATH=.` and read the `artifact=` line every one of them prints, or
+# `run_bench.sh`, which resolves the extension the same way and records its
+# md5 in the run header.
 import os, sys, torch
 torch.set_default_device("cuda")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import kernelkit as kk, deep_select, lib, test as suite
 from lib import (TestParam, NormalFloatDistribution, UniformUIntDistribution,
-                 UintDistributionWithHotspotAndSpecifiedPivot)
+                 UintDistributionWithHotspotAndSpecifiedPivot, get_fp_config)
 
 def case(tag, b, V, k, distrib=None, end=False, si=True, sv=False, rv=False,
          idx_dtype=torch.int32, seed=3):
@@ -64,6 +74,31 @@ for V in (66551, 131072, 225467):
 allok &= case("decline wide bin pivot", 2, 66551, 2048,
               UintDistributionWithHotspotAndSpecifiedPivot(
                   0x3f800000, 2048, [(0x3f800000, 40000)], True))
+# ── the NaN contract, on the band this arm actually answers ────────────────
+# The arm answers a row *without ranking it* and hands the answer to the
+# contract half as `preselected`, and that half **reads** a per-row flag
+# instead of scanning (`maca_topk.cu:463`).  So the arm has to raise it, and
+# for a while it did not: `dg_chunks.cuh` took `nan_flags` and did
+# `(void)nan_flags;`, which served a NaN row a normal top-k with
+# `abort_when_nan_found` -- the default -- inert.  These cases are what would
+# have caught it.  They are here rather than in `tests/test.py`'s own table
+# because the *default* routing reaches this arm only at `b <= 2` with
+# `V >= 2048`, and the table's `b` values are drawn, not pinned.
+#
+# Both NaN signs, because the guard is `!= 0` over a flag raised by
+# `is_nan_value`, and a sign-asymmetric predicate would pass one and not the
+# other.  `V=2048, k=2048` is deliberately absent: there the window is no
+# longer than `topk`, the shortcut arm answers before the NaN block runs, and
+# the suite's own predicate exempts that row -- which is a different assertion
+# and belongs to the shortcut, not here.
+_NaN = UintDistributionWithHotspotAndSpecifiedPivot
+for _sign in (get_fp_config(torch.float32).positive_nan,
+              get_fp_config(torch.float32).negative_nan):
+    for V, k in ((66551, 2048), (131072, 2048), (262144, 2048)):
+        allok &= case(f"nan hotspot b=1 V={V}", 1, V, k,
+                      _NaN(None, k, [(_sign, 8)], True))
+        allok &= case(f"nan hotspot b=2 V={V}", 2, V, k,
+                      _NaN(None, k, [(_sign, 8)], True))
 # ── controls just outside the band ─────────────────────────────────────────
 allok &= case("control b=4", 4, 66551, 2048)
 allok &= case("control denormals", 1, 66551, 2048, distrib=UniformUIntDistribution(0, 0x1000))

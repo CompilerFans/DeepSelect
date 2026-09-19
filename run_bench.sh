@@ -253,6 +253,66 @@ bench_status=0
 # run ineligible for `--set-baseline`, which is what the sticky status is for.
 run_stage snapshot      python scripts/perf_snapshot.py --backends "${backends}" --out-dir "${out}" || bench_status=1
 if [[ ${skip_gate} -eq 0 ]]; then
+    # ── the correctness gate, which the two stages below are not ────────────
+    # `--perf-only` filters `testcases` to `num_runs > 0`, and every one of
+    # those is a `NormalFloatDistribution` cell -- `randn_like`, no NaN.  The
+    # correctness table (which *does* carry the NaN cases, via
+    # `UintDistributionWithHotspotAndSpecifiedPivot(..., True)`) has
+    # `num_runs=0` and is never reached.  So the two stages below are a *perf*
+    # gate wearing a test's name, and the two defects they let through
+    # (the chunks arm serving a NaN row a normal top-k, and a captured graph
+    # reading a scratch buffer a later call had moved) were both invisible to
+    # them for exactly that reason.
+    #
+    # A sample rather than the whole 105,140-case table: it is the same
+    # predicate on the same generator, and a fixed seed makes the draw a
+    # receipt someone else can re-run.  `-rf` so one bad case does not hide
+    # the rest.
+    #
+    # **The harness's exit status is all-or-nothing and this box cannot satisfy
+    # it.**  `tests/test.py` returns 1 for *any* non-pass bucket, and the
+    # 400-case draw always contains a few `b=4096 V~1e6` fp32 cells -- 15 GiB
+    # per tensor, three alive at once -- which a 63.6 GiB shared device cannot
+    # serve.  They land in `crash` rather than `skip` because the allocation
+    # that fails is the *operator's* `cudaMalloc` (`maca_topk.cu`), so
+    # `torch.cuda.OutOfMemoryError` is never raised for the harness to classify
+    # it.  So `run_stage correctness ... || true`, and the verdict is read off
+    # the harness's own summary block: **no `check_fail`** (a wrong selection --
+    # the only thing this stage exists to catch) and **no crash whose detail
+    # line is not an out-of-memory**.  The `^={20,}$` rule is the summary's own
+    # separator; the per-case one is 16 characters wide.
+    run_stage correctness python tests/test.py --seed 20260911 --sample 400 -rf || true
+    csum=$(awk '/^={20,}$/{buf=""} {buf = buf $0 ORS} END{printf "%s", buf}' \
+           "${out}/correctness.log") || true
+    cf=$(printf '%s' "${csum}" | awk '/^  check_fail /{print $2; exit}') || true
+    cr=$(printf '%s' "${csum}" | awk '/^  crash /{print $2; exit}') || true
+    sk=$(printf '%s' "${csum}" | awk '/^  skip /{print $2; exit}') || true
+    # `|| true` on every one of these: `set -o pipefail` is on, and a `grep`
+    # that filters *everything* out exits 1 -- which is the healthy case here
+    # ("no crash detail that is not an OOM"), and would otherwise take the
+    # whole script down with `set -e` at exactly the moment it should pass.
+    non_oom=$(printf '%s' "${csum}" | grep -A1 "^  crash  *TestParam" \
+              | grep -vE "^  crash  *TestParam|^--" | grep -v "out of memory" \
+              | head -3) || true
+    if [[ "${cf:-?}" != "0" ]]; then
+        echo "run_bench.sh: [correctness] FAILED -- ${cf:-?} case(s) selected wrong" >&2
+        printf '%s' "${csum}" | grep -A1 "^  check_fail  *TestParam" | head -6 \
+            | sed 's/^/              /' >&2 || true
+        bench_status=1
+    elif [[ -n "${non_oom}" ]]; then
+        echo "run_bench.sh: [correctness] FAILED -- a crash that is not an OOM:" >&2
+        echo "${non_oom}" | sed 's/^/              /' >&2
+        bench_status=1
+    else
+        echo "run_bench.sh: [correctness] OK -- ${cr:-?} crashed and ${sk:-?} skipped, all out of memory; 0 selected wrong"
+    fi
+    # The arms' own cases, which pin the shapes the drawn table only samples:
+    # `chunks_arm_official.py` covers the `b <= 2` band and the NaN contract on
+    # it, `graph_capture.py` covers capture/replay and the shape-change probes.
+    # Both print the extension they loaded; `PYTHONPATH` here is the same one
+    # the other stages get, so it is the checkout's artifact.
+    run_stage cases_chunks  python tests/cases/chunks_arm_official.py || bench_status=1
+    run_stage cases_graph   python tests/cases/graph_capture.py || bench_status=1
     run_stage official      python tests/test.py --perf-only -nc || bench_status=1
     run_stage official_fp32 python tests/test.py --perf-only -nc --dtype fp32 || bench_status=1
 fi
