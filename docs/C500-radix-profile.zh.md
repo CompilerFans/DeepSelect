@@ -340,7 +340,7 @@ CUB 在本平台可用（`/opt/maca/include/cub`），但**不是绕过这一条
 硬编码成 **6**（`cub/util_arch.cuh:91-99`），即 64。
 
 本仓现状：`csrc/xcore1000/radix_core.cuh` 的 3 处（`:365` 死代码
-`hist_add_bf16_reg`，`:462`/`:481` 在 `run_cumsum_warp` 里、被生产路径
+`hist_add_bf16_reg`，`:464`/`:483` 在 `run_cumsum_warp` 里、被生产路径
 `radix_topk_row_bf16_b` **每行调用两次**）是 wrapper 写法。但它们**不是热区**：
 每 CTA 约 96 条 shuffle 操作，对比 pass 1 的**每元素一次**共享原子
 （profile 行上 16,384 次，即实测的 102.5 µs）。改它们是收尾清洁，不是优化杠杆。

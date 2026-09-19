@@ -102,7 +102,8 @@ constexpr int kChunkBlockSize = KCHUNK_BLOCK_SIZE;
 // the three values above.  So the 16 KB arm is not a conservative choice that
 // a bigger part could raise: on this source it is the only buildable one.
 // (`ref/ds/README.md` §5 recorded the 32 KB failure; the 48 KB `#else` fails
-// the same way, which is why it is unbuilt rather than merely untaken.)
+// the same way -- `'16384 >= 46824'` against 32 KB's `'16384 >= 30440'` --
+// which is why it is unbuilt rather than merely untaken.)
 //
 // Read `kF32SmemInputSize` at :521 for what 16 KB actually buys.
 //

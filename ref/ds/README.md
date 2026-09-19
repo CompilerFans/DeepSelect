@@ -305,14 +305,16 @@ passed, and — importantly — the reference *cannot* take a larger one: with
 ```
 xcore1000_radix_core.cuh:273:15: error: static assertion failed ... 'the 16-bit arena
 must not be smaller than the region it aliases'
-./xcore1000_radix_core.cuh:273:56: note: expression evaluates to '16384 >= 46824'
+./xcore1000_radix_core.cuh:273:56: note: expression evaluates to '16384 >= 30440'
 ```
 
 which is the guarded `static_assert` at ref radix core `:273` (upstream `:251`)
 — the 16-bit path's 12-bit histogram aliases the whole dynamic arena, so
 `kSmemInputSize * 4` must stay within 4096 entries. 16 KB is not a tuning
 choice here, it is the only size the untouched core compiles at. (48 KB is
-unreachable for the same reason.)
+unreachable for the same reason, and fails with `'16384 >= 46824'` — the two
+numbers differ because `kSmemInputSize` grows with the arena. Re-measured
+2026-09-19; the pair quoted here used to be 32768 with the 48 KB number.)
 
 ### The constants
 
