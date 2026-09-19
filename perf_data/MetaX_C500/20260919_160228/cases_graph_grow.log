@@ -1,0 +1,24 @@
+/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/tests/cases/graph_capture.py:36: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+  import os, sys, traceback, torch
+torch 2.6.0+metax3.7.0.7  device=MetaX C500  sms=104
+artifact=/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+
+  row/radix                          b=8   V=32768   k=2048  end=0 si=1  eager=PASS
+  row/radix                          b=8   V=32768   k=2048  end=0 si=1  capture=OK  replay=MATCH  (official predicate on replay: PASS)
+  row/radix                          b=8   V=32768   k=2048  end=0 si=1  replay(new input)=MATCH  (eager on new data: PASS; official predicate on replay: PASS)
+  coarse12                           b=16  V=66551   k=2048  end=0 si=1  eager=PASS
+  coarse12                           b=16  V=66551   k=2048  end=0 si=1  capture=OK  replay=MATCH  (official predicate on replay: PASS)
+  coarse12                           b=16  V=66551   k=2048  end=0 si=1  replay(new input)=MATCH  (eager on new data: PASS; official predicate on replay: PASS)
+  chunks                             b=2   V=66551   k=2048  end=0 si=1  eager=PASS
+  chunks                             b=2   V=66551   k=2048  end=0 si=1  capture=OK  replay=MATCH  (official predicate on replay: PASS)
+  chunks                             b=2   V=66551   k=2048  end=0 si=1  replay(new input)=MATCH  (eager on new data: PASS; official predicate on replay: PASS)
+  chunks+end                         b=1   V=107520  k=2048  end=1 si=1  eager=PASS
+  chunks+end                         b=1   V=107520  k=2048  end=1 si=1  capture=OK  replay=MATCH  (official predicate on replay: PASS)
+  chunks+end                         b=1   V=107520  k=2048  end=1 si=1  replay(new input)=MATCH  (eager on new data: PASS; official predicate on replay: PASS)
+probe: capture small, call another shape, then replay (bitwise)
+    after an intervening b=4096 V=131072: MATCH
+    after an intervening b=16 V=131072: MATCH
+    after an intervening b=1 V=262144: MATCH
+    after an intervening b=64 V=131072: MATCH
+  grow-scratch  replay=MATCH
+# exit 0

@@ -1,0 +1,385 @@
+/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/scripts/perf_snapshot.py:80: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+  import torch  # noqa: E402
+chip MetaX_C500  device MetaX C500  sm 104  backends ['maca_c', 'torch', 'deep_gemm']  cases 120
+case                                          backend   status         kernel us     wall us      GB/s
+offic/bflo b6-v256-k512                       maca_c    pass               3.558      41.293          
+offic/bflo b6-v256-k512                       torch     pass                                            [not applicable: the reference back]
+offic/bflo b6-v256-k512                       deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v1024-k512                      maca_c    pass              16.077      39.629          
+offic/bflo b6-v1024-k512                      torch     pass              26.163      26.752          
+offic/bflo b6-v1024-k512                      deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v4096-k512                      maca_c    pass              18.381      48.512          
+offic/bflo b6-v4096-k512                      torch     pass              51.123      51.302          
+offic/bflo b6-v4096-k512                      deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v16384-k512                     maca_c    pass               29.85      41.754          
+offic/bflo b6-v16384-k512                     torch     pass              140.57     140.186          
+offic/bflo b6-v16384-k512                     deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v65536-k512                     maca_c    pass              53.709      57.318          
+offic/bflo b6-v65536-k512                     torch     pass             179.174      157.03          
+offic/bflo b6-v65536-k512                     deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v131072-k512                    maca_c    pass               84.07      87.142          
+offic/bflo b6-v131072-k512                    torch     pass             219.648      197.99          
+offic/bflo b6-v131072-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v262144-k512                    maca_c    pass              82.125     116.173          
+offic/bflo b6-v262144-k512                    torch     pass             269.056     245.325          
+offic/bflo b6-v262144-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v524288-k512                    maca_c    pass              81.126     122.163          
+offic/bflo b6-v524288-k512                    torch     pass             300.288     279.629          
+offic/bflo b6-v524288-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v1048576-k512                   maca_c    pass             110.208     161.664          
+offic/bflo b6-v1048576-k512                   torch     pass             378.086     356.275          
+offic/bflo b6-v1048576-k512                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v256-k512                     maca_c    pass               6.195      39.629          
+offic/bflo b256-v256-k512                     torch     pass                                            [not applicable: the reference back]
+offic/bflo b256-v256-k512                     deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+  ... 10/120 cases (0.1s)
+offic/bflo b256-v1024-k512                    maca_c    pass              34.355       41.37          
+offic/bflo b256-v1024-k512                    torch     pass              61.696       60.57          
+offic/bflo b256-v1024-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v4096-k512                    maca_c    pass               41.83      44.595          
+offic/bflo b256-v4096-k512                    torch     pass             210.278     198.554          
+offic/bflo b256-v4096-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v16384-k512                   maca_c    pass              69.453      70.989          
+offic/bflo b256-v16384-k512                   torch     pass             317.235     308.992          
+offic/bflo b256-v16384-k512                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v65536-k512                   maca_c    pass             174.566     175.104          
+offic/bflo b256-v65536-k512                   torch     pass             702.746     694.042          
+offic/bflo b256-v65536-k512                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v131072-k512                  maca_c    pass             282.701     282.752          
+offic/bflo b256-v131072-k512                  torch     pass             1211.11    1198.925          
+offic/bflo b256-v131072-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v262144-k512                  maca_c    pass             491.008     489.011          
+offic/bflo b256-v262144-k512                  torch     pass             2039.91    2038.528          
+offic/bflo b256-v262144-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v524288-k512                  maca_c    pass             901.632     897.792          
+offic/bflo b256-v524288-k512                  torch     pass            3692.698    3691.955          
+offic/bflo b256-v524288-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v1048576-k512                 maca_c    pass            1719.757    1711.309          
+offic/bflo b256-v1048576-k512                 torch     pass            6973.414    6981.299          
+offic/bflo b256-v1048576-k512                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v256-k512                     maca_c    pass                7.27      38.784          
+offic/bflo b512-v256-k512                     torch     pass                                            [not applicable: the reference back]
+offic/bflo b512-v256-k512                     deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v1024-k512                    maca_c    pass              45.594      48.614          
+offic/bflo b512-v1024-k512                    torch     pass              91.648      91.443          
+offic/bflo b512-v1024-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+  ... 20/120 cases (0.2s)
+offic/bflo b512-v4096-k512                    maca_c    pass              57.318      58.982          
+offic/bflo b512-v4096-k512                    torch     pass             252.467     244.378          
+offic/bflo b512-v4096-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v16384-k512                   maca_c    pass             100.403     100.429          
+offic/bflo b512-v16384-k512                   torch     pass             461.978     453.555          
+offic/bflo b512-v16384-k512                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v65536-k512                   maca_c    pass             286.976     287.309          
+offic/bflo b512-v65536-k512                   torch     pass            1205.094    1194.778          
+offic/bflo b512-v65536-k512                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v131072-k512                  maca_c    pass             468.838     467.661          
+offic/bflo b512-v131072-k512                  torch     pass            2149.658    2140.518          
+offic/bflo b512-v131072-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v262144-k512                  maca_c    pass             822.758     818.688          
+offic/bflo b512-v262144-k512                  torch     pass             3792.64     3783.27          
+offic/bflo b512-v262144-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v524288-k512                  maca_c    pass            1524.019    1514.701          
+offic/bflo b512-v524288-k512                  torch     pass            7057.741    7056.717          
+offic/bflo b512-v524288-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v1048576-k512                 maca_c    pass            2905.728    2900.122          
+offic/bflo b512-v1048576-k512                 torch     pass           13639.424   13645.107          
+offic/bflo b512-v1048576-k512                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v256-k512                     maca_c    pass               9.011       39.91          
+offic/bflo b768-v256-k512                     torch     pass                                            [not applicable: the reference back]
+offic/bflo b768-v256-k512                     deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v1024-k512                    maca_c    pass              58.163      60.237          
+offic/bflo b768-v1024-k512                    torch     pass             125.824      126.95          
+offic/bflo b768-v1024-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v4096-k512                    maca_c    pass              75.776      78.874          
+offic/bflo b768-v4096-k512                    torch     pass             309.018     297.754          
+offic/bflo b768-v4096-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+  ... 30/120 cases (0.3s)
+offic/bflo b768-v16384-k512                   maca_c    pass             139.546     139.776          
+offic/bflo b768-v16384-k512                   torch     pass             685.696     676.838          
+offic/bflo b768-v16384-k512                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v65536-k512                   maca_c    pass             441.523     441.523          
+offic/bflo b768-v65536-k512                   torch     pass            1680.794    1672.064          
+offic/bflo b768-v65536-k512                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v131072-k512                  maca_c    pass              731.93      728.96          
+offic/bflo b768-v131072-k512                  torch     pass            3076.941    3083.034          
+offic/bflo b768-v131072-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v262144-k512                  maca_c    pass            1291.008    1286.886          
+offic/bflo b768-v262144-k512                  torch     pass            5559.987    5557.529          
+offic/bflo b768-v262144-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v524288-k512                  maca_c    pass            2395.392    2387.507          
+offic/bflo b768-v524288-k512                  torch     pass           10398.848   10408.244          
+offic/bflo b768-v524288-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v1048576-k512                 maca_c    pass            4595.968     4593.51          
+offic/bflo b768-v1048576-k512                 torch     pass           20114.048   20137.958          
+offic/bflo b768-v1048576-k512                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v256-k512                    maca_c    pass              31.437      42.701          
+offic/bflo b4096-v256-k512                    torch     pass                                            [not applicable: the reference back]
+offic/bflo b4096-v256-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v1024-k512                   maca_c    pass             222.029     226.893          
+offic/bflo b4096-v1024-k512                   torch     pass             383.949     373.632          
+offic/bflo b4096-v1024-k512                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v4096-k512                   maca_c    pass             319.283      324.25          
+offic/bflo b4096-v4096-k512                   torch     pass             705.715     698.931          
+offic/bflo b4096-v4096-k512                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v16384-k512                  maca_c    pass             620.211      623.36          
+offic/bflo b4096-v16384-k512                  torch     pass            2012.416    2004.941          
+offic/bflo b4096-v16384-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+  ... 40/120 cases (0.3s)
+offic/bflo b4096-v65536-k512                  maca_c    pass            2153.293    2154.547          
+offic/bflo b4096-v65536-k512                  torch     pass            7792.973    7808.461          
+offic/bflo b4096-v65536-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v131072-k512                 maca_c    pass            3597.875     3601.92          
+offic/bflo b4096-v131072-k512                 torch     pass           15383.117   15404.851          
+offic/bflo b4096-v131072-k512                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v262144-k512                 maca_c    pass            6404.429    6414.182          
+offic/bflo b4096-v262144-k512                 torch     pass            29495.91   29532.263          
+offic/bflo b4096-v262144-k512                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v524288-k512                 maca_c    pass           11913.344   11935.795          
+offic/bflo b4096-v524288-k512                 torch     pass            57699.61   57747.302          
+offic/bflo b4096-v524288-k512                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v1048576-k512                maca_c    pass           22971.827   22983.655          
+offic/bflo b4096-v1048576-k512                torch     pass          111885.389  111959.656          
+offic/bflo b4096-v1048576-k512                deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v256-k1024                      maca_c    pass               3.712      37.965          
+offic/bflo b6-v256-k1024                      torch     pass                                            [not applicable: the reference back]
+offic/bflo b6-v256-k1024                      deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v1024-k1024                     maca_c    pass               3.686      40.422          
+offic/bflo b6-v1024-k1024                     torch     pass              24.678      25.574          
+offic/bflo b6-v1024-k1024                     deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v4096-k1024                     maca_c    pass              19.149      41.165          
+offic/bflo b6-v4096-k1024                     torch     pass               50.79      50.918          
+offic/bflo b6-v4096-k1024                     deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v16384-k1024                    maca_c    pass               31.13      39.194          
+offic/bflo b6-v16384-k1024                    torch     pass             144.768     143.488          
+offic/bflo b6-v16384-k1024                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v65536-k1024                    maca_c    pass              57.395      60.851          
+offic/bflo b6-v65536-k1024                    torch     pass              178.15     157.542          
+offic/bflo b6-v65536-k1024                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+  ... 50/120 cases (0.3s)
+offic/bflo b6-v131072-k1024                   maca_c    pass              90.368      92.621          
+offic/bflo b6-v131072-k1024                   torch     pass             224.896     207.514          
+offic/bflo b6-v131072-k1024                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v262144-k1024                   maca_c    pass              98.304     132.045          
+offic/bflo b6-v262144-k1024                   torch     pass             253.363     243.994          
+offic/bflo b6-v262144-k1024                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v524288-k1024                   maca_c    pass             141.722     181.786          
+offic/bflo b6-v524288-k1024                   torch     pass             301.466     281.139          
+offic/bflo b6-v524288-k1024                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b6-v1048576-k1024                  maca_c    pass             136.218     187.571          
+offic/bflo b6-v1048576-k1024                  torch     pass             370.893     356.557          
+offic/bflo b6-v1048576-k1024                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v256-k1024                    maca_c    pass               5.811      38.656          
+offic/bflo b256-v256-k1024                    torch     pass                                            [not applicable: the reference back]
+offic/bflo b256-v256-k1024                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v1024-k1024                   maca_c    pass               5.811      38.426          
+offic/bflo b256-v1024-k1024                   torch     pass               55.45      56.576          
+offic/bflo b256-v1024-k1024                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v4096-k1024                   maca_c    pass              44.032      46.899          
+offic/bflo b256-v4096-k1024                   torch     pass             210.099     201.293          
+offic/bflo b256-v4096-k1024                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v16384-k1024                  maca_c    pass              73.011      73.754          
+offic/bflo b256-v16384-k1024                  torch     pass             320.154     309.504          
+offic/bflo b256-v16384-k1024                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v65536-k1024                  maca_c    pass              189.44     189.005          
+offic/bflo b256-v65536-k1024                  torch     pass             721.613     711.834          
+offic/bflo b256-v65536-k1024                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v131072-k1024                 maca_c    pass             304.384     305.459          
+offic/bflo b256-v131072-k1024                 torch     pass            1211.955    1199.667          
+offic/bflo b256-v131072-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+  ... 60/120 cases (0.3s)
+offic/bflo b256-v262144-k1024                 maca_c    pass             517.658     516.429          
+offic/bflo b256-v262144-k1024                 torch     pass             2040.73    2036.608          
+offic/bflo b256-v262144-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v524288-k1024                 maca_c    pass             931.891     927.462          
+offic/bflo b256-v524288-k1024                 torch     pass            3686.605    3675.264          
+offic/bflo b256-v524288-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b256-v1048576-k1024                maca_c    pass            1750.554    1744.947          
+offic/bflo b256-v1048576-k1024                torch     pass             6952.32    6960.691          
+offic/bflo b256-v1048576-k1024                deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v256-k1024                    maca_c    pass               8.346      40.397          
+offic/bflo b512-v256-k1024                    torch     pass                                            [not applicable: the reference back]
+offic/bflo b512-v256-k1024                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v1024-k1024                   maca_c    pass               8.576       37.76          
+offic/bflo b512-v1024-k1024                   torch     pass              87.424      86.682          
+offic/bflo b512-v1024-k1024                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v4096-k1024                   maca_c    pass               61.44      62.822          
+offic/bflo b512-v4096-k1024                   torch     pass             256.717     246.733          
+offic/bflo b512-v4096-k1024                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v16384-k1024                  maca_c    pass             106.035     107.162          
+offic/bflo b512-v16384-k1024                  torch     pass              464.87     457.549          
+offic/bflo b512-v16384-k1024                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v65536-k1024                  maca_c    pass             311.552     312.166          
+offic/bflo b512-v65536-k1024                  torch     pass             1224.73    1216.179          
+offic/bflo b512-v65536-k1024                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v131072-k1024                 maca_c    pass               505.6     506.112          
+offic/bflo b512-v131072-k1024                 torch     pass            2165.734     2165.76          
+offic/bflo b512-v131072-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v262144-k1024                 maca_c    pass             869.171     866.355          
+offic/bflo b512-v262144-k1024                 torch     pass            3853.414    3850.343          
+offic/bflo b512-v262144-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+  ... 70/120 cases (0.4s)
+offic/bflo b512-v524288-k1024                 maca_c    pass            1572.147    1568.589          
+offic/bflo b512-v524288-k1024                 torch     pass            7114.522    7128.243          
+offic/bflo b512-v524288-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b512-v1048576-k1024                maca_c    pass            2960.384    2959.181          
+offic/bflo b512-v1048576-k1024                torch     pass           13624.883   13632.614          
+offic/bflo b512-v1048576-k1024                deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v256-k1024                    maca_c    pass               8.858      41.318          
+offic/bflo b768-v256-k1024                    torch     pass                                            [not applicable: the reference back]
+offic/bflo b768-v256-k1024                    deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v1024-k1024                   maca_c    pass               10.24      37.683          
+offic/bflo b768-v1024-k1024                   torch     pass             116.762     118.221          
+offic/bflo b768-v1024-k1024                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v4096-k1024                   maca_c    pass              78.899      82.611          
+offic/bflo b768-v4096-k1024                   torch     pass             312.269     300.186          
+offic/bflo b768-v4096-k1024                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v16384-k1024                  maca_c    pass             147.763     150.554          
+offic/bflo b768-v16384-k1024                  torch     pass             677.606     670.822          
+offic/bflo b768-v16384-k1024                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v65536-k1024                  maca_c    pass             479.795     480.205          
+offic/bflo b768-v65536-k1024                  torch     pass            1702.118    1698.278          
+offic/bflo b768-v65536-k1024                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v131072-k1024                 maca_c    pass             790.118     791.936          
+offic/bflo b768-v131072-k1024                 torch     pass             3118.95    3116.646          
+offic/bflo b768-v131072-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v262144-k1024                 maca_c    pass            1364.787    1364.762          
+offic/bflo b768-v262144-k1024                 torch     pass            5603.968    5604.096          
+offic/bflo b768-v262144-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b768-v524288-k1024                 maca_c    pass            2475.776    2476.877          
+offic/bflo b768-v524288-k1024                 torch     pass           10477.978   10482.713          
+offic/bflo b768-v524288-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+  ... 80/120 cases (0.7s)
+offic/bflo b768-v1048576-k1024                maca_c    pass            4682.138    4685.696          
+offic/bflo b768-v1048576-k1024                torch     pass           20270.541   20285.158          
+offic/bflo b768-v1048576-k1024                deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v256-k1024                   maca_c    pass              31.949      39.706          
+offic/bflo b4096-v256-k1024                   torch     pass                                            [not applicable: the reference back]
+offic/bflo b4096-v256-k1024                   deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v1024-k1024                  maca_c    pass              31.232      40.755          
+offic/bflo b4096-v1024-k1024                  torch     pass             384.922     377.728          
+offic/bflo b4096-v1024-k1024                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v4096-k1024                  maca_c    pass             338.995     343.322          
+offic/bflo b4096-v4096-k1024                  torch     pass             713.523     705.203          
+offic/bflo b4096-v4096-k1024                  deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v16384-k1024                 maca_c    pass             663.885      668.16          
+offic/bflo b4096-v16384-k1024                 torch     pass            2021.222    2020.685          
+offic/bflo b4096-v16384-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v65536-k1024                 maca_c    pass            2334.566    2338.278          
+offic/bflo b4096-v65536-k1024                 torch     pass            7891.686    7899.264          
+offic/bflo b4096-v65536-k1024                 deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v131072-k1024                maca_c    pass            3882.726    3888.538          
+offic/bflo b4096-v131072-k1024                torch     pass           15569.101    15589.12          
+offic/bflo b4096-v131072-k1024                deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v262144-k1024                maca_c    pass            6783.206    6787.431          
+offic/bflo b4096-v262144-k1024                torch     pass           29702.784     29725.8          
+offic/bflo b4096-v262144-k1024                deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v524288-k1024                maca_c    pass           12359.962   12379.878          
+offic/bflo b4096-v524288-k1024                torch     pass            58243.43   58284.595          
+offic/bflo b4096-v524288-k1024                deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+offic/bflo b4096-v1048576-k1024               maca_c    pass            23415.91   23451.904          
+offic/bflo b4096-v1048576-k1024               torch     pass          112091.725  112160.327          
+offic/bflo b4096-v1048576-k1024               deep_gemm unsupported                                     [backend 'deep_gemm' ranks float32 ]
+  ... 90/120 cases (5.0s)
+offic/floa b6-v129280-k512                    maca_c    pass             100.685     114.176          
+offic/floa b6-v129280-k512                    torch     pass             353.485     357.094          
+offic/floa b6-v129280-k512                    deep_gemm unsupported                                     [backend 'deep_gemm' returns an uno]
+offic/floa b256-v129280-k512                  maca_c    pass              287.36     304.768          
+offic/floa b256-v129280-k512                  torch     pass            1584.384     1617.69          
+offic/floa b256-v129280-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' returns an uno]
+offic/floa b512-v129280-k512                  maca_c    pass             499.942     510.797          
+offic/floa b512-v129280-k512                  torch     pass            2810.726    2861.466          
+offic/floa b512-v129280-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' returns an uno]
+offic/floa b768-v129280-k512                  maca_c    pass             745.216     752.282          
+offic/floa b768-v129280-k512                  torch     pass            4047.181    4131.866          
+offic/floa b768-v129280-k512                  deep_gemm unsupported                                     [backend 'deep_gemm' returns an uno]
+offic/floa b4096-v129280-k512                 maca_c    pass            4261.811    4291.763          
+offic/floa b4096-v129280-k512                 torch     pass           20145.459    20530.56          
+offic/floa b4096-v129280-k512                 deep_gemm unsupported                                     [backend 'deep_gemm' returns an uno]
+deep_/floa b1-v66551-k2048                    maca_c    pass              67.277      71.603          
+deep_/floa b1-v66551-k2048                    torch     pass             221.389     189.952          
+deep_/floa b1-v66551-k2048                    deep_gemm pass               53.53     350.771          
+deep_/floa b16-v66551-k2048                   maca_c    pass              86.707      97.408          
+deep_/floa b16-v66551-k2048                   torch     pass             340.838     329.267          
+deep_/floa b16-v66551-k2048                   deep_gemm pass              54.477      400.64          
+deep_/floa b132-v66551-k2048                  maca_c    pass             123.008     141.542          
+deep_/floa b132-v66551-k2048                  torch     pass             651.008      722.79          
+/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/torch/_inductor/compile_worker/__main__.py:7: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+  from torch._inductor.async_compile import pre_fork_setup
+deep_/floa b132-v66551-k2048                  deep_gemm pass             103.142     765.363          
+deep_/floa b512-v66551-k2048                  maca_c    pass             278.016     296.038          
+deep_/floa b512-v66551-k2048                  torch     pass            1600.128     1921.51          
+deep_/floa b512-v66551-k2048                  deep_gemm pass             246.784    2006.938          
+deep_/floa b1-v131072-k2048                   maca_c    pass              78.874      83.277          
+deep_/floa b1-v131072-k2048                   torch     pass             262.707     228.634          
+deep_/floa b1-v131072-k2048                   deep_gemm pass              63.232     284.134          
+  ... 100/120 cases (0.4s)
+deep_/floa b1-v131072-k2048                   maca_c    pass              78.566      82.739          
+deep_/floa b1-v131072-k2048                   torch     pass             258.099     225.587          
+deep_/floa b1-v131072-k2048                   deep_gemm pass              63.667     303.206          
+deep_/floa b1-v131072-k2048                   maca_c    pass               78.72      82.995          
+deep_/floa b1-v131072-k2048                   torch     pass             260.122     227.174          
+deep_/floa b1-v131072-k2048                   deep_gemm pass              63.155     283.494          
+deep_/floa b1-v131072-k2048                   maca_c    pass              78.566      83.098          
+deep_/floa b1-v131072-k2048                   torch     pass              261.76     228.045          
+deep_/floa b1-v131072-k2048                   deep_gemm pass               63.59     293.274          
+deep_/floa b132-v131072-k2048                 maca_c    pass             203.827     222.182          
+deep_/floa b132-v131072-k2048                 torch     pass            1011.533     994.893          
+deep_/floa b132-v131072-k2048                 deep_gemm pass             172.442      846.31          
+deep_/floa b132-v131072-k2048                 maca_c    pass             203.981     222.234          
+deep_/floa b132-v131072-k2048                 torch     pass            1018.163    1001.421          
+deep_/floa b132-v131072-k2048                 deep_gemm pass             172.314     855.552          
+deep_/floa b132-v131072-k2048                 maca_c    pass             203.827     222.234          
+deep_/floa b132-v131072-k2048                 torch     pass            1017.574     998.426          
+deep_/floa b132-v131072-k2048                 deep_gemm pass             172.442     850.765          
+deep_/floa b132-v131072-k2048                 maca_c    pass             204.749     223.514          
+deep_/floa b132-v131072-k2048                 torch     pass            1011.507     990.899          
+deep_/floa b132-v131072-k2048                 deep_gemm pass             172.723     853.632          
+deep_/floa b256-v131072-k2048                 maca_c    pass             276.813     293.453          
+deep_/floa b256-v131072-k2048                 torch     pass            1609.933    1593.318          
+deep_/floa b256-v131072-k2048                 deep_gemm pass             241.203    1289.216          
+deep_/floa b256-v131072-k2048                 maca_c    pass             275.994     292.506          
+deep_/floa b256-v131072-k2048                 torch     pass            1611.469    1589.478          
+deep_/floa b256-v131072-k2048                 deep_gemm pass             240.947     1297.69          
+deep_/floa b256-v131072-k2048                 maca_c    pass             276.429     293.094          
+deep_/floa b256-v131072-k2048                 torch     pass             1610.65    1590.272          
+deep_/floa b256-v131072-k2048                 deep_gemm pass             240.333    1281.766          
+  ... 110/120 cases (0.5s)
+deep_/floa b256-v131072-k2048                 maca_c    pass             275.661     292.557          
+deep_/floa b256-v131072-k2048                 torch     pass             1620.89    1597.645          
+deep_/floa b256-v131072-k2048                 deep_gemm pass             240.563    1286.195          
+deep_/floa b4096-v131072-k2048                maca_c    pass            3414.528    3442.125          
+deep_/floa b4096-v131072-k2048                torch     pass           20489.344   20503.296          
+deep_/floa b4096-v131072-k2048                deep_gemm pass            3266.483   16034.023          
+deep_/floa b4096-v131072-k2048                maca_c    pass             3411.61    3438.592          
+deep_/floa b4096-v131072-k2048                torch     pass            20490.65    20499.84          
+deep_/floa b4096-v131072-k2048                deep_gemm pass             3262.31   16054.016          
+deep_/floa b4096-v131072-k2048                maca_c    pass            3410.816    3435.571          
+deep_/floa b4096-v131072-k2048                torch     pass           20532.941   20527.693          
+deep_/floa b4096-v131072-k2048                deep_gemm pass            3262.592   16067.661          
+deep_/floa b4096-v131072-k2048                maca_c    pass            3412.378    3435.418          
+deep_/floa b4096-v131072-k2048                torch     pass           20475.904   20490.265          
+deep_/floa b4096-v131072-k2048                deep_gemm pass            3262.746   16044.826          
+deep_/floa b1-v107520-k2048                   maca_c    pass              76.544      80.154          
+deep_/floa b1-v107520-k2048                   torch     pass             262.093     228.045          
+deep_/floa b1-v107520-k2048                   deep_gemm pass              61.133     278.758          
+deep_/floa b16-v66551-k2048                   maca_c    pass              87.142      97.587          
+deep_/floa b16-v66551-k2048                   torch     pass             348.954     330.368          
+deep_/floa b16-v66551-k2048                   deep_gemm pass               54.17     407.501          
+deep_/floa b132-v107520-k2048                 maca_c    pass             172.698     190.541          
+deep_/floa b132-v107520-k2048                 torch     pass              877.85     851.533          
+deep_/floa b132-v107520-k2048                 deep_gemm pass              144.41      709.53          
+deep_/floa b256-v107520-k2048                 maca_c    pass             233.062     249.472          
+deep_/floa b256-v107520-k2048                 torch     pass            1360.998     1345.28          
+deep_/floa b256-v107520-k2048                 deep_gemm pass             199.885    1160.909          
+deep_/floa b4096-v107520-k2048                maca_c    pass            2846.234    2866.893          
+deep_/floa b4096-v107520-k2048                torch     pass           15701.683   15710.797          
+deep_/floa b4096-v107520-k2048                deep_gemm pass            2700.032   13319.962          
+  ... 120/120 cases (1.5s)
+
+wrote perf_data/MetaX_C500/20260919_160228/deepselect_perf.csv  (360 rows, 120 cases)
+  deep_gemm  pass         25
+  deep_gemm  unsupported  95
+  maca_c     pass         120
+  torch      pass         120
+# exit 0

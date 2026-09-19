@@ -1,0 +1,39 @@
+{
+  "backends": [
+    "maca_c",
+    "torch",
+    "deep_gemm"
+  ],
+  "case_source": "tests/test.py::performance_cases() (+ the selector grid when the deep_gemm package can serve it, + --cases-file)",
+  "cases": 120,
+  "chip": "MetaX_C500",
+  "command": "/home/compiler_gfx/miniconda3/bin/python scripts/perf_snapshot.py --backends maca_c,torch,deep_gemm --out-dir perf_data/MetaX_C500/20260919_160228",
+  "csv_files": [
+    "deepselect_perf.csv"
+  ],
+  "csv_format_version": 2,
+  "cuda_visible_devices": "2",
+  "deep_gemm_package": "/home/compiler_gfx/mcDeepGemm/deep_gemm",
+  "deep_gemm_version": "0.5.0",
+  "deep_select_git_commit": "352554afa7bc6e65b7117177df0eea6caf68ec9c",
+  "deep_select_git_dirty": true,
+  "device_dir": "MetaX_C500",
+  "device_name": "MetaX C500",
+  "extension_md5": "d9fa0a45925d9b5c97b0155944f2b2ba",
+  "extension_so": "/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so",
+  "finished_at_utc": "2026-09-19T08:03:54.628179+00:00",
+  "measurement": "two clocks per cell.  `time(us)` is tests/test.py's own: one 'topk'-matching kernel's time, else the e2e span over the matching kernels; p.num_runs reps, L2 flushed (kk.bench).  `wall_us` is an event pair around the whole call, L2 flushed outside the span -- every kernel the operator launches, plus launch and sync.  **They are not the same quantity and neither is derived from the other**: `time(us)` excludes kernels the matching rule does not name (which is where deep_gemm's NaN scan lives, ~5.4 ms on b256-v131072), `wall_us` includes them.  Compare across backends on `wall_us`; compare one `maca_c` build against another on `time(us)`.  Correctness: tests/test.py::check_result / check_call_contract, applied to every backend except `torch`, whose column is a bare torchtopk the official harness does not check either.",
+  "output_dir": "perf_data/MetaX_C500/20260919_160228",
+  "python": "3.10.20",
+  "rows": 360,
+  "run_id": "20260919_160228",
+  "sm_count": 104,
+  "started_at_utc": "2026-09-19T08:02:43.643485+00:00",
+  "status_counts": {
+    "deep_gemm/pass": 25,
+    "deep_gemm/unsupported": 95,
+    "maca_c/pass": 120,
+    "torch/pass": 120
+  },
+  "torch": "2.6.0+metax3.7.0.7"
+}

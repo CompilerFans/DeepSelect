@@ -313,6 +313,15 @@ if [[ ${skip_gate} -eq 0 ]]; then
     # the other stages get, so it is the checkout's artifact.
     run_stage cases_chunks  python tests/cases/chunks_arm_official.py || bench_status=1
     run_stage cases_graph   python tests/cases/graph_capture.py || bench_status=1
+    # **The probes are separate processes, and that is not a detail.**  The
+    # scratch allocator is process-wide, so a probe is only meaningful if
+    # nothing before it in that process has already warmed or grown what it
+    # means to catch: the cold probe wants a first call that *is* the capture,
+    # and the shape probe wants the captured table still untouched.  Running
+    # them after the four cells in the same process would test the opposite of
+    # what they are for.  Both exit non-zero on failure.
+    run_stage cases_graph_cold python tests/cases/graph_capture.py --probe || bench_status=1
+    run_stage cases_graph_grow python tests/cases/graph_capture.py --grow-probe || bench_status=1
     run_stage official      python tests/test.py --perf-only -nc || bench_status=1
     run_stage official_fp32 python tests/test.py --perf-only -nc --dtype fp32 || bench_status=1
 fi

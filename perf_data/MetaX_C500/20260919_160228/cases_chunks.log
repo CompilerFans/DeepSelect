@@ -1,0 +1,90 @@
+/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/tests/cases/chunks_arm_official.py:22: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+  import os, sys, torch
+  band                                   b=1   V=2048    k=512   si=1 rv=0 end=0 -> PASS
+  band+end                               b=1   V=2048    k=512   si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=1   V=2048    k=512   si=0 rv=0 end=0 -> PASS
+  band+rv                                b=1   V=2048    k=512   si=0 rv=1 end=0 -> PASS
+  band                                   b=1   V=4096    k=1024  si=1 rv=0 end=0 -> PASS
+  band+end                               b=1   V=4096    k=1024  si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=1   V=4096    k=1024  si=0 rv=0 end=0 -> PASS
+  band+rv                                b=1   V=4096    k=1024  si=0 rv=1 end=0 -> PASS
+  band                                   b=1   V=16384   k=2048  si=1 rv=0 end=0 -> PASS
+  band+end                               b=1   V=16384   k=2048  si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=1   V=16384   k=2048  si=0 rv=0 end=0 -> PASS
+  band+rv                                b=1   V=16384   k=2048  si=0 rv=1 end=0 -> PASS
+  band                                   b=1   V=66551   k=512   si=1 rv=0 end=0 -> PASS
+  band+end                               b=1   V=66551   k=512   si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=1   V=66551   k=512   si=0 rv=0 end=0 -> PASS
+  band+rv                                b=1   V=66551   k=512   si=0 rv=1 end=0 -> PASS
+  band                                   b=1   V=66551   k=2048  si=1 rv=0 end=0 -> PASS
+  band+end                               b=1   V=66551   k=2048  si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=1   V=66551   k=2048  si=0 rv=0 end=0 -> PASS
+  band+rv                                b=1   V=66551   k=2048  si=0 rv=1 end=0 -> PASS
+  band                                   b=1   V=107520  k=2048  si=1 rv=0 end=0 -> PASS
+  band+end                               b=1   V=107520  k=2048  si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=1   V=107520  k=2048  si=0 rv=0 end=0 -> PASS
+  band+rv                                b=1   V=107520  k=2048  si=0 rv=1 end=0 -> PASS
+  band                                   b=1   V=131072  k=2048  si=1 rv=0 end=0 -> PASS
+  band+end                               b=1   V=131072  k=2048  si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=1   V=131072  k=2048  si=0 rv=0 end=0 -> PASS
+  band+rv                                b=1   V=131072  k=2048  si=0 rv=1 end=0 -> PASS
+  band                                   b=1   V=225467  k=231   si=1 rv=0 end=0 -> PASS
+  band+end                               b=1   V=225467  k=231   si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=1   V=225467  k=231   si=0 rv=0 end=0 -> PASS
+  band+rv                                b=1   V=225467  k=231   si=0 rv=1 end=0 -> PASS
+  band                                   b=2   V=2048    k=512   si=1 rv=0 end=0 -> PASS
+  band+end                               b=2   V=2048    k=512   si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=2   V=2048    k=512   si=0 rv=0 end=0 -> PASS
+  band+rv                                b=2   V=2048    k=512   si=0 rv=1 end=0 -> PASS
+  band                                   b=2   V=4096    k=1024  si=1 rv=0 end=0 -> PASS
+  band+end                               b=2   V=4096    k=1024  si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=2   V=4096    k=1024  si=0 rv=0 end=0 -> PASS
+  band+rv                                b=2   V=4096    k=1024  si=0 rv=1 end=0 -> PASS
+  band                                   b=2   V=16384   k=2048  si=1 rv=0 end=0 -> PASS
+  band+end                               b=2   V=16384   k=2048  si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=2   V=16384   k=2048  si=0 rv=0 end=0 -> PASS
+  band+rv                                b=2   V=16384   k=2048  si=0 rv=1 end=0 -> PASS
+  band                                   b=2   V=66551   k=512   si=1 rv=0 end=0 -> PASS
+  band+end                               b=2   V=66551   k=512   si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=2   V=66551   k=512   si=0 rv=0 end=0 -> PASS
+  band+rv                                b=2   V=66551   k=512   si=0 rv=1 end=0 -> PASS
+  band                                   b=2   V=66551   k=2048  si=1 rv=0 end=0 -> PASS
+  band+end                               b=2   V=66551   k=2048  si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=2   V=66551   k=2048  si=0 rv=0 end=0 -> PASS
+  band+rv                                b=2   V=66551   k=2048  si=0 rv=1 end=0 -> PASS
+  band                                   b=2   V=107520  k=2048  si=1 rv=0 end=0 -> PASS
+  band+end                               b=2   V=107520  k=2048  si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=2   V=107520  k=2048  si=0 rv=0 end=0 -> PASS
+  band+rv                                b=2   V=107520  k=2048  si=0 rv=1 end=0 -> PASS
+  band                                   b=2   V=131072  k=2048  si=1 rv=0 end=0 -> PASS
+  band+end                               b=2   V=131072  k=2048  si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=2   V=131072  k=2048  si=0 rv=0 end=0 -> PASS
+  band+rv                                b=2   V=131072  k=2048  si=0 rv=1 end=0 -> PASS
+  band                                   b=2   V=225467  k=231   si=1 rv=0 end=0 -> PASS
+  band+end                               b=2   V=225467  k=231   si=1 rv=0 end=1 -> PASS
+  band+si=False                          b=2   V=225467  k=231   si=0 rv=0 end=0 -> PASS
+  band+rv                                b=2   V=225467  k=231   si=0 rv=1 end=0 -> PASS
+  decline length==topk                   b=1   V=2048    k=2048  si=1 rv=0 end=0 -> PASS
+  decline length<topk                    b=1   V=1024    k=2048  si=1 rv=0 end=0 -> PASS
+  decline length<topk                    b=2   V=512     k=2048  si=1 rv=0 end=0 -> PASS
+  decline end<=topk                      b=2   V=66551   k=2048  si=1 rv=0 end=1 -> PASS
+  decline wide bin V=66551               b=1   V=66551   k=2048  si=1 rv=0 end=0 -> PASS
+  decline wide bin V=131072              b=1   V=131072  k=2048  si=1 rv=0 end=0 -> PASS
+  decline wide bin V=225467              b=1   V=225467  k=2048  si=1 rv=0 end=0 -> PASS
+  decline wide bin pivot                 b=2   V=66551   k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=1 V=66551                b=1   V=66551   k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=2 V=66551                b=2   V=66551   k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=1 V=131072               b=1   V=131072  k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=2 V=131072               b=2   V=131072  k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=1 V=262144               b=1   V=262144  k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=2 V=262144               b=2   V=262144  k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=1 V=66551                b=1   V=66551   k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=2 V=66551                b=2   V=66551   k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=1 V=131072               b=1   V=131072  k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=2 V=131072               b=2   V=131072  k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=1 V=262144               b=1   V=262144  k=2048  si=1 rv=0 end=0 -> PASS
+  nan hotspot b=2 V=262144               b=2   V=262144  k=2048  si=1 rv=0 end=0 -> PASS
+  control b=4                            b=4   V=66551   k=2048  si=1 rv=0 end=0 -> PASS
+  control denormals                      b=1   V=66551   k=2048  si=1 rv=0 end=0 -> PASS
+ALL PASS
+# exit 0

@@ -3626,7 +3626,13 @@ in `mcGraphExecDestroy`）；改动前它报 MATCH。
 |---|---|
 | `correctness` | `tests/test.py --seed 20260911 --sample 400 -rf`，判据是**无 `check_fail`** 且**无"非 OOM 的 crash"** |
 | `cases_chunks` | `tests/cases/chunks_arm_official.py`，含 12 条 NaN 用例（两种符号 × b∈{1,2} × V∈{66551,131072,262144}） |
-| `cases_graph` | `tests/cases/graph_capture.py`，四个路由格 + 冷 scratch 探针 + 多形状重放探针 |
+| `cases_graph` | `tests/cases/graph_capture.py`，四个路由格 |
+| `cases_graph_cold` | 同文件 `--probe`（独立进程） |
+| `cases_graph_grow` | 同文件 `--grow-probe`（独立进程） |
+
+两个探针**必须是独立进程**：scratch 分配器是进程级的，冷探针要的是"进程里
+第一次调用就是 capture"，多形状探针要的是"捕获的表还没被动过"——跟在四个
+路由格后面在同一个进程里跑，测的正好是它们要抓的反面。
 
 `correctness` 阶段**不能直接用 harness 的退出码**：`tests/test.py` 对任何
 非 pass 桶都返回 1，而这台机器（63.6 GiB、共享）永远跑不完抽样里那几个
