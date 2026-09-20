@@ -1119,6 +1119,79 @@ inline constexpr uint64_t kF32Coarse12WorkTarget = 114688;
 inline constexpr uint32_t kF32Coarse12MinBatchesNarrow = 16;
 inline constexpr uint32_t kF32Coarse12NarrowVocab = 131072;
 
+// ── C600U's ladder: the same two arms, re-sited on the 28-AP part ────────────
+//
+// The C500 ladder above is a measurement on 104 APs, and on a C600U it is not
+// merely conservative -- it is **unreachable**, because the performance half of
+// `f32_coarse12_applies` refuses any device that is not the one it was measured
+// on.  So the route has never run here, and what follows is what it does when
+// it can.  Measured 2026-09-20 on this part (28 AP, 128 KiB/AP), the arms
+// interleaved per round over the official data and timing rule, verdict =
+// median of per-round ratios, `B/A < 1` meaning the route won:
+//
+//     narrow (V <= 131072)      k=512        k=1024       k=2048
+//       b1                                   1.07         0.95
+//       b2                                                0.88
+//       b4                                                0.91
+//       b8                     1.42          0.95         0.90
+//       b9                                   1.07
+//       b14                                  1.05
+//       b15                                  0.96
+//       b16                    1.08          0.96         0.77
+//       b17                    1.08
+//       b18                    0.84
+//       b24                    0.83                        0.79
+//       b32                    0.83                        0.75
+//
+//     wide (V > 131072)         k=512        k=1024       k=2048
+//       b16                    1.46         1.23          1.11 (V=393216)
+//       b18                                               1.00
+//       b20                    1.11          --           0.90
+//       b24                    1.03         0.16          0.89
+//       b32                    1.02         0.16          0.88
+//       b40                    1.01          --            --
+//       b48                    0.90         0.15          0.78
+//
+// **Both arms are a product `batches * topk` here, not a batch.**  On C500 the
+// narrow arm is a flat `batches >= 16` and the wide one is a product; here the
+// narrow crossing moves with `topk` as plainly as the wide one does -- `k=2048`
+// crosses at `b1`, `k=1024` at `b9`, `k=512` at `b18` -- and a product holds
+// all three.  The C500 narrow arm's flat 16 is wrong in *both* directions on
+// this part: it declines `b5..b15` at `k=2048` (0.88-0.95, every one a win)
+// and it enters `b16..b17` at `k=512` (1.08, a loss).
+//
+// The two floors are sited on the measured crossings and are **conservative in
+// exactly the way the C500 ladder's `topk = 512` arm is** -- a product cannot
+// hold a crossing that moves with `topk` at the low end, so each declines a
+// band of wins rather than risk the loss beside it:
+//
+//   * narrow, `9216`: the binding cell is `k = 512` at `b16..b17` (+8%), so the
+//     floor sits at `b18` there.  `k = 1024` crosses at `b9` and the product
+//     puts it at `b9` -- exact.  `k = 2048` crosses at `b1` and the product puts
+//     it at `b5`, declining `b1..b4` (0.88-0.95).
+//   * wide, `49152`: the binding cell is `k = 2048` at `b16` (+11% at
+//     `V = 393216`, +21% at `524288`, +22% at `163840`), so the floor sits at
+//     `b24` there.  `k = 512` crosses near `b40` (`V = 262144`) and the product
+//     puts it at `b96`; the band between is a win at every cell measured except
+//     `96 x 524288` (+7%, isolated -- 80 is 0.83 and 112 is 0.98).
+//
+// **The `k = 1024` `V = 262144` `b24..b48` column is not a crossing.**  It
+// reads 0.15-0.16 because the *default* route falls into its rescan there
+// (`c = 2` gives a 131072-element chunk against the 101906 bound, and the arena
+// floor in `f32_chunked_chunks` is guarded to `topk == 2048`), which is the
+// chunk curve's own hole rather than a property of this route.  Those cells are
+// why the floor is not raised past `b24` at that `topk`; the healthy cell at
+// the same `topk` is `b16` at 1.23, which is why it is not sited there either.
+//
+// What it is worth on the production shapes, official data, default route =
+// 1.0: `4096 x 129280 k=512` 8789 -> 5456 us (0.62), `768 x 129280 k=512`
+// 1702 -> 1076 (0.63), `512 x 66551 k=2048` 1138 -> 717 (0.63), `132 x 107520
+// k=2048` 584 -> 391 (0.67).
+inline constexpr uint32_t kF32Coarse12C600USmCount = 28;
+inline constexpr uint64_t kF32Coarse12C600UNarrowProduct = 9216;
+inline constexpr uint64_t kF32Coarse12C600UWideProduct = 49152;
+
+
 // The width floor is the one value in this gate that is not a crossing at all.
 // The port wins at every width the split is legal at -- `V = 4096` is -29.1%,
 // `8192` is -45.9%, `16384` is -53.4%, and the `(V, k)` sweeps above that are
@@ -1161,7 +1234,11 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // *Is the route faster here?*  A measurement, and this one is not adaptive --
 // the crossing in the tables above is a C500 ladder, and applying it to a
 // machine nobody measured would be a guess dressed as a rule.  So it is
-// guarded by the device it was measured on, named for what it is.
+// guarded by the device it was measured on, named for what it is.  **Since
+// 2026-09-20 that is two devices and two ladders**, the 104-AP C500 one above
+// and the 28-AP one beside it (`kF32Coarse12C600USmCount`); the second exists
+// because the route had never run on a C600U at all, so "unmeasured" was
+// declining shapes it wins by up to 0.62x.
 //
 // Splitting them is the point, and it still is under the macro: the budget
 // half is now a *compile-time* property of the family, while the performance
@@ -1185,7 +1262,9 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // the arena budget, the `topk` bound and the width bound are still enforced, so
 // a forced route is a legal route.  It does not change any default, and it
 // cannot reach a family the ladder was not measured on -- the `sm_count` test
-// above it runs first.
+// above it runs first.  (It is what sited the C600U ladder: the knob is read
+// *after* the AP-count test, so a probe needs that test relaxed to reach the
+// arms at all -- see the note on `kF32Coarse12C600USmCount`.)
 inline int f32_coarse12_override() {
     static const int v = [] {
         const char *s = std::getenv("DEEP_SELECT_F32_COARSE12");
@@ -1215,6 +1294,21 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         return false;
     } else {
         // ── the performance half: where the ladder below was measured ──
+        // The two 28-AP parts are the exception to "a device the ladder was not
+        // measured on": the ladder *was* re-measured on them (2026-09-20, the
+        // table above `kF32Coarse12C600USmCount`), so the test is which of the
+        // two ladders applies rather than whether any does.  A part that is
+        // neither takes the row path, as before.
+        if (params.sm_count == kF32Coarse12C600USmCount) {
+            if (params.topk > (uint32_t)rk::dg12::kMaxTopK) return false;
+            if (batches == 0) return false;
+            if (params.vocab_size < kF32Coarse12MinVocab) return false;
+            if (f32_coarse12_override() >= 0) return f32_coarse12_override() != 0;
+            const uint64_t product = (uint64_t)batches * params.topk;
+            if (params.vocab_size <= kF32Coarse12NarrowVocab)
+                return product >= kF32Coarse12C600UNarrowProduct;
+            return product >= kF32Coarse12C600UWideProduct;
+        }
         if (params.sm_count != kF32Coarse12MeasuredSmCount) return false;
         // The arena's bound, not a fitted one: `topk_coarse12_row` serves at
         // most what the candidate half can hold, and there is no overflow path
