@@ -69,6 +69,40 @@ setup.py's build_for_maca."
 // `sm_count`, so the count is adapted, but the *band* was never measured off
 // this part).  Nothing has been validated on C600U for either route.
 //
+// **The 1600 row's 32 is a hand-entered number with nothing behind it, and a
+// C600-U in front of this tree reports 28.**  Measured 2026-09-20, two ways:
+// `torch.cuda.get_device_properties().multi_processor_count`, and
+// `cudaDevAttrMultiProcessorCount` through a `cucc`-compiled probe on the same
+// box -- both 28, stable across repeated reads and under load, on both devices
+// of the host.  The row's own provenance says why the 32 was never checked:
+// it landed in `67864ad` with the words "No C600U was available, so every
+// C600/C600U claim here is static", so it is the number the part was believed
+// to have.  The 1500 row's 28 and the 1600 row's 32 cannot both be right for
+// the same silicon generation the way they are written here, and this part is
+// the counterexample.
+//
+// Nothing routes on it -- `ARCH_SM_COUNT` has no behavioral consumer (the
+// paragraph above is the audit finding that established that) -- so the row
+// is wrong on paper only.  It is corrected to what the part reports rather
+// than left as the believed value, because the one thing this macro is for is
+// the record, and a record that disagrees with the device it names is worse
+// than no record.  **Two consequences a reader should not have to discover:**
+//
+//   - The two `perf_data/MetaX_C600-U/20260915_*` snapshots carry `sm_count
+//     32` in their manifests, because they were taken on another host
+//     (`mx-cjxu-ws-cr-20260915131045`; today's is
+//     `...-2026092013092900002848`, and the GPU PCI buses moved with it,
+//     `a4/a5` -> `a8/a9`).  So the directory named for the device already
+//     stacks a 32-AP board and a 28-AP board, which is the failure mode the
+//     `device_dir` naming rule exists to prevent -- see the note in
+//     `scripts/perf_snapshot.py`.  Re-measuring the C600U baseline on this
+//     host would silently write `sm_count 28` into the same directory.
+//   - `f32_chunks_large_batch` and `f32_chunk_work_target` read the *runtime*
+//     `sm_count`, so they already adapt; but the chunk *band* was fitted on
+//     104 APs, and `MetaX_C500/baseline` is where the numbers for the 28-AP
+//     re-fit would have to come from.  A C500 baseline's own manifest says
+//     `sm_count 104`, so that one is self-consistent.
+//
 // `ARCH_FAMILY` is what the artifact is *named*, and the loader matches on it:
 // `deep_select_maca_xcore<N>.so` is the file, `_binding.family_suffix()` is
 // the reader, and this constant is the one place the number is written down on
@@ -84,7 +118,8 @@ static constexpr uint32_t ARCH_SM_COUNT = 28;               // C600
 static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 128 * 1024;
 #elif DEEP_SELECT_ARCH == 1600
 static constexpr uint32_t ARCH_FAMILY = 1600;
-static constexpr uint32_t ARCH_SM_COUNT = 32;               // C600U / N300U
+static constexpr uint32_t ARCH_SM_COUNT = 28;               // C600U (measured
+// on this part 2026-09-20; the row read 32 until then -- see above)
 static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 128 * 1024;
 #else
 #error "unknown xcore family in DEEP_SELECT_ARCH; add its row here (AP count \
