@@ -139,6 +139,13 @@ def build_for_maca():
     its `kerutils` include is off `include_dirs` below.  Re-adding both is what
     building it would take.
 
+    **Run `ref/kerutils_platform_arms/run_probe.sh` first.**  The two edits above
+    are the whole mechanical change, so they are what a reader looks at -- and a
+    build that makes them does not thereby exercise the vendored library's MACA
+    arm, which nothing else in the tree compiles.  The arm is where this tree's
+    platform selection lives, and it is the one thing that cannot be checked by
+    the act of adding the consumer back.
+
     Every source is a `.cu`, so the device compiler is the only compiler this
     build invokes (torch would route a `.cpp` to `$cxx`, meaning a second flag
     list and a second kerutils mode macro).  `CUDA_HOME` is deliberately left
