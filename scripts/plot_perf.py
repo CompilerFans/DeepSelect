@@ -6,11 +6,20 @@ record it came from cannot disagree.  Both are grouped bar charts of effective
 bandwidth, `maca_c` (DeepSelect) beside `torch.topk` in each group, laid out as
 `assets/perf_bf16_cuda.png` and `assets/perf_fp32_cuda.png` are:
 
-* `perf_bf16_maca.png` -- Lightning Indexer: bf16, `topk = 512`, one panel per
-  batch size (6 / 512 / 4096), grouped bars over vocab size (16K / 64K / 128K /
-  256K / 512K / 1M), one shared y-axis.
-* `perf_fp32_maca.png` -- Sampling: fp32, `vocab_size = 129280`, `topk = 512`,
-  grouped bars over batch size (6 / 256 / 512 / 768 / 4096).
+* `perf_bf16_maca_<device>.png` -- Lightning Indexer: bf16, `topk = 512`, one
+  panel per batch size (6 / 512 / 4096), grouped bars over vocab size (16K /
+  64K / 128K / 256K / 512K / 1M), one shared y-axis.
+* `perf_fp32_maca_<device>.png` -- Sampling: fp32, `vocab_size = 129280`,
+  `topk = 512`, grouped bars over batch size (6 / 256 / 512 / 768 / 4096).
+
+`<device>` is the recording's own board (`device_dir_name`'s spelling, `MetaX
+C500` -> `MetaX_C500`), and it is in the *filename* for the same reason it is in
+the title and in `perf_data/`'s directory: `perf_data/` holds one recording per
+device, and a name that stops at the platform gives two boards one output path,
+so rendering the second silently replaces the first's figure.  The title has
+always named the board; the file did not.  Named figures now sit side by side --
+`perf_bf16_maca_MetaX_C500.png`, `perf_bf16_maca_MetaX_C600-U.png` -- and the
+README picks the one it displays.
 
 The upstream figures are in TB/s over a fixed 0-7 axis; these are in GB/s over a
 range fitted to the data, because these parts' read wall is a fraction of an
@@ -141,6 +150,17 @@ def device_label(row) -> str:
     recording old enough to predate the column, not the preferred label.
     """
     return row.get("device_name") or row.get("chip", "")
+
+
+def device_slug(row) -> str:
+    """The same board as a filename component: `MetaX C500` -> `MetaX_C500`.
+
+    `perf_snapshot.device_name`'s own rule -- spaces to underscores -- so a
+    figure, the recording it came from and `perf_data/`'s directory all spell
+    the board the same way.  Empty for a recording that names no device; the
+    caller then falls back to the bare platform name.
+    """
+    return device_label(row).strip().replace(" ", "_")
 
 
 def _vocab_label(n: int) -> str:
@@ -303,13 +323,22 @@ def main():
     path, rows = load_rows(source)
     print(f"reading {path}")
 
+    # One recording is one board, so the device is a property of the file and
+    # not of the figure: it goes in the name once, here, rather than in each
+    # `plot_*` -- which take the path they write and stay unaware a device
+    # exists.  A recording that names no device keeps the bare platform name.
+    slug = device_slug(rows[0])
+    stem = f"_maca_{slug}" if slug else "_maca"
+
     wrote = []
     if args.figure in ("both", "bf16"):
-        if plot_bf16(rows, args.assets_dir / "perf_bf16_maca.png"):
-            wrote.append("perf_bf16_maca.png")
+        name = f"perf_bf16{stem}.png"
+        if plot_bf16(rows, args.assets_dir / name):
+            wrote.append(name)
     if args.figure in ("both", "fp32"):
-        if plot_fp32(rows, args.assets_dir / "perf_fp32_maca.png"):
-            wrote.append("perf_fp32_maca.png")
+        name = f"perf_fp32{stem}.png"
+        if plot_fp32(rows, args.assets_dir / name):
+            wrote.append(name)
     if not wrote:
         raise SystemExit("nothing rendered -- the recording has no cells for "
                          "the requested figure(s)")

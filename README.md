@@ -202,15 +202,29 @@ floating-point math, so a FLOP rate would not be meaningful here.
 
 ### Lightning Indexer Scenario (MACA)
 
-bfloat16, `topk = 512`, one subplot per batch size.
+bfloat16, `topk = 512`, one subplot per batch size. One figure per device:
+these parts differ in SM count, clock and read wall, so a number without a
+board beside it is not a measurement.
 
-![DeepSelect vs torch.topk, bfloat16 Lightning Indexer, MACA](assets/perf_bf16_maca.png)
+**MetaX C500**
+
+![DeepSelect vs torch.topk, bfloat16 Lightning Indexer, MACA, MetaX C500](assets/perf_bf16_maca_MetaX_C500.png)
+
+**MetaX C600-U**
+
+![DeepSelect vs torch.topk, bfloat16 Lightning Indexer, MACA, MetaX C600-U](assets/perf_bf16_maca_MetaX_C600-U.png)
 
 ### Sampling Scenario (MACA)
 
 float32, `vocab_size = 129280`, `topk = 512`.
 
-![DeepSelect vs torch.topk, float32 Sampling, MACA](assets/perf_fp32_maca.png)
+**MetaX C500**
+
+![DeepSelect vs torch.topk, float32 Sampling, MACA, MetaX C500](assets/perf_fp32_maca_MetaX_C500.png)
+
+**MetaX C600-U**
+
+![DeepSelect vs torch.topk, float32 Sampling, MACA, MetaX C600-U](assets/perf_fp32_maca_MetaX_C600-U.png)
 
 ## Installation
 
