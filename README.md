@@ -197,19 +197,28 @@ floating-point math, so a FLOP rate would not be meaningful here.
 > These figures belong to the upstream CUDA kernels. For the MACA port, run
 > `tests/test.py --perf-only` on the target device -- what it measures and how
 > the two implementations compare there is in
-> [MACA support](#maca-support).
+> [MACA support](#maca-support). The MACA measurement is drawn by
+> [`scripts/plot_perf.py`](scripts/plot_perf.py) from a `perf_snapshot.py`
+> recording, and its figures are the two `_maca` files below.
 
 ### Lightning Indexer Scenario
 
-bfloat16, `topk = 512`, one subplot per batch size, on a shared 0 - 7 TB/s axis.
+bfloat16, `topk = 512`, one subplot per batch size, on a shared 0 - 7 TB/s axis
+(the upstream CUDA figure). The MACA figure shares the layout but not the axis:
+its peak is under 0.4 TB/s, because the cells are memory-bound on a part whose
+read wall is a fraction of the H200's.
 
 ![DeepSelect vs torch.topk, bfloat16 Lightning Indexer](assets/perf_bf16.png)
+
+![DeepSelect vs torch.topk, bfloat16 Lightning Indexer (MACA)](assets/perf_bf16_maca.png)
 
 ### Sampling Scenario
 
 float32, `vocab_size = 129280`, `topk = 512`.
 
 ![DeepSelect vs torch.topk, float32 Sampling](assets/perf_fp32.png)
+
+![DeepSelect vs torch.topk, float32 Sampling (MACA)](assets/perf_fp32_maca.png)
 
 ## Installation
 
