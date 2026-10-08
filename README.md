@@ -1,6 +1,8 @@
 # DeepSelect
 
-DeepSelect is a high performance implementation of the TopK kernel used in DeepSeek Sparse Attention (DSA) (which is used in DeepSeek V3.2, DeepSeek V4, and DeepSeek V4.1 models) and the sampler. It achieves 2 ~ 20x speedup compared to vanilla `torch.topk`.
+DeepSelect is a high performance implementation of the TopK kernel used in DeepSeek Sparse Attention (DSA) (which is used in DeepSeek V3.2, DeepSeek V4, and DeepSeek V4.1 models) and the sampler. It supports NVIDIA CUDA and MetaX MACA platforms, and achieves 2 ~ 20x speedup compared to vanilla `torch.topk`.
+
+DeepSelect 是为 DeepSeek 稀疏注意力（DeepSeek Sparse Attention, DSA）和采样器（Sampler）定制的高性能 TopK 算子，支持 NVIDIA CUDA 平台与沐曦（MetaX MACA）平台。与原生 `torch.topk` 相比，它可实现 2～20 倍的加速。
 
 ## News
 
@@ -177,10 +179,10 @@ This scenario covers:
 - Input dtype: `torch.bfloat16`
 - `batch_size`: $1 \sim +\infty$ (both large and small batch sizes are optimized)
 - `vocab_size`: $1 \sim +\infty$ (both large and small vocabularies are optimized)
-- `topk`: small (must be $\le 4096$; larger values are not supported)
+- `topk`: small (must be $\le 4096$; larger values are not supported), mainly optimized for `topk=512` (i.e., DeepSeek V4's `topk`)
 
 Recommendations:
-- Disable `sorted_index` unless the output has to be ordered by index or by value; enabling either one costs performance.
+- Disable `sorted_index` and `sorted` unless the output has to be ordered by index or by value, respectively; enabling either one costs performance.
 - Set `return_value=False` when the values are not needed. This skips the value output and is faster.
 
 ### Sampling Scenario

@@ -65,6 +65,10 @@ BF16_VOCABS = (16384, 65536, 131072, 262144, 524288, 1048576)
 BAR_WIDTH = 0.38
 # How much air the y-axis leaves above the tallest bar drawn.
 HEADROOM = 1.05
+# Upstream tags each figure with the platform it was measured on -- `(CUDA)`,
+# `(Ascend)`.  Ours carries the board too, since `perf_data/` holds one recording
+# per device and "MACA" alone does not say which part.
+PLATFORM = "MACA"
 
 
 def newest_snapshot(perf_root: Path) -> Path:
@@ -232,7 +236,8 @@ def plot_bf16(rows, output: Path) -> bool:
     axes[0][0].set_ylabel("Effective bandwidth (GB/s)", fontsize=9)
     axes[0][0].legend(frameon=True, fontsize=8, loc="upper left")
     title = "bf16, topk = 512: DeepSelect vs torch.topk"
-    fig.suptitle(f"{title} -- {chip}" if chip else title, fontsize=11)
+    fig.suptitle(f"{title} ({PLATFORM}, {chip})" if chip
+                 else f"{title} ({PLATFORM})", fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -267,7 +272,8 @@ def plot_fp32(rows, output: Path) -> bool:
     _grouped_bars(ax, list(range(len(batches))), maca_bars, torch_bars)
     title = "fp32, vocab_size = 129280, topk = 512: DeepSelect vs torch.topk"
     _finish_axes(ax, list(range(len(batches))), [str(b) for b in batches],
-                 f"{title} -- {chip}" if chip else title, "batch_size", top,
+                 f"{title} ({PLATFORM}, {chip})" if chip
+                 else f"{title} ({PLATFORM})", "batch_size", top,
                  ylabel="Effective bandwidth (GB/s)")
     ax.legend(frameon=True, fontsize=8, loc="upper left")
     fig.tight_layout()
