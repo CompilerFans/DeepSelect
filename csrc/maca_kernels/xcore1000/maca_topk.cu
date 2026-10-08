@@ -308,18 +308,33 @@ static __device__ __forceinline__ void radix_layout(
 //
 // Both also resolve a threshold bin too large for the arena by re-walking the
 // row rather than by ranking a truncated candidate set.
+// `check_nan` asks the row kernel to fold the contract's NaN scan into pass 1's
+// own load and hand the CTA's vote back through `row_nan`.  It is the caller's
+// NaN scan either way; what it replaces is `row_has_nan` walking the whole row
+// first, which is a third read of a row that is read twice already.
 template <typename ValueT, int BLOCK>
 static __device__ __forceinline__ void radix_select_row(
-    const ValueT *input_row, uint32_t length, int32_t *out_idx, uint32_t topk) {
+    const ValueT *input_row, uint32_t length, int32_t *out_idx, uint32_t topk,
+    bool check_nan, bool *row_nan) {
     if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
-        rk::radix_topk_row_bf16_b<BLOCK>(input_row, out_idx, length, topk);
+        if (check_nan)
+            rk::radix_topk_row_bf16_b<BLOCK, true>(input_row, out_idx, length,
+                                                   topk, row_nan);
+        else
+            rk::radix_topk_row_bf16_b<BLOCK, false>(input_row, out_idx, length,
+                                                    topk, row_nan);
     } else {
         static_assert(std::is_same<ValueT, float>::value,
                       "the operator serves bfloat16 and float32 only");
         // The fp32 row picks its own block width, one width for every shape.
         static_assert(BLOCK == rk::kBlockSize,
                       "the fp32 row runs at rk::kBlockSize");
-        rk::radix_topk_row_f32(input_row, out_idx, length, topk);
+        if (check_nan)
+            rk::radix_topk_row_f32<true>(input_row, out_idx, length, topk, 0u,
+                                         row_nan);
+        else
+            rk::radix_topk_row_f32<false>(input_row, out_idx, length, topk, 0u,
+                                          row_nan);
     }
 }
 
@@ -484,19 +499,20 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
     // (`nan_scan_kernel` is not launched) nor read (this branch), which is why
     // the chunked arm can skip its memset as well.
     bool nan_local = false;
+    // The row kernel folds the scan into pass 1 and writes the vote here; only
+    // the preselected arm has it already, from the flag table the split raised.
+    // Asking `row_has_nan` as well would walk the row a third time.
+    const bool fold_nan = params.check_nan && !kPreSelected;
     if constexpr (kPreSelected) {
         nan_local = params.check_nan && params.nan_flags[row] != 0;
-    } else if (params.check_nan) {
-        nan_local = row_has_nan(input_row, 0, length);
-        nan_local = __syncthreads_or((int)nan_local) != 0;
-    }
-    if (nan_local) {
-        if (params.abort_on_nan) {
-            if (tid == 0) printf("[deep_select] NaN detected. Aborting.\n");
-            __trap();
+        if (nan_local) {
+            if (params.abort_on_nan) {
+                if (tid == 0) printf("[deep_select] NaN detected. Aborting.\n");
+                __trap();
+            }
+            if (tid == 0) out_index_row[0] = (OutIdxT)0x3F3F3F3F;
+            return;
         }
-        if (tid == 0) out_index_row[0] = (OutIdxT)0x3F3F3F3F;
-        return;
     }
 
     // ── selection ───────────────────────────────────────────────────────────
@@ -520,7 +536,20 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
         rerank = __syncthreads_or((int)rerank) != 0;
     }
     if (!kPreSelected || rerank) {
-        radix_select_row<ValueT, BLOCK>(input_row, length, (int32_t *)selected, topk);
+        radix_select_row<ValueT, BLOCK>(input_row, length, (int32_t *)selected,
+                                        topk, fold_nan, &nan_local);
+    }
+
+    // The fold's vote lands only now, after the kernel has ranked the row.  The
+    // slot it owns is row 0's and the disposition is the one the preselected
+    // arm ran above; what differs is when the answer arrived.
+    if (nan_local) {
+        if (params.abort_on_nan) {
+            if (tid == 0) printf("[deep_select] NaN detected. Aborting.\n");
+            __trap();
+        }
+        if (tid == 0) out_index_row[0] = (OutIdxT)0x3F3F3F3F;
+        return;
     }
 
     // ── emit ────────────────────────────────────────────────────────────────

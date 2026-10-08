@@ -151,6 +151,12 @@ __device__ __forceinline__ bool is_nan_bits(uint32_t bits) {
     return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
 }
 
+// The bf16 sibling: exponent all-ones and a non-zero payload, in 8+7 bits
+// rather than 8+23.  Same contract, same one compare per element.
+__device__ __forceinline__ bool is_nan_bits16(uint32_t bits) {
+    return (bits & 0x7F80u) == 0x7F80u && (bits & 0x007Fu) != 0u;
+}
+
 // 与 SGLang 原始实现一致：先转 half 再取高 8 位
 __device__ __forceinline__ uint8_t float_to_uint8(float x) {
     __half h = __float2half_rn(x);
@@ -368,7 +374,11 @@ static_assert(kCoarse12ArenaEntries * sizeof(uint32_t) >= (size_t)kSmemInputSize
 // form has to skip `__match_any_sync` entirely: a per-thread private histogram
 // with one flush at the end is the only shape left, and its risk is the
 // per-element register dependency chain, not conflicts (that is what P4 hit).
-__device__ __forceinline__ void hist_add_bf16_wide(
+// `kNan` folds the contract's NaN scan into this very load -- the same trade
+// `hist_add_f32` makes, and for the same reason: the bytes are read anyway, so
+// the scan is one compare per element here instead of a whole extra row walk.
+template <bool kNan = false>
+__device__ __forceinline__ bool hist_add_bf16_wide(
     uint32_t* s_wide, const maca_bfloat16* input, uint32_t idx)
 {
     uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
@@ -376,6 +386,12 @@ __device__ __forceinline__ void hist_add_bf16_wide(
     #pragma unroll
     for (int i = 0; i < 8; i++)
         atomicAdd(&s_wide[bf16_to_uint16(h[i]) >> kCoarse12Shift], 1u);
+    if (!kNan) return false;
+    bool found = false;
+    #pragma unroll
+    for (int i = 0; i < 8; i++)
+        found |= is_nan_bits16(__bfloat16_as_ushort(h[i]));
+    return found;
 }
 
 // FP16: 寄存器直方图 + warp shuffle
@@ -1235,9 +1251,13 @@ __device__ __forceinline__ void overflow_emit_member(
     }
 }
 
-template <uint32_t BLOCK_SIZE>
+// `kNan` / `row_nan` mirror `radix_topk_row_f32`: the contract's NaN scan rides
+// pass 1's own load, and the block-wide vote is handed back so the caller does
+// not walk the row a second time to ask the same question.
+template <uint32_t BLOCK_SIZE, bool kNan = false>
 __device__ __forceinline__ void radix_topk_row_bf16_b(
-    const maca_bfloat16* input, int32_t* output, uint32_t length, uint32_t topk)
+    const maca_bfloat16* input, int32_t* output, uint32_t length, uint32_t topk,
+    bool* row_nan = nullptr)
 {
     constexpr uint32_t RADIX = kRadix;
     constexpr uint32_t SMEM_INPUT_SIZE = kCoarse12ArenaEntries;
@@ -1266,16 +1286,27 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // 1024-thread blocks. Use one uniform load mode for odd-length rows.
     const bool input_aligned = (length & 7u) == 0 && bf16x8_is_aligned(input);
     uint32_t vec_len = length / 8 * 8;
+    bool nan_local = false;
     if (input_aligned) {
         for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8)
-            hist_add_bf16_wide(s_wide, input, idx);
-        for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
-            atomicAdd(&s_wide[bf16_to_uint16(__ldg(input + idx)) >> kCoarse12Shift], 1u);
+            nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx);
+        for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE) {
+            const maca_bfloat16 raw = __ldg(input + idx);
+            atomicAdd(&s_wide[bf16_to_uint16(raw) >> kCoarse12Shift], 1u);
+            if (kNan) nan_local |= is_nan_bits16(__bfloat16_as_ushort(raw));
+        }
     } else {
-        for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
-            atomicAdd(&s_wide[bf16_to_uint16(__ldg(input + idx)) >> kCoarse12Shift], 1u);
+        for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
+            const maca_bfloat16 raw = __ldg(input + idx);
+            atomicAdd(&s_wide[bf16_to_uint16(raw) >> kCoarse12Shift], 1u);
+            if (kNan) nan_local |= is_nan_bits16(__bfloat16_as_ushort(raw));
+        }
     }
     __syncthreads();
+    // The histogram is complete and the CTA's NaN vote is in, on one barrier --
+    // the same reduction `row_has_nan` runs, only across a block.
+    if (kNan && row_nan != nullptr)
+        *row_nan = __syncthreads_or((int)nan_local) != 0;
 
     // Fold 4,096 -> 256, one bin per high byte, so the scan stays the same
     // 256-wide warp scan the 8-bit level used; thread 0 then narrows inside the
