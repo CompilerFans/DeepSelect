@@ -2,13 +2,22 @@
 """Render the README's performance figures from a `perf_snapshot.py` recording.
 
 Two figures, both drawn from one `deepselect_perf.csv` so the picture and the
-record it came from cannot disagree:
+record it came from cannot disagree.  Both are grouped bar charts of effective
+bandwidth, `maca_c` (DeepSelect) beside `torch.topk` in each group, laid out as
+`assets/perf_bf16.png` and `assets/perf_fp32.png` are:
 
-* `perf_bf16_maca.png` -- Lightning Indexer: bfloat16, `topk = 512`, one subplot
-  per batch size, effective throughput (TB/s) over the column count, `maca_c`
-  and `torch.topk` on a shared axis.
-* `perf_fp32_maca.png` -- Sampling: float32, `vocab_size = 129280`, `topk = 512`,
-  speedup against `torch.topk` over batch size.
+* `perf_bf16_maca.png` -- Lightning Indexer: bf16, `topk = 512`, one panel per
+  batch size (6 / 512 / 4096), grouped bars over vocab size (16K / 64K / 128K /
+  256K / 512K / 1M), one shared y-axis.
+* `perf_fp32_maca.png` -- Sampling: fp32, `vocab_size = 129280`, `topk = 512`,
+  grouped bars over batch size (6 / 256 / 512 / 768 / 4096).
+
+The upstream figures are in TB/s over a fixed 0-7 axis; these are in GB/s over a
+range fitted to the data, because these parts' read wall is a fraction of an
+H200's and a shared 0-7 TB/s axis would leave every bar a sliver.  What is
+matched is the rest of the style: the two series' colours, the boxed legend, the
+per-panel `batch = N` titles, the dotted horizontal grid, the `16K`-style tick
+labels and the `-- {device}` suffix each title carries.
 
 The CSV is written by `scripts/perf_snapshot.py`; the timings in it are
 `tests/test.py`'s own, one row per (cell, backend).  Only `maca_c` and `torch`
@@ -29,6 +38,8 @@ Usage:
 
 import argparse
 import csv
+import math
+import re
 from pathlib import Path
 
 import matplotlib
@@ -40,23 +51,44 @@ REPO = Path(__file__).resolve().parent.parent
 PERF_ROOT = REPO / "perf_data"
 DEFAULT_ASSETS = REPO / "assets"
 
-COLOR_MACA = "#2563eb"
-COLOR_TORCH = "#f97316"
+# Upstream's own series colours, sampled from `assets/perf_bf16.png`.
+COLOR_MACA = "#66ccfe"
+COLOR_TORCH = "#ed0000"
+
+# A recording directory's name, `YYYYmmdd_HHMMSS`.
+STAMP = re.compile(r"\d{8}_\d{6}")
+
+# The upstream figure's grid: three batch sizes, six vocab sizes, `topk = 512`.
+BF16_BATCHES = (6, 512, 4096)
+BF16_VOCABS = (16384, 65536, 131072, 262144, 524288, 1048576)
+
+BAR_WIDTH = 0.38
+# How much air the y-axis leaves above the tallest bar drawn.
+HEADROOM = 1.05
 
 
 def newest_snapshot(perf_root: Path) -> Path:
     """The `deepselect_perf.csv` of the newest `<device>/<stamp>/` recording.
 
     The stamp is `YYYYmmdd_HHMMSS`, so lexicographic order is chronological and
-    the path needs no stat to sort.
+    the path needs no stat to sort.  Two things are excluded deliberately:
+
+    * `perf_data/<device>/baseline` is a *symlink* to a recording, and globbing
+      `*/*` would let that name sort last under any device and pick a recording
+      from the wrong board with no sign that it did.
+    * The device directory's name.  Sorting the whole path would order the
+      *boards* (`MetaX_C500` before `MetaX_C600-U`) and only then the stamps, so
+      a week-old recording on the later-named board would beat this morning's on
+      the earlier-named one.  The stamp is the timestamp; it is what is compared.
     """
-    found = sorted(perf_root.glob("*/*/deepselect_perf.csv"))
-    if not found:
+    stamps = [p for p in perf_root.glob("*/*/deepselect_perf.csv")
+              if STAMP.fullmatch(p.parent.name)]
+    if not stamps:
         raise FileNotFoundError(
             f"no snapshot under {perf_root} -- record one with "
             f"`scripts/perf_snapshot.py` first"
         )
-    return found[-1]
+    return max(stamps, key=lambda p: (p.parent.name, str(p)))
 
 
 def load_rows(source: Path):
@@ -69,22 +101,12 @@ def load_rows(source: Path):
         raise ValueError(f"no rows found in {path}")
     required = {
         "family", "n_rows", "n_cols", "top_k", "input_dtype", "backend",
-        "time(us)", "throughput(TB/s)",
+        "bandwidth(GB/s)",
     }
     missing = required.difference(rows[0])
     if missing:
         raise ValueError(f"missing CSV columns: {', '.join(sorted(missing))}")
     return path, rows
-
-
-def _us(row: str):
-    """A row's `time(us)` as a float, or None when the backend was not timed.
-
-    An empty clock is "not measured", never zero: the two must not be conflated
-    into a point at the origin.
-    """
-    value = (row.get("time(us)") or "").strip()
-    return float(value) if value else None
 
 
 def _select(rows, **want):
@@ -93,6 +115,16 @@ def _select(rows, **want):
         if all(str(row.get(key, "")) == str(val) for key, val in want.items()):
             out.append(row)
     return out
+
+
+def _bandwidth(row):
+    """A row's `bandwidth(GB/s)` as a float, or None when it was not measured.
+
+    An empty cell is "not timed", never zero: the two must not be conflated
+    into a bar of zero height.
+    """
+    value = (row.get("bandwidth(GB/s)") or "").strip()
+    return float(value) if value else None
 
 
 def device_label(row) -> str:
@@ -107,108 +139,145 @@ def device_label(row) -> str:
     return row.get("device_name") or row.get("chip", "")
 
 
-def plot_bf16(rows, source: Path, output: Path) -> bool:
+def _vocab_label(n: int) -> str:
+    """A column count as a short tick label: 16384 -> `16K`, 1048576 -> `1M`."""
+    for div, suffix in ((1 << 20, "M"), (1 << 10, "K")):
+        if n >= div and n % div == 0:
+            return f"{n // div}{suffix}"
+    return str(n)
+
+
+def _bandwidth_by(cells, backend):
+    """`(n_rows, n_cols) -> GB/s` for one backend's timed cells."""
+    out = {}
+    for row in cells:
+        if row["backend"] != backend:
+            continue
+        value = _bandwidth(row)
+        if value is not None:
+            out[(int(row["n_rows"]), int(row["n_cols"]))] = value
+    return out
+
+
+def _axis_top(panels, headroom=HEADROOM):
+    """A round y-limit that clears the tallest bar of every panel.
+
+    It has to be computed from all panels at once and set explicitly: the
+    panels share a y-axis, and `set_ylim` resolves that shared axis on the
+    spot, so setting a limit from inside the panel loop would freeze the range
+    at whatever the first panel happened to contain -- clipping every later
+    panel's taller bars at the top of the axes.
+    """
+    values = [v for maca, torch_ref in panels
+              for v in list(maca) + list(torch_ref) if v is not None]
+    if not values:
+        return 1.0
+    target = max(values) * headroom
+    step = 10 ** math.floor(math.log10(target))
+    for mult in (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10):
+        if step * mult >= target:
+            return step * mult
+    return step * 10
+
+
+def _grouped_bars(ax, positions, maca, torch_ref):
+    """One `maca_c`/`torch` bar pair per position, over matching values lists."""
+    ax.bar([p - BAR_WIDTH / 2 for p, v in zip(positions, maca) if v is not None],
+           [v for v in maca if v is not None], BAR_WIDTH,
+           color=COLOR_MACA, label="DeepSelect")
+    ax.bar([p + BAR_WIDTH / 2 for p, v in zip(positions, torch_ref) if v is not None],
+           [v for v in torch_ref if v is not None], BAR_WIDTH,
+           color=COLOR_TORCH, label="torch.topk")
+
+
+def _finish_axes(ax, ticks, labels, title, xlabel, top, ylabel=None):
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel(xlabel, fontsize=9)
+    ax.grid(True, axis="y", linestyle=":", linewidth=0.6, alpha=0.5)
+    ax.set_axisbelow(True)
+    ax.tick_params(axis="y", labelsize=8)
+    ax.set_ylim(0, top)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=9)
+
+
+def plot_bf16(rows, output: Path) -> bool:
     cells = _select(rows, family="lightning_indexer", input_dtype="bfloat16",
                     top_k="512")
     if not cells:
         print("bf16: no lightning_indexer/bfloat16/topk=512 cells -- skipped")
         return False
 
-    def series(backend):
-        return {
-            (int(r["n_rows"]), int(r["n_cols"])): float(r["throughput(TB/s)"])
-            for r in cells
-            if r["backend"] == backend and r["throughput(TB/s)"]
-        }
-
-    maca, torch_ref = series("maca_c"), series("torch")
-    batches = sorted({batch for batch, _ in maca})
-    vocabs = sorted({vocab for _, vocab in maca})
+    maca, torch_ref = _bandwidth_by(cells, "maca_c"), _bandwidth_by(cells, "torch")
+    batches = [b for b in BF16_BATCHES if any((b, v) in maca for v in BF16_VOCABS)]
+    vocabs = [v for v in BF16_VOCABS if any((b, v) in maca for b in batches)]
+    if not batches or not vocabs:
+        print("bf16: the requested grid is not in this recording -- skipped")
+        return False
     chip = device_label(cells[0])
 
-    fig, axes = plt.subplots(
-        1, len(batches), figsize=(3.4 * len(batches) + 1.4, 4.4), dpi=160,
-        sharey=True, squeeze=False,
-    )
-    for ax, batch in zip(axes[0], batches):
-        m = sorted((v, maca[(batch, v)]) for v in vocabs if (batch, v) in maca)
-        t = sorted((v, torch_ref[(batch, v)]) for v in vocabs
-                   if (batch, v) in torch_ref)
-        if m:
-            ax.plot([v for v, _ in m], [y for _, y in m], marker="o",
-                    markersize=4, linewidth=1.6, color=COLOR_MACA,
-                    label="DeepSelect")
-        if t:
-            ax.plot([v for v, _ in t], [y for _, y in t], marker="s",
-                    markersize=3.5, linewidth=1.4, color=COLOR_TORCH,
-                    label="torch.topk")
-        ax.set_xscale("log", base=2)
-        ax.set_xticks(vocabs)
-        ax.set_xticklabels([f"{v / 1000:.3g}" for v in vocabs],
-                           rotation=45, ha="right", fontsize=7)
-        ax.set_title(f"batch = {batch}", fontsize=9)
-        ax.set_xlabel("columns (thousands)", fontsize=8)
-        ax.grid(True, which="both", linestyle=":", linewidth=0.6, alpha=0.5)
-        ax.tick_params(axis="y", labelsize=8)
-        ax.set_ylim(bottom=0)
-    axes[0][0].set_ylabel("Throughput (TB/s)", fontsize=9)
+    panels = [([maca.get((b, v)) for v in vocabs],
+               [torch_ref.get((b, v)) for v in vocabs]) for b in batches]
+    top = _axis_top(panels)
+
+    fig, axes = plt.subplots(1, len(batches), figsize=(14.0, 4.15), dpi=160,
+                             sharey=True, squeeze=False)
+    x = list(range(len(vocabs)))
+    for ax, batch, (maca_bars, torch_bars) in zip(axes[0], batches, panels):
+        _grouped_bars(ax, x, maca_bars, torch_bars)
+        _finish_axes(ax, x, [_vocab_label(v) for v in vocabs],
+                     f"batch = {batch}", "vocab_size", top)
+    axes[0][0].set_ylabel("Effective bandwidth (GB/s)", fontsize=9)
     axes[0][0].legend(frameon=True, fontsize=8, loc="upper left")
-    title = "Lightning Indexer (bfloat16, topk=512)"
+    title = "bf16, topk = 512: DeepSelect vs torch.topk"
     fig.suptitle(f"{title} -- {chip}" if chip else title, fontsize=11)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
 
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, bbox_inches="tight")
     plt.close(fig)
-    peak = max(maca.values())
-    print(f"bf16: {len(maca)} maca_c cells over {len(batches)} batch sizes, "
-          f"peak {peak:.3f} TB/s -> {output}")
+    peak = max(v for maca_bars, torch_bars in panels
+               for v in maca_bars + torch_bars if v is not None)
+    print(f"bf16: {len(batches)} batch sizes x {len(vocabs)} vocab sizes, "
+          f"peak {peak:.1f} GB/s on a 0-{top:g} axis -> {output}")
     return True
 
 
-def plot_fp32(rows, source: Path, output: Path) -> bool:
+def plot_fp32(rows, output: Path) -> bool:
     cells = _select(rows, family="sampler", input_dtype="float32",
                     n_cols="129280", top_k="512")
     if not cells:
         print("fp32: no sampler/float32/vocab=129280/topk=512 cells -- skipped")
         return False
 
-    clocks = {}
-    for row in cells:
-        us = _us(row)
-        if us is not None:
-            clocks.setdefault(int(row["n_rows"]), {})[row["backend"]] = us
-    points = sorted((b, c["torch"] / c["maca_c"]) for b, c in clocks.items()
-                    if "maca_c" in c and "torch" in c)
-    if not points:
+    maca, torch_ref = _bandwidth_by(cells, "maca_c"), _bandwidth_by(cells, "torch")
+    batches = sorted({b for b, _ in maca} & {b for b, _ in torch_ref})
+    if not batches:
         print("fp32: no cell where both maca_c and torch were timed -- skipped")
         return False
     chip = device_label(cells[0])
 
-    fig, ax = plt.subplots(figsize=(9, 5.5), dpi=160)
-    ax.plot([b for b, _ in points], [s for _, s in points], marker="o",
-            markersize=6, linewidth=1.8, color=COLOR_MACA,
-            label="DeepSelect vs torch.topk")
-    ax.axhline(1.0, color=COLOR_TORCH, linestyle="--", linewidth=1.5,
-               label="torch.topk (parity)")
-    for b, s in points:
-        ax.annotate(f"{s:.2f}x", (b, s), textcoords="offset points",
-                    xytext=(0, 7), ha="center", fontsize=8)
-    ax.set_xlabel("Batches")
-    ax.set_ylabel("Speedup vs torch.topk")
-    ax.set_title(f"Sampling (float32, vocab_size=129280, topk=512)"
-                 + (f" -- {chip}" if chip else ""))
-    ax.grid(True, linestyle=":", linewidth=0.7, alpha=0.55)
-    ax.legend(frameon=True)
-    ax.margins(x=0.06)
+    maca_bars = [maca.get((b, 129280)) for b in batches]
+    torch_bars = [torch_ref.get((b, 129280)) for b in batches]
+    top = _axis_top([(maca_bars, torch_bars)])
+
+    fig, ax = plt.subplots(figsize=(6.75, 4.3), dpi=160)
+    _grouped_bars(ax, list(range(len(batches))), maca_bars, torch_bars)
+    title = "fp32, vocab_size = 129280, topk = 512: DeepSelect vs torch.topk"
+    _finish_axes(ax, list(range(len(batches))), [str(b) for b in batches],
+                 f"{title} -- {chip}" if chip else title, "batch_size", top,
+                 ylabel="Effective bandwidth (GB/s)")
+    ax.legend(frameon=True, fontsize=8, loc="upper left")
     fig.tight_layout()
 
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, bbox_inches="tight")
     plt.close(fig)
-    print(f"fp32: {len(points)} sampler cells, "
-          f"speedup {min(s for _, s in points):.2f}-"
-          f"{max(s for _, s in points):.2f}x -> {output}")
+    peak = max(v for v in maca_bars + torch_bars if v is not None)
+    print(f"fp32: {len(batches)} batch sizes, peak {peak:.1f} GB/s on a "
+          f"0-{top:g} axis -> {output}")
     return True
 
 
@@ -230,10 +299,10 @@ def main():
 
     wrote = []
     if args.figure in ("both", "bf16"):
-        if plot_bf16(rows, source, args.assets_dir / "perf_bf16_maca.png"):
+        if plot_bf16(rows, args.assets_dir / "perf_bf16_maca.png"):
             wrote.append("perf_bf16_maca.png")
     if args.figure in ("both", "fp32"):
-        if plot_fp32(rows, source, args.assets_dir / "perf_fp32_maca.png"):
+        if plot_fp32(rows, args.assets_dir / "perf_fp32_maca.png"):
             wrote.append("perf_fp32_maca.png")
     if not wrote:
         raise SystemExit("nothing rendered -- the recording has no cells for "

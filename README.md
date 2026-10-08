@@ -203,10 +203,14 @@ floating-point math, so a FLOP rate would not be meaningful here.
 
 ### Lightning Indexer Scenario
 
-bfloat16, `topk = 512`, one subplot per batch size, on a shared 0 - 7 TB/s axis
-(the upstream CUDA figure). The MACA figure shares the layout but not the axis:
-its peak is under 0.4 TB/s, because the cells are memory-bound on a part whose
-read wall is a fraction of the H200's.
+bfloat16, `topk = 512`: grouped bars of effective bandwidth over vocab size
+(16K / 64K / 128K / 256K / 512K / 1M), one panel per batch size (6 / 512 /
+4096), on a shared y-axis. The two figures differ in that axis and nothing
+else: upstream's is 0 - 7 TB/s, the MACA measurement's is fitted to its own
+data, because these cells are memory-bound on a part whose read wall is a
+fraction of the H200's and a shared TB/s axis would leave every bar a sliver.
+The MACA figure's title also names the board it was taken on, since
+`perf_data/` holds a recording per device.
 
 ![DeepSelect vs torch.topk, bfloat16 Lightning Indexer](assets/perf_bf16.png)
 
@@ -214,7 +218,9 @@ read wall is a fraction of the H200's.
 
 ### Sampling Scenario
 
-float32, `vocab_size = 129280`, `topk = 512`.
+float32, `vocab_size = 129280`, `topk = 512`: grouped bars of effective
+bandwidth over batch size (6 / 256 / 512 / 768 / 4096), same two series and
+same two axis conventions as above.
 
 ![DeepSelect vs torch.topk, float32 Sampling](assets/perf_fp32.png)
 
