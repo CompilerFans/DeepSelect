@@ -118,6 +118,11 @@ def _bench_kineto(fn: Callable, num_tests: int = 30,
     flush_l2_size = int(8e9 // 4)
     schedule = torch.profiler.schedule(wait=0, warmup=1, active=1, repeat=1) if not is_using_nsys else None
     profiler = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule, acc_events=True) if not is_using_nsys else empty_suppress()
+
+    is_kineto_log_level_unset = 'KINETO_LOG_LEVEL' not in os.environ
+    if is_kineto_log_level_unset:
+        os.environ['KINETO_LOG_LEVEL'] = '6'  # Suppress those "profiler_start" / "profiler_end" messages
+
     with profiler:
         for i in range(2):
             if i == 1 and not is_using_nsys:
@@ -135,7 +140,10 @@ def _bench_kineto(fn: Callable, num_tests: int = 30,
                 if i == 0:
                     torch.cuda.synchronize()
                 profiler.step()
-    
+
+    if is_kineto_log_level_unset:
+        os.environ.pop('KINETO_LOG_LEVEL')
+
     if is_using_nsys:
         return BenchResult(num_tests, {})
 

@@ -531,12 +531,13 @@ definitional `min(selected) >= max(unselected)`, the NaN guard, and the
 orderings.  No reference implementation is computed anywhere, so nothing here
 can drift away from the contract it is checking.
 
-Two edits under `tests/kernelkit/` are the whole delta, and both are needed to
-run at all on MACA: `platform.py` asks torch whether it can see a device
-instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA 3D
-controller, so every MACA host was reported CPU-only and `bench()` refused to
-run), and the one PEP 701 f-string at `stress.py:292` (Python 3.12 syntax; this
-tree builds against 3.10) is rewritten with the same meaning.
+One edit under `tests/kernelkit/` is the whole portability delta, and it is
+needed to run at all on MACA: `platform.py` asks torch whether it can see a
+device instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA
+3D controller, so every MACA host was reported CPU-only and `bench()` refused to
+run).  `kernelkit` carries no Ascend surface here (`_bench_msprof`,
+`is_on_ascend_platform`), and its Ray-based stress harness is gone the way it is
+gone upstream.
 
 ### Performance
 
