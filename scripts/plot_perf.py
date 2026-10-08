@@ -95,6 +95,18 @@ def _select(rows, **want):
     return out
 
 
+def device_label(row) -> str:
+    """The device's name for a figure title -- `device_name`, else `chip`.
+
+    Two answers to one question live in the CSV: `device_name` is the part's
+    own string ("MetaX C500"), `chip` is the directory-safe spelling of it
+    ("MetaX_C500", `perf_snapshot.device_dir_name`).  A figure names the board
+    a reader can recognize, so it takes the name; `chip` is the fallback for a
+    recording old enough to predate the column, not the preferred label.
+    """
+    return row.get("device_name") or row.get("chip", "")
+
+
 def plot_bf16(rows, source: Path, output: Path) -> bool:
     cells = _select(rows, family="lightning_indexer", input_dtype="bfloat16",
                     top_k="512")
@@ -112,7 +124,7 @@ def plot_bf16(rows, source: Path, output: Path) -> bool:
     maca, torch_ref = series("maca_c"), series("torch")
     batches = sorted({batch for batch, _ in maca})
     vocabs = sorted({vocab for _, vocab in maca})
-    chip = cells[0].get("chip", "")
+    chip = device_label(cells[0])
 
     fig, axes = plt.subplots(
         1, len(batches), figsize=(3.4 * len(batches) + 1.4, 4.4), dpi=160,
@@ -171,7 +183,7 @@ def plot_fp32(rows, source: Path, output: Path) -> bool:
     if not points:
         print("fp32: no cell where both maca_c and torch were timed -- skipped")
         return False
-    chip = cells[0].get("chip", "")
+    chip = device_label(cells[0])
 
     fig, ax = plt.subplots(figsize=(9, 5.5), dpi=160)
     ax.plot([b for b, _ in points], [s for _, s in points], marker="o",
