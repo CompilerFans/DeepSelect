@@ -1,0 +1,36 @@
+{
+  "backends": [
+    "maca_c",
+    "torch"
+  ],
+  "case_source": "tests/test.py::performance_cases() (+ the selector grid when the deep_gemm package can serve it, + --cases-file)",
+  "cases": 120,
+  "chip": "MetaX_C600-U",
+  "command": "/opt/conda/bin/python3 scripts/perf_snapshot.py --backends maca_c,torch --out-dir perf_data/MetaX_C600-U/20261008_1100_rep",
+  "csv_files": [
+    "deepselect_perf.csv"
+  ],
+  "csv_format_version": 2,
+  "cuda_visible_devices": "1",
+  "deep_gemm_package": "/opt/conda/lib/python3.10/site-packages/deep_gemm",
+  "deep_gemm_version": "0.6.0",
+  "deep_select_git_commit": "8e7295a7b17a830bf16da573581a24d2dac0cbaa",
+  "deep_select_git_dirty": true,
+  "device_dir": "MetaX_C600-U",
+  "device_name": "MetaX C600-U",
+  "extension_md5": "2220475c460a294b74e57ec06c45393e",
+  "extension_so": "/root/DeepSelect/deep_select/deep_select_maca_xcore1600.so",
+  "finished_at_utc": "2026-10-08T11:10:43.739765+00:00",
+  "measurement": "two clocks per cell.  `time(us)` is tests/test.py's own: one 'topk'-matching kernel's time, else the e2e span over the matching kernels; p.num_runs reps, L2 flushed (kk.bench).  `wall_us` is an event pair around the whole call, L2 flushed outside the span -- every kernel the operator launches, plus launch and sync.  **They are not the same quantity and neither is derived from the other**: `time(us)` excludes kernels the matching rule does not name (which is where deep_gemm's NaN scan lives, ~5.4 ms on b256-v131072), `wall_us` includes them.  Compare across backends on `wall_us`; compare one `maca_c` build against another on `time(us)`.  Correctness: tests/test.py::check_result / check_call_contract, applied to every backend except `torch`, whose column is a bare torchtopk the official harness does not check either.",
+  "output_dir": "perf_data/MetaX_C600-U/20261008_1100_rep",
+  "python": "3.10.10",
+  "rows": 240,
+  "run_id": "20261008_1100_rep",
+  "sm_count": 28,
+  "started_at_utc": "2026-10-08T11:08:57.228681+00:00",
+  "status_counts": {
+    "maca_c/pass": 120,
+    "torch/pass": 120
+  },
+  "torch": "2.10.0+metax3.8.1.0"
+}

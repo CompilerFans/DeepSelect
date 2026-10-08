@@ -669,7 +669,8 @@ inline int wave_filled_chunks(int base_chunks, int sm_count) {
 
 // [MACA] SM-count-sensitive.  C500's 104 APs are what 16 was measured against
 // (b6 x 16 = 96 CTAs = 92% of the last wave, and the chunk sweep shows 16-32
-// flat there); C600 (28) and C600U (32) round it by `wave_filled_chunks`.
+// flat there); C600 and C600U round it by `wave_filled_chunks` -- the latter at
+// whichever of its two AP counts the device reports.
 inline int chunked_chunks(const RowParams &params) {
     return wave_filled_chunks(16, (int)params.sm_count);
 }
@@ -1187,7 +1188,27 @@ inline constexpr uint32_t kF32Coarse12NarrowVocab = 131072;
 // 1.0: `4096 x 129280 k=512` 8789 -> 5456 us (0.62), `768 x 129280 k=512`
 // 1702 -> 1076 (0.63), `512 x 66551 k=2048` 1138 -> 717 (0.63), `132 x 107520
 // k=2048` 584 -> 391 (0.67).
-inline constexpr uint32_t kF32Coarse12C600USmCount = 28;
+// **A set, not a count: the C600U ships at 28 APs and at 32, and both are
+// ordinary parts.**  The ladder below was fitted on the 28-AP one, so the
+// 32-AP arm is served by *extrapolation*, and this is where that says so.
+//
+// Two reasons it is extrapolated rather than declined.  The routes the floors
+// sit between are **both one CTA per row**, so the per-row costs the crossing
+// is made of do not move with the AP count -- and the step here is 1.14x,
+// against the 3.7x (104 -> 28) this ladder was already re-sited across.  And
+// declining is not the conservative arm: a 32-AP part then takes the row path
+// on every shape the route serves, which on this host measures **1.61x** at
+// `4096 x 129280 k=512` float32.  Measured 2026-10-08 on one binary by
+// varying this entry's own `sm_count` argument at a fixed 28 -- 8832 us with
+// `DEEP_SELECT_F32_COARSE12=0`, 5484 with `=1` -- so the two arms differ in
+// the route and in nothing else this file decides.
+//
+// `DEEP_SELECT_F32_COARSE12` is how a 32-AP machine would turn the
+// extrapolation into a measurement, but it is read *below* the AP test, so a
+// probe has to be on a part in this set already.
+inline bool is_f32_coarse12_c600u_ap_count(uint32_t sm_count) {
+    return sm_count == 28 || sm_count == 32;
+}
 inline constexpr uint64_t kF32Coarse12C600UNarrowProduct = 9216;
 inline constexpr uint64_t kF32Coarse12C600UWideProduct = 49152;
 
@@ -1236,9 +1257,10 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // machine nobody measured would be a guess dressed as a rule.  So it is
 // guarded by the device it was measured on, named for what it is.  **Since
 // 2026-09-20 that is two devices and two ladders**, the 104-AP C500 one above
-// and the 28-AP one beside it (`kF32Coarse12C600USmCount`); the second exists
-// because the route had never run on a C600U at all, so "unmeasured" was
-// declining shapes it wins by up to 0.62x.
+// and the C600U one beside it; the second exists because the route had never
+// run on a C600U at all, so "unmeasured" was declining shapes it wins by up to
+// 0.62x.  The C600U set carries both of that family's AP counts -- the 32-AP
+// arm is an extrapolation and says so at its own definition.
 //
 // Splitting them is the point, and it still is under the macro: the budget
 // half is now a *compile-time* property of the family, while the performance
@@ -1264,7 +1286,7 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // cannot reach a family the ladder was not measured on -- the `sm_count` test
 // above it runs first.  (It is what sited the C600U ladder: the knob is read
 // *after* the AP-count test, so a probe needs that test relaxed to reach the
-// arms at all -- see the note on `kF32Coarse12C600USmCount`.)
+// arms at all -- see the note on `is_f32_coarse12_c600u_ap_count`.)
 inline int f32_coarse12_override() {
     static const int v = [] {
         const char *s = std::getenv("DEEP_SELECT_F32_COARSE12");
@@ -1294,12 +1316,12 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         return false;
     } else {
         // ── the performance half: where the ladder below was measured ──
-        // The two 28-AP parts are the exception to "a device the ladder was not
-        // measured on": the ladder *was* re-measured on them (2026-09-20, the
-        // table above `kF32Coarse12C600USmCount`), so the test is which of the
-        // two ladders applies rather than whether any does.  A part that is
-        // neither takes the row path, as before.
-        if (params.sm_count == kF32Coarse12C600USmCount) {
+        // The C600U is the exception to "a device the ladder was not measured
+        // on": the ladder *was* re-measured on that family (2026-09-20, the
+        // table above), so the test is which of the two ladders applies rather
+        // than whether any does.  A part that is neither takes the row path, as
+        // before.
+        if (is_f32_coarse12_c600u_ap_count(params.sm_count)) {
             if (params.topk > (uint32_t)rk::dg12::kMaxTopK) return false;
             if (batches == 0) return false;
             if (params.vocab_size < kF32Coarse12MinVocab) return false;
@@ -1387,8 +1409,9 @@ inline constexpr uint32_t kF32ChunksMinVocab = 2048;
 // not of this function.**  Every bound above the band still applies: the AP
 // count the ladder was measured on, `kMaxTopK`, the width floor, and
 // `batches <= kF32ChunksMaxBatches`.  In particular the AP-count test comes
-// first, so this knob **cannot reach a C600U** -- a 32-AP image takes the row
-// path at every batch, whatever the variable is set to.  `DEEP_SELECT_F32_CHUNKS=n`
+// first, so this knob **cannot reach a C600U at either of its AP counts** --
+// that family takes the row path at every batch, whatever the variable is set
+// to.  `DEEP_SELECT_F32_CHUNKS=n`
 // is the knob for a different chunk *count*; this one only decides whether the
 // arm is entered at all.
 inline int f32_chunks_route_override() {
@@ -1422,8 +1445,9 @@ inline bool f32_chunks_applies(const RowParams &params, uint32_t batches) {
     //
     // **The AP-count test above is a limit for the same reason, and it is why
     // the knob cannot reach a C600U**: `f32_chunks_route_override()` is read
-    // only from here, so `DEEP_SELECT_F32_CHUNKS_ROUTE=1` on a 32-AP image
-    // changes nothing.  See `structs.h`'s note on the family table.
+    // only from here, so `DEEP_SELECT_F32_CHUNKS_ROUTE=1` changes nothing on
+    // that family, at either of its AP counts.  See `structs.h`'s note on the
+    // family table.
     if (f32_chunks_route_override() >= 0) return f32_chunks_route_override() != 0;
     return true;
 }
