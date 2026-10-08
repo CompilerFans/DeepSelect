@@ -377,6 +377,28 @@ def _maca_stack_check(ext_modules, maca_root):
             f"and unset DEEP_SELECT_MACA_STACK_CHECK to skip the check.")
 
 
+# --- the version string's three parts ---------------------------------------
+#
+# The MACA toolkit generation, read from the environment the way mcDeepGEMM's
+# `setup.py` reads it and folded in the way it folds it (`<version>+maca<v>`).
+# `MACA_AI_VERSION` is the same variable's earlier spelling, taken second for
+# parity with that reference, whose own comment marks it for removal.
+#
+# It earns its place in the *name* rather than in a manifest: the extension
+# resolves `libmcruntime.so` through the rpath baked in at link time, so a
+# wheel built against one toolkit generation dies on another with
+# `mcErrorInvalidDeviceFunction` -- 0/202, not a plausible partial -- which
+# reads like a kernel defect.  See the run-time trap in CLAUDE.md.  A wheel
+# name that does not say which toolkit it was built against is the one name a
+# consumer cannot check.
+#
+# `build.sh` and `install.sh` supply it from `$MACA_PATH` so the default below
+# is what a bare `python setup.py bdist_wheel` gets -- and `maca0.0.0.0` says,
+# truthfully, that no toolkit version was given.
+maca_version = os.environ.get("MACA_VERSION", "0.0.0.0")
+if maca_version == "0.0.0.0":
+    maca_version = os.environ.get("MACA_AI_VERSION", "0.0.0.0")
+
 try:
     cmd = ["git", "rev-parse", "--short", "HEAD"]
     git_rev = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode("ascii").rstrip()
@@ -422,7 +444,7 @@ class _BdistWheel(_bdist_wheel_base):
 
 setup(
     name="deep_select",
-    version=f"{__version__}+{git_rev}.{datetime_rev}",
+    version=f"{__version__}+maca{maca_version}.{git_rev}.{datetime_rev}",
     packages=find_packages(include=["deep_select"]),
     ext_modules=ext_modules,
     cmdclass={

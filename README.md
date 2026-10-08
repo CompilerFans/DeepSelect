@@ -266,6 +266,24 @@ pin would reject). The tag is honest: the extension is loaded through
 to name, and what the wheel is actually sensitive to is the platform. See
 CLAUDE.md's wheel table for what the target machine must still provide.
 
+**The version names the toolkit the wheel was built against**, in the spelling
+mcDeepGEMM's `setup.py` uses:
+
+```
+deep_select-<base>+maca<MACA_VERSION>.<git-rev>.<timestamp>-py3-none-linux_x86_64.whl
+```
+
+`<MACA_VERSION>` comes from `$MACA_PATH/Version.txt` (`build.sh` and
+`install.sh` read it; a value the caller exports wins). It is in the *name*
+rather than only in a manifest because this is the one thing a consumer cannot
+otherwise check: the extension resolves `libmcruntime.so` through the rpath
+baked in at link time, so a wheel built against one SDK generation fails on
+another with `mcErrorInternalDeviceFunction` -- every call, not a plausible
+partial -- which reads like a kernel defect. That trap is recorded under the
+testing and benchmarking environment traps in CLAUDE.md. A bare
+`python setup.py bdist_wheel` sets nothing, and the version says so:
+`maca0.0.0.0`.
+
 ```bash
 ./develop.sh                           # in-place build, this device only
 ./build.sh                             # a wheel, every family (CUCC_TARGETS to narrow)
@@ -475,6 +493,7 @@ then.
 | variable | default | effect |
 | --- | --- | --- |
 | `CUCC_TARGETS` | `xcore1000,xcore1500,xcore1600` (all three scripts) | which `-offload-arch` images go into the one extension. `native` is **not** a target: `setup.py` raises on anything that is not `xcore<N>`, and an unrecognized target is rejected by `mxcc` |
+| `MACA_VERSION` | `build.sh`/`install.sh` derive it from `$MACA_PATH/Version.txt`; `setup.py` alone defaults to `0.0.0.0` | the MACA toolkit generation, folded into the wheel version as `+maca<v>` -- mcDeepGEMM's own variable and spelling. Caller-set wins over the derivation. A derived value that cannot appear in a PEP 440 local version is dropped rather than passed on, and the version then records the absence |
 | `MACA_PATH` | `/opt/maca` | the MACA toolkit root, and the authority for it. All three scripts derive `CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`/`LD_LIBRARY_PATH` from it, since a stale one of those in the caller's shell silently beats it |
 | `BUILDROOT` | unset | `build.sh` only. When set, the wheel is also copied to `${BUILDROOT}/wheel/` — the host repository's own destination, so one packaging step can collect both wheels by pointing a single `BUILDROOT` at both trees |
 | `MACA_HOME` | — | toolkit root too, consulted when `MACA_PATH` is unset. `MACA_PATH` wins if both are set |

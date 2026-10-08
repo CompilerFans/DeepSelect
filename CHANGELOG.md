@@ -7,6 +7,27 @@ there.
 
 ## Unreleased
 
+### The wheel names the toolkit it was built against
+
+The version string carried the git revision and a build timestamp but nothing
+about the MACA toolkit -- which is the one compatibility fact a consumer cannot
+check any other way.  The extension resolves `libmcruntime.so` through the rpath
+baked in at link time, so a wheel built against one SDK generation fails on
+another with `mcErrorInternalDeviceFunction` on **every** call: not a plausible
+partial but a total failure, whose symptom reads like a kernel defect.
+
+It is now `<base>+maca<MACA_VERSION>.<git-rev>.<timestamp>`, the same
+`+maca<v>` spelling mcDeepGEMM's `setup.py` folds in, so a wheel name reads:
+
+    deep_select-1.0.0+maca3.7.0.36.8674df2.20261008.165823-py3-none-linux_x86_64.whl
+
+`MACA_VERSION` is mcDeepGEMM's own variable name.  `build.sh` and `install.sh`
+read it from the toolkit's own `Version.txt` (first `Version:` line), a
+caller-set value winning -- the precedence those scripts already give
+`CUCC_TARGETS`.  A value that cannot appear in a PEP 440 local version is
+dropped rather than handed on, and the version then records the absence, which
+is also what a bare `python setup.py bdist_wheel` gets: `maca0.0.0.0`.
+
 ### MACA is a platform arm of its own
 
 The tree declared its platform by *claiming another one*. `csrc/structs.h` had
