@@ -183,6 +183,33 @@ def _bandwidth_by(cells, backend):
     return out
 
 
+def _require_both_series(maca, torch_ref, figure: str):
+    """Refuse to draw a comparison figure that has only one side of it.
+
+    `_grouped_bars` draws nothing for a `None` value, so a recording that timed
+    only one backend renders a single-series chart carrying the same
+    "DeepSelect vs torch.topk" title -- the legend still names both and nothing
+    on the figure says one is missing.  That is not hypothetical: the default
+    (`newest_snapshot`) picked up a `--backends maca_c` run and the bf16 figure
+    lost its torch bars, and the commit that landed it shipped that way.  A
+    missing *cell* is a gap and is drawn as one; a missing *series* is not a
+    comparison and is refused here.
+
+    Raised rather than skipped: the recording has the figure's cells, so the
+    caller asked for something this recording cannot show -- unlike a
+    recording that simply has no cells for the figure, which `plot_*` skips.
+    """
+    missing = [name for name, series in (("maca_c", maca), ("torch", torch_ref))
+               if not series]
+    if not missing:
+        return
+    raise SystemExit(
+        f"{figure}: the recording timed no {', '.join(missing)} cells for this "
+        f"figure, so it cannot show the comparison it is titled for. Record it "
+        f"with `--backends maca_c,torch` and plot that recording."
+    )
+
+
 def _axis_top(panels, headroom=HEADROOM):
     """A round y-limit that clears the tallest bar of every panel.
 
@@ -235,6 +262,7 @@ def plot_bf16(rows, output: Path) -> bool:
         return False
 
     maca, torch_ref = _bandwidth_by(cells, "maca_c"), _bandwidth_by(cells, "torch")
+    _require_both_series(maca, torch_ref, "bf16")
     batches = [b for b in BF16_BATCHES if any((b, v) in maca for v in BF16_VOCABS)]
     vocabs = [v for v in BF16_VOCABS if any((b, v) in maca for b in batches)]
     if not batches or not vocabs:
@@ -278,6 +306,7 @@ def plot_fp32(rows, output: Path) -> bool:
         return False
 
     maca, torch_ref = _bandwidth_by(cells, "maca_c"), _bandwidth_by(cells, "torch")
+    _require_both_series(maca, torch_ref, "fp32")
     batches = sorted({b for b, _ in maca} & {b for b, _ in torch_ref})
     if not batches:
         print("fp32: no cell where both maca_c and torch were timed -- skipped")
