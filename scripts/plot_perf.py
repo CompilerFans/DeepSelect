@@ -4,7 +4,7 @@
 Two figures, both drawn from one `deepselect_perf.csv` so the picture and the
 record it came from cannot disagree.  Both are grouped bar charts of effective
 bandwidth, `maca_c` (DeepSelect) beside `torch.topk` in each group, laid out as
-`assets/perf_bf16.png` and `assets/perf_fp32.png` are:
+`assets/perf_bf16_cuda.png` and `assets/perf_fp32_cuda.png` are:
 
 * `perf_bf16_maca.png` -- Lightning Indexer: bf16, `topk = 512`, one panel per
   batch size (6 / 512 / 4096), grouped bars over vocab size (16K / 64K / 128K /
@@ -24,11 +24,11 @@ The CSV is written by `scripts/perf_snapshot.py`; the timings in it are
 appear on the figures -- `deep_gemm` answers none of these cells (float32 only,
 so every bf16 row is `unsupported`, and so are the sampler cells).
 
-The `_maca` suffix is deliberate: `assets/perf_bf16.png` and
-`assets/perf_fp32.png` are upstream's own CUDA figures and are displayed as
-such, so a generator that wrote those names would silently replace a picture
-the README labels with another.  These two are the MACA measurement, from the
-recording the run names.
+The `_maca` suffix is upstream's own convention, which names a figure for the
+part it was measured on (`perf_bf16_cuda.png`, `perf_bf16_ascend.png`); these
+are the MACA member of that set, and the README shows them.  A generator that
+wrote the bare `perf_bf16.png` would land outside the convention and on a name
+that has meant the CUDA figure.
 
 Usage:
     scripts/plot_perf.py                            # newest recording, both figures
@@ -51,7 +51,7 @@ REPO = Path(__file__).resolve().parent.parent
 PERF_ROOT = REPO / "perf_data"
 DEFAULT_ASSETS = REPO / "assets"
 
-# Upstream's own series colours, sampled from `assets/perf_bf16.png`.
+# Upstream's own series colours, sampled from `assets/perf_bf16_cuda.png`.
 COLOR_MACA = "#66ccfe"
 COLOR_TORCH = "#ed0000"
 

@@ -77,7 +77,11 @@ Consequences:
 - MACA performance is measured by upstream's own grid --
   `PYTHONPATH=. python tests/test.py --perf-only` -- which benches each shape
   with the kernelkit kineto harness and times `torch.topk` beside it. The
-  numbers in [Performance](#performance) are still the upstream CUDA kernels'.
+  figures in [Performance](#performance) are that measurement, drawn from a
+  [`scripts/perf_snapshot.py`](scripts/perf_snapshot.py) recording by
+  [`scripts/plot_perf.py`](scripts/plot_perf.py); upstream's own CUDA figures
+  are kept beside them as `assets/perf_bf16_cuda.png` /
+  `assets/perf_fp32_cuda.png`.
 
 ## Design philosophy: one operator, four axes, no universal kernel
 
@@ -194,37 +198,17 @@ Measured with the benchmark in [`tests/test.py`](tests/test.py)
 on the same input. The metric is effective memory bandwidth: TopK does no
 floating-point math, so a FLOP rate would not be meaningful here.
 
-> These figures belong to the upstream CUDA kernels. For the MACA port, run
-> `tests/test.py --perf-only` on the target device -- what it measures and how
-> the two implementations compare there is in
-> [MACA support](#maca-support). The MACA measurement is drawn by
-> [`scripts/plot_perf.py`](scripts/plot_perf.py) from a `perf_snapshot.py`
-> recording, and its figures are the two `_maca` files below.
+### Lightning Indexer Scenario (MACA)
 
-### Lightning Indexer Scenario
+bfloat16, `topk = 512`, one subplot per batch size.
 
-bfloat16, `topk = 512`: grouped bars of effective bandwidth over vocab size
-(16K / 64K / 128K / 256K / 512K / 1M), one panel per batch size (6 / 512 /
-4096), on a shared y-axis. The two figures differ in that axis and nothing
-else: upstream's is 0 - 7 TB/s, the MACA measurement's is fitted to its own
-data, because these cells are memory-bound on a part whose read wall is a
-fraction of the H200's and a shared TB/s axis would leave every bar a sliver.
-The MACA figure's title also names the board it was taken on, since
-`perf_data/` holds a recording per device.
+![DeepSelect vs torch.topk, bfloat16 Lightning Indexer, MACA](assets/perf_bf16_maca.png)
 
-![DeepSelect vs torch.topk, bfloat16 Lightning Indexer](assets/perf_bf16.png)
+### Sampling Scenario (MACA)
 
-![DeepSelect vs torch.topk, bfloat16 Lightning Indexer (MACA)](assets/perf_bf16_maca.png)
+float32, `vocab_size = 129280`, `topk = 512`.
 
-### Sampling Scenario
-
-float32, `vocab_size = 129280`, `topk = 512`: grouped bars of effective
-bandwidth over batch size (6 / 256 / 512 / 768 / 4096), same two series and
-same two axis conventions as above.
-
-![DeepSelect vs torch.topk, float32 Sampling](assets/perf_fp32.png)
-
-![DeepSelect vs torch.topk, float32 Sampling (MACA)](assets/perf_fp32_maca.png)
+![DeepSelect vs torch.topk, float32 Sampling, MACA](assets/perf_fp32_maca.png)
 
 ## Installation
 
