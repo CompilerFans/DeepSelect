@@ -137,7 +137,7 @@ reach lanes the rest of the code believes are in another group.
 
 ## 4. The reference implementation is in this repository
 
-`csrc/xcore1000/radix_core.cuh` is a MACA kernel written for a 64-lane wave
+`csrc/maca_kernels/xcore1000/radix_core.cuh` is a MACA kernel written for a 64-lane wave
 from the start, and it is the model to copy:
 
 ```cpp
@@ -260,7 +260,7 @@ specific to this bug class and belong in the record:
   broke it"** — usually a fixed input run several times, and if a baseline is
   being compared, note that the baseline had to be patched to build at all.
 
-## 8. Worked example: `csrc/xcore1600/` in this repository
+## 8. Worked example: `csrc/maca_kernels/xcore1600/` in this repository
 
 The tree this skill was written against. **Partly fixed since** — the scan
 helper, the warp-count derivation and most of the masks have been repaired, and
@@ -273,7 +273,7 @@ The measurement and the diagnosis below are kept as written, because they are
 what the fix started from.
 
 One caveat before you quote §8.1's verdict line: the probe's scan block is
-**self-contained**, not a call into `csrc/xcore1600/utils.cuh` — it carries its
+**self-contained**, not a call into `csrc/maca_kernels/xcore1600/utils.cuh` — it carries its
 own copy of the pre-fix 32-lane helper (`wave64_probe.cu:105-132`, `as_port[tx]
 = scan32<int>(1, tx % 32)`) and its own 64-lane replacement. So it still prints
 `VERDICT: port scan wrong on 32/64 lanes` **on a tree where that scan is fixed**
@@ -338,7 +338,7 @@ for: widen the model, not the literal.
 
 ### 8.2 Site inventory
 
-**Re-verified 2026-09-19 against the current `csrc/xcore1600/`**:
+**Re-verified 2026-09-19 against the current `csrc/maca_kernels/xcore1600/`**:
 `common_parts.cuh` is 1433 lines, `utils.cuh` 51. The table is split into what
 is fixed, what remains, and what was a stale citation — the rows that were
 stale are kept rather than deleted, because a reader who follows an old link
@@ -406,7 +406,7 @@ and it uses `0xffffffffffffffffull` masks) — slow, but not part of this bug.
 ### 8.4 Containment
 
 Nothing routes to this tree any more: `setup.py` builds
-`csrc/xcore1000/maca_topk.cu` for every family, and that is the hand-written
+`csrc/maca_kernels/xcore1000/maca_topk.cu` for every family, and that is the hand-written
 64-lane kernel, which passes the slice 200/200 on a C600U (and is faster there).
 There is no `_xcore1600_sources()` to point at any more — the port's sources are
 off `SOURCES` and its `kerutils` include is off `include_dirs`, and re-adding

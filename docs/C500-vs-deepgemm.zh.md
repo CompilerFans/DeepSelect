@@ -1,5 +1,10 @@
 # maca_c 的向量化现状，与 `backend="deep_gemm"` 的对等对比
 
+> **2026-10-08 路径迁移**：内核目录已移到 `csrc/maca_kernels/` 之下 ——
+> `csrc/xcore1000/` → `csrc/maca_kernels/xcore1000/`，
+> `csrc/xcore1600/` → `csrc/maca_kernels/xcore1600/`。
+> 本文是改动当时的记录，路径按当时状态保留，未逐处改写。
+
 测量日 2026-09-14，C500，`CUDA_VISIBLE_DEVICES=2`（该设备当时无进程）。
 口径：`tests/lib.py` 造例（`NormalFloatDistribution`），种子 11，
 `return_value=False`，`indices_type=int32`。

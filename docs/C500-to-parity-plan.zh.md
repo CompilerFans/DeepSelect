@@ -1,5 +1,10 @@
 # 逼近 deep_gemm：两个可分离的杠杆，和一份按杠杆排序的方案
 
+> **2026-10-08 路径迁移**：内核目录已移到 `csrc/maca_kernels/` 之下 ——
+> `csrc/xcore1000/` → `csrc/maca_kernels/xcore1000/`，
+> `csrc/xcore1600/` → `csrc/maca_kernels/xcore1600/`。
+> 本文是改动当时的记录，路径按当时状态保留，未逐处改写。
+
 前置事实见 `docs/C500-vs-deepgemm.zh.md` §2：官方轴 36 格里 maca_c 只赢 6 格
 （全是 `L ≤ 4096`），`L ≥ 16384` 全域落后 2.4–2.9×，最差 `b6-v524288-k512` 落后 10×。
 

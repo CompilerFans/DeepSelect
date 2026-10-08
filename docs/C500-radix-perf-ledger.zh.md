@@ -1,5 +1,10 @@
 # C500 行式 radix TopK：性能账本（2026-09-12）
 
+> **2026-10-08 路径迁移**：内核目录已移到 `csrc/maca_kernels/` 之下 ——
+> `csrc/xcore1000/` → `csrc/maca_kernels/xcore1000/`，
+> `csrc/xcore1600/` → `csrc/maca_kernels/xcore1600/`。
+> 本文是改动当时的记录，路径按当时状态保留，未逐处改写。
+
 这份账本记录 2026-09-12 一天内三个提交的实测 before → after，以及每个数字的
 **口径**。原则来自仓库纪律：**只给 delta 不算记录**——必须同时给出受影响 cell
 的前后**算力与带宽**（含 arch peak / memory floor 的百分比）与绑定 roofline。

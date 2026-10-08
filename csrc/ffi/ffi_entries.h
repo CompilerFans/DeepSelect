@@ -50,7 +50,7 @@ tvm::ffi::Array<int64_t> get_alignment_requirement();
 // has to be the count of the part in front of the call rather than of the part
 // the image was built for, or a grid gets sized for the wrong machine.
 //
-// Keep this in step with the definition in `csrc/xcore1000/maca_topk.cu`,
+// Keep this in step with the definition in `csrc/maca_kernels/xcore1000/maca_topk.cu`,
 // parameter for parameter.  It had drifted: `sm_count` was added to the
 // definition (2026-09-15, the arch-constants work) and never here, and
 // nothing failed -- the built extension takes 13 arguments and rejects 12

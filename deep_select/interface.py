@@ -429,7 +429,7 @@ def topk_torch(
     if topk > 4096:
         raise ValueError(f"topk must be <= 4096, got {topk}")
     # The same contract rejections the kernel path enforces
-    # (`csrc/xcore1000/maca_topk.cu`, which is what every family builds) -- the
+    # (`csrc/maca_kernels/xcore1000/maca_topk.cu`, which is what every family builds) -- the
     # operator's contract, not an implementation's, so a strided view must be an
     # error whichever backend was chosen.  `sorted` is *not* float32-only here:
     # that kernel orders bfloat16 too.

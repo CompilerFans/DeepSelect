@@ -17,20 +17,20 @@ what a top-K kernel's staging buffers are sized against:
 
 | tree | parts | kernel |
 | --- | --- | --- |
-| `csrc/xcore1000/` | C500 (64 KiB per SM) | `maca_topk.cu`, written for MACA |
-| `csrc/xcore1600/` | C600, C600U (128 KiB per SM) | the upstream kernels, ported |
+| `csrc/maca_kernels/xcore1000/` | C500 (64 KiB per SM) | `maca_topk.cu`, written for MACA |
+| `csrc/maca_kernels/xcore1600/` | C600, C600U (128 KiB per SM) | the upstream kernels, ported |
 
 Which one a device runs is a property of the device, not a choice — but there
 is only one answer today: `setup.py` builds a single extension carrying an image
 per architecture it was asked for, and **every family runs
-`csrc/xcore1000/maca_topk.cu`**. (See the note under `csrc/xcore1600/` below.)
+`csrc/maca_kernels/xcore1000/maca_topk.cu`**. (See the note under `csrc/maca_kernels/xcore1600/` below.)
 
-`csrc/xcore1000/maca_topk.cu` reimplements the operator -- the same public
+`csrc/maca_kernels/xcore1000/maca_topk.cu` reimplements the operator -- the same public
 contract, the same `deep_select.interface.topk` signature -- with portable
 primitives only (shuffle, `atomicAdd`, `__syncthreads`, `__syncthreads_or`), as
 a radix refine over an order-preserving key of each value.
 
-`csrc/xcore1600/` keeps upstream's algorithm (a threshold-and-compact scan in a
+`csrc/maca_kernels/xcore1600/` keeps upstream's algorithm (a threshold-and-compact scan in a
 random block order, one global read per element) and replaces its device-side
 dependencies: TMA tensor-map loads become cooperative `ldg`, mbarriers a single
 buffer with `__syncthreads`, inline PTX MACA builtins. Its config tuples are
@@ -41,13 +41,13 @@ re-derived for 128 KiB, since upstream's are sized for an H100's 227 KiB.
 > C600U -- an `arange` row of 0..511 with `topk=8` returns indices like
 > `[448..455]` where the answer is `[511..504]`, and differently on every run;
 > the official slice scored 4/200. So every family builds
-> `csrc/xcore1000/maca_topk.cu` instead, which passes 200/200 on a C600U **and
+> `csrc/maca_kernels/xcore1000/maca_topk.cu` instead, which passes 200/200 on a C600U **and
 > is 1.5-2.9x faster there** (CLAUDE.md, "Can a C600U run the C500 kernel").
 > The port stays in the tree as the reserved implementation, but it is no longer
 > built or buildable: reaching it now takes a source change to `setup.py`'s
 > `SOURCES` *and* its `include_dirs` (its `kerutils` include was dropped from the
 > build with it), not an environment variable, and there is no switch for it
-> anywhere in `setup.py`. Everything below in this section describes `csrc/xcore1600/` as
+> anywhere in `setup.py`. Everything below in this section describes `csrc/maca_kernels/xcore1600/` as
 > it stands, port bugs included.
 
 Consequences:
@@ -150,7 +150,7 @@ whole chunk policy is that one ratio.
 (`csrc/structs.h` carries `ARCH_FAMILY`, `ARCH_SM_COUNT` and
 `ARCH_SMEM_PER_AP_BYTES`, and of those only the last has a behavioral consumer.
 There are no `NATIVE_*` constants left in this tree; the name survives only in
-two `static_assert`s under the unbuilt `csrc/xcore1600/`, where it is
+two `static_assert`s under the unbuilt `csrc/maca_kernels/xcore1600/`, where it is
 undefined -- see that header's own note.)
 
 What changes on a 128 KiB part, and in which direction:
@@ -165,7 +165,7 @@ What changes on a 128 KiB part, and in which direction:
   is gated on measurement rather than on the ratio.
 
 **A 128 KiB device therefore owes its own measurement of the same curve**, not a
-rescaling of the C500 one. The unvalidated port in `csrc/xcore1600/` is the
+rescaling of the C500 one. The unvalidated port in `csrc/maca_kernels/xcore1600/` is the
 other half of that story -- see [MACA support](#maca-support) and CLAUDE.md's
 "Known holes".
 
@@ -297,7 +297,7 @@ form when you want it explicitly.
 `deep_select/deep_select_maca*.so`, carries one image per target, because mxcc
 takes a comma-separated `-offload-arch` and compiles each into its own image of
 the same source (measured: three targets → three images, 11.07 MB against
-3.7 MB for one). Each target builds `csrc/xcore1000/maca_topk.cu` -- the
+3.7 MB for one). Each target builds `csrc/maca_kernels/xcore1000/maca_topk.cu` -- the
 hand-written MACA kernel, for every capacity, 64 KiB and 128 KiB alike.
 
 One consequence is worth stating because it shapes the source: **the build is
@@ -309,7 +309,7 @@ device. The AP count the *grids* are sized against still travels as an argument
 -- a grid must fill the machine in front of the call, not the one the image was
 built for. See CLAUDE.md, "the arch constants are compile-time".
 
-The ported kernels under `csrc/xcore1600/` are reserved and unbuilt: they select
+The ported kernels under `csrc/maca_kernels/xcore1600/` are reserved and unbuilt: they select
 wrong on a C600U, and the C500 kernel is both correct there and 1.5-2.9x faster
 (see CLAUDE.md, "Can a C600U run the C500 kernel"). Wiring the port back is a
 source change to `setup.py`'s `SOURCES` and `include_dirs` together, deliberately
@@ -399,7 +399,7 @@ asked for nothing in particular could reach a kernel defect. The cost is speed
 `sorted_value`, matching upstream.
 
 `"maca_c"` is the MACA kernel this device has: the hand-written kernel under
-`csrc/xcore1000/`, built as one image per family named in `CUCC_TARGETS` (see
+`csrc/maca_kernels/xcore1000/`, built as one image per family named in `CUCC_TARGETS` (see
 "Build" above). **Every capacity runs that same kernel** -- 64 KiB and 128 KiB
 parts alike -- so no architecture name appears at this level, and nothing about
 the part a caller happens to be on has to reach the call. It is the production

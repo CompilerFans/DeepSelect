@@ -7,7 +7,7 @@ extracted into a torch-free, standalone repro:
 | dir         | what it is | source |
 |-------------|------------|--------|
 | `deep_gemm/` | `deep_gemm.fp32_indexer_topk_selector`, the csrc's own routing | `mcDeepGEMM/csrc/kernels/fp32_topk.cu` |
-| `ds/`        | DeepSelect's fp32 radix row kernel | `DeepSelect/csrc/xcore1000/maca_topk.cu` |
+| `ds/`        | DeepSelect's fp32 radix row kernel | `DeepSelect/csrc/maca_kernels/xcore1000/maca_topk.cu` |
 | `mcoplib/`   | mcoplib's `topk_transform_v1` (SGLang port) | `mcoplib/op/sglang/jit_kernels/topk_v1.cu` |
 
 Each is a kernel TU + a public header + a `main.cu` driver + this README's
@@ -456,12 +456,12 @@ than "the kernel aborted" will draw the wrong conclusion.
 
 ### The chunk-count change did not break the library
 
-The change under test: `csrc/xcore1000/maca_topk.cu`, `f32_chunks_large_batch`
+The change under test: `csrc/maca_kernels/xcore1000/maca_topk.cu`, `f32_chunks_large_batch`
 went from the constant `2` to
 `ceil(vocab_size / 101906)` clamped at 2, gated on `sm_count == 104`. The gate
 artifact is `deep_select/deep_select_maca.so`
 `md5 3114a5fd50eaaa90e713621b51f98e94`, built 01:49 from
-`csrc/xcore1000/maca_topk.cu` at 00:48 (extension newer than source, so not
+`csrc/maca_kernels/xcore1000/maca_topk.cu` at 00:48 (extension newer than source, so not
 stale).  (The artifact name is `deep_select_maca_xcore1000.so` since
 2026-09-18, when the build became one `.so` per family; this receipt predates
 that and its md5 names the file as it was.)

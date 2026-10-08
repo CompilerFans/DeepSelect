@@ -1,7 +1,7 @@
 // The reference's public edge -- one host entry, no torch, no tvm_ffi.
 //
 // Upstream's edge is `deep_select::topk(tvm::ffi::TensorView, ...)` in
-// `csrc/xcore1000/maca_topk.cu` (lines 1112-1425).  Everything it did that the
+// `csrc/maca_kernels/xcore1000/maca_topk.cu` (lines 1112-1425).  Everything it did that the
 // dataflow does not need is gone here: the dtype / shape / stride / device
 // checks against `TensorView`s, the process-wide grow-only `cudaMalloc` scratch
 // cache under a mutex, and the stream taken from the FFI environment.  What is

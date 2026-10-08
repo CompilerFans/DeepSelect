@@ -13,9 +13,9 @@
 //   on.  As a `.cu` this file reaches mxcc like every other source here and
 //   needs no separate host flag list.  It is host code either way (no
 //   `__global__`), so the device pass emits nothing.
-#include "../ffi/ffi_checks.h"
-#include "../ffi/ffi_error.h"
-#include "../ffi/ffi_tensor.h"
+#include "ffi_checks.h"
+#include "ffi_error.h"
+#include "ffi_tensor.h"
 
 #include <tvm/ffi/extra/c_env_api.h>
 

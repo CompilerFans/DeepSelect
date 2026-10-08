@@ -2,7 +2,7 @@
 
 A minimal, torch-free, ffi-free reference repro of DeepSelect's MACA top-K
 operator, taken from
-`../csrc/xcore1000/{radix_core.cuh,maca_topk.cu}`. It compiles with the
+`../csrc/maca_kernels/xcore1000/{radix_core.cuh,maca_topk.cu}`. It compiles with the
 toolchain in `/tmp/dsprobe/TOOLCHAIN.md` (MACA 3.7.0.36, `cucc`, target
 `xcore1000`) and runs on the C500 in this box.
 
@@ -10,7 +10,7 @@ Files:
 
 | file | what it is |
 | --- | --- |
-| `xcore1000_radix_core.cuh` | a verbatim copy of `csrc/xcore1000/radix_core.cuh` (2464 lines), with a provenance banner on top. Both dataflows — fp32 row and bf16 row — and both chunked splits are still in it. |
+| `xcore1000_radix_core.cuh` | a verbatim copy of `csrc/maca_kernels/xcore1000/radix_core.cuh` (2464 lines), with a provenance banner on top. Both dataflows — fp32 row and bf16 row — and both chunked splits are still in it. |
 | `xcore1000_maca_topk.cu` | upstream `maca_topk.cu` lines 1–1108 (the whole kernel/contract layer) verbatim, then a new `ds_topk` host entry. The tvm-ffi edge is not carried. |
 | `xcore1000_ds_topk.h` | the public header: one entry, `ds_topk(...)`. |
 | `main.cu` | the driver: device randn scores, the selector, a CPU `nth_element` check, time and GB/s. |
@@ -437,13 +437,13 @@ it just never runs, because `ds_topk` only ever passes `value_dtype = 0`.
 
 **Which revision of `maca_topk.cu` this is.** The working tree's, not committed
 `HEAD`'s. Checked rather than assumed: the ref head matches
-`csrc/xcore1000/maca_topk.cu` in exactly three diff hunks — the two include
+`csrc/maca_kernels/xcore1000/maca_topk.cu` in exactly three diff hunks — the two include
 edits above and trailing blank lines — while 995 lines differ from
-`git show HEAD:csrc/xcore1000/maca_topk.cu`. That matters for exactly one thing
+`git show HEAD:csrc/maca_kernels/xcore1000/maca_topk.cu`. That matters for exactly one thing
 here: the `f32_chunks_large_batch` / `kF32OverflowChunkLen` chunk-count rule
 (ref `:850–852`) is in this copy, so the split cell runs 6 chunks rather than
 HEAD's constant 2. If the ref should track HEAD instead, re-copy lines 1–1108
-from `git show HEAD:csrc/xcore1000/maca_topk.cu` and re-check the routing
+from `git show HEAD:csrc/maca_kernels/xcore1000/maca_topk.cu` and re-check the routing
 numbers in §3.
 
 ---

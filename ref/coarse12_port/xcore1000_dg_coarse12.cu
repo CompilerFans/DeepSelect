@@ -5,13 +5,13 @@
 // in two translation units is two host stubs for one kernel, which the linker
 // rejects.  So this TU owns the kernel and the driver only calls it.
 //
-// What is under measurement is `csrc/xcore1000/dg_coarse12.cuh` **as the
+// What is under measurement is `csrc/maca_kernels/xcore1000/dg_coarse12.cuh` **as the
 // shipping extension compiles it** -- included here, not copied.  Everything in
 // it is `inline`, so a second TU needs one external symbol to link against,
 // which is what the wrapper below is; the `static_assert`s in the header are
 // therefore checked in a TU that contains nothing else, which is the property
 // that makes it reusable at all.
-#include "../../csrc/xcore1000/dg_coarse12.cuh"
+#include "../../csrc/maca_kernels/xcore1000/dg_coarse12.cuh"
 
 namespace rk {
 namespace dg12_ref {

@@ -17,10 +17,10 @@
 //     `__syncthreads`, `__syncthreads_or`.  No inline asm, no TMA, no mbarrier,
 //     no cluster.
 //   * The wave is 64 lanes, not 32.  Any mask or `/ 32` inherited from the
-//     CUDA-era kernels is suspect -- see `csrc/xcore1600/` for what that looks
+//     CUDA-era kernels is suspect -- see `csrc/maca_kernels/xcore1600/` for what that looks
 //     like when it is wrong.
 //
-// The upstream `v3` (bf16) and `v3_fp32` trees are ported under `csrc/xcore1600/`
+// The upstream `v3` (bf16) and `v3_fp32` trees are ported under `csrc/maca_kernels/xcore1600/`
 // and are NOT built; `v3_cluster` is deleted (MACA has no cluster launch), so
 // the shapes it served fall through to this kernel -- the same path every other
 // shape takes, with `topk <= 1024 <= 4096` and no vocabulary bound, so they are
@@ -1890,8 +1890,8 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
 // entry and its behavior is not tied to the host's torch build.  The contract
 // checks that used to be `TORCH_CHECK` are `DS_HOST_CHECK`, the tensors are
 // `tvm::ffi::TensorView`, and the stream comes from the FFI environment.
-#include "../ffi/ffi_error.h"
-#include "../ffi/ffi_tensor.h"
+#include "ffi_error.h"
+#include "ffi_tensor.h"
 
 #include <tvm/ffi/extra/c_env_api.h>
 
@@ -2406,4 +2406,4 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
 
 }  // namespace deep_select
 
-#include "../ffi/ffi_entries.h"
+#include "ffi_entries.h"

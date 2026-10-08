@@ -3,8 +3,8 @@ Generate explicit template instantiation .cu files for a topk kernel template.
 
 Usage, from the repo root:
     python3 scripts/generate_instantiations.py <instantiation_dir>
-    # e.g. csrc/xcore1600/v3/instantiations
-    #      csrc/xcore1600/v3_fp32/instantiations
+    # e.g. csrc/maca_kernels/xcore1600/v3/instantiations
+    #      csrc/maca_kernels/xcore1600/v3_fp32/instantiations
     # [MACA] the old v3_cluster/instantiations went with cluster and TMA.
 
 Creates one .cu per config, then prints the paths (repo-root relative) to copy
@@ -144,7 +144,7 @@ def main(instantiation_dir: str):
         if os.path.exists(instantiation_dir):
             shutil.rmtree(instantiation_dir)
         os.makedirs(instantiation_dir, exist_ok=True)
-    if instantiation_dir == "csrc/xcore1600/v3/instantiations":
+    if instantiation_dir == "csrc/maca_kernels/xcore1600/v3/instantiations":
         remove_and_remake_dir()
         # bf16: sv0 x si{0,1} x rv{0,1}
         valid_si_rv_combinations = [
@@ -161,7 +161,7 @@ def main(instantiation_dir: str):
         # `surviving_topk_pairs` alone is 2 * MAX_TOPK * 8 = 65536 B and the
         # extra-pairs region at least (MAX_TOPK + B) * 8 = 65536 B, which fills
         # the SM before a single input element is staged.  `topk` in
-        # (1024, 4096] is served by `csrc/xcore1000/maca_topk.cu` instead.
+        # (1024, 4096] is served by `csrc/maca_kernels/xcore1000/maca_topk.cu` instead.
         #
         # TMA4 costs 109.6 KB of smem per CTA, so occupancy 2 only fits at
         # max_topk <= 512.
@@ -178,7 +178,7 @@ def main(instantiation_dir: str):
                     for num_threads, occ, b, b2, tma in fast_path_tuples:
                         configs.append(TopkSelectConfigs("nv_bfloat16", out_idx_t, False, si, rv, max_topk, num_threads, occ, b, b2, tma))
         generate_instantiations(instantiation_dir, "topk_select_bf16_normal", configs)
-    elif instantiation_dir == "csrc/xcore1600/v3_fp32/instantiations":
+    elif instantiation_dir == "csrc/maca_kernels/xcore1600/v3_fp32/instantiations":
         remove_and_remake_dir()
         # fp32: sv0 x si{0,1} x rv{0,1} + sv1_si0_rv1
         valid_sv_si_rv_combinations_fp32 = [

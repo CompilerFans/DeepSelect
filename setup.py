@@ -15,11 +15,11 @@ warnings.filterwarnings("ignore", message=".*flash_attn.*")
 
 exec(open("deep_select/__version__.py").read())
 
-# One source, one extension.  `csrc/xcore1600/` is the ported upstream kernel:
-# it stays in the repo as source and is off the build entirely -- see
-# `build_for_maca`.
+# One source, one extension.  `csrc/maca_kernels/xcore1600/` is the ported
+# upstream kernel: it stays in the repo as source and is off the build entirely
+# -- see `build_for_maca`.
 SOURCES = [
-    "csrc/xcore1000/maca_topk.cu",
+    "csrc/maca_kernels/xcore1000/maca_topk.cu",
 ]
 
 # What this file builds when `CUCC_TARGETS` says nothing.  `build.sh` sets the
@@ -135,8 +135,8 @@ def build_for_maca():
     it takes the `#else` branch on every architecture, and host code exists once
     in a fat binary regardless.
 
-    `csrc/xcore1600/` is not built: its source is off `SOURCES` and its
-    `kerutils` include is off `include_dirs` below.  Re-adding both is what
+    `csrc/maca_kernels/xcore1600/` is not built: its source is off `SOURCES` and
+    its `kerutils` include is off `include_dirs` below.  Re-adding both is what
     building it would take.
 
     Every source is a `.cu`, so the device compiler is the only compiler this
@@ -172,12 +172,13 @@ def build_for_maca():
     # toolkit's own `include/`, which is where `maca_bfloat16.h` and `cub/` are.
     include_dirs = [
         os.path.join(this_dir, "csrc"),
-        # `csrc/ffi/` -- the tvm-ffi edge (tensor/error/check helpers).  Both
-        # kernel trees include it as `"../ffi/..."`, `dispatch_utils.h` as
-        # `"ffi_..."`, so the directory itself is on the path.
+        # `csrc/ffi/` -- the tvm-ffi edge (tensor/error/check helpers).  Every
+        # kernel source includes it as `"ffi_..."`, so the directory itself is
+        # on the path; nothing names it by relative depth, which is what keeps
+        # these includes independent of where a kernel tree sits.
         os.path.join(this_dir, "csrc", "ffi"),
         os.path.join(maca_root, "include"),
-        # `csrc/xcore1600/` is NOT on this list and neither is
+        # `csrc/maca_kernels/xcore1600/` is NOT on this list and neither is
         # `csrc/3rdparty/kerutils/include`, which only its kernels include
         # (`csrc/ffi/` names kerutils once, in a comment, and includes nothing
         # from it).  Both trees stay in the repo as source; neither is compiled.
@@ -306,7 +307,7 @@ def build_for_maca():
 # it is asked about (~60 s for `maca_topk.cu`).  Over a named subset of sources:
 #
 #     DEEP_SELECT_MACA_STACK_CHECK=1 ./build.sh
-#     DEEP_SELECT_MACA_STACK_CHECK=csrc/xcore1000/maca_topk.cu ./build.sh
+#     DEEP_SELECT_MACA_STACK_CHECK=csrc/maca_kernels/xcore1000/maca_topk.cu ./build.sh
 #     DEEP_SELECT_MACA_STACK_BASELINE=64 DEEP_SELECT_MACA_STACK_CHECK=1 ./build.sh
 #
 # The baseline is bytes and is per toolchain: 48 is what this one reports for a

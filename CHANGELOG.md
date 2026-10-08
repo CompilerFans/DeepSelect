@@ -5,6 +5,25 @@ operator; the performance work and its evidence live in
 `docs/C500-radix-perf-ledger.zh.md`, and every number quoted here has a section
 there.
 
+## Unreleased
+
+### The kernel trees moved under a platform directory
+
+`csrc/xcore1000/` → `csrc/maca_kernels/xcore1000/` and
+`csrc/xcore1600/` → `csrc/maca_kernels/xcore1600/`, so the tree has the layer
+upstream's `csrc/cuda_kernels/` and `csrc/ascend_kernels/` have: platform above,
+variant below.  Anything outside the repository that names a source path — a
+build wrapper, a doc, a script — needs the new one.
+
+`setup.py`'s `SOURCES` and `scripts/generate_instantiations.py`'s two
+instantiation-directory keys moved with it.  The kernel sources stopped naming
+`csrc/ffi/` by relative depth (`"../ffi/ffi_error.h"` → `"ffi_error.h"`), which
+is why the move did not have to renumber them and why the next one will not
+either.
+
+The measured-run records under `docs/` and the release notes below are kept as
+written; each record doc carries a dated note saying where the tree went.
+
 ## v1.0.0 — 2026-09-19
 
 First tagged release.  `perf_data/MetaX_C500/baseline` is pinned to

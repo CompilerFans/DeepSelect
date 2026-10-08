@@ -34,7 +34,7 @@
 
 // ── reference extraction note ───────────────────────────────────────────────
 //
-// Verbatim copy of `csrc/xcore1000/radix_core.cuh` (2464 lines).  Not one
+// Verbatim copy of `csrc/maca_kernels/xcore1000/radix_core.cuh` (2464 lines).  Not one
 // character below this banner was changed: the fp32 dataflow, the 16-bit
 // dataflow, the launchers and every routing predicate are the upstream ones.
 // This file is included by `xcore1000_maca_topk.cu` exactly as upstream

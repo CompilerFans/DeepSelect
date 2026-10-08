@@ -104,7 +104,7 @@ __global__ void k_collectives(unsigned long long *ballot32, unsigned long long *
 
 // ── 3. does the port's own scan helper survive a 64-lane wave? ──────────────
 
-// Verbatim from csrc/xcore1600/utils.cuh: the 32-lane form the port uses.
+// Verbatim from csrc/maca_kernels/xcore1600/utils.cuh: the 32-lane form the port uses.
 template<typename T>
 __device__ __forceinline__ T scan32(T x, uint32_t lane_idx) {
     #pragma unroll

@@ -1,6 +1,6 @@
 // ── reference extraction ────────────────────────────────────────────────────
 //
-// Upstream: `csrc/xcore1000/maca_topk.cu`.  Everything above the host entry at
+// Upstream: `csrc/maca_kernels/xcore1000/maca_topk.cu`.  Everything above the host entry at
 // the bottom of this file is upstream lines 1-1108, verbatim, with exactly two
 // edits, both in the include block: `"structs.h"` is dropped (see the note
 // where it stood) and `"radix_core.cuh"` becomes `"xcore1000_radix_core.cuh"`
@@ -46,10 +46,10 @@
 //     `__syncthreads`, `__syncthreads_or`.  No inline asm, no TMA, no mbarrier,
 //     no cluster.
 //   * The wave is 64 lanes, not 32.  Any mask or `/ 32` inherited from the
-//     CUDA-era kernels is suspect -- see `csrc/xcore1600/` for what that looks
+//     CUDA-era kernels is suspect -- see `csrc/maca_kernels/xcore1600/` for what that looks
 //     like when it is wrong.
 //
-// The upstream `v3` (bf16) and `v3_fp32` trees are ported under `csrc/xcore1600/`
+// The upstream `v3` (bf16) and `v3_fp32` trees are ported under `csrc/maca_kernels/xcore1600/`
 // and are NOT built; `v3_cluster` is deleted (MACA has no cluster launch), so
 // the shapes it served fall through to this kernel -- the same path every other
 // shape takes, with `topk <= 1024 <= 4096` and no vocabulary bound, so they are

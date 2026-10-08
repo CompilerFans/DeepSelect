@@ -196,7 +196,7 @@ static_assert(MAX_VOCAB_SIZE <= MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION);
 // built for, and refusing a mismatched grid is a better failure than a grid
 // sized for the wrong part.
 //
-// The ported kernels under `csrc/xcore1600/` selected their config tuples
+// The ported kernels under `csrc/maca_kernels/xcore1600/` selected their config tuples
 // against `NATIVE_SHARED_MEMORY_PER_SM_BYTES` (64 KiB for family 1000, 128 KiB
 // for 1500/1600) and asserted at compile time that their staging fitted.  That
 // is `ARCH_SMEM_PER_AP_BYTES` now, and the assertion can come back with it:
@@ -207,7 +207,7 @@ static_assert(MAX_VOCAB_SIZE <= MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION);
 // `static_assert`s in that tree still name the old
 // `NATIVE_SHARED_MEMORY_PER_SM_BYTES` -- `v3/topk_select.cuh` and
 // `v3_fp32/topk_select.cuh`, one each -- and that identifier is defined
-// nowhere, so those files would not compile if `csrc/xcore1600/` went back on
+// nowhere, so those files would not compile if `csrc/maca_kernels/xcore1600/` went back on
 // `SOURCES`.  The rename is part of re-adding the tree, not something a
 // reader can assume is already done; see `setup.py`'s note in
 // `build_for_maca` for what re-adding takes.

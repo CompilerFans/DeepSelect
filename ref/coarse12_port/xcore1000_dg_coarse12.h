@@ -1,6 +1,6 @@
 // The kernel TU's external surface, for the driver.
 //
-// `csrc/xcore1000/dg_coarse12.cuh` is the header of record; this declares only
+// `csrc/maca_kernels/xcore1000/dg_coarse12.cuh` is the header of record; this declares only
 // the wrappers `xcore1000_dg_coarse12.cu` defines around it.  Kept apart so the
 // driver's translation unit does not contain the kernel -- see that file.
 #pragma once

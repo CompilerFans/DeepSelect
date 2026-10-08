@@ -58,8 +58,8 @@ C500（xcore1000）上走的是**行式 radix 选择**：一行一个 CTA，两�
 
 | 文件 | 角色 |
 |---|---|
-| `csrc/xcore1000/maca_topk.cu` | **契约层 + 启动层**：`topk` 的对外契约（values / sorted / NaN / 窗口 / 偏移 / 短行）、NaN 扫描、动态 smem 尺寸与布局、kernel 启动 |
-| `csrc/xcore1000/radix_core.cuh` | **选择数据流**（header-only）：`radix_topk_row_bf16_b`（16 位行，生产路径）、`radix_topk_row_f32*`（32 位行）、若干 static-k / register / chunked 变体 |
+| `csrc/maca_kernels/xcore1000/maca_topk.cu` | **契约层 + 启动层**：`topk` 的对外契约（values / sorted / NaN / 窗口 / 偏移 / 短行）、NaN 扫描、动态 smem 尺寸与布局、kernel 启动 |
+| `csrc/maca_kernels/xcore1000/radix_core.cuh` | **选择数据流**（header-only）：`radix_topk_row_bf16_b`（16 位行，生产路径）、`radix_topk_row_f32*`（32 位行）、若干 static-k / register / chunked 变体 |
 | `csrc/structs.h` | `TopkSelectArgs` / `RowParams` |
 | `scripts/official_slice.py` | 官方大表的切片驱动（正确性门）——**2026-09-16 已删除，能力并入 `tests/test.py`**（见 §4 正确性门） |
 | `tests/test.py` | 官方性能表（每个 perf 用例先查正确性再计时） |
@@ -225,7 +225,7 @@ PYTHONPATH=$PWD python tests/test.py --perf-only    # 95 个用例，先验后�
   只读墙的占比（不是 1,487：见 `C500-to-parity-plan.zh.md` §7.1 的更正）；
   不是的话写清绑定在什么上；
 - 门的结果（95/95 + 82170/82170）；
-- 架构边界声明（只动 `csrc/xcore1000/` ⇒ xcore1600 逐字节不变 ⇒ 不欠 C600U 验证）。
+- 架构边界声明（只动 `csrc/maca_kernels/xcore1000/` ⇒ xcore1600 逐字节不变 ⇒ 不欠 C600U 验证）。
 
 落地顺序：
 
