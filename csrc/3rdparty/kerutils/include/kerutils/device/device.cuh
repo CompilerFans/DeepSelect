@@ -4,11 +4,34 @@
 
 #ifdef KERUTILS_IS_BUILD_ON_CUDA
 #include "cuda/common.h"
-// [MACA] 此处原有 sm80/sm90/sm100 三组 intrinsics（cp.async / TMA gather /
-// UMMA / cluster / st_async），已整组删除：它们全是内联 PTX 汇编，MACA 汇编器
-// 只认 MACA ISA，且其中的 'l'（64 位）操作数约束在 mxcc 上直接报
-// `invalid constraint`。DeepSelect 内核真正用到的那两个函数（st_shared、trap）
-// 已在 cuda/common.h 里给出 MACA 实现；st_async 与 cluster 屏障只被 v3_cluster
-// 使用，而 MACA 无 cluster 支持，该变体（含整个 v3_cluster 目录与 api.cu 里
-// 对它的分发）已整体删除。
+#include "cuda/sm80/intrinsics.cuh"
+#include "cuda/sm80/helpers.cuh"
+#include "cuda/sm90/intrinsics.cuh"
+#include "cuda/sm100/intrinsics.cuh"
+#endif
+
+// [MACA] A narrower arm than the CUDA one above, and the narrowing is the
+// point: the `cuda/sm*` headers it does not list are inline PTX (`cp.async`,
+// TMA, UMMA, cluster barriers, `st_async`) written for CUDA's assembler, and
+// mxcc takes MACA ISA only -- the 64-bit operand constraints in them do not
+// even parse (`invalid constraint`).  What the shared device headers call out
+// of that set (`st_shared`, `trap`, `canonical_warp_idx_sync`) is implemented
+// in `maca/common.h`, which is the file to extend rather than this list.
+//
+// **Adding a `cuda/sm*` header here is not a port, and two of the reasons are
+// counters to the obvious argument.**  Those headers depend on cutlass, which
+// this platform has no include for (the toolkit's copy is `mctlass/`); and
+// `cuda/common.h`'s `KERUTILS_ENABLE_SM80/90/100` gates -- which is what would
+// pull them in -- test `__CUDA_ARCH__`, which is **defined here as 800**, not
+// absent.  So the gates would fire and re-enable exactly the PTX that does not
+// assemble.  `__CUDA_ARCH__=800` is a compatibility value cucc passes
+// (`-Xdevice -D__CUDA_ARCH__=800`), not a statement about this part: the
+// family is `DEEP_SELECT_ARCH` on the host side and `__MACA_ARCH__` in the
+// device pass, and **no MACA code may branch on `__CUDA_ARCH__`**.
+#ifdef KERUTILS_IS_BUILD_ON_MACA
+#include "maca/common.h"
+#endif
+
+#ifdef KERUTILS_IS_BUILD_ON_ASCEND
+#include "ascend/common.h"
 #endif

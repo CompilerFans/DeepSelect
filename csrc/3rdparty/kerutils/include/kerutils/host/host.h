@@ -13,6 +13,20 @@
 #include <cudaTypedefs.h>
 #endif
 
+// [MACA] cu-bridge maps the CUDA runtime API onto MACA's mcruntime, so
+// `cudaError_t`, `cudaStream_t`, `cudaGetErrorString` and
+// `cudaFuncSetAttribute` are all real here, and the launch path below is
+// written against them.  What is absent is `<cudaTypedefs.h>`, the
+// *driver*-API typedef header: the one thing here that needs it is
+// `make_tensor_map`, which is CUDA-only below.
+#ifdef KERUTILS_IS_BUILD_ON_MACA
+#include <cuda_runtime_api.h>
+#endif
+
+#ifdef KERUTILS_IS_BUILD_ON_ASCEND
+#include <acl/acl.h>
+#endif
+
 #include "kerutils/common/common.h"
 
 namespace kerutils {
@@ -54,7 +68,12 @@ public:
         }                                                                                        \
     } while(0)
 
-#ifdef KERUTILS_IS_BUILD_ON_CUDA
+// [MACA] The MACA arm shares this block rather than duplicating it: everything
+// in it except `make_tensor_map` is written against the CUDA *runtime* API,
+// which cu-bridge provides, and duplicating `KernelLaunchConfig`,
+// `find_next_power_of_2` and the two checks would give a fix in one arm no way
+// to reach the other.  What differs is inside `launch_kernel`.
+#if defined(KERUTILS_IS_BUILD_ON_CUDA) || defined(KERUTILS_IS_BUILD_ON_MACA)
 
 #define KU_CUDA_CHECK(call)                                                                                   \
 do {                                                                                                          \
@@ -80,22 +99,106 @@ do {                                                                            
 
 #define KU_CHECK_KERNEL_LAUNCH() KU_CUDA_CHECK(cudaGetLastError())
 
-template<typename T>
-inline __host__ __device__ constexpr T ceil_div(const T &a, const T &b) {
-    return (a + b - 1) / b;
-}
-
-template<typename T>
-inline __host__ __device__ constexpr T ceil(const T &a, const T &b) {
-    return (a + b - 1) / b * b;
-}
-
 template<typename T, T LOWER_BOUND = 1>
 inline __host__ __device__ constexpr T find_next_power_of_2(const T& x) {
     if (x <= LOWER_BOUND)
         return LOWER_BOUND;
     return find_next_power_of_2<T, LOWER_BOUND*2>(x);
 }
+
+// [MACA] CUDA-only.  `CUtensorMap` and `cuTensorMapEncodeTiled` are driver-API
+// TMA types: they come from `<cudaTypedefs.h>` above and describe a mechanism
+// MACA does not have, so there is nothing to implement this arm against.  A
+// caller here wanting the wrapper would need TMA first.
+#ifdef KERUTILS_IS_BUILD_ON_CUDA
+
+// A wrapper for make_tensor_map
+static inline CUtensorMap make_tensor_map(
+    const std::vector<uint64_t> &size,
+    const std::vector<uint64_t> &strides,   // PAY ATTENTION: In BYTES
+    const std::vector<uint32_t> &box_size,
+    void* global_ptr,
+    CUtensorMapDataType data_type,
+    CUtensorMapSwizzle swizzle_mode,
+    CUtensorMapL2promotion l2_promotion,
+    CUtensorMapInterleave interleave_mode = CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+    CUtensorMapFloatOOBfill oob_fill = CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
+    const std::vector<uint32_t> &element_strides_ = {}
+) {
+    int dim = size.size();
+    KU_ASSERT(dim >= 1);
+    
+    std::vector<uint32_t> element_strides;
+    if (element_strides_.empty()) {
+        for (int i = 0; i < dim; ++i)
+            element_strides.push_back(1);
+    } else {
+        element_strides = element_strides_;
+    }
+    KU_ASSERT(strides.size() == (uint32_t)dim-1 && box_size.size() == (uint32_t)dim && element_strides.size() == (uint32_t)dim);
+
+    auto call_cuTensorMapEncodeTiled = [&]<typename... Args>(Args... args) {
+        cudaDriverEntryPointQueryResult cuda_status;
+        void* pfn = nullptr;
+#if (__CUDACC_VER_MAJOR__ > 12)
+        KU_CUDA_CHECK(cudaGetDriverEntryPointByVersion(
+            "cuTensorMapEncodeTiled",
+            &pfn, 12000,
+            cudaEnableDefault,
+            &cuda_status));
+#else
+        KU_CUDA_CHECK(cudaGetDriverEntryPoint(
+            "cuTensorMapEncodeTiled",
+            &pfn,
+            cudaEnableDefault,
+            &cuda_status));
+#endif
+        if (cuda_status != cudaDriverEntryPointSuccess) {
+            KU_ASSERT(false, "Failed to load `cuTensorMapEncodeTiled`. cuda_status = %d", cuda_status);
+        }
+        return reinterpret_cast<decltype(&cuTensorMapEncodeTiled)>(pfn)(args...); \
+    };
+
+    CUtensorMap result;
+    CUresult ret_code = call_cuTensorMapEncodeTiled(
+        &result,
+        data_type,
+        dim,
+        global_ptr,
+        size.data(),
+        strides.data(),
+        box_size.data(),
+        element_strides.data(),
+        interleave_mode,
+        swizzle_mode,
+        l2_promotion,
+        oob_fill
+    );
+    if (ret_code != CUresult::CUDA_SUCCESS) {
+        auto print_vector = [&](auto t, const char* fmt, const char end='\n') {
+            for (auto elem : t) {
+                printf(fmt, elem);
+            }
+            printf("%c", end);
+        };
+        fprintf(stderr, "Failed to create tensormap\n");
+        fprintf(stderr, "Dim: %d\n", dim);
+        printf("size: "); print_vector(size, "%lu ");
+        printf("strides: "); print_vector(strides, "%lu ");
+        printf("box_size: "); print_vector(box_size, "%u ");
+        printf("element_strides: "); print_vector(element_strides, "%u ");
+        printf("global ptr: 0x%lx\n", (int64_t)global_ptr);
+        printf("data_type: %d\n", (int)data_type);
+        printf("swizzle_mode: %d\n", (int)swizzle_mode);
+        printf("l2_promotion: %d\n", (int)l2_promotion);
+        printf("interleave_mode: %d\n", (int)interleave_mode);
+        printf("oob_fill: %d\n", (int)oob_fill);
+        KU_ASSERT(false);
+    }
+    return result;
+}
+
+#endif  // KERUTILS_IS_BUILD_ON_CUDA -- make_tensor_map
 
 // Given strides (in number of elements), this function converts their datatype in uint64_t and then multiplies by elem_size
 template<typename T>
@@ -135,16 +238,23 @@ void launch_kernel(const KernelLaunchConfig &cfg, KernelFunc kernel, Args&&... a
             static_cast<int>(cfg.dynamic_smem)));
     }
 
-    // [MACA] 原来这里还有 cooperative / cluster / PDL 三条启动分支，已整组删除：
-    //   * cluster —— MACA 无 cluster 支持（JIT/驱动侧直接拒绝 cluster launch），
-    //     依赖它的 v3_cluster 变体已整体删除，没有任何调用方会传 cluster != {1,1,1}；
-    //   * PDL（programmatic dependent launch）—— MACA 同样不支持；
-    //   * cooperative —— cu-bridge 没有 cudaLaunchCooperativeKernel 的对应物。
-    //  三者的共同点是「不启用时就退化成最普通的 <<<>>> 启动」，所以这里只留
-    //  那一条。
-    //  请求了但得不到满足时**只警告、不中断**：启动照常按普通 <<<>>> 走，
-    //  同时打印一条说明。静默忽略是最难查的那种失败，而直接抛异常又会把一个
-    //  可降级的启动变成硬失败 —— 警告是这两者之间正确的取舍。
+#ifdef KERUTILS_IS_BUILD_ON_MACA
+
+    // [MACA] None of the three launch capabilities below exists here: no
+    // cluster (the driver rejects a cluster launch outright), no programmatic
+    // dependent launch, and no `cudaLaunchCooperativeKernel` in cu-bridge.
+    //
+    // Not one of them is needed to launch, which is why this arm is short.  A
+    // `KernelLaunchConfig` that leaves all three at their default values --
+    // which is every call site in this tree -- takes the identical path on
+    // both platforms; only a caller that *requests* one lands here.
+    //
+    // Such a request warns instead of raising, and that is the deliberate
+    // choice between two bad ones.  Ignoring it silently is the failure that
+    // is hardest to find later, because the launch still happens and the rows
+    // still come back; raising would turn a launch that does its job into a
+    // hard failure over a guarantee it could not have made.  The caller is
+    // told, and keeps the result.
     if (cfg.cluster.x != 1 || cfg.cluster.y != 1 || cfg.cluster.z != 1) {
         fprintf(stderr, "[kerutils] warning: cluster launch is not supported on MACA; "
                         "the cluster dimension request is ignored\n");
@@ -161,9 +271,83 @@ void launch_kernel(const KernelLaunchConfig &cfg, KernelFunc kernel, Args&&... a
     kernel<<<cfg.grid, cfg.block, cfg.dynamic_smem, cfg.stream>>>(
         std::forward<Args>(args)...);
 
+#else  // KERUTILS_IS_BUILD_ON_CUDA
+
+    const bool is_cluster     = !(cfg.cluster.x == 1 && cfg.cluster.y == 1 && cfg.cluster.z == 1);
+    const bool need_kernel_ex = is_cluster || cfg.use_pdl;
+
+    if (is_cluster && cfg.cooperative) {
+        KU_ASSERT(false, "cluster and cooperative launch are mutually exclusive");
+    }
+
+    if (cfg.cooperative) {
+        void* kernel_args[sizeof...(Args) > 0 ? sizeof...(Args) : 1] = {};
+        if constexpr (sizeof...(Args) > 0) {
+            size_t i = 0;
+            ((kernel_args[i++] = detail::kernel_arg_ptr(std::forward<Args>(args))), ...);
+        }
+        KU_CUDA_CHECK(cudaLaunchCooperativeKernel(
+            kernel, cfg.grid, cfg.block,
+            sizeof...(Args) > 0 ? kernel_args : nullptr,
+            static_cast<unsigned int>(cfg.dynamic_smem), cfg.stream));
+    } else if (need_kernel_ex) {
+        if (is_cluster) {
+            KU_ASSERT(cfg.grid.x % cfg.cluster.x == 0 &&
+                      cfg.grid.y % cfg.cluster.y == 0 &&
+                      cfg.grid.z % cfg.cluster.z == 0);
+            if (cfg.cluster.x * cfg.cluster.y * cfg.cluster.z > 8) {
+                KU_CUDA_CHECK(cudaFuncSetAttribute(
+                    reinterpret_cast<const void*>(kernel),
+                    cudaFuncAttributeNonPortableClusterSizeAllowed, 1));
+            }
+        }
+
+        const unsigned int num_attrs = is_cluster ? 2 : 1;
+        cudaLaunchAttribute attrs[2];
+        if (is_cluster) {
+            attrs[0].id = cudaLaunchAttributeClusterDimension;
+            attrs[0].val.clusterDim = {cfg.cluster.x, cfg.cluster.y, cfg.cluster.z};
+        }
+        attrs[num_attrs - 1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attrs[num_attrs - 1].val.programmaticStreamSerializationAllowed = cfg.use_pdl ? 1 : 0;
+
+        cudaLaunchConfig_t config = {
+            {cfg.grid.x, cfg.grid.y, cfg.grid.z},
+            {cfg.block.x, cfg.block.y, cfg.block.z},
+            cfg.dynamic_smem,
+            cfg.stream,
+            attrs,
+            num_attrs
+        };
+        KU_CUDA_CHECK(cudaLaunchKernelEx(
+            &config, kernel, std::forward<Args>(args)...));
+    } else {
+        kernel<<<cfg.grid, cfg.block, cfg.dynamic_smem, cfg.stream>>>(
+            std::forward<Args>(args)...);
+    }
+
+#endif  // KERUTILS_IS_BUILD_ON_MACA
+
     KU_CHECK_KERNEL_LAUNCH();
 }
 
-#endif  // KERUTILS_IS_BUILD_ON_CUDA
+#endif  // KERUTILS_IS_BUILD_ON_CUDA || KERUTILS_IS_BUILD_ON_MACA
+
+#ifdef KERUTILS_IS_BUILD_ON_ASCEND
+
+#define KU_ACLRT_CHECK(call)                                                                                   \
+do {                                                                                                            \
+    aclError status_ = (call);                                                                                  \
+    if (status_ != ACL_SUCCESS) {                                                                               \
+        char _ku_buf[1024];                                                                                     \
+        snprintf(_ku_buf, sizeof(_ku_buf), "ACLRT error (%s:%d): %s (code %d)", __FILE__, __LINE__,            \
+                 aclGetRecentErrMsg(), status_);                                                                \
+        fprintf(stderr, "%s\n", _ku_buf);                                                                       \
+        THROW_KU_EXCEPTION("ACLRT", _ku_buf);                                                                   \
+    }                                                                                                            \
+} while(0)
+
+
+#endif  // KERUTILS_IS_BUILD_ON_ASCEND
 
 }   // namespace kerutils

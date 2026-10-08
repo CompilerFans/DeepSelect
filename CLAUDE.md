@@ -258,10 +258,15 @@ Build plumbing worth knowing before editing `setup.py`:
   written *against* cu-bridge: `_find_cuda_home()` lands on `${MACA_PATH}/tools/cu-bridge` (its guess #4), and
   `_join_cuda_home` drives the device compiler as `$CUDA_HOME/bin/nvcc`, falling back to `bin/cucc` when that is absent —
   which is this install's case. `cucc` is then the whole CUDA-dialect adapter: `-imacros __macro_mxcc.h` (turns mxcc's
-  `__MACACC__` into `__CUDACC__`/`__NVCC__`, which torch's c10 headers and `kerutils/common/common.h` both branch on),
+  `__MACACC__` into `__CUDACC__`/`__NVCC__`, which torch's c10 headers branch on —
+  **and which `kerutils/common/common.h` deliberately does *not* test first**, because on this platform `__CUDACC__` is
+  an alias the adapter synthesizes rather than a statement about the platform; see "The platform layer" under
+  "Kernel architecture" below),
   `-gencode=...` → `-DNV_ARCH_A100 -Xdevice -D__CUDA_ARCH__=800`, `-lcudart` → `-lmcruntime`, plus the MACA library `-I`
   catalogue. Everything it does not recognize it forwards unchanged to mxcc (`-forward-unknown-to-compiler`), which is how
   the mxcc-dialect flags in `setup.py`'s `nvcc_args` reach the compiler.
+  **The whole chain is `cucc` and nothing calls mxcc directly** — `cucc --version` reports `mxcc version 1.0.0`, and
+  `ref/kerutils_platform_arms/run_probe.sh` prints the expansion under `BASH_XTRACE=1`.
   **That catalogue is cucc's, and `setup.py` must not repeat it**: `conf.json`'s `all/adder` already passes `-I` for
   `cu-bridge/include`, `include/soft-link` and every `include/mc*` library, plus `-imacros __macro_mxcc.h`. A hand-written
   copy drifts — this file carried 12 entries, 7 of which cucc already passed and 5 of which it did not. What cucc does
@@ -277,9 +282,10 @@ Build plumbing worth knowing before editing `setup.py`:
   the headline of "Build-change discipline" below.)
 - Every source in `csrc/` is a `.cu`, so the device compiler is the only compiler the build runs for sources.
   `api.cu` is host *code* (no `__global__`), spelled `.cu` so torch routes it to the device rule rather than to `$cxx`:
-  mxcc defines `__MACA__` for a `.cu` and only for a `.cu`, and `kerutils/common/common.h` keys `KERUTILS_IS_BUILD_ON_CUDA`
+  mxcc defines `__MACA__` for a `.cu` and only for a `.cu`, and `kerutils/common/common.h` keys
+  `KERUTILS_IS_BUILD_ON_MACA`
   on it. Upstream calls the same file `api.cpp`; the extension is the whole difference. A `.cpp` here would need its own
-  flag list, its own `-DKERUTILS_IS_BUILD_ON_CUDA`, and a pinned `CXX`. (`mxcc -x maca` is the identical switch and does
+  flag list and a pinned `CXX`. (`mxcc -x maca` is the identical switch and does
   define `__MACA__` for a `.cpp`, but it cannot reach the file: torch picks the rule by extension, and `-x` is not a file
   type it knows.)
 - `-use-fast-math` is passed with FTZ turned back off (`-Xclang -fdenormal-fp-math-f32=ieee`) so the one float conversion (`__float2bfloat16` of `value_oob_fill_value`) stays exact for a denormal fill. The ranking path is integer-only and indifferent.
@@ -323,7 +329,47 @@ and passing `check_result` on every cell the port fails. Nothing in that tree is
 C500-specific code, and the capacity gate cannot fire in this direction — see
 "Can a C600U run the C500 kernel" below.
 
-`csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel) and `TopkSelectArgs` (the port's params type; `maca_topk.cu` has its own `RowParams`, and `TopkSelectArgs::shared_memory_size_per_sm` is read only by `csrc/maca_kernels/xcore1600/`). It also carries **the per-family table** — `ARCH_FAMILY`, `ARCH_SM_COUNT` and `ARCH_SMEM_PER_AP_BYTES`, keyed on `DEEP_SELECT_ARCH` — see "the arch constants are compile-time" below. It used to carry no per-architecture constant at all; that changed on 2026-09-18 when the build went back to one artifact per family.
+`csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel) and `TopkSelectArgs` (the port's params type; `maca_topk.cu` has its own `RowParams`, and `TopkSelectArgs::shared_memory_size_per_sm` is read only by `csrc/maca_kernels/xcore1600/`). It also carries **the per-family table** — `ARCH_FAMILY`, `ARCH_SM_COUNT` and `ARCH_SMEM_PER_AP_BYTES`, keyed on `DEEP_SELECT_ARCH` — see "the arch constants are compile-time" below, and the platform declaration it is compiled under — see "the platform layer" immediately below.
+
+### The platform layer
+
+**Two dimensions, not one.** A kernel tree is named for its *platform* and then for its *family*: `csrc/maca_kernels/xcore1000/` is the MACA platform's family-1000 variant. That is upstream's shape — `csrc/cuda_kernels/` and `csrc/ascend_kernels/` sit at the same level for the same reason — and the family is the variant *below* the platform, not its peer. `csrc/structs.h`, `csrc/ffi/` and `csrc/3rdparty/` stay above it: shared by every platform this tree builds, which is currently one.
+
+The platform also travels as a **compile-time declaration**, in three places that have to agree:
+
+| where | what | who it is for |
+| --- | --- | --- |
+| `setup.py`'s `nvcc_args` | `-DDEEP_SELECT_IS_BUILD_ON_MACA`, beside the per-Extension `-DDEEP_SELECT_ARCH` | the build declares what it is building for |
+| `csrc/structs.h` | `#if !defined(DEEP_SELECT_IS_BUILD_ON_MACA) → #error` | the declaration is *checked*; there is no `#else` arm to fall into silently |
+| `csrc/3rdparty/kerutils/include/kerutils/common/common.h` | `KERUTILS_IS_BUILD_ON_MACA` | the vendored library's own arm, which is **not** keyed on the flag — see below |
+
+**They are two different mechanisms on purpose, and only the first two are the same mechanism.** Upstream declares its platform to `structs.h` with `-DDEEP_SELECT_IS_BUILD_ON_CUDA` and lets kerutils detect its own from the toolchain; this tree follows that split. A vendored library cannot require a build flag, so kerutils keys on what the compiler supplies: `__CUDACC__` for CUDA, `__has_include("kernel_operator.h")` for Ascend, `__MACA__` for MACA. The three are mutually exclusive and `common.h` has an `#error` per pair plus one for none — the same shape as upstream's CUDA × Ascend check, extended to the third.
+
+**`__MACA__` is tested *before* `__CUDACC__`, and that ordering is load-bearing rather than stylistic.** `cucc` passes `-imacros __macro_mxcc.h` to every translation unit, and that adapter header defines `__NVCC__` and `__CUDACC__` so CUDA-dialect source compiles. On MACA they are therefore *defined and false* — a synthesized alias, not a statement about the platform. Testing `__CUDACC__` first makes both arms fire; the mutual-exclusion `#error` is what reported it, on the first run of the probe below.
+
+**A `.cu` is preprocessed twice, and the two passes do not see the same macros.** The table below is what the arms are decided from, and it is measured on every run of `ref/kerutils_platform_arms/` rather than argued (MACA 3.7.0, `--offload-arch=xcore1000`):
+
+| macro | host pass | device pass | where it comes from |
+| --- | --- | --- | --- |
+| `__MACA__` / `__MACACC__` | **Y** | **Y** | mxcc |
+| `__CUDACC__` / `__NVCC__` | **Y** | **Y** | cucc's `-imacros __macro_mxcc.h` |
+| `__MACA_ARCH__` | – | **Y = 1000** | mxcc, device pass only |
+| `__CUDA_ARCH__` | – | **Y = 800** | cucc's `-Xdevice -D__CUDA_ARCH__=800` |
+
+Three things follow, and the third is the trap. `__MACA__` is the arm key because it is the one that is present in **both** passes — `__MACA_ARCH__` is device-pass-only, so a `host/host.h` waiting on it would find only its `#error`. `__CUDACC__` must be tested second because it is defined and false. And **`__CUDA_ARCH__` is defined, as 800** — so `cuda/common.h`'s `KERUTILS_ENABLE_SM80/90/100` gates would *fire* on this platform if that header were included, re-enabling the `cuda/sm80/` PTX that does not assemble here; `device/device.cuh`'s include list is what keeps them out, not a macro test. **No MACA code may branch on `__CUDA_ARCH__`**: the family is `DEEP_SELECT_ARCH` (host side, per artifact) or `__MACA_ARCH__` (device pass), never that value. (`cute/config.hpp` reaches the same conclusion its own way — it keys `CUTE_DEVICE` on `defined(__MACA_ARCH__) || defined(_NVHPC_CUDA) || defined(__clang__)`, using `__clang__`, which mxcc defines in both passes, as the host-pass fallback.)
+
+The arms themselves:
+
+| file | CUDA | MACA | Ascend |
+| --- | --- | --- | --- |
+| `common/common.h` | upstream | + `KERUTILS_IS_BUILD_ON_MACA` arm, first | upstream |
+| `device/device.cuh` | upstream verbatim | `maca/common.h` | `ascend/common.h` |
+| `device/<platform>/common.h` | upstream verbatim | **this tree's file** | upstream |
+| `host/host.h` | upstream verbatim | shared with CUDA except inside `launch_kernel` | upstream |
+
+`device/cuda/common.h` and `host/host.h`'s CUDA path are **byte-identical to `upstream/main`**, which is the property that makes a later re-merge cheap: the CUDA half of the vendored library is upstream's, and the MACA half is its own file. `device/maca/common.h` has **no cutlass dependency** — and cannot have one, since `/opt/maca/include/cutlass/` does not exist (the toolkit's cutlass-derived library is `include/mctlass/`) — so the `bf16` / `transac_bar_t` aliases the CUDA arm re-exports from cutlass are simply absent there; nothing in this tree uses them. `host/host.h` keeps `make_tensor_map` (TMA, driver API) CUDA-only for the same reason.
+
+**Nothing in the build compiles the MACA device arm.** Its only consumer, `csrc/maca_kernels/xcore1600/`, is off `SOURCES` and off `include_dirs`, so `./develop.sh` succeeding says nothing about it. `ref/kerutils_platform_arms/` is the compilation that does, and it reads its flags out of `setup.py`.
 
 ### The arch constants are compile-time
 
@@ -574,9 +620,13 @@ a compile error.
 | `__shfl_up/down_sync(0xFFFFFFFF, v, 1)` | lane 32 reads **itself**, not lane 31 |
 
 `kerutils`'s `canonical_warp_idx_sync()` (`csrc/3rdparty/kerutils/include/
-kerutils/device/cuda/common.h:89`) is `threadIdx.x / 32u` and belongs to this
+kerutils/device/maca/common.h`) is `threadIdx.x / 32u` and belongs to this
 family: a port that calls it for `warp_idx` gets a warp index twice as large as
-the real one, which then mis-sizes every `warp_cnt[NUM_WARPS]` array.
+the real one, which then mis-sizes every `warp_cnt[NUM_WARPS]` array. It is
+deliberately **not** the platform's wave index (`threadIdx.x / 64u`) — the
+ported kernels index 32-thread groups, and
+`ref/kerutils_platform_arms/` distinguishes the two at runtime, so "correcting"
+it to the platform's answer turns that probe red.
 
 | intrinsic | status on MACA | use |
 | --- | --- | --- |

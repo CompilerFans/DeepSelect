@@ -7,6 +7,62 @@ there.
 
 ## Unreleased
 
+### MACA is a platform arm of its own
+
+The tree declared its platform by *claiming another one*. `csrc/structs.h` had
+no platform macro at all, and `csrc/3rdparty/kerutils/common/common.h` selected
+kerutils' CUDA arm on MACA by aliasing `__MACA__` onto
+`KERUTILS_IS_BUILD_ON_CUDA`. That aliasing is now gone: the platform is
+declared, and kerutils has a MACA arm beside its CUDA and Ascend ones.
+
+Three places, and only the first two are the same mechanism:
+
+* `setup.py`'s `nvcc_args` passes `-DDEEP_SELECT_IS_BUILD_ON_MACA`, beside the
+  per-Extension `-DDEEP_SELECT_ARCH`.
+* `csrc/structs.h` refuses a build that names no platform
+  (`#if !defined(...) → #error`), so the declaration is checked rather than
+  conventional -- the shape upstream uses for its own two platforms.
+* kerutils selects its arm from the toolchain, **not** from that flag, because
+  a vendored library cannot require a build flag: `__CUDACC__` for CUDA,
+  `__has_include("kernel_operator.h")` for Ascend, `__MACA__` for MACA. The
+  three are mutually exclusive and each pair has an `#error`.
+
+**`__MACA__` is tested before `__CUDACC__`, and that ordering is load-bearing.**
+cucc passes `-imacros __macro_mxcc.h` to every translation unit, and that
+adapter header defines `__NVCC__` and `__CUDACC__` so CUDA-dialect source
+compiles. On MACA they are defined and false. Testing `__CUDACC__` first makes
+both arms fire; the mutual-exclusion `#error` is what reported it, on the first
+run of the probe below.
+
+The arms themselves: `device/cuda/common.h` is `upstream/main`'s file
+byte-for-byte again, and the MACA adaptations that used to live inside it
+(`st_shared`, `trap`, `canonical_warp_idx_sync`, the native `<maca_bfloat16.h>`
+include) are now `device/maca/common.h`. `device/device.cuh` and
+`kerutils.cuh` name the arm; `host/host.h` shares its body between CUDA and
+MACA and branches only inside `launch_kernel`, where the cluster / PDL /
+cooperative arms do not exist on MACA and a request for one warns rather than
+raising. `ceil_div` / `ceil` moved to `common/common.h` where upstream moved
+them, keeping `__host__ __device__` -- their callers are device code, and
+upstream's plain `inline constexpr` relies on `--expt-relaxed-constexpr`, which
+mxcc does not guarantee.
+
+**The MACA arm carries no cutlass**, which is the platform's constraint rather
+than a preference: `/opt/maca/include/cutlass/` does not exist (the toolkit's
+cutlass-derived library is `include/mctlass/`), so the `bf16` and
+`transac_bar_t` aliases the CUDA arm re-exports from cutlass have nothing to
+alias. Nothing here used them.
+
+**Nothing in the build compiles the MACA device arm** -- its only consumer,
+`csrc/maca_kernels/xcore1600/`, is off `SOURCES` and `include_dirs` -- so
+`ref/kerutils_platform_arms/` is what compiles it, with flags read out of
+`setup.py` rather than copied from it. It checks that the arm is the one
+selected and the only one, that the constexpr pair folds in the host pass and
+evaluates in a kernel, that the three device primitives round-trip 256/256
+slots, and that `launch_kernel` launches both on a default config and on one
+requesting cluster / PDL / cooperative. It does **not** claim
+`csrc/maca_kernels/xcore1600/` compiles; that tree is still unbuilt, as
+recorded under Known holes in `CLAUDE.md`.
+
 ### The kernel trees moved under a platform directory
 
 `csrc/xcore1000/` → `csrc/maca_kernels/xcore1000/` and

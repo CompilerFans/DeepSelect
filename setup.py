@@ -191,6 +191,18 @@ def build_for_maca():
         "-O3",
         "-std=c++20",
         "-DNDEBUG",
+        # The platform this build is for, beside the family.  Upstream declares
+        # its own the same way (`-DDEEP_SELECT_IS_BUILD_ON_CUDA` on the CUDA
+        # extension, `_ASCEND` on the NPU one) and `csrc/structs.h` refuses a
+        # build that names no platform, so the declaration is checked rather
+        # than conventional.
+        #
+        # It is deliberately *not* what kerutils keys on.  That library
+        # detects its platform from the toolchain -- `__CUDACC__`,
+        # `__has_include("kernel_operator.h")`, `__MACA__` -- so it keeps
+        # working when vendored into a build that passes no flags, which a
+        # vendored library cannot require.
+        "-DDEEP_SELECT_IS_BUILD_ON_MACA",
         "-Wno-deprecated-declarations",
         # torch injects `-fPIC` on the `cxx` side and
         # `--compiler-options '-fPIC'` on the device side, which cucc

@@ -1,6 +1,27 @@
 #pragma once
 
 #include <cstdint>
+
+// ── the platform this build is for ──────────────────────────────────────────
+//
+// Upstream's `csrc/structs.h` dispatches on the same declaration --
+// `#if DEEP_SELECT_IS_BUILD_ON_CUDA / #elif DEEP_SELECT_IS_BUILD_ON_ASCEND /
+// #else #error` -- and this tree is the MACA row of that dispatch, so the
+// declaration is required here for the same reason: the build must say which
+// platform it is for, and `setup.py` says it in `nvcc_args` beside
+// `-DDEEP_SELECT_ARCH`.  There is no `#else` arm to fall into, so a build that
+// forgets the flag is an error naming the flag rather than a silent choice
+// between platforms.
+//
+// Deliberately before the platform headers: without it the first complaint
+// would be `maca_bfloat16.h not found`, which names the symptom and not the
+// cause.
+#if !defined(DEEP_SELECT_IS_BUILD_ON_MACA)
+#error "DEEP_SELECT_IS_BUILD_ON_MACA is not set: this source is built for the \
+MACA platform.  See setup.py's build_for_maca, which passes it beside \
+-offload-arch and -DDEEP_SELECT_ARCH."
+#endif
+
 #include <cuda_runtime_api.h>
 
 // MACA's native bf16.  Every TU includes this header, so `api.cu` and each
