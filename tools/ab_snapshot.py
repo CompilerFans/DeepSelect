@@ -62,10 +62,19 @@ LIB = hashlib.md5(open(_p, "rb").read()).hexdigest()[:8]
 
 IX = {"int32": torch.int32, "int64": torch.int64}
 DT = {"bfloat16": torch.bfloat16, "float32": torch.float32}
+CELLS = json.loads(sys.argv[1])
+# One allocation width for every cell, so the shapes compared share a layout --
+# but it has to cover the widest cell asked for.  It read a fixed `524288`
+# until 2026-10-08, and `[:, :L]` *clamps*: a `4096 x 1048576 k=512` row was
+# silently measured at `L = 524288` (half the elements, and 1.93x the time the
+# same binary takes at the real width).  Ratios between two arms survived that
+# only while both arms routed the same way at the truncated width -- and the
+# width is exactly what the route predicates read.
+WIDTH = max(524288, max(c[1] for c in CELLS))
 out = []
-for bs, L, k, dt, ix in json.loads(sys.argv[1]):
+for bs, L, k, dt, ix in CELLS:
     torch.manual_seed(0)
-    s = torch.randn(bs, 524288, dtype=torch.float32, device="cuda:0")[:, :L]
+    s = torch.randn(bs, WIDTH, dtype=torch.float32, device="cuda:0")[:, :L]
     if dt == "bfloat16":
         s = s.to(torch.bfloat16)
     s = s.contiguous()
