@@ -367,6 +367,8 @@ The arms themselves:
 | `device/<platform>/common.h` | upstream verbatim | **this tree's file** | upstream |
 | `host/host.h` | upstream verbatim | shared with CUDA except inside `launch_kernel` | upstream |
 
+**The Ascend column describes upstream's shape, not this tree's contents.** `device/ascend/common.h` and `kerutils_for_ascend_npu.h` are Ascend-only and are not carried here, so `device/device.cuh`'s `"ascend/common.h"` — upstream's line, kept verbatim — resolves to nothing in this tree. That is inert rather than latent: the arm it sits in is `KERUTILS_IS_BUILD_ON_ASCEND`, keyed on `__has_include("kernel_operator.h")`, which is false on CUDA and on MACA alike. It is the same trade as the CUDA headers just below: kept as upstream wrote them, for the re-merge.
+
 `device/cuda/common.h` and `host/host.h`'s CUDA path are **byte-identical to `upstream/main`**, which is the property that makes a later re-merge cheap: the CUDA half of the vendored library is upstream's, and the MACA half is its own file. `device/maca/common.h` has **no cutlass dependency** — and cannot have one, since `/opt/maca/include/cutlass/` does not exist (the toolkit's cutlass-derived library is `include/mctlass/`) — so the `bf16` / `transac_bar_t` aliases the CUDA arm re-exports from cutlass are simply absent there; nothing in this tree uses them. `host/host.h` keeps `make_tensor_map` (TMA, driver API) CUDA-only for the same reason.
 
 **Nothing in the build compiles the MACA device arm.** Its only consumer, `csrc/maca_kernels/xcore1600/`, is off `SOURCES` and off `include_dirs`, so `./develop.sh` succeeding says nothing about it. `ref/kerutils_platform_arms/` is the compilation that does, and it reads its flags out of `setup.py`.
