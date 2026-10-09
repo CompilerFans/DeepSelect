@@ -382,16 +382,33 @@ __device__ __forceinline__ bool hist_add_bf16_wide(
     uint32_t* s_wide, const maca_bfloat16* input, uint32_t idx)
 {
     uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
-    const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
+    const uint32_t* w = reinterpret_cast<const uint32_t*>(&v);
+    // Both halves of each 32-bit word at once.  The ordered-key flip is a
+    // per-half mask -- 0x8000 for a non-negative half, 0xffff for a negative
+    // one, i.e. `0x8000 + 0x7fff * sign` -- and both halves' masks pack into
+    // one word: the arithmetic shift puts each half's sign at bit 0 or bit 16,
+    // so one multiply by 0x7fff builds the pair with no carry between halves
+    // (0x7fff + 0x7fff0000 = 0x7fff7fff).
+    //
+    // The NaN test rides the raw word: `(h & 0x7fff) > 0x7f80` is
+    // `is_nan_bits16` exactly, and it holds for both halves at once because
+    // `| 0x80008000` puts each half's top bit within reach of one subtraction
+    // of 0x7f817f81 -- the low half cannot borrow into the high one, since
+    // 0x8000 - 0x7f81 = 0x7f >= 0.  Both forms are verified against the
+    // per-element ones on all 65,536 half patterns.
+    uint32_t z = 0u;
     #pragma unroll
-    for (int i = 0; i < 8; i++)
-        atomicAdd(&s_wide[bf16_to_uint16(h[i]) >> kCoarse12Shift], 1u);
-    if (!kNan) return false;
-    bool found = false;
-    #pragma unroll
-    for (int i = 0; i < 8; i++)
-        found |= is_nan_bits16(__bfloat16_as_ushort(h[i]));
-    return found;
+    for (int i = 0; i < 4; i++) {
+        const uint32_t kp =
+            w[i] ^ ((((w[i] >> 15) & 0x00010001u) * 0x7FFFu) + 0x80008000u);
+        atomicAdd(&s_wide[(kp >> kCoarse12Shift) & 0x0FFFu], 1u);
+        atomicAdd(&s_wide[kp >> (16 + kCoarse12Shift)], 1u);
+        if (kNan) {
+            z |= (((w[i] & 0x7FFF7FFFu) | 0x80008000u) - 0x7F817F81u)
+                 & 0x80008000u;
+        }
+    }
+    return z != 0u;
 }
 
 // FP16: 寄存器直方图 + warp shuffle
