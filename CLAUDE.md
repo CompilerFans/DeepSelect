@@ -1067,18 +1067,27 @@ DS_TOPK_BACKEND=maca_c PYTHONPATH=. python tests/test.py         # the unpinned 
 PYTHONPATH=$PWD python tests/test.py --backend maca_c --sample 1000000 -rf
 ```
 
-82,170 cases, one process. `--sample 1000000` exceeds the table, so `min()`
-draws all of it; `-rf` is what keeps the run going to its summary.
+**105,287 cases as of 2026-10-09**, one process — the 82,170 this file carried
+was the four-shard-era figure (4 × 20,543). `--sample 1000000` exceeds the
+table, so `min()` draws all of it; `-rf` is what keeps the run going to its
+summary.
 
-**Budget the wall clock from a measurement on the day, not from this file.**
-The recorded per-shard figures for this same 20,543-case quarter disagree by
-**5×**: `docs/C500-radix-handover.zh.md` §4 says `~340 s` (→ ~23 min for four),
-and `docs/C500-radix-perf-ledger.zh.md` §5's later rows say **1,730–1,917 s**
-(→ ~2 h for four). Both are for four serial shards of 20543/20543/20542/20542;
-nothing in either says which machine state produced the difference, and no
-single-process run of the whole table has been taken. So: plan for **a couple of
-hours**, and replace this paragraph with the measured number the first time the
-one-process gate is actually run.
+**Budget the wall clock from a measurement on the day, not from this file, and
+expect it to be long.** Measured 2026-10-09 on a quiet C500 (device 2, artifact
+md5 `6c28a77b52b6`): **1.66–1.81 cases/s** sustained over the first 11,275
+cases, i.e. **~16–17 h projected** for the whole table — the cases are far
+heavier than the count suggests (403 of the first 1,100 are ≥ 67M elements,
+and device memory peaked at 54 GB). The shard-era figures for the then-82,170
+case table (340 s vs 1,730–1,917 s per 20,543-case quarter — a 5× spread with
+nothing recording which machine state produced which) do not transfer.
+
+That run was **stopped by decision at 11,275/105,287** (0 `check_fail`,
+0 `crash`, 0 `skip`); **no complete single-process run has been taken**, so the
+projection above is what to plan from, and the next full run should replace it
+with its own measured number. The gate's marginal value is highest for a
+**routing** change — different shapes taking different kernels is exactly what
+the table's exotic cells cover — and lowest for a change confined to one
+kernel body that every row-path case reaches identically.
 
 `--shard` went with the driver it lived in on 2026-09-16, which is what turned
 four restartable quarters into one:
