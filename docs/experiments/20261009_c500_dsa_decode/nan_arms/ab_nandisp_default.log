@@ -1,0 +1,19 @@
+# 147 cells from perf_data/MetaX_C500/20261009_202953/deepselect_perf.csv
+# 2 arms x 3 rounds x 10 iters, device 2
+# round 0 arm old lib=6c28a77b /tmp/ds_hist/OLD/deep_select/deep_select_maca_xcore1000.so
+# round 0 arm new lib=d6eb50f7 /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+# round 1 arm old lib=6c28a77b /tmp/ds_hist/OLD/deep_select/deep_select_maca_xcore1000.so
+# round 1 arm new lib=d6eb50f7 /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+# round 2 arm old lib=6c28a77b /tmp/ds_hist/OLD/deep_select/deep_select_maca_xcore1000.so
+# round 2 arm new lib=d6eb50f7 /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+
+# arm old: libs=['6c28a77b']
+# arm new: libs=['d6eb50f7']
+
+=== new vs old (paired median per cell) ===
+  route c12    n= 10  median 1.0030x  [0.996, 1.015]
+  route row    n=100  median 1.0051x  [0.652, 1.890]
+  route split  n= 11  median 1.0262x  [1.017, 1.045]
+  ALL    n=121  median 1.0086x  [0.652, 1.890]
+
+# wrote /tmp/ds_hist/ab_epi_final.json/ab_paired.json

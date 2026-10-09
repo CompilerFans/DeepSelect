@@ -44,7 +44,8 @@ README §8.3–§8.7 引用的每一条测量都在这。臂树本身（各 500 
 |---|---|
 | `ab_final.log` | A / B / T / S1 / S2，同一 session 交替、3 轮，`measure_sum.py` 逐内核（含"Σ算子核"与官方口径两列） |
 | `ab_fold.log` | A / W / Y1，同上 |
-| `ab_epi_final.log`（默认档）/ `ab_noabort.log` + `ab_noabort.json/ab_paired.json`（生产档） | 家族级 A/B 的两个档（`tools/ab_snapshot.py`，121 格配对、2 臂 × 3 轮 × 10 iters、device 2）：前者是加档位开关之前的一次跑（默认 `True`），后者带 `abort=False` 回执。JSON 每格是 `{a, b, a_main, b_main, route_a, route_b}`；读数在 README §8.9 |
+| `ab_family.log` + `ab_family_paired.json` | **SWAR fold**（8.7）的家族级 A/B（`tools/ab_snapshot.py`，121 格配对、2 臂 × 3 轮 × 10 iters、device 2，臂 `621b63a5` / `fe0e4b98`）；JSON 的每格是 `{a: [...], b: [...], route_a, route_b}` |
+| `ab_nandisp_default.log` + `.json` / `ab_nandisp_prod.log` + `.json` | **NaN 处置搬出行核**（8.9）的家族级 A/B **两个档**，同几何（121 格 × 3 轮 × 10 iters、device 2）：`default` 是加档位开关之前的一次跑（两臂都没带 kwarg = 默认 `True`），`prod` 带每轮 `abort=False` 回执。`prod` 的 JSON 多 `a_main`/`b_main`（去掉跟随核的读数），`default` 没有这一对。读数在 README §8.9 |
 | `resource_usage/<臂>.ru2` | `mxcc --resource-usage` 全量输出；关键行见下 |
 | `measure_sum.py` | 逐内核计时 + "Σ算子核"（`bench_topk` 的名字过滤会漏掉 `nan_scan_kernel`，所以必须自己加这一列） |
 | `measure_nan.py` | 单格 A/B 计时 |

@@ -1,0 +1,25 @@
+# 147 cells from perf_data/MetaX_C500/20261009_202953/deepselect_perf.csv
+# 2 arms x 3 rounds x 10 iters, device 2
+# round 0 arm old lib=6c28a77b abort=False /tmp/ds_hist/OLD/deep_select/deep_select_maca_xcore1000.so
+# round 0 arm new lib=0595136a abort=False /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+# round 1 arm old lib=6c28a77b abort=False /tmp/ds_hist/OLD/deep_select/deep_select_maca_xcore1000.so
+# round 1 arm new lib=0595136a abort=False /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+# round 2 arm old lib=6c28a77b abort=False /tmp/ds_hist/OLD/deep_select/deep_select_maca_xcore1000.so
+# round 2 arm new lib=0595136a abort=False /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+
+# arm old: libs=['6c28a77b'] abort_when_nan_found=['False']
+# arm new: libs=['0595136a'] abort_when_nan_found=['False']
+
+=== new vs old — all operator kernels ===
+  route c12    n= 10  median 1.0001x  [0.993, 1.002]
+  route row    n=100  median 1.0000x  [0.649, 1.048]
+  route split  n= 11  median 1.0013x  [0.998, 1.011]
+  ALL    n=121  median 1.0000x  [0.649, 1.048]
+
+=== new vs old — selection kernels only (no follower) ===
+  route c12    n= 10  median 1.0001x  [0.993, 1.002]
+  route row    n=100  median 1.0000x  [0.649, 1.048]
+  route split  n= 11  median 1.0013x  [0.998, 1.011]
+  ALL    n=121  median 1.0000x  [0.649, 1.048]
+
+# wrote /tmp/ds_hist/ab_noabort.json/ab_paired.json

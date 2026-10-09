@@ -1002,7 +1002,9 @@ epilogue**（`printf` + `__trap` + sentinel + `return`）的账，而 epilogue �
 #### 寄存器普查：60/60 个行核实例化全部跨过门槛
 
 前后各一份 `mxcc --resource-usage` 全量清单，**逐实例化配对**比对（改前 = 干净
-`git archive HEAD` 树 / `ee402bc`，改后 = 落地树；命令见 `nan_arms/dump_asm.sh`）：
+`git archive HEAD` 树 / `ee402bc`，改后 = 落地树；两份清单随本节入仓 ——
+`nan_arms/resource_usage/{HEAD_ee402bc,landed_0595136a}.ru2`，105 / 106 个设备
+函数；命令见 `nan_arms/dump_asm.sh`）：
 
 | 路由（`PRE` 位） | 实例化数 | 改前 MT | 改后 MT |
 |---|---:|---|---|
@@ -1059,11 +1061,13 @@ trap"只在行核确实覆盖了每一行时才成立）：
 
 #### 家族级配对 A/B —— 两个档，两张读数
 
-`tools/ab_snapshot.py --arm old=/tmp/ds_hist/OLD --arm new=$PWD --rounds 3
+`tools/ab_snapshot.py --arm old=<HEAD 的干净树> --arm new=$PWD --rounds 3
 --device 2`，147 格（121 格两臂都 pass，其余是只在一臂上 pass 的 `deep_gemm`
 列），同 session 交替、每臂每轮一进程。两臂的 `.so` 回执分别是 `6c28a77b`
-（= `ee402bc`，`git archive HEAD` 的干净树 —— 与 `baseline` 的
-`extension_md5` 逐字节相同）与 **`0595136a`**（落地件）。
+（= `ee402bc`，`git archive HEAD` 的干净树 —— 与当时 `baseline` 的
+`extension_md5` 逐字节相同）与 **`0595136a`**（落地件）。两个档的原始输出随本节
+入仓：`nan_arms/ab_nandisp_default.{log,json}`（默认档）与
+`nan_arms/ab_nandisp_prod.{log,json}`（生产档）；两臂的臂树在 `/tmp`，收尾已删。
 
 **落地件与 8.9 早前那批读数不是同一个 `.so`，但代码是同一份**：15:23 的构建
 （`d6eb50f7`）之后只改过一段注释（15:38），15:48 重建得 `0595136a`；
