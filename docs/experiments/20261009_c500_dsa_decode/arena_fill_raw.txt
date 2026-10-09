@@ -1,0 +1,8 @@
+b64 V1048576 k512
+  crowded      12-bit (key>>4)  threshold=    412  largest=  29720  cap= 4096  -> 0.10x cap, 0/64 over
+  bituniform   12-bit (key>>4)  threshold=    301  largest=   8721  cap= 4096  -> 0.07x cap, 0/64 over
+
+b6 V1048576 k512
+  crowded      8-bit (key>>8)   threshold=   1542  largest=  18868  cap= 7028  -> 0.22x cap, 0/6 over
+  bituniform   8-bit (key>>8)   threshold=    286  largest=    857  cap= 7028  -> 0.04x cap, 0/6 over
+

@@ -1,0 +1,77 @@
+/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/docs/experiments/20261009_c500_dsa_decode/probe_stage1_passes.py:55: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+  import torch
+# read wall = 1650 GB/s (C500, measured streaming)
+# device = MetaX C500  sm_count = 104
+# arena: kSmemInputSize = 3514 slots (x2 = 7028 with compact indices); a chunk is vocab/chunks elements
+
+=== b6 V1048576 k512   (one row walk = 12.6 MB)
+  [crowded]  route=split  span=151.14 us   op_sum=142.64 us
+      op nan_scan_kernel<... unsigned int, unsigned int, int*)      38.55 us
+      op topk_kernel_radix<...true>(deep_select_maca::RowParams)       5.43 us
+      op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)      65.54 us
+      op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      33.13 us
+  [bituniform]  route=split  span=123.67 us   op_sum=115.25 us
+      op nan_scan_kernel<... unsigned int, unsigned int, int*)      37.63 us
+      op topk_kernel_radix<...true>(deep_select_maca::RowParams)       5.45 us
+      op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)      44.65 us
+      op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      27.52 us
+
+  kernel                               crowded  bituniform   ratio        crowded real GB/s (%wall)
+  nan_scan_kernel<...d int, unsigned int, int*)     38.55       37.63   1.02x       326.4 (1 pass) 19.8%
+  topk_kernel_radix<...ep_select_maca::RowParams)      5.43        5.45   1.00x      4637.0 (2 pass) 281.0%
+  topk_bf16_chunk_stage1_kernel_k<...t16*, long, int, int, int)     65.54       44.65   1.47x       384.0 (2 pass) 23.3%
+  topk_bf16_chunk_stage2_kernel_k<...nt const*, int*, int, int)     33.13       27.52   1.20x       759.7 (2 pass) 46.0%
+  op_sum                                142.64      115.25   1.24x
+  (one row walk = 12.6 MB; ratio >1 means the crowded arm is slower)
+
+=== b6 V262144 k512   (one row walk = 3.1 MB)
+  [crowded]  route=split  span=106.16 us   op_sum=97.74 us
+      op nan_scan_kernel<... unsigned int, unsigned int, int*)      20.66 us
+      op topk_kernel_radix<...true>(deep_select_maca::RowParams)       5.56 us
+      op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)      41.50 us
+      op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      30.03 us
+  [bituniform]  route=split  span=69.04 us   op_sum=60.60 us
+      op nan_scan_kernel<... unsigned int, unsigned int, int*)      19.92 us
+      op topk_kernel_radix<...true>(deep_select_maca::RowParams)       5.48 us
+      op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)      19.53 us
+      op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      15.67 us
+
+  kernel                               crowded  bituniform   ratio        crowded real GB/s (%wall)
+  nan_scan_kernel<...d int, unsigned int, int*)     20.66       19.92   1.04x       152.3 (1 pass)  9.2%
+  topk_kernel_radix<...ep_select_maca::RowParams)      5.56        5.48   1.01x      1132.5 (2 pass) 68.6%
+  topk_bf16_chunk_stage1_kernel_k<...t16*, long, int, int, int)     41.50       19.53   2.12x       151.6 (2 pass)  9.2%
+  topk_bf16_chunk_stage2_kernel_k<...nt const*, int*, int, int)     30.03       15.67   1.92x       209.5 (2 pass) 12.7%
+  op_sum                                 97.74       60.60   1.61x
+  (one row walk = 3.1 MB; ratio >1 means the crowded arm is slower)
+
+=== b1 V1048576 k512   (one row walk = 2.1 MB)
+  [crowded]  route=split  span=135.71 us   op_sum=127.31 us
+      op nan_scan_kernel<... unsigned int, unsigned int, int*)      27.08 us
+      op topk_kernel_radix<...true>(deep_select_maca::RowParams)       6.02 us
+      op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)      60.31 us
+      op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      33.89 us
+  [bituniform]  route=split  span=109.52 us   op_sum=101.07 us
+      op nan_scan_kernel<... unsigned int, unsigned int, int*)      26.98 us
+      op topk_kernel_radix<...true>(deep_select_maca::RowParams)       5.86 us
+      op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)      40.01 us
+      op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      28.21 us
+
+  kernel                               crowded  bituniform   ratio        crowded real GB/s (%wall)
+  nan_scan_kernel<...d int, unsigned int, int*)     27.08       26.98   1.00x        77.4 (1 pass)  4.7%
+  topk_kernel_radix<...ep_select_maca::RowParams)      6.02        5.86   1.03x       697.2 (2 pass) 42.3%
+  topk_bf16_chunk_stage1_kernel_k<...t16*, long, int, int, int)     60.31       40.01   1.51x        69.5 (2 pass)  4.2%
+  topk_bf16_chunk_stage2_kernel_k<...nt const*, int*, int, int)     33.89       28.21   1.20x       123.7 (2 pass)  7.5%
+  op_sum                                127.31      101.07   1.26x
+  (one row walk = 2.1 MB; ratio >1 means the crowded arm is slower)
+
+=== b64 V1048576 k512   (one row walk = 134.2 MB)
+  [crowded]  route=row  span=482.76 us   op_sum=482.76 us
+      op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     482.76 us
+  [bituniform]  route=row  span=775.32 us   op_sum=775.32 us
+      op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     775.32 us
+
+  kernel                               crowded  bituniform   ratio        crowded real GB/s (%wall)
+  topk_kernel_radix<...ep_select_maca::RowParams)    482.76      775.32   0.62x       556.0 (2 pass) 33.7%
+  op_sum                                482.76      775.32   0.62x
+  (one row walk = 134.2 MB; ratio >1 means the crowded arm is slower)
+
