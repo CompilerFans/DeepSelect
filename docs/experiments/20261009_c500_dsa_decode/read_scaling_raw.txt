@@ -1,0 +1,17 @@
+# read wall = 1650 GB/s (C500, measured streaming)
+# device = MetaX C500  sm_count = 104
+# V=1048576 k=512 bf16; one row = 2.1 MB, chunks = 16 -> nan_scan grid = b*16 CTAs
+
+  b=1   ctas=16    bytes=   2.10 MB  nan_scan=   26.78 us     78.3 GB/s    4.7% wall
+  b=2   ctas=32    bytes=   4.19 MB  nan_scan=   29.29 us    143.2 GB/s    8.7% wall
+  b=3   ctas=48    bytes=   6.29 MB  nan_scan=   31.31 us    200.9 GB/s   12.2% wall
+  b=6   ctas=96    bytes=  12.58 MB  nan_scan=   38.84 us    324.0 GB/s   19.6% wall
+  b=12  ctas=192   bytes=  25.17 MB  nan_scan=   42.93 us    586.2 GB/s   35.5% wall
+  b=26  ctas=416   bytes=  54.53 MB  nan_scan=   52.74 us   1033.9 GB/s   62.7% wall
+  b=52  ctas=832   bytes= 109.05 MB  nan_scan=   85.76 us   1271.6 GB/s   77.1% wall
+
+  fit: us = 28.07 + 0.5197 * MB
+       intercept 28.07 us is paid per run, not per byte;
+       slope   0.5197 us/MB = 1924.1 GB/s marginal (116.6% wall)
+  (marginal here is a 2-parameter fit over the b sweep; read it as
+   the machine's steady-state rate at this size, not as a wall.)

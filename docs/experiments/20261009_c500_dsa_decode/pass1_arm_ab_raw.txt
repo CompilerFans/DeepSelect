@@ -1,0 +1,17 @@
+# 147 cells from perf_data/MetaX_C500/20261009_144529/deepselect_perf.csv
+# 2 arms x 2 rounds x 10 iters, device 2
+# round 0 arm prod lib=126e9969 /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+# round 0 arm p1only lib=5539f1c8 /tmp/ds_p1/deep_select/deep_select_maca_xcore1000.so
+# round 1 arm prod lib=126e9969 /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+# round 1 arm p1only lib=5539f1c8 /tmp/ds_p1/deep_select/deep_select_maca_xcore1000.so
+
+# arm prod: libs=['126e9969']
+# arm p1only: libs=['5539f1c8']
+
+=== p1only vs prod (paired median per cell) ===
+  route c12    n= 10  median 1.0009x  [0.998, 1.005]
+  route row    n=100  median 0.4437x  [0.327, 1.088]
+  route split  n= 11  median 0.9981x  [0.996, 1.003]
+  ALL    n=121  median 0.4482x  [0.327, 1.088]
+
+# wrote /tmp/ds_p1_out/ab_paired.json
