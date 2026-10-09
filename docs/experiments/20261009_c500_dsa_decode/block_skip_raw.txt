@@ -1,0 +1,12 @@
+V=  16384 k= 512  candidates/row     598 ( 3.65% of row) | blocks that CANNOT be skipped: mean  90.6%  worst row  95.7%  -> pass-2 traffic x0.906
+V=  16384 k=1024  candidates/row    1104 ( 6.74% of row) | blocks that CANNOT be skipped: mean  99.0%  worst row 100.0%  -> pass-2 traffic x0.990
+V=  65536 k= 512  candidates/row     815 ( 1.24% of row) | blocks that CANNOT be skipped: mean  55.0%  worst row  58.0%  -> pass-2 traffic x0.550
+V=  65536 k=1024  candidates/row    1498 ( 2.29% of row) | blocks that CANNOT be skipped: mean  77.1%  worst row  79.2%  -> pass-2 traffic x0.771
+V= 131072 k= 512  candidates/row     830 ( 0.63% of row) | blocks that CANNOT be skipped: mean  33.4%  worst row  35.7%  -> pass-2 traffic x0.334
+V= 131072 k=1024  candidates/row    1640 ( 1.25% of row) | blocks that CANNOT be skipped: mean  55.4%  worst row  57.4%  -> pass-2 traffic x0.554
+V= 262144 k= 512  candidates/row     797 ( 0.30% of row) | blocks that CANNOT be skipped: mean  17.7%  worst row  19.4%  -> pass-2 traffic x0.177
+V= 262144 k=1024  candidates/row    1671 ( 0.64% of row) | blocks that CANNOT be skipped: mean  33.6%  worst row  34.8%  -> pass-2 traffic x0.336
+V= 524288 k= 512  candidates/row     725 ( 0.14% of row) | blocks that CANNOT be skipped: mean   8.5%  worst row   9.0%  -> pass-2 traffic x0.085
+V= 524288 k=1024  candidates/row    1600 ( 0.31% of row) | blocks that CANNOT be skipped: mean  17.8%  worst row  18.8%  -> pass-2 traffic x0.178
+V=1048576 k= 512  candidates/row     625 ( 0.06% of row) | blocks that CANNOT be skipped: mean   3.7%  worst row   4.1%  -> pass-2 traffic x0.037
+V=1048576 k=1024  candidates/row    1447 ( 0.14% of row) | blocks that CANNOT be skipped: mean   8.5%  worst row   8.9%  -> pass-2 traffic x0.085

@@ -1,0 +1,82 @@
+# in-kernel phase marks, 8 CTAs (rows 0..7), tree = git archive HEAD (0595136a) + patch_phase_marks.py
+# ticks are get_time() units (~1.0 ns/tick by the wave model); ratios are the reading
+
+== cell 4096 x 524288 x 512 ==
+[arm2 check_nan=True] deep_select_maca_xcore1000.so md5=8ed3bb272802
+return type=tuple idx=Tensor shape=(4096, 512) dtype=torch.int32
+cell=4096x524288x512
+  row               clear             pass1  fold/scan/narrow           collect       refine/emit           sum
+    0       1164   141744     4776   170000     4860  tot=  322544  p1= 43.9% col= 52.7%  col/p1=1.199
+    1       1196   141400     4892   169592     5296  tot=  322376  p1= 43.9% col= 52.6%  col/p1=1.199
+    2       1288   140492     5088   172644     4960  tot=  324472  p1= 43.3% col= 53.2%  col/p1=1.229
+    3       1224   140676     4816   169904     5384  tot=  322004  p1= 43.7% col= 52.8%  col/p1=1.208
+    4       1152   139644     5220   170548     5108  tot=  321672  p1= 43.4% col= 53.0%  col/p1=1.221
+    5       1116   140948     5024   169996     5092  tot=  322176  p1= 43.7% col= 52.8%  col/p1=1.206
+    6       1148   139536     5292   171216     5212  tot=  322404  p1= 43.3% col= 53.1%  col/p1=1.227
+    7       1104   143188     4920   169020     5200  tot=  323432  p1= 44.3% col= 52.3%  col/p1=1.180
+
+operator kernel sum 6171.9 us | official rule 6151.3 us
+
+== cell 4096 x 1048576 x 512 ==
+[arm2 check_nan=True] deep_select_maca_xcore1000.so md5=8ed3bb272802
+return type=tuple idx=Tensor shape=(4096, 512) dtype=torch.int32
+cell=4096x1048576x512
+  row               clear             pass1  fold/scan/narrow           collect       refine/emit           sum
+    0       1608   259592     4808   333392     4632  tot=  604032  p1= 43.0% col= 55.2%  col/p1=1.284
+    1       1516   261156     4816   308580     4412  tot=  580480  p1= 45.0% col= 53.2%  col/p1=1.182
+    2       1388   258252     4816   330200     5336  tot=  599992  p1= 43.0% col= 55.0%  col/p1=1.279
+    3       1380   261080     4864   329760     5124  tot=  602208  p1= 43.4% col= 54.8%  col/p1=1.263
+    4       1524   260648     4660   329236     5148  tot=  601216  p1= 43.4% col= 54.8%  col/p1=1.263
+    5       1400   257340     5020   325264     5112  tot=  594136  p1= 43.3% col= 54.7%  col/p1=1.264
+    6       1488   253844     5040   327084     6596  tot=  594052  p1= 42.7% col= 55.1%  col/p1=1.289
+    7       1544   258960     4796   333448     4480  tot=  603228  p1= 42.9% col= 55.3%  col/p1=1.288
+
+operator kernel sum 11793.4 us | official rule 11772.4 us
+
+== cell 512 x 1048576 x 512 ==
+[arm2 check_nan=True] deep_select_maca_xcore1000.so md5=8ed3bb272802
+return type=tuple idx=Tensor shape=(512, 512) dtype=torch.int32
+cell=512x1048576x512
+  row               clear             pass1  fold/scan/narrow           collect       refine/emit           sum
+    0       1276   262328     4656   331220     5228  tot=  604708  p1= 43.4% col= 54.8%  col/p1=1.263
+    1       1412   260352     5032   330832     4552  tot=  602180  p1= 43.2% col= 54.9%  col/p1=1.271
+    2       1380   259936     4896   332168     4116  tot=  602496  p1= 43.1% col= 55.1%  col/p1=1.278
+    3       1364   261424     5112   330208     4556  tot=  602664  p1= 43.4% col= 54.8%  col/p1=1.263
+    4       1324   258760     5080   330116     5076  tot=  600356  p1= 43.1% col= 55.0%  col/p1=1.276
+    5       1396   262700     4968   330480     5208  tot=  604752  p1= 43.4% col= 54.6%  col/p1=1.258
+    6       1348   261272     4800   332848     5036  tot=  605304  p1= 43.2% col= 55.0%  col/p1=1.274
+    7       1356   260508     4728   330684     4868  tot=  602144  p1= 43.3% col= 54.9%  col/p1=1.269
+
+operator kernel sum 1643.9 us | official rule 1619.3 us
+
+== cell 4096 x 131072 x 512 ==
+[arm2 check_nan=True] deep_select_maca_xcore1000.so md5=8ed3bb272802
+return type=tuple idx=Tensor shape=(4096, 512) dtype=torch.int32
+cell=4096x131072x512
+  row               clear             pass1  fold/scan/narrow           collect       refine/emit           sum
+    0       1236    43264     4928    50464     6264  tot=  106156  p1= 40.8% col= 47.5%  col/p1=1.166
+    1       1324    44212     4744    50216     7368  tot=  107864  p1= 41.0% col= 46.6%  col/p1=1.136
+    2       1260    44152     4828    50064     5888  tot=  106192  p1= 41.6% col= 47.1%  col/p1=1.134
+    3       1360    43012     4756    50268     5268  tot=  104664  p1= 41.1% col= 48.0%  col/p1=1.169
+    4       1248    44960     4444    48424     5536  tot=  104612  p1= 43.0% col= 46.3%  col/p1=1.077
+    5       1232    43940     4696    49488     5604  tot=  104960  p1= 41.9% col= 47.1%  col/p1=1.126
+    6       1332    44440     4660    50892     7652  tot=  108976  p1= 40.8% col= 46.7%  col/p1=1.145
+    7       1192    43588     4800    49564     6680  tot=  105824  p1= 41.2% col= 46.8%  col/p1=1.137
+
+operator kernel sum 1932.7 us | official rule 1910.3 us
+
+== check_nan control (same binary, runtime switch), 4096x524288x512 ==
+[arm2 check_nan=False] deep_select_maca_xcore1000.so md5=8ed3bb272802
+return type=tuple idx=Tensor shape=(4096, 512) dtype=torch.int32
+cell=4096x524288x512
+  row               clear             pass1  fold/scan/narrow           collect       refine/emit           sum
+    0        784   137172     5188   163132     4188  tot=  310464  p1= 44.2% col= 52.5%  col/p1=1.189
+    1        796   138276     5176   164140     5832  tot=  314220  p1= 44.0% col= 52.2%  col/p1=1.187
+    2        776   138744     5560   163432     5988  tot=  314500  p1= 44.1% col= 52.0%  col/p1=1.178
+    3        840   139264     5460   164192     5564  tot=  315320  p1= 44.2% col= 52.1%  col/p1=1.179
+    4        784   137696     5552   166604     5632  tot=  316268  p1= 43.5% col= 52.7%  col/p1=1.210
+    5        772   142848     4812   161264     5100  tot=  314796  p1= 45.4% col= 51.2%  col/p1=1.129
+    6        788   136880     5024   165180     5212  tot=  313084  p1= 43.7% col= 52.8%  col/p1=1.207
+    7        756   138560     5424   161728     4188  tot=  310656  p1= 44.6% col= 52.1%  col/p1=1.167
+
+operator kernel sum 6006.9 us | official rule 5988.2 us
