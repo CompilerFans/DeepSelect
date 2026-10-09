@@ -200,6 +200,14 @@ Measured with the benchmark in [`tests/test.py`](tests/test.py)
 on the same input. The metric is effective memory bandwidth: TopK does no
 floating-point math, so a FLOP rate would not be meaningful here.
 
+Each figure is drawn from one recording by
+[`scripts/plot_perf.py`](scripts/plot_perf.py) -- `python3 scripts/plot_perf.py
+<recording>` re-renders it -- so the picture and the record it came from cannot
+disagree. The two **C500** figures are drawn from
+`perf_data/MetaX_C500/20261009_202953` (artifact md5 `6c28a77b52b6`); the
+**C600-U** pair is from the 2026-10-08 re-measurement (commit `622a5b2`,
+28-AP part, artifact md5 `7844e79adcb664fb1a4f4d897c2fd011`).
+
 ### Lightning Indexer Scenario (MACA)
 
 bfloat16, `topk = 512`, one subplot per batch size. One figure per device:
