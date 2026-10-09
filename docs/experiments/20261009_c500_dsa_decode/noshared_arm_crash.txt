@@ -1,0 +1,45 @@
+# 147 cells from perf_data/MetaX_C500/20261009_144529/deepselect_perf.csv
+# 2 arms x 2 rounds x 10 iters, device 2
+# round 0 arm p1only lib=5539f1c8 /tmp/ds_p1/deep_select/deep_select_maca_xcore1000.so
+<string>:5: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+Traceback (most recent call last):
+  File "<string>", line 26, in <module>
+  File "/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/torch/random.py", line 46, in manual_seed
+    torch.cuda.manual_seed_all(seed)
+  File "/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/torch/cuda/random.py", line 127, in manual_seed_all
+    _lazy_call(cb, seed_all=True)
+  File "/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/torch/cuda/__init__.py", line 256, in _lazy_call
+    callable()
+  File "/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/torch/cuda/random.py", line 125, in cb
+    default_generator.manual_seed(seed)
+RuntimeError: CUDA error: an illegal memory access was encountered
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+
+# round 0 arm p1noshared: FAILED
+# round 1 arm p1only lib=5539f1c8 /tmp/ds_p1/deep_select/deep_select_maca_xcore1000.so
+<string>:5: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+Traceback (most recent call last):
+  File "<string>", line 26, in <module>
+  File "/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/torch/random.py", line 46, in manual_seed
+    torch.cuda.manual_seed_all(seed)
+  File "/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/torch/cuda/random.py", line 127, in manual_seed_all
+    _lazy_call(cb, seed_all=True)
+  File "/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/torch/cuda/__init__.py", line 256, in _lazy_call
+    callable()
+  File "/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/torch/cuda/random.py", line 125, in cb
+    default_generator.manual_seed(seed)
+RuntimeError: CUDA error: an illegal memory access was encountered
+CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+
+# round 1 arm p1noshared: FAILED
+
+# arm p1only: libs=['5539f1c8']
+# arm p1noshared: libs=[]
+
+# wrote /tmp/ds_p2_out/ab_paired.json

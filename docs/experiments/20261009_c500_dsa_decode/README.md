@@ -356,6 +356,76 @@ every one of them paid a third row walk"）——`_k` 就是没吃到这个修�
 比例在 8 个格上的一致性（±5%）说明这不是单格噪声，但 "pass1 = 44%" 是这一臂的读数，
 不是对 pass 1 的独立测量。
 
+## Phase 4 —— 行核里还有第三趟，和一处只从调用方守着的越界读
+
+### 4.1 `_b` 的 overflow 分支是**整行第三趟**，本 shape 不触发
+
+`radix_topk_row_bf16_b` 在 collect 之后还有一段（`radix_core.cuh:1420-1472`）：
+
+```cpp
+const bool overflow = s_num_input[0] > SMEM_INPUT_SIZE;
+if (overflow) {
+    for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {   // 整行第三趟
+        uint4 v = __ldg(...);
+        for (int i = 0; i < 8; i++)
+            overflow_emit_member(idx + i, ...);
+    }
+    ...;  __syncthreads(); return;
+}
+```
+
+coarse12 移植时 `SMEM_INPUT_SIZE` 被改指 `kCoarse12ArenaEntries`（4096），所以这条门的
+判据现在是 **12 位阈值桶的成员数 vs 4096**——正是 `probe_arena_fill.py` 量到的量
+（k=512 时 387、k=1024 时 847），**本 shape 不触发**。但注意余量只有 5–10×：
+这条趟的开关是"阈值桶恰好装不下"，而阈值落在哪个桶由每行 rank-topk 决定。
+和 Phase 2 那条悬崖是同一个性质。
+
+### 4.2 失败的消融暴露的一处隐患：`s_high_threshold_bin_id` 没有初值
+
+为了给 pass 1 的共享原子定价，做了第三臂 `/tmp/ds_p2`（在 pass-1-only 臂上只把
+`hist_add_bf16_wide` 的 `atomicAdd` 换成寄存器累加）。它**崩了**——
+`CUDA error: an illegal memory access`。查因不是臂写错，是它踩到了内核里一处
+只由**调用方**守着的路径：
+
+```cpp
+if (tx < RADIX) {
+    ...
+} else if (tx == RADIX) {
+    s_histogram[RADIX] = 0;
+    // The refine's landing state, initialized here so that a crossing the
+    // scan cannot find leaves a defined bin behind rather than whatever the
+    // previous launch on this SM left in shared memory.
+    s_threshold_bin_id = 0;
+    s_last_remain = 0;
+}
+```
+
+这段注释写得**正是**这个隐患，也**正是**为它防了 `s_threshold_bin_id` 与
+`s_last_remain` ——但**同一处的第三个变量 `s_high_threshold_bin_id` 没有初值**。
+它只由扫描写：
+
+```cpp
+if (tx < RADIX && inclusive_suffix > remain_topk && exclusive_suffix <= remain_topk) {
+    s_high_threshold_bin_id = tx; s_num_input[0] = 0; s_counter = 0;
+}
+```
+
+直方图全零时该条件恒不成立，变量保留上一次启动在同一 SM 上留下的值，随后被当作
+高位字节索引进 4096 槽的 `s_wide`：
+
+```cpp
+const uint32_t high = s_high_threshold_bin_id;
+... s_wide[(high << kCoarse12Shift) + s]     // (high<<4)+s 越界
+```
+
+**在生产路径上不可达**：调用方都先挡了 `length > topk`（`length <= topk` 走捷径，
+`stage1` 也有 `if (chunk_len <= topk) return`），所以直方图总数恒 > topk，扫描必命中。
+它记在这里是因为**守的位置不对**：同处的另两个变量是从内核内部守的，注释也写明了
+理由，只有这一个依赖外部守卫——一旦哪个调用方放松了那条前置条件，失败形式是
+越界共享读，不是错答案。
+
+这条臂因此**作废，没有读数**；共享原子的定价仍未取得。
+
 ## 残留
 
 - 控制臂 `/tmp/ds_ab/rowonly`、`/tmp/ds_ab/oldgate`、以及两处 cell list
