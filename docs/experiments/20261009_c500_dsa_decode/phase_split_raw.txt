@@ -1,0 +1,273 @@
+/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/docs/experiments/20261009_c500_dsa_decode/probe.py:44: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+  import torch
+# read wall = 1650 GB/s (C500, measured streaming)
+# cells = 27  device = MetaX C500  sm_count = 104
+
+--- b1 V131072 k512  [row]
+       mcDeviceSynchronize                             5327.20 us
+       mcFuncSetAttribute                                 0.66 us
+       mcLaunchKernel                                    24.38 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5364.04 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)      75.90 us
+    op_sum=75.90  span=75.90  gap=0.00  official=75.90  wall=78.26  non_op_in_bench=10716.28 us
+--- b1 V262144 k512  [split]
+       Memset (Device)                                   12.34 us
+       mcDeviceSynchronize                             5308.14 us
+       mcFuncSetAttribute                                 0.60 us
+       mcLaunchKernel                                    56.68 us
+       mcMemsetAsync                                      8.68 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5357.13 us
+    op nan_scan_kernel<... unsigned int, unsigned int, int*)      11.49 us
+    op topk_kernel_radix<...true>(deep_select_maca::RowParams)       6.12 us
+    op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)      40.99 us
+    op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      30.11 us
+    op_sum=88.70  span=97.13  gap=8.42  official=82.82  wall=108.57  non_op_in_bench=10743.57 us
+--- b1 V1048576 k512  [split]
+       Memset (Device)                                   12.26 us
+       mcDeviceSynchronize                             5188.45 us
+       mcFuncSetAttribute                                 1.06 us
+       mcLaunchKernel                                    88.90 us
+       mcMemsetAsync                                     16.23 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5365.53 us
+    op nan_scan_kernel<... unsigned int, unsigned int, int*)      26.80 us
+    op topk_kernel_radix<...true>(deep_select_maca::RowParams)       6.07 us
+    op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)      60.85 us
+    op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      33.38 us
+    op_sum=127.10  span=135.53  gap=8.42  official=105.93  wall=146.51  non_op_in_bench=10672.44 us
+--- b64 V131072 k512  [row]
+       mcDeviceSynchronize                             5172.46 us
+       mcFuncSetAttribute                                 1.33 us
+       mcLaunchKernel                                    55.04 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5359.03 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)      82.92 us
+    op_sum=82.92  span=82.92  gap=0.00  official=82.92  wall=86.04  non_op_in_bench=10587.86 us
+--- b64 V262144 k512  [split]
+       Memset (Device)                                   27.57 us
+       mcDeviceSynchronize                             5426.15 us
+       mcFuncSetAttribute                                 0.99 us
+       mcLaunchKernel                                    88.40 us
+       mcMemsetAsync                                     16.72 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5360.36 us
+    op nan_scan_kernel<... unsigned int, unsigned int, int*)      39.07 us
+    op topk_kernel_radix<...true>(deep_select_maca::RowParams)       5.84 us
+    op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)     278.27 us
+    op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      30.18 us
+    op_sum=353.36  span=361.78  gap=8.42  official=319.87  wall=389.40  non_op_in_bench=10920.19 us
+--- b64 V1048576 k512  [split]
+       Memset (Device)                                   27.19 us
+       mcDeviceSynchronize                             5821.60 us
+       mcFuncSetAttribute                                 0.67 us
+       mcLaunchKernel                                    60.11 us
+       mcMemsetAsync                                     10.43 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5362.30 us
+    op nan_scan_kernel<... unsigned int, unsigned int, int*)     110.36 us
+    op topk_kernel_radix<...true>(deep_select_maca::RowParams)       5.89 us
+    op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)     459.67 us
+    op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      33.61 us
+    op_sum=609.54  span=617.96  gap=8.42  official=504.81  wall=645.30  non_op_in_bench=11282.29 us
+--- b128 V131072 k512  [row]
+       mcDeviceSynchronize                             5304.60 us
+       mcFuncSetAttribute                                 1.34 us
+       mcLaunchKernel                                    46.00 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5363.35 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     159.51 us
+    op_sum=159.51  span=159.51  gap=0.00  official=159.51  wall=160.64  non_op_in_bench=10715.29 us
+--- b128 V262144 k512  [row]
+       mcDeviceSynchronize                             5367.26 us
+       mcFuncSetAttribute                                 1.34 us
+       mcLaunchKernel                                    52.37 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5362.25 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     273.89 us
+    op_sum=273.89  span=273.89  gap=0.00  official=273.89  wall=275.74  non_op_in_bench=10783.22 us
+--- b128 V1048576 k512  [row]
+       mcDeviceSynchronize                             6107.01 us
+       mcFuncSetAttribute                                 1.06 us
+       mcLaunchKernel                                    46.33 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5360.87 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     951.96 us
+    op_sum=951.96  span=951.96  gap=0.00  official=951.96  wall=955.78  non_op_in_bench=11515.28 us
+--- b1 V131072 k1024  [row]
+       mcDeviceSynchronize                             5276.70 us
+       mcFuncSetAttribute                                 0.84 us
+       mcLaunchKernel                                    37.45 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5360.41 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)      81.95 us
+    op_sum=81.95  span=81.95  gap=0.00  official=81.95  wall=83.84  non_op_in_bench=10675.40 us
+--- b1 V262144 k1024  [split]
+       Memset (Device)                                   12.21 us
+       mcDeviceSynchronize                             5309.15 us
+       mcFuncSetAttribute                                 0.62 us
+       mcLaunchKernel                                    58.60 us
+       mcMemsetAsync                                     10.22 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5359.44 us
+    op nan_scan_kernel<... unsigned int, unsigned int, int*)      11.49 us
+    op topk_kernel_radix<...true>(deep_select_maca::RowParams)       6.25 us
+    op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)      42.21 us
+    op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      44.67 us
+    op_sum=104.63  span=113.15  gap=8.52  official=98.79  wall=123.67  non_op_in_bench=10750.24 us
+--- b1 V1048576 k1024  [split]
+       Memset (Device)                                   12.47 us
+       mcDeviceSynchronize                             5204.95 us
+       mcFuncSetAttribute                                 1.05 us
+       mcLaunchKernel                                    90.91 us
+       mcMemsetAsync                                     16.23 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5360.20 us
+    op nan_scan_kernel<... unsigned int, unsigned int, int*)      26.88 us
+    op topk_kernel_radix<...true>(deep_select_maca::RowParams)       6.40 us
+    op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)      62.03 us
+    op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      57.40 us
+    op_sum=152.70  span=161.10  gap=8.40  official=131.40  wall=172.54  non_op_in_bench=10685.81 us
+--- b64 V131072 k1024  [row]
+       mcDeviceSynchronize                             5262.92 us
+       mcFuncSetAttribute                                 1.00 us
+       mcLaunchKernel                                    41.24 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5360.38 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)      89.47 us
+    op_sum=89.47  span=89.47  gap=0.00  official=89.47  wall=91.90  non_op_in_bench=10665.54 us
+--- b64 V262144 k1024  [split]
+       Memset (Device)                                   27.32 us
+       mcDeviceSynchronize                             5584.65 us
+       mcFuncSetAttribute                                 0.71 us
+       mcLaunchKernel                                    61.05 us
+       mcMemsetAsync                                     10.50 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5358.49 us
+    op nan_scan_kernel<... unsigned int, unsigned int, int*)      39.42 us
+    op topk_kernel_radix<...true>(deep_select_maca::RowParams)       6.20 us
+    op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)     293.38 us
+    op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      45.24 us
+    op_sum=384.23  span=392.60  gap=8.37  official=350.34  wall=419.51  non_op_in_bench=11042.71 us
+--- b64 V1048576 k1024  [split]
+       Memset (Device)                                   27.55 us
+       mcDeviceSynchronize                             5868.63 us
+       mcFuncSetAttribute                                 0.66 us
+       mcLaunchKernel                                    59.71 us
+       mcMemsetAsync                                     10.03 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5362.25 us
+    op nan_scan_kernel<... unsigned int, unsigned int, int*)     111.36 us
+    op topk_kernel_radix<...true>(deep_select_maca::RowParams)       6.22 us
+    op topk_bf16_chunk_stage1_kernel_k<...ca_bfloat16*, long, int, int, int)     481.33 us
+    op topk_bf16_chunk_stage2_kernel_k<...onst*, int const*, int*, int, int)      58.83 us
+    op_sum=657.74  span=666.06  gap=8.32  official=551.94  wall=690.02  non_op_in_bench=11328.83 us
+--- b128 V131072 k1024  [row]
+       mcDeviceSynchronize                             5298.87 us
+       mcFuncSetAttribute                                 1.21 us
+       mcLaunchKernel                                    50.27 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5361.66 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     174.34 us
+    op_sum=174.34  span=174.34  gap=0.00  official=174.34  wall=174.80  non_op_in_bench=10712.02 us
+--- b128 V262144 k1024  [row]
+       mcDeviceSynchronize                             5407.76 us
+       mcFuncSetAttribute                                 1.17 us
+       mcLaunchKernel                                    49.95 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5358.23 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     291.97 us
+    op_sum=291.97  span=291.97  gap=0.00  official=291.97  wall=293.50  non_op_in_bench=10817.11 us
+--- b128 V1048576 k1024  [row]
+       mcDeviceSynchronize                             6162.36 us
+       mcFuncSetAttribute                                 0.90 us
+       mcLaunchKernel                                    38.16 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5365.02 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     972.54 us
+    op_sum=972.54  span=972.54  gap=0.00  official=972.54  wall=975.39  non_op_in_bench=11566.44 us
+--- b1 V131072 k2048  [row]
+       mcDeviceSynchronize                             5228.76 us
+       mcFuncSetAttribute                                 1.26 us
+       mcLaunchKernel                                    52.35 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5361.10 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     128.82 us
+    op_sum=128.82  span=128.82  gap=0.00  official=128.82  wall=129.56  non_op_in_bench=10643.48 us
+--- b1 V262144 k2048  [row]
+       mcDeviceSynchronize                             5313.52 us
+       mcFuncSetAttribute                                 1.42 us
+       mcLaunchKernel                                    54.06 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5362.61 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     215.55 us
+    op_sum=215.55  span=215.55  gap=0.00  official=215.55  wall=213.43  non_op_in_bench=10731.61 us
+--- b1 V1048576 k2048  [row]
+       mcDeviceSynchronize                             5795.66 us
+       mcFuncSetAttribute                                 1.27 us
+       mcLaunchKernel                                    53.72 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5360.00 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     699.29 us
+    op_sum=699.29  span=699.29  gap=0.00  official=699.29  wall=668.52  non_op_in_bench=11210.65 us
+--- b64 V131072 k2048  [row]
+       mcDeviceSynchronize                             5335.41 us
+       mcFuncSetAttribute                                 0.96 us
+       mcLaunchKernel                                    38.56 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5366.20 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     140.83 us
+    op_sum=140.83  span=140.83  gap=0.00  official=140.83  wall=142.52  non_op_in_bench=10741.13 us
+--- b64 V262144 k2048  [row]
+       mcDeviceSynchronize                             5333.65 us
+       mcFuncSetAttribute                                 1.29 us
+       mcLaunchKernel                                    53.89 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5361.54 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     240.20 us
+    op_sum=240.20  span=240.20  gap=0.00  official=240.20  wall=242.23  non_op_in_bench=10750.37 us
+--- b64 V1048576 k2048  [row]
+       mcDeviceSynchronize                             5915.50 us
+       mcFuncSetAttribute                                 1.17 us
+       mcLaunchKernel                                    48.70 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5361.77 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     775.65 us
+    op_sum=775.65  span=775.65  gap=0.00  official=775.65  wall=779.85  non_op_in_bench=11327.13 us
+--- b128 V131072 k2048  [row]
+       mcDeviceSynchronize                             5407.96 us
+       mcFuncSetAttribute                                 0.76 us
+       mcLaunchKernel                                    31.65 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5363.35 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     179.48 us
+    op_sum=179.48  span=179.48  gap=0.00  official=179.48  wall=181.58  non_op_in_bench=10803.72 us
+--- b128 V262144 k2048  [row]
+       mcDeviceSynchronize                             5484.95 us
+       mcFuncSetAttribute                                 0.95 us
+       mcLaunchKernel                                    41.74 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5359.46 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)     307.99 us
+    op_sum=307.99  span=307.99  gap=0.00  official=307.99  wall=311.17  non_op_in_bench=10887.10 us
+--- b128 V1048576 k2048  [row]
+       mcDeviceSynchronize                             6096.31 us
+       mcFuncSetAttribute                                 1.44 us
+       mcLaunchKernel                                    54.11 us
+       vectorized_elementwise_kernel_nullary_opt<...::native::FillFunctor<int>, char*)    5362.92 us
+    op topk_kernel_radix<...alse>(deep_select_maca::RowParams)    1012.86 us
+    op_sum=1012.86  span=1012.86  gap=0.00  official=1012.86  wall=1017.86  non_op_in_bench=11514.77 us
+
+========================================================================================================
+    b         V     k  route |     op_us   span_us   gap% |  span_GB/s  wall% |  wall_GB/s  wall%
+--------------------------------------------------------------------------------------------------------
+    1    131072   512    row |     75.90     75.90   0.0% |        3.5   0.2% |        3.4   0.2%
+    1    262144   512  split |     88.70     97.13   8.7% |        5.4   0.3% |        4.8   0.3%
+    1   1048576   512  split |    127.10    135.53   6.2% |       15.5   0.9% |       14.3   0.9%
+   64    131072   512    row |     82.92     82.92   0.0% |      203.9  12.4% |      196.5  11.9%
+   64    262144   512  split |    353.36    361.78   2.3% |       93.1   5.6% |       86.5   5.2%
+   64   1048576   512  split |    609.54    617.96   1.4% |      217.4  13.2% |      208.2  12.6%
+  128    131072   512    row |    159.51    159.51   0.0% |      212.0  12.8% |      210.5  12.8%
+  128    262144   512    row |    273.89    273.89   0.0% |      246.0  14.9% |      244.3  14.8%
+  128   1048576   512    row |    951.96    951.96   0.0% |      282.3  17.1% |      281.1  17.0%
+    1    131072  1024    row |     81.95     81.95   0.0% |        3.2   0.2% |        3.2   0.2%
+    1    262144  1024  split |    104.63    113.15   7.5% |        4.7   0.3% |        4.3   0.3%
+    1   1048576  1024  split |    152.70    161.10   5.2% |       13.0   0.8% |       12.2   0.7%
+   64    131072  1024    row |     89.47     89.47   0.0% |      190.4  11.5% |      185.4  11.2%
+   64    262144  1024  split |    384.23    392.60   2.1% |       86.1   5.2% |       80.6   4.9%
+   64   1048576  1024  split |    657.74    666.06   1.2% |      201.9  12.2% |      194.9  11.8%
+  128    131072  1024    row |    174.34    174.34   0.0% |      195.5  11.8% |      195.0  11.8%
+  128    262144  1024    row |    291.97    291.97   0.0% |      231.6  14.0% |      230.4  14.0%
+  128   1048576  1024    row |    972.54    972.54   0.0% |      276.6  16.8% |      275.7  16.7%
+    1    131072  2048    row |    128.82    128.82   0.0% |        2.1   0.1% |        2.1   0.1%
+    1    262144  2048    row |    215.55    215.55   0.0% |        2.5   0.1% |        2.5   0.2%
+    1   1048576  2048    row |    699.29    699.29   0.0% |        3.0   0.2% |        3.1   0.2%
+   64    131072  2048    row |    140.83    140.83   0.0% |      122.9   7.4% |      121.4   7.4%
+   64    262144  2048    row |    240.20    240.20   0.0% |      141.9   8.6% |      140.7   8.5%
+   64   1048576  2048    row |    775.65    775.65   0.0% |      173.7  10.5% |      172.8  10.5%
+  128    131072  2048    row |    179.48    179.48   0.0% |      192.8  11.7% |      190.6  11.5%
+  128    262144  2048    row |    307.99    307.99   0.0% |      221.3  13.4% |      219.0  13.3%
+  128   1048576  2048    row |   1012.86   1012.86   0.0% |      266.1  16.1% |      264.8  16.0%
+
+# op_sum  = sum of names containing ('topk', 'nan_scan') (case-insensitive).
+# span_us = first operator-kernel start to last end, per run (kk.bench's
+#           own cold-L2 regime).  gap% = (span - op_sum)/span.
+# wall_us = wall_clock_time, which does NOT flush between iterations; it
+#           is a different cache state and is here for reference only.
+# official_us = the harness's own clock (topk-matching names only).
+# GB/s is logical single-pass (bytes/(us*1e3)); wall = 1650 GB/s.
