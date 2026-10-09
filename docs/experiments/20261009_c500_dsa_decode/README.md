@@ -915,3 +915,335 @@ device 2，extension md5 `6c28a77b52b6`，147/147 格 pass），两把尺子分�
 算术重写 —— 它的正确性已由穷举恒等式检查（2,135,204 条）、设备侧 NaN/±inf 契约
 比对与 340 格套件钉住。全表留给下一批路由改动收尾时跑；实测速率与格数已按
 CLAUDE.md 那句"首次实测替换本段"的要求写进 CLAUDE.md。
+
+### 8.9 40% 的另一半：NaN 的**处置**离开行核（2026-10-09 深夜）
+
+8.7 结尾那句"相对 B 那 +10 个寄存器是'这个 fold 存在'本身的账"**只对了一半**。
+这一节把它拆开：那 15 个寄存器里没有一个是 fold 的算术或投票的机制，**整块都是
+epilogue**（`printf` + `__trap` + sentinel + `return`）的账，而 epilogue 是可以
+搬走的 —— 搬走它拿到的比 8.7 的 SWAR 那只多一个数量级。
+
+#### 机制：寄存器是**整个函数**的高水位，不是热路径的量
+
+`abort_when_nan_found=False`（两个测试套件、整个性能网格都用它）下，epilogue
+**永不执行**。但它只要在这个函数里，寄存器分配器就要为它留出高水位：一个
+1024 线程的块要两个 CTA/SM 就得 ≤ 32 MT。所以**一段死代码**决定了整个内核的
+占用率 —— 这是"每格少一个常驻 CTA"的来源，与 8.3 同一条机理。
+
+臂（全部单变量：只改 epilogue，其余逐字节同生产）。下表 MT 是**普查里
+`kPreSelected=0` 那一半**的数字 —— 行核的两个 epilogue 站点分别在
+`if constexpr (kPreSelected)` 的两支里，**每个实例化只含其中一个**，所以只改
+一个站点的臂恰好动一半：见「落地形态」末条。
+
+| 臂 | epilogue 形态 | MT / ST | 驱动 blocks/SM | 标题格 µs |
+|---|---|---|---:|---:|
+| **A** | 生产：`printf` + `__trap` + sentinel + `return` | 37 / 52 | 1 | 9310.4 / 9310.2 / 9311.4 |
+| H1 | 去掉 pass 1 里的逐元素 NaN 测试（诊断：测试不是账） | 37 / 52 | 1 | — |
+| H4 | `fold_nan=false` + 不透明但保留的 epilogue | 37 / 46 | — | — |
+| **H5a** | 只留裸 sentinel store（丢 abort 与 `return`） | 22 / 46 | **2** | 6135.4 / 6137.3 / 6136.0 |
+| **H5b** | 只留逐行 flag store（丢 sentinel 与 abort） | 22 / 50 | **2** | 6141.7 / 6144.9 / 6144.2 |
+| H6 | 整块抽成 `__device__ __noinline__` 函数 | **40 / 54** | 1 | — |
+| H6c | 只留 `__trap()`（删 printf） | 24 / 48 | 2 | — |
+| H6d | 只留 `printf`（删 `__trap`） | 37 / 52 | 1 | — |
+| **H7** | sentinel + flag + `return` | 22 / 52 | **2** | 6133.6 |
+
+- **H6d 是那条单变量证明：`__trap` 是免费的，13 个寄存器整个是 `printf` 的**
+  （删 trap 不动 MT；删 printf 从 37 掉到 24；两个都删 = 22）。
+- **`__noinline__` 不隔离寄存器**（H6 反而 +3）：设备函数由同一分配器统一算，
+  把调用藏进另一个函数并不改变高水位。这条值得记 —— 它是"用函数边界隔离
+  寄存器压力"这个直觉在本工具链上的反例。
+- H1 说**逐元素测试不是账**：pass 1 里带不带那个测试，MT 都是 37。8.4 的结论
+  到此收口：这道坎从头到尾只有 epilogue 一个来源。
+
+#### 落地形态：行核只**报**，abort 由跟随核执行
+
+- **行核**（`maca_topk.cu` 的两个 epilogue 站点）：NaN 行 → sentinel 进
+  `out_index_row[0]`，并把该行在 `params.nan_abort_flags` 里置 1，然后 `return`。
+  不再有 `printf`/`__trap`，`RowParams::abort_on_nan` 随之删除（内核不再读它）。
+- **跟随核** `nan_abort_kernel`（128 线程/块，一行一个线程）：读取到置位的行
+  就 `printf` + `__trap()`。**消息与 trap 语义逐条保留**（实测：`[deep_select]
+  NaN detected. Aborting.` 照打，MCR dump 里 `trapType: Trap Assert` 与内核名
+  从行核变成 `nan_abort_kernel` —— 这也是"处置确实搬走了"的设备侧收据）。
+- **dispatcher**：为 `abort_on_nan` 的调用分配一张**独立的** `nan_abort_flags`
+  表（grow-only，与 `ChunkedScratch` 其余成员同规矩），**不清零**，最后发
+  跟随核。
+- **为什么不清零、也不复用 `scan_flags`**：契约半部是这张表**唯一**的写者，
+  且它**写每一行** —— 内核入口 `tid==0` 处清 0，NaN 处置处置 1。既然没有一行
+  会留上一次调用的值，"跨调用干净"就由写入本身保证，`mcMemsetAsync` 是白付的。
+  实测那笔白付是 **~11 µs**（`nan_arms/memset_cost.py`，裸
+  `mcMemsetAsync(16 KB)`），占默认档整笔额外开销的绝大部分 —— 而付它的正是
+  **小 batch 调用**，也就是本战役要救的形状，所以它必须省掉。`scan_flags` 不能
+  兼这个角色：它只被"扫描但没排序"的路由**部分**写入，才正需要那次清零。
+- **省掉它的实测代价**（`nan_arms/measure_abort_cost.py`，同树 `abort=False` vs
+  `True` 两次 e2e，事件计时、不含 L2 flush）：
+
+  | 格 | abort=False | abort=True | Δ | 其中跟随核 |
+  |---|---:|---:|---:|---:|
+  | b4096 V524288 k512 bf16 | 6141.5 µs | 6146.1 µs | **+4.6 µs（+0.07%）** | 2.8 µs |
+  | b64 V1048576 k512 bf16 | 446.4 | 447.7 | **+1.3 µs（+0.29%）** | 2.2 µs |
+  | b128 V1048576 k1024 bf16 | 691.3 | 692.4 | **+1.1 µs（+0.16%）** | 2.2 µs |
+
+  同一把尺子量"清零 + 跟随核"那一版是 **+14.3 µs**（标题格），差额就是那次
+  memset —— 这就是把它去掉的理由，也是本设计唯一的"额外开销"面。
+- **`abort_when_nan_found=False` 的调用（两个套件、整个性能网格）不分配、不写、
+  不发跟随核**：`p.nan_abort_flags` 保持 null，行核里两处 flag 写入与入口那次
+  清 0 都不执行。因此**网格上唯一的变化就是行核那段 epilogue 本身的寄存器**。
+- **两个站点都要改，改一个只动一半**：`if constexpr (kPreSelected)` 的两支各自
+  含一个站点，`PRE=0` 的实例化只有 fold 那个、`PRE=1` 的只有预选那个。H5a/H5b/
+  H6c/H7 这批臂改的是同一处，所以它们只把 60 个实例化里的 30 个拉过门槛 ——
+  **落地改动两个站点都改，60/60 全过**（下表）。臂表里那些 22–24 MT 是 `PRE=0`
+  那一半的读数，不是全表。
+
+为什么不做更省的 H6c（只删 printf，保留内核内 trap，24 MT、零额外开销）：
+**那条消息是用户唯一能看到的"为什么进程死了"**（同一次实测：MCR 只给
+`An assert triggered in device code ... mcruntime api will be disabled`，不含
+原因），删掉它是一处真实的诊断回退，不是风格问题。
+
+#### 寄存器普查：60/60 个行核实例化全部跨过门槛
+
+前后各一份 `mxcc --resource-usage` 全量清单，**逐实例化配对**比对（改前 = 干净
+`git archive HEAD` 树 / `ee402bc`，改后 = 落地树；命令见 `nan_arms/dump_asm.sh`）：
+
+| 路由（`PRE` 位） | 实例化数 | 改前 MT | 改后 MT |
+|---|---:|---|---|
+| 行核 `PRE=0`（bf16/fp32，全部 SI/RV/SV 组合、两个 block 宽、两种索引宽） | 30 | **37**（全部） | **22–28** |
+| 预选 `PRE=1`（split 的契约半部，同样六个组合） | 30 | **42 / 44 / 46**（6 / 15 / 9） | **20–28** |
+
+改前 **60/60 超过 32 MT**（1024 线程块要 2 CTA/SM 的门槛），改后 **0/60**。
+改后 MT 直方图：`{20:4, 22:12, 24:15, 26:17, 28:12}`。
+
+设备函数总数 105 → **106**（只多跟随核本身，**没有新增模板实例化轴**），
+`.so` 5,341,248 → 5,333,136 B（**−8 KB**）。
+
+#### 双币种（标题格 = 趟输入 4,295 MB + 索引 8.4 MB；墙 1,650 GB/s）
+
+| 臂 | 逻辑口径 | 两趟实际流量 |
+|---|---|---|
+| A（改前） | 462.2 GB/s（28.0% 墙） | 922.6 GB/s（55.9%） |
+| **新** | **701.6 GB/s（42.5%）** | **1400.5 GB/s（84.9%）** |
+
+**roofline 判定**：改前这一格绑在 1 CTA/SM 的每 CTA 依赖链上（28.0% 的墙，
+却算不动）；改后它到两趟流量的 84.9%，**逼近读墙**。这条正是 8.3/8.4 那条
+占用率判定的收尾：同一个 body、同一台机器，只有"几个 CTA 能同时驻留"变了。
+
+#### 门（落地件 `0595136a`，device 2）
+
+这一节改的是**契约**路径，而两个套件都写死 `abort_when_nan_found=False`
+（`tests/test.py:194`）—— 也就是说**套件碰不到被改的那一支**。所以门有四道，
+后三道是这次新写的：
+
+| 门 | 命令 | 结果 |
+|---|---|---|
+| 套件（回归） | `./run_test.sh --test` | **340/340 pass**，rc=0 |
+| NaN 契约（`abort=False` 支） | `nan_contract_gate.py` 300 | **273 pass / 0 fail / 27 OOM-skip** |
+| NaN 契约（`abort=True` 支，**套件不覆盖**） | `nan_abort_probe.py` | rc=1，消息照打，MCR dump 的 `kernelName` = `nan_abort_kernel` |
+| 路由守卫（`abort=True` 干净输入不得 abort） | `nan_flag_route_gate.py` 120 | **127 pass / 0 fail / 1 OOM-skip**，路由收据见下 |
+
+路由收据是这一节最该看的一张表 —— 它是"表由行核逐行写"这条不变式**唯一**
+的实测依据（`nan_abort_kernel` 是**无条件**为 abort 调用发射的，所以"它没
+trap"只在行核确实覆盖了每一行时才成立）：
+
+| 形状 | 走到的算子内核 |
+|---|---|
+| b4096 v16384 k512 bf16 | `topk_kernel_radix<bf16,int,512,…>` |
+| b64 v1048576 k512 bf16 | `topk_kernel_radix<bf16,int,1024,…>` |
+| b6 v1048576 k512 bf16（**split**） | `nan_scan_kernel` + `topk_bf16_chunk_stage1_kernel_k<512>` + `…stage2…` + **`topk_kernel_radix<bf16,int,1024,…>`** |
+| b4096 v131072 k2048 fp32（**coarse12**） | `dg12::topk_coarse12_kernel` + **`topk_kernel_radix<float,int,512,…>`** |
+
+后两行就是那条不变式：**两条"自己答行"的路由，末尾都仍然发一次行核**，所以
+每一行的表项都被写过。`nan_abort_kernel` 在四行里都出现且都没 trap。
+
+（构建之间的对照用 `comment_gate.py` 证明是注释级：契约门与路由门跑在 15:23 的
+`d6eb50f7bf2a…` 上，最终件是 15:48 的 `0595136a…`，两版之间只改了一段注释，
+`0 differ in code`。套件在两版上各跑一次，都是 340/340。）
+
+#### 家族级配对 A/B —— 两个档，两张读数
+
+`tools/ab_snapshot.py --arm old=/tmp/ds_hist/OLD --arm new=$PWD --rounds 3
+--device 2`，147 格（121 格两臂都 pass，其余是只在一臂上 pass 的 `deep_gemm`
+列），同 session 交替、每臂每轮一进程。两臂的 `.so` 回执分别是 `6c28a77b`
+（= `ee402bc`，`git archive HEAD` 的干净树 —— 与 `baseline` 的
+`extension_md5` 逐字节相同）与 **`0595136a`**（落地件）。
+
+**落地件与 8.9 早前那批读数不是同一个 `.so`，但代码是同一份**：15:23 的构建
+（`d6eb50f7`）之后只改过一段注释（15:38），15:48 重建得 `0595136a`；
+`tools/comment_gate.py` 对那段注释前后两版源码报 `1 documentation-only,
+0 differ in code`。所以两张读数说的是同一份内核。
+
+档位由 `--abort-when-nan-found {yes,no}` 选，子进程把**自己**实际用的档位回执在
+每轮的 `abort=` 里 —— 这道回执是补一个工具缺陷的：`main()` 曾把档位算出来却没有
+传进 `run_arm`，于是标着 `False` 的一次跑实际量的是默认档，那份读数作废重跑。
+**默认档那张表来自加开关之前的一次跑**（行里没有 `abort=` 字段，两个臂都没带
+kwarg = 默认 `True`）；**生产档那张表的六轮回执全是 `abort=False`**。两个档只差
+跟随核那一次发射。
+
+**生产档（`abort=False`）—— 决策看这张**
+
+`--abort-when-nan-found no`，正是两个套件、整个性能网格、以及 vLLM 传的那一档
+（§8.10）。这一档不分配、不写、不发跟随核，量到的就是行核本身的差。
+
+| | |
+|---|---|
+| 全网格总计 | 129,091.0 → 94,365.5 µs，**净 1.368×** |
+| 逐格 | **51 格更快，21 格更慢，49 格在 ±0.5% 内** |
+| 最快 / 最慢 | **1.541×**（`b4096 v65536 k512`）/ **0.954×**（`b256 v4096 k1024`）|
+| ≥100 µs 的 84 格 | 127,413 → 92,681 µs，中位 **1.279×** |
+
+按 batch 分组（一行一个 CTA，104 个 AP 就是这条分界线）：
+
+| batch | 格数 | 中位 | 区间 |
+|---|---:|---|---|
+| 4096 | 19 | **0.662×** | [0.649, 1.001] |
+| 768 | 17 | **0.697×** | [0.686, 1.008] |
+| 512 | 17 | **0.732×** | [0.724, 1.004] |
+| 256 | 19 | **0.788×** | [0.773, 1.048] |
+| 128 | 9 | **0.775×** | [0.762, 1.002] |
+| 64 | 9 | 1.001× | [1.000, 1.004] |
+| 6 / 1 / 132(fp32) | 31 | 1.006 / 1.006 / 1.000× | — |
+
+**b≥128 有收益、b≤64 没有，这条界正好是 104 个 AP**：batch 就是 CTA 数，b≥128
+时机器能同时驻留两个 CTA/SM 并把它们交错起来，b=64 只有一波，第二个常驻 CTA
+买不到东西。三个重要的格：
+
+- 长行（`v ≥ 65536`）的 b256–b4096 格（40 格，`row` 路由）：**+27% ~ +54%**，
+  **无例外**，行长越长越高；网格时间里最重的那批格就是它们。对照之下同 batch 的
+  短行格（`v ≤ 16384`，24 格）基本不动（区间 [0.954, 1.158]）。
+- 本战役的目标形状 DSA decode `b128`（`k512/1024`）：**1.29 ~ 1.31×** —— 这 9 格
+  全部是本次补进网格的那些。
+- 同族 `b1` / `b64`（含被 split 拒绝的 `k2048`）：1.000 ~ 1.011×，中性。
+
+**21 格更慢，绝对值处处 ≤1.7 µs**：比值最大的是"短行 + 小 batch"这种每 CTA 固定
+成本占比高的格（`b256 v4096 k1024` 34.6 → 36.2 µs，+4.8%），往后比值迅速收敛
+（`b1 v131072 k512` 71.1 → 71.9 µs，+1.1%），**≥100 µs 的 84 格里只有 2 格慢
+（各 +1.1 / +0.8 µs）** —— 是"每调用多付一次固定成本"的形状，不随行长增长。
+这一处的机制没有单独隔离（入口/出口两处谓词写与整个内核的寄存器重排在同一批
+改动里）。`split` 与 `coarse12` 两条路由同样不动（中位 1.0001× / 1.0013×）：
+它们的主体内核不是行核（split 是 stage1/stage2，coarse12 是
+`topk_coarse12_kernel`），所以行核这一处的变化不体现在它们的中位上。
+
+**默认档（`abort=True`）—— 保留的对照读数**
+
+同两臂同 session，只是调用带上 `abort_when_nan_found=True`：网格总计
+129,088.9 → 94,750.2 µs（1.3624×），**46 格更快 / 59 格更慢 / 16 格在 ±1% 内**，
+最差 0.529×，最好 1.534×。两档的差**只有跟随核那一次发射**：`nan_abort_kernel`
+的内核时间实测 **2.8–2.9 µs**（`measure_abort_cost.py` 在同两格上直接量到
+2.9 µs），与行长无关，所以默认档每一格都比生产档多付这一个常数：
+
+| 格（改前 µs） | 默认档相对改前的退化 |
+|---|---|
+| 3.5–10 | **−30% ~ −47%**（`(6,1024,1024)` 3.5 → 6.6）|
+| 10–100 | −2% ~ −23% |
+| 100–600 | −1% ~ −3% |
+| ≥ 768（行长 1M 上下） | **+43% ~ +53%** |
+
+**这一档没有生产调用者**（§8.10：三个调用面全部落在 `abort=False` 上），留在这里
+是因为它是"跟随核值多少"的直接测量。
+
+#### 封存跑与基线（`run_bench.sh`，device 2）
+
+`run_bench.sh`（不带 `--set-baseline`）在安静机器上跑完整三阶段，对 baseline
+`20261009_202953`（`extension_md5` = `6c28a77b…`，本节改前树）比较，记录在
+`perf_data/MetaX_C500/20261010_003837`：
+
+| 后端 | 判定 | 总计 |
+|---|---|---|
+| **maca_c** | **0 回退 / 60 提升 / 74 噪声** | 131,318.1 → 96,216.5 µs（**−26.73%**）|
+| torch（对照） | 0 / 1 / 123 | −0.01% |
+| deep_gemm | 0 / 0 / 12 | −0.13% |
+| | `# VERDICT: OK (maca_c within ±3.0% and no status change)` | |
+
+- **对照臂不动是关键**：`torch` 是本次改动碰不到的裸 `torch.topk`，它 −0.01%
+  说明这一跑确实在安静的机器上。
+- **比较器看不到那 21 格回退**：逐格容差是 ±3%，而配对 A/B 测到的回退是
+  0.5–4.8%、绝对值 ≤1.7 µs，在本比较器的地板之下。**回退的权威读数是配对
+  A/B，不是这里**；这里的"0 回退"要读成"没有跨过 ±3% 的回退"。
+- 正确性阶段：**0 格选错**，4 格崩溃、20 格 skip，全部 OOM（与上一版基线那一跑
+  逐字相同：都是大 fp32 格 `cudaMalloc` 拿不到工作区）。`run_bench.sh` 的重判据
+  正是"崩溃是否只是 OOM"，故 `bench_status=0`，这一跑有资格当基线。
+- **第一次封存跑（`20261010_002408`）已作废**：它的 header 里有一份别的会话的
+  torch 进程（device 1 上的 `pair.py`），按本仓"抢卡上的跑不算测量"的规矩弃用，
+  机器安静后重跑。两次总计一致（−26.73% / −26.73%）—— 那次抢卡没影响读数，
+  但记录用干净的那一份。
+
+**基线已更新**：`perf_data/MetaX_C500/baseline` → `20261010_003837`
+（`extension_md5` = `0595136a…`）。本节原先按"纯提升才更新基线"写的是"基线
+不动"；用户 2026-10-10 裁定更新，于是按本仓《Performance-change discipline》
+封存 —— 判定表在上面，21 格回退逐条在案。`assets/perf_bf16_maca_MetaX_C500.png`
+与 `perf_fp32_maca_MetaX_C500.png` 已从这份录制重画（图的来源与基线指向同一份
+录制）。
+
+被换掉的那 34–54% 不是"某格调优"，是**每格**都在付的占用率税 —— `PRE=0`
+37 MT / `PRE=1` 42–46 MT 相对 32 MT 的门槛。8.9 早前把它记成"付 3 µs 换
+34–51%"；生产档下那 3 µs 不存在，这笔账只剩"搬走一段死代码换回一个常驻 CTA"。
+
+**一条已无必要的候选**：把 block 放到 512。它的动机是躲开那 3 µs —— 512 线程下
+2 CTA/SM 允许 ≤64 MT，37 MT 的 inline 形态本来就装得下，处置不必搬走。生产档
+没有那 3 µs 要躲，这条留作记录（`radix_block_for` 现在只按
+`needs_long_row_bf16` 选块宽）。**另一条从来不可行**：让跟随核只在付得起的地方
+发 —— 契约不以形状为条件，而"有没有 NaN"在设备上，host 无从预判。
+
+### 8.10 生产调用面：vLLM 与 SGLang 到底怎么调 DeepSelect（2026-10-10 查证）
+
+8.9 的 A/B 现在两个档都量了（`--abort-when-nan-found`）。这一节回答"生产到底跑
+哪一档"。**结论：`abort=False` 那一档** —— 两条生产线都不跑本仓的 `maca_c`
+行核，但 vLLM 明确传 `abort_when_nan_found=False`。
+
+#### vLLM —— 主集成 PR #56464
+
+- 落点是 `vllm/model_executor/layers/indexer_topk.py` 的 `SparseIndexerTopk`
+  分发器；包装签名（vLLM API 文档）：
+  `deep_select_topk(input, topk, end=None, output_idx=None, indices_dtype=torch.int32)`。
+- **它传 `abort_when_nan_found=False`，理由不是顺手**：PR 分析记录 review 期
+  "解决了 CUDA graph capture 期间可能发生的 runtime trap"。⇒ 在这条路径上，
+  trap 不是"少用的选项"，是 **capture 期不可接受的事件**，这一档不会被改回 `True`。
+- `check_nan` 保持默认（**扫描照跑**，只是处置关掉）—— 正是 8.9 A/B 的
+  `--abort-when-nan-found no` 那一档。
+- 后续：#57206 把该后端从 decode 扩到合格的 prefill chunk；
+  **#58627**（bug）是 `False` 支契约的后续 —— 报 NaN 时只写 `output_idx[row,0]`、
+  其余 slot 未写，而 V4.1 sparse MQA 复用调用方的 `col_indices_buffer`，于是上一行的
+  陈旧索引可能被 remap 成真实 attention 位置。**这是契约议题**（`False` 支"其余未定义"
+  的本义），与本次改动无关，但要记：它说明 `False` 支在生产上是活的。
+
+#### SGLang —— 一条 vendor 线，入口不是同一个
+
+链：#26788（JIT kernel，runtime k ≤ 2048）→ #30274（page-table 折进 fused top-k v2）
+→ **#41364**（vendor + `topk_page_transform` + 收紧 layout 契约）→
+**#41561**（Hopper full top-k decode；**查证时仍 open，CI 红**）。
+
+- #41364 把 `csrc/deepselect` 改名为 `csrc/deep_select`，并在 vendored 核上加了
+  **三处标 `[SGLang]` 的钩子**：`TopkSelectArgs` 末尾的 page-table 字段、
+  `TopkSelectConfig` 末尾的 `page_transform_` 标志、
+  `EpilogueRunner::page_transform_epilogue`。
+- 入口是 `sglang.kernels.ops.attention.deep_select:topk`（`KernelBackend.JIT`，
+  capabilities = SM90/SM100/SM103），**vendor 上游的 csrc** 再 JIT 编译，
+  不经过 `deep_select.topk` 这个 Python 层。
+- `support` 用的正是「128 B 输入/行跨度对齐、32 B 输出对齐」这套收紧后的契约。
+- **`abort_when_nan_found` / `check_nan` 在这条线的公开材料里一次都没出现** ——
+  **未定**，不能据此说 SGLang 传什么。要定就得读它 vendored 的 `entry.cuh`
+  里那个 `TopkSelectArgs` 块（本次网络无法取到该文件）。
+
+#### 对本仓的三条结论
+
+1. **两条生产线都不跑本仓的 `maca_c` 行核**：vLLM 走 `deep_gemm`
+   （`bf16_indexer_dsa.fp32_indexer_topk_selector`），SGLang vendor 的是上游 CUDA
+   csrc。**本仓内核在这里查不到生产调用者** —— 这不是"没人用"，是"可查的公开
+   集成里没有"，两者不能混说。
+2. **它们都会改 vendored 树**：SGLang 的三处钩子正是加在 `TopkSelectArgs` /
+   `TopkSelectConfig` 这一批结构上 —— 在本仓，同一批就是 `csrc/structs.h` 与
+   `csrc/maca_kernels/xcore1600/`。这与本仓《注释纪律》旁边那条"CUDA 半边保持
+   upstream 逐字节、便于再合并"是同一件事的两面：**谁都要改结构，谁的改法都要
+   能被下一次合并吸收**。
+3. **对 8.9 的意义**：生产是 `abort=False`，跟随核那 3 µs 不在任何已知生产路径上；
+   但**这不构成"不用量"** —— 恰恰相反，它说明必须**按 `abort=False` 重测**，
+   因为那才是唯一在跑的档。8.9 的"59 格退化"因此是**默认档**的读数，需要与
+   `abort=False` 的读数并列记录，不能单独引用。
+
+**来源**：[vLLM #56464](https://github.com/vllm-project/vllm/pull/56464) ·
+[vLLM #57206](https://github.com/vllm-project/vllm/pull/57206) ·
+[vLLM #58627](https://github.com/vllm-project/vllm/issues/58627) ·
+[vLLM indexer_topk 文档](https://docs.vllm.ai/en/latest/api/vllm/model_executor/layers/indexer_topk/) ·
+[SGLang #41364](https://github.com/sgl-project/sglang/pull/41364) ·
+[SGLang #41561](https://github.com/sgl-project/sglang/pull/41561) ·
+[SGLang #26788](https://github.com/sgl-project/sglang/pull/26788) ·
+[SGLang #30274](https://github.com/sgl-project/sglang/pull/30274) ·
+[PR #56464 分析](https://blog.secrett2633.cloud/opensource/pr-analysis/vllm-pr-56464-perfkernel-integrate-deepselect-topk)

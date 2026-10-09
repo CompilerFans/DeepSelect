@@ -22,6 +22,21 @@ README §8.3–§8.7 引用的每一条测量都在这。臂树本身（各 500 
 | **X2** | X1 + `#pragma unroll 4` |
 | **Y1** | W 的 SWAR 测试 + SWAR 键翻转（**已落进生产树**，提交 `8e2a232`） |
 | **Z1** | W 去掉 `__syncthreads_or` 投票（诊断用，语义不对） |
+| **H1** | Y1 去掉 pass 1 的逐元素 NaN 测试（把投票换成粗直方图 16 bin 回读）：**MT 仍是 37** —— 测试不是那笔账 |
+| **H4** | `fold_nan=false` 的字面量 + 不透明但**保留**的 epilogue：**37 MT** —— epilogue 一在函数里就要付 |
+| **H5a** | Y1 的 epilogue 缩成裸 sentinel store（去 printf/trap/`return`）：**22 MT / 2 CTA/SM**，标题格 6135.4 µs |
+| **H5b** | Y1 的 epilogue 换成逐行 flag store（去 sentinel/abort/`return`）：**22 MT / 2 CTA/SM**，6141.7 µs |
+| **H6** | epilogue 整块抽成 `__device__ __noinline__` 函数：**40 MT（更差）** —— 函数边界不隔离寄存器 |
+| **H6c** | epilogue 只留 `__trap()`（删 printf）：**24 MT** |
+| **H6d** | epilogue 只留 `printf`（删 `__trap`）：**37 MT（无变化）** ⇒ **13 个寄存器整个是 printf 的** |
+| **H7** | epilogue = sentinel + flag + `return`（落地形态的**一个站点**）：**22 MT**，6133.6 µs |
+
+**H5a / H5b / H6c / H7 都只改了行核两个 epilogue 站点里的**一个 —— 两个站点分别
+在 `if constexpr (kPreSelected)` 的两支里，每个实例化只含其中一个，所以这批臂
+恰好只把 60 个实例化里的 **30 个**（`PRE=0` 那一半）拉过 32 MT 的门槛，上表
+那些 22–24 MT 是那一半的读数。**落地改动两个站点都改，60/60 全过** ——
+逐实例化配对见 README §8.9 的普查表，两侧清单由
+`dump_asm.sh <tree>` 产出（改前用 `git archive HEAD` 的干净树）。
 
 ## 文件
 
@@ -29,7 +44,7 @@ README §8.3–§8.7 引用的每一条测量都在这。臂树本身（各 500 
 |---|---|
 | `ab_final.log` | A / B / T / S1 / S2，同一 session 交替、3 轮，`measure_sum.py` 逐内核（含"Σ算子核"与官方口径两列） |
 | `ab_fold.log` | A / W / Y1，同上 |
-| `ab_family.log` + `ab_family_paired.json` | 家族级 A/B（`tools/ab_snapshot.py`，121 格配对、2 臂 × 3 轮 × 10 iters、device 2）；JSON 的每格是 `{a: [...], b: [...], route_a, route_b}` |
+| `ab_epi_final.log`（默认档）/ `ab_noabort.log` + `ab_noabort.json/ab_paired.json`（生产档） | 家族级 A/B 的两个档（`tools/ab_snapshot.py`，121 格配对、2 臂 × 3 轮 × 10 iters、device 2）：前者是加档位开关之前的一次跑（默认 `True`），后者带 `abort=False` 回执。JSON 每格是 `{a, b, a_main, b_main, route_a, route_b}`；读数在 README §8.9 |
 | `resource_usage/<臂>.ru2` | `mxcc --resource-usage` 全量输出；关键行见下 |
 | `measure_sum.py` | 逐内核计时 + "Σ算子核"（`bench_topk` 的名字过滤会漏掉 `nan_scan_kernel`，所以必须自己加这一列） |
 | `measure_nan.py` | 单格 A/B 计时 |
@@ -39,6 +54,26 @@ README §8.3–§8.7 引用的每一条测量都在这。臂树本身（各 500 
 | `attr_probe.py` | 记录下来的原因：`mcFuncGetAttribute` 拿错 id **会 core dump**（不是返回错误） |
 | `run_ab.sh` / `run_ab3.sh` | 五条臂与三条臂的驱动脚本（含"等对手进程退出"的前置） |
 | `dump_asm.sh` | `mxcc -aop -S -maca-device-only` 的封装 |
+| `nan_abort_probe.py` | `abort_when_nan_found=True` 的契约探针：NaN 行必须**打消息并 trap**，且 MCR dump 里 trap 的内核名是 `nan_abort_kernel` |
+| `nan_contract_gate.py` | NaN 契约门：从正确性表 105,138 例里筛出 19,116 条 `allow_nan` 用例，抽样跑 `run_testcase`（即套件自己的 `check_result`）。`OOM` 按套件口径记 skip |
+| `nan_flag_route_gate.py` | **默认档（`abort=True`）在干净输入上不得 abort** —— 无 memset 设计的守卫：表由行核逐行写，任何"某路由没写自己那些行"的实现都会在这里 trap。从表里抽 NaN-free 用例 + 补 split 形状，末尾打一张**路由收据**（每族一格、按内核名） |
+| `measure_abort_cost.py` | 默认档的代价：同格 `abort=False` vs `True` 的 e2e 差，并逐内核打印（跟随核名字里没有 `topk`，官方口径过滤会漏掉它） |
+| `memset_cost.py` | 裸 `mcMemsetAsync(16 KB)` 的单价（~11 µs）—— "表不每调用清零"这个决定的依据 |
+
+### 8.9 那一节的两个新工具
+
+`nan_abort_probe.py` 与 `nan_contract_gate.py` 见上表。用它们是因为**今天这两个
+契约都没有套件门**：`tests/test.py` 的调用点写死 `abort_when_nan_found=False`
+（`:194`），所以 abort 那一支从来没有测试碰过；NaN 用例虽在表里，200 例抽样
+未必抽到。两者都按「拷贝+指向」跑：臂树在 `/tmp`，生产树全程未改。
+
+### 8.9 家族级 A/B 的两个档
+
+`tools/ab_snapshot.py` 的 `--abort-when-nan-found {yes,no}` 决定调用带不带
+`abort_when_nan_found`，子进程把**自己**实际用的档位回执在每轮 `abort=` 里。
+加这道回执是因为 `main()` 曾把档位算出来却没传进 `run_arm` —— 标着 `False`
+的一次跑其实量的是默认档，那份读数作废重跑。生产档是 `no`：两个套件、整个
+性能网格、以及 vLLM 传的都是它。
 
 ## 关键数字（都能在上面文件里核对）
 
@@ -52,6 +87,19 @@ README §8.3–§8.7 引用的每一条测量都在这。臂树本身（各 500 
 | S1 | 42 / 50 | 2,336 | 1 CTA/SM |
 | W / X1 / X2 / Y1 | **37 / 52** | 4,924 | **1 CTA/SM** |
 | Z1 | 37 / 52 | 4,668 | 1 CTA/SM |
+| H1 | 37 / 52 | 4,924 | 1 CTA/SM |
+| H4 | 37 / 46 | 2,336 | — |
+| H5a | **22 / 46** | 4,924 | **2 CTA/SM** |
+| H5b | **22 / 50** | 4,924 | **2 CTA/SM** |
+| H6 | **40 / 54** | 4,924 | 1 CTA/SM |
+| H6c | **24 / 48** | 4,924 | **2 CTA/SM** |
+| H6d | 37 / 52 | 4,924 | 1 CTA/SM |
+| H7 | **22 / 52** | 4,924 | **2 CTA/SM** |
+| 落地（现行生产，`ee402bc` + 本改动） | **22 / 52** | 4,924 | **2 CTA/SM** |
+
+（A 是 SWAR 之前的生产；Y1 = 提交 `8e2a232` 之后、NaN 处置搬走之前的生产。
+同一行的 H5a/H5b/H7 都改自 Y1，单变量，只差 epilogue 那一处 —— 且**只差其中一个
+站点**，见上。）
 
 `regs_per_multiprocessor = 131072`、`max_threads_per_multi_processor = 2048`
 ⇒ 1024 线程、2 个 CTA 时每线程 32 个寄存器：27 在预算内，37–43 不在。

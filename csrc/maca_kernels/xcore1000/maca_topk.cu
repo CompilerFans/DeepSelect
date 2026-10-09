@@ -80,6 +80,27 @@ struct RowParams {
     // Written by that kernel, read by the contract half.  Null when nothing
     // scans.
     int32_t *scan_flags;
+    // The table `nan_abort_kernel` reads, one entry per row: raised by the
+    // contract half for a row it found a NaN in.  Distinct from `scan_flags`
+    // rather than sharing it because the contract half is its only writer and
+    // writes **every** row -- 0 at the top of `topk_kernel_radix`, 1 in the NaN
+    // disposition -- which is what lets it go without a per-call
+    // `cudaMemsetAsync`: a slot left over from the previous call cannot be
+    // read, because no slot is left over.  (That memset is not free: measured
+    // on C500, one `mcMemsetAsync` of this table is ~11 us -- a launch, not a
+    // bandwidth cost -- and the calls that would pay it are the small-batch
+    // ones that gain nothing from the occupancy this change buys.)
+    //
+    // "Every row" is a property of the launch, and it is the invariant this
+    // table rests on: `topk_kernel_radix` is launched `<<<batches, BLOCK>>>`,
+    // one CTA per row, on *every* route -- the split, the coarse12 and the
+    // dgchunks arms each hand their answer to that same launch through
+    // `launch_typed_radix`, so none of them answers a row without it.  A route
+    // that answered rows itself would have to clear its own rows here, and it
+    // would need this table zeroed per call.
+    //
+    // Null unless the call can abort.
+    int32_t *nan_abort_flags;
     // The coarse12 route's staging buffer: `n_rows * topk` int32 columns, the
     // row positions that kernel ranks.  It cannot be `output_index` itself
     // because the public entry's default `indices_type` is int64 and the kernel
@@ -111,15 +132,17 @@ struct RowParams {
     uint32_t sm_count;
     int32_t idx_fill;
     float value_fill;
-    // `check_nan` is whether the row is scanned at all; `abort_on_nan` is what
-    // happens once one is found, and is inert when nothing scans.  Two flags
-    // rather than one because the scan is a whole extra pass over the row and a
-    // caller that has already established its input is NaN-free pays it for
-    // nothing: measured on C500, 22-32% of the five official fp32 cells
-    // (7243.7 -> 5618.1 us at b4096-v129280) -- while a caller that has not
-    // still gets the full contract by default.
+    // `check_nan` is whether the row is scanned at all.  The scan is a whole
+    // extra pass over the row and a caller that has already established its
+    // input is NaN-free pays it for nothing: measured on C500, 22-32% of the
+    // five official fp32 cells (7243.7 -> 5618.1 us at b4096-v129280) -- while
+    // a caller that has not still gets the full contract by default.
+    //
+    // What happens to a row that *is* found poisoned is not the kernel's
+    // decision: the contract half raises the row's flag, and `nan_abort_kernel`
+    // reads it.  The abort answered here instead cost this kernel 15 MT of
+    // registers (see that kernel).
     bool check_nan;
-    bool abort_on_nan;
 };
 
 // ── key encode / decode ─────────────────────────────────────────────────────
@@ -419,6 +442,32 @@ __global__ __launch_bounds__(kScanBlock) void nan_scan_kernel(
     }
 }
 
+// The abort half of the NaN contract, in its own kernel because the contract
+// half must not carry it: `printf` + `__trap` answered inline costs the row
+// kernel **15 MT of registers on C500** (37 -> 22, one source line at a time),
+// and a 1024-thread block stops fitting two CTAs per SM at 32 MT, so the block
+// costs the whole kernel a resident CTA on every call, including the calls that
+// never reach it.  The `printf` is 13 of the 15 -- dropping it alone takes the
+// kernel to 24 MT, dropping the `__trap` alone changes nothing.  With the block
+// moved here the row kernel runs two CTAs/SM, and that is the difference
+// between 9,310 us and 6,144 us on `b4096 V524288 k512` bf16.
+//
+// `flags` is `RowParams::nan_abort_flags`: the contract half clears a row's
+// entry as the kernel starts and raises it in the NaN disposition, so one
+// thread per row here reads this call's answer and the first raised flag prints
+// and traps.  A `check_nan` call therefore aborts on the row that poisoned it
+// rather than on the row that got scheduled first.
+constexpr int kNanAbortBlock = 128;
+
+__global__ __launch_bounds__(kNanAbortBlock) void nan_abort_kernel(
+    const int32_t *flags, uint32_t batches) {
+    const uint32_t row = (uint32_t)blockIdx.x * kNanAbortBlock + threadIdx.x;
+    if (row < batches && __ldg(flags + row) != 0) {
+        printf("[deep_select] NaN detected. Aborting.\n");
+        __trap();
+    }
+}
+
 // BLOCK is `rk::kBlockSize`, or `rk::kLongRowBlockSize` for the regime the
 // ported dispatcher picks the wider block for (see `needs_long_row_bf16`).
 //
@@ -446,6 +495,11 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
     if (tid == 0) {
         row_offset =
             params.idx_offset_ptr ? __ldg(params.idx_offset_ptr + row) : 0;
+        // Every row clears its own abort flag here, before anything in this
+        // CTA can return, so `nan_abort_kernel` reads this call's answer and
+        // the table never needs zeroing between calls (see
+        // `RowParams::nan_abort_flags`).
+        if (params.nan_abort_flags != nullptr) params.nan_abort_flags[row] = 0;
     }
     __syncthreads();
     const int32_t idx_offset = row_offset;
@@ -506,11 +560,11 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
     if constexpr (kPreSelected) {
         nan_local = params.check_nan && params.nan_flags[row] != 0;
         if (nan_local) {
-            if (params.abort_on_nan) {
-                if (tid == 0) printf("[deep_select] NaN detected. Aborting.\n");
-                __trap();
+            if (tid == 0) {
+                out_index_row[0] = (OutIdxT)0x3F3F3F3F;
+                if (params.nan_abort_flags != nullptr)
+                    params.nan_abort_flags[row] = 1;
             }
-            if (tid == 0) out_index_row[0] = (OutIdxT)0x3F3F3F3F;
             return;
         }
     }
@@ -542,13 +596,16 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
 
     // The fold's vote lands only now, after the kernel has ranked the row.  The
     // slot it owns is row 0's and the disposition is the one the preselected
-    // arm ran above; what differs is when the answer arrived.
+    // arm ran above; what differs is when the answer arrived.  Neither arm
+    // aborts from here: the flag raised below is what `nan_abort_kernel` reads,
+    // and the abort belongs in that kernel rather than in this one (see it for
+    // the 15 MT this costs when inlined).
     if (nan_local) {
-        if (params.abort_on_nan) {
-            if (tid == 0) printf("[deep_select] NaN detected. Aborting.\n");
-            __trap();
+        if (tid == 0) {
+            out_index_row[0] = (OutIdxT)0x3F3F3F3F;
+            if (params.nan_abort_flags != nullptr)
+                params.nan_abort_flags[row] = 1;
         }
-        if (tid == 0) out_index_row[0] = (OutIdxT)0x3F3F3F3F;
         return;
     }
 
@@ -2092,6 +2149,12 @@ struct ChunkedScratch {
     // buffer is that table for every route that does not bring its own.
     int32_t *scan_flags = nullptr;
     size_t scan_flags_count = 0;
+    // `RowParams::nan_abort_flags`, for the calls that can abort.  Grown like
+    // the rest and never shrunk; what it is *not* is zeroed per call -- the
+    // kernel writes every row's entry, so no call can read another call's
+    // answer.
+    int32_t *nan_abort_flags = nullptr;
+    size_t nan_abort_flags_count = 0;
     // The coarse12 route's answer buffer: `n_rows * topk` int32 columns, which
     // are the row *positions* the kernel ranks.  It is separate from
     // `output_index` because the public entry's default `indices_type` is
@@ -2263,7 +2326,6 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     p.idx_fill = (int32_t)idx_oob_fill_value;
     p.value_fill = (float)value_oob_fill_value;
     p.check_nan = check_nan;
-    p.abort_on_nan = abort_when_nan_found;
 
     const int value_dtype = float32 ? 0 : 1;
     const int index_dtype = dsf::same_dtype(output_index.dtype(), dsf::kInt32) ? 0 : 1;
@@ -2465,6 +2527,24 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
                                               (size_t)batches * sizeof(int32_t),
                                               stream));
     }
+    // The abort table: same grow-only pattern, opposite zeroing policy.  The
+    // contract half writes a slot for every row before it can return, so a
+    // memset here would buy nothing and cost the call ~11 us (see the field's
+    // note).  It is allocated for the whole `abort_on_nan` class rather than
+    // for the route that will need it, because the route is chosen inside
+    // `topk_launch` and every route it can choose answers through the same
+    // contract half.
+    if (check_nan && abort_when_nan_found) {
+        if ((size_t)batches > scratch.nan_abort_flags_count) {
+            int32_t *grown = nullptr;
+            DS_CUDA_RUNTIME_CHECK(
+                cudaMalloc(&grown, (size_t)batches * sizeof(int32_t)));
+            scratch_retire(scratch.retired, scratch.nan_abort_flags);
+            scratch.nan_abort_flags = grown;
+            scratch.nan_abort_flags_count = (size_t)batches;
+        }
+        p.nan_abort_flags = scratch.nan_abort_flags;
+    }
     if (needs_coarse12_cols) p.coarse12_cols = scratch.coarse12_cols;
     if (value_dtype == 0 && detail::f32_chunks_applies(p, (uint32_t)batches))
         p.chunks_workspace = scratch.chunks_workspace;
@@ -2482,6 +2562,15 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     topk_launch(p, batches, (void *)stream, value_dtype, index_dtype,
                 sorted_index, sorted_value, return_value, workspace,
                 workspace_bytes);
+    // Last, because it reads the table the contract half fills.  Launched only
+    // for the calls that can abort, so a `check_nan` call that answers with the
+    // sentinel pays nothing for it.
+    if (check_nan && abort_when_nan_found && p.nan_abort_flags != nullptr &&
+        batches > 0) {
+        const uint32_t n = (uint32_t)batches;
+        nan_abort_kernel<<<(n + kNanAbortBlock - 1) / kNanAbortBlock,
+                           kNanAbortBlock, 0, stream>>>(p.nan_abort_flags, n);
+    }
     DS_CUDA_RUNTIME_CHECK(cudaGetLastError());
 }
 
