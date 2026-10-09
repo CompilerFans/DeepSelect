@@ -337,6 +337,18 @@ def performance_cases() -> List[TestParam]:
         ]
         for compressed_seqlen in [256, 1024, 4096, 16384, 65536, 131072, 262144, 524288, 1048576]
     ] + [
+        # DSA decode: `bs x heads` rows over a long context.  The grid above
+        # never reaches it -- its smallest batch is 6 and no cell there uses
+        # `topk=2048`.  Every axis carries a boundary the routing turns on:
+        # 64 is `kChunkedMaxBatches`, 262144 is `kChunkedMinVocab`, and 2048
+        # is the one `topk` the split refuses outright.  Batch 1 is not a
+        # production row count (V3's smallest is `1 x 64` heads); it is the
+        # boundary probe that holds the row-to-CTA ratio on the grid.
+        TestParam(b, vocab_size, topk, False, False, False, torch.bfloat16, torch.int32, num_runs=10)
+        for topk in [512, 1024, 2048]
+        for b in [1, 64, 128]
+        for vocab_size in [131072, 262144, 1048576]
+    ] + [
         # Sampler
         TestParam(b, vocab_size, 512, True, False, True, torch.float, torch.int64, num_runs=10)
         for b in [6, 256, 512, 768, 4096]
