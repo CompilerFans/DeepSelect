@@ -1,0 +1,19 @@
+# 147 cells from perf_data/MetaX_C500/20261009_140904/deepselect_perf.csv
+# 2 arms x 3 rounds x 10 iters, device 2
+# round 0 arm A lib=621b63a5 /tmp/ds_nan_ab/A/deep_select/deep_select_maca_xcore1000.so
+# round 0 arm B lib=fe0e4b98 /tmp/ds_nan_ab/Y1/deep_select/deep_select_maca_xcore1000.so
+# round 1 arm A lib=621b63a5 /tmp/ds_nan_ab/A/deep_select/deep_select_maca_xcore1000.so
+# round 1 arm B lib=fe0e4b98 /tmp/ds_nan_ab/Y1/deep_select/deep_select_maca_xcore1000.so
+# round 2 arm A lib=621b63a5 /tmp/ds_nan_ab/A/deep_select/deep_select_maca_xcore1000.so
+# round 2 arm B lib=fe0e4b98 /tmp/ds_nan_ab/Y1/deep_select/deep_select_maca_xcore1000.so
+
+# arm A: libs=['621b63a5']
+# arm B: libs=['fe0e4b98']
+
+=== B vs A (paired median per cell) ===
+  route c12    n= 10  median 1.0001x  [1.000, 1.003]
+  route row    n=100  median 0.9431x  [0.903, 1.016]
+  route split  n= 11  median 0.9990x  [0.995, 1.002]
+  ALL    n=121  median 0.9525x  [0.903, 1.016]
+
+# wrote /tmp/ds_nan_ab/ab_family/ab_paired.json

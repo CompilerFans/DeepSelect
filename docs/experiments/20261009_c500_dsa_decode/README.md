@@ -726,7 +726,7 @@ L 值得单独记一笔：那第三趟是**纯读**，微基准里同几何纯�
 
 ### 8.3 机制：绑的是 **MT 寄存器**，不是共享内存（本节原稿引的 smem 表不是这一格的仪器）
 
-**驱动自己的答案**（`/tmp/ds_nan_ab/occ_probe.py`：把臂按它自己的包装进来，对
+**驱动自己的答案**（`nan_arms/occ_probe.py`：把臂按它自己的包装进来，对
 本格真正跑的 `topk_kernel_radix<__maca_bfloat16, int, 1024, false,false,false,false>`
 调 `mcOccupancyMaxActiveBlocksPerMultiprocessor(func, 1024, 18432)` —— 真实的
 block 宽度与动态 smem）：
@@ -792,7 +792,7 @@ CLAUDE.md 的资源审计那一节记着"bf16 wide path, topk=512 : 16384 + 2048
 
 问题原样是"NaN 检查现在融在一个 kernel 里，换成独立 kernel 会不会更好"。
 **不会，而且差得不近。** 五个臂同一 session、交替、官方口径
-（`/tmp/ds_nan_ab/ab_final.log`）：
+（`nan_arms/ab_final.log`）：
 
 | 臂 | 行核 µs | `nan_scan_kernel` µs | 合计 |
 |---|---:|---:|---:|

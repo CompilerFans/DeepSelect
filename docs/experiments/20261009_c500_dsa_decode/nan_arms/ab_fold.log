@@ -1,0 +1,56 @@
+  no other torch process
+[A-r1] so=deep_select_maca_xcore1000.so md5=621b63a53f95
+    mcFuncSetAttribute                                                10 x        0.5 us
+    mcLaunchKernel                                                    50 x       20.4 us
+    RowParams)                                                        10 x    10071.0 us
+    --- SUM of operator kernels                                             10092.0 us
+    --- official rule (names containing "topk")                             10074.5 us
+[W-r1] so=deep_select_maca_xcore1000.so md5=bd1ff84b628b
+    mcFuncSetAttribute                                                10 x        0.4 us
+    mcLaunchKernel                                                    50 x       19.6 us
+    RowParams)                                                        10 x     9390.5 us
+    --- SUM of operator kernels                                              9410.6 us
+    --- official rule (names containing "topk")                              9390.1 us
+[Y1-r1] so=deep_select_maca_xcore1000.so md5=fe0e4b981afd
+    mcFuncSetAttribute                                                10 x        0.6 us
+    mcLaunchKernel                                                    50 x       24.9 us
+    RowParams)                                                        10 x     9307.5 us
+    --- SUM of operator kernels                                              9333.0 us
+    --- official rule (names containing "topk")                              9307.4 us
+[A-r2] so=deep_select_maca_xcore1000.so md5=621b63a53f95
+    mcFuncSetAttribute                                                10 x        0.5 us
+    mcLaunchKernel                                                    50 x       19.6 us
+    RowParams)                                                        10 x    10071.8 us
+    --- SUM of operator kernels                                             10091.8 us
+    --- official rule (names containing "topk")                             10072.1 us
+[W-r2] so=deep_select_maca_xcore1000.so md5=bd1ff84b628b
+    mcFuncSetAttribute                                                10 x        0.5 us
+    mcLaunchKernel                                                    50 x       20.5 us
+    RowParams)                                                        10 x     9391.0 us
+    --- SUM of operator kernels                                              9412.0 us
+    --- official rule (names containing "topk")                              9392.4 us
+[Y1-r2] so=deep_select_maca_xcore1000.so md5=fe0e4b981afd
+    mcFuncSetAttribute                                                10 x        0.6 us
+    mcLaunchKernel                                                    50 x       22.6 us
+    RowParams)                                                        10 x     9308.3 us
+    --- SUM of operator kernels                                              9331.4 us
+    --- official rule (names containing "topk")                              9310.7 us
+[A-r3] so=deep_select_maca_xcore1000.so md5=621b63a53f95
+    mcFuncSetAttribute                                                10 x        0.5 us
+    mcLaunchKernel                                                    50 x       22.0 us
+    RowParams)                                                        10 x    10072.4 us
+    --- SUM of operator kernels                                             10095.0 us
+    --- official rule (names containing "topk")                             10072.6 us
+[W-r3] so=deep_select_maca_xcore1000.so md5=bd1ff84b628b
+    mcFuncSetAttribute                                                10 x        0.6 us
+    mcLaunchKernel                                                    50 x       22.9 us
+    RowParams)                                                        10 x     9391.8 us
+    --- SUM of operator kernels                                              9415.3 us
+    --- official rule (names containing "topk")                              9392.1 us
+[Y1-r3] so=deep_select_maca_xcore1000.so md5=fe0e4b981afd
+    mcFuncSetAttribute                                                10 x        0.5 us
+    mcLaunchKernel                                                    50 x       19.1 us
+    RowParams)                                                        10 x     9309.4 us
+    --- SUM of operator kernels                                              9329.0 us
+    --- official rule (names containing "topk")                              9307.9 us
+ALLDONE
