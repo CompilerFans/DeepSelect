@@ -656,6 +656,31 @@ inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk)
 constexpr uint32_t kChunkedMaxBatches = 64;
 constexpr uint32_t kChunkedMinVocab = 262144;
 
+// Row length the split has to buy before it is worth a batch: the gate below
+// admits `vocab_size / kChunkedVocabPerRow` rows.
+//
+// The split pays four kernels (a separate NaN scan, two stages, and the
+// `preselected` row kernel) and reads the input a third time, and buys CTA
+// parallelism for a row the row kernel would otherwise walk alone.  That stops
+// paying once the batch alone keeps the machine busy -- and the batch at which
+// it does grows with the row length, because the row kernel's cost is flat in
+// the batch for as long as it fits one wave.
+//
+// Measured crossing on C500, paired A/B alternating both arms in one session
+// (`docs/experiments/20261009_c500_dsa_decode/`, ratios are split/row so >1
+// means the split won):
+//
+//     vocab 262144   b=12 1.131 | b=16 0.909   -> crossing in (12, 16)
+//     vocab 524288   b=32 1.199 | b=40 (unmeasured, k=1024 crossed at 16)
+//     vocab 1048576  b=40 1.105 | b=48 0.922   -> crossing in (40, 48)
+//
+// 20000 per row puts the boundary at 13 /         26 /        52 for those
+// three -- inside the first bracket, and on the conservative side of the
+// other two.  Being wrong towards the row kernel costs at most 1.20x on the
+// measured set; being wrong towards the split costs up to 2.51x (b=64
+// vocab 262144), which is what the boundary is here to stop.
+constexpr uint32_t kChunkedVocabPerRow = 20000;
+
 // The split is SM-count-sensitive: a grid of `kBatch * chunks` CTAs leaves
 // `ctas mod SM` SMs idle unless it is a whole number of waves, and the same 16
 // is a different fraction of a wave on a 104-AP C500, a 28-SM C600 and a
@@ -717,7 +742,10 @@ struct ChunkedWorkspace {
 inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
     if (batches == 0 || batches > kChunkedMaxBatches) return false;
     if (params.vocab_size < kChunkedMinVocab) return false;
-    return params.topk == 512 || params.topk == 1024;
+    if (params.topk != 512 && params.topk != 1024) return false;
+    // `kChunkedVocabPerRow` is exact and overflow-free as a division; the
+    // product would need 64-bit arithmetic to say the same thing.
+    return batches <= params.vocab_size / kChunkedVocabPerRow;
 }
 
 inline size_t chunked_workspace_bytes(uint32_t batches, uint32_t topk,
