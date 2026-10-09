@@ -52,9 +52,18 @@ perf_snapshot = _load_perf_snapshot()
 READ_WALL_GB_S = 1650.0
 
 # The b=4096 bf16 cells, and the shape the extraction microbench matched:
-# one row per CTA, grid = n_rows.
+# one row per CTA, grid = n_rows.  `--cells` overrides, so the README figures'
+# own bars can be checked one by one.
 CELLS = [(4096, 1048576, 512), (4096, 524288, 512), (4096, 131072, 512),
          (64, 1048576, 512)]
+
+# The two README figures' cells: bf16 over batch 6/512/4096 x the six vocab
+# sizes at topk=512, and fp32 over batch 6..4096 at vocab_size=129280.
+BF16_FIG = [(b, v, 512, "torch.bfloat16")
+            for b in (6, 512, 4096)
+            for v in (16384, 65536, 131072, 262144, 524288, 1048576)]
+FP32_FIG = [(b, 129280, 512, "torch.float32")
+            for b in (6, 256, 512, 768, 4096)]
 
 
 def short_name(name, tail=30):
@@ -72,6 +81,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--num-tests", type=int, default=10)
     ap.add_argument("--device", type=int, default=None)
+    ap.add_argument("--figures", action="store_true",
+                    help="the cells the README's two figures draw")
+    ap.add_argument("--dtype", default="torch.bfloat16",
+                    help="with --cells, the dtype of every listed cell")
+    ap.add_argument("--cells", default=None,
+                    help="'b,v,k;b,v,k' -- overrides the built-in list")
     args = ap.parse_args()
     if args.device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
@@ -82,10 +97,25 @@ def main():
           f"  sm_count = {torch.cuda.get_device_properties(0).multi_processor_count}")
     print()
 
-    for want in CELLS:
+    if args.cells:
+        cells = []
+        for part in args.cells.split(";"):
+            b, v, k = (int(x) for x in part.split(","))
+            cells.append((b, v, k, args.dtype))
+    elif args.figures:
+        cells = BF16_FIG + FP32_FIG
+    else:
+        cells = [(b, v, k, "torch.bfloat16") for b, v, k in CELLS]
+
+    for want in cells:
         hit = [c for c in official.performance_cases()
-               if (c.batch_size, c.vocab_size, c.topk) == want
-               and str(c.dtype) == "torch.bfloat16"]
+               if (c.batch_size, c.vocab_size, c.topk) == want[:3]
+               and str(c.dtype) == want[3]]
+        if not hit:
+            # a figure cell the *perf grid* does not carry: build it by hand
+            hit = [official.TestParam(want[0], want[1], want[2], False, False,
+                                      False, eval(want[3]), torch.int32,
+                                      num_runs=10)]
         if not hit:
             print(f"{want}: not in the grid"); continue
         p = hit[0]
@@ -98,8 +128,9 @@ def main():
         res = kk.bench(call, args.num_tests)
 
         b, v, k = p.batch_size, p.vocab_size, p.topk
-        row_mb = b * v * 2 / 1e6
-        print(f"=== b{b} V{v} k{k}   grid would be {b} CTAs, one row = {row_mb:.1f} MB")
+        width = 4 if "float32" in str(p.dtype) else 2
+        row_mb = b * v * width / 1e6
+        print(f"=== {p.dtype} b{b} V{v} k{k}  ({row_mb:.1f} MB)")
         total = 0.0
         for name in sorted(res.get_kernel_names()):
             ranges = res.time_ranges[name]
