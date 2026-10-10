@@ -1,0 +1,23 @@
+# probe_f32_split.py -- per-kernel split of the fp32 b4096 V129280 k512 cell
+# device 2, quiet box, 2026-10-10 09:19
+=== arm: default (dg12 route) ===
+  import sys, torch
+   Memset                                                    10x      16.5 us
+   mcFuncSetAttribute                                        10x       0.4 us
+   mcLaunchKernel                                            60x      25.7 us
+   mcMemsetAsync                                             10x       3.6 us
+   topk_coarse12_kernel                                      10x    2837.4 us
+   RowParams)                                                10x     962.6 us
+   SUM                                                              3846.1 us | official    3815.0 us
+   input 2118.1 MB, two passes = 4236.2 MB; wall 1650 GB/s -> 2567 us
+=== arm: DEEP_SELECT_F32_COARSE12=0 (dg12 refused -> split) ===
+  import sys, torch
+   Memset                                                    20x      28.4 us
+   mcFuncSetAttribute                                        10x       0.5 us
+   mcLaunchKernel                                            70x      36.1 us
+   mcMemsetAsync                                             20x       6.8 us
+   topk_f32_chunk_stage2_kernel                              10x     301.3 us
+   RowParams)                                                10x    1042.9 us
+   topk_f32_chunk_stage1_kernel<true>                        10x    4632.1 us
+   SUM                                                              6048.0 us | official    5972.6 us
+   input 2118.1 MB, two passes = 4236.2 MB; wall 1650 GB/s -> 2567 us

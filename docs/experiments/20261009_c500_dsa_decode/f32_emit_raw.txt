@@ -1,0 +1,22 @@
+  import sys, torch
+# official flags: sorted_value=True sorted_index=False return_value=True
+--- (a) sv=True  rv=True 
+     60x      24.1 us  mcLaunchKernel
+     10x    2839.7 us  rk::dg12::topk_coarse12_kernel(float const*, int const*, int*, int*, int, int, long, int)
+     10x     986.5 us  void deep_select_maca::topk_kernel_radix<float, long, 512, true, true, true, true>(deep_select_maca::RowParams
+--- (b) sv=False rv=True 
+     60x      60.0 us  mcLaunchKernel
+     10x    2840.7 us  rk::dg12::topk_coarse12_kernel(float const*, int const*, int*, int*, int, int, long, int)
+     10x     718.0 us  void deep_select_maca::topk_kernel_radix<float, long, 512, false, true, false, true>(deep_select_maca::RowPara
+--- (c) sv=False rv=False
+     60x      24.7 us  mcLaunchKernel
+     10x    2838.1 us  rk::dg12::topk_coarse12_kernel(float const*, int const*, int*, int*, int, int, long, int)
+     10x      53.7 us  void deep_select_maca::topk_kernel_radix<float, long, 512, false, false, false, true>(deep_select_maca::RowPar
+--- (f) si=True  rv=False
+     60x      63.5 us  mcLaunchKernel
+     10x    2839.2 us  rk::dg12::topk_coarse12_kernel(float const*, int const*, int*, int*, int, int, long, int)
+     10x     421.1 us  void deep_select_maca::topk_kernel_radix<float, long, 512, true, false, false, true>(deep_select_maca::RowPara
+--- (g) si=True  rv=True 
+     60x      53.3 us  mcLaunchKernel
+     10x    2839.3 us  rk::dg12::topk_coarse12_kernel(float const*, int const*, int*, int*, int, int, long, int)
+     10x     812.3 us  void deep_select_maca::topk_kernel_radix<float, long, 512, true, true, false, true>(deep_select_maca::RowParam
