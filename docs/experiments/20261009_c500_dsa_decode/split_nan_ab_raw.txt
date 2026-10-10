@@ -1,0 +1,48 @@
+# round 0 arm old md5=5fe45c65
+# round 0 arm new md5=c85b632d
+# round 1 arm new md5=c85b632d
+# round 1 arm old md5=5fe45c65
+# round 2 arm old md5=5fe45c65
+# round 2 arm new md5=c85b632d
+
+# cells = the split's own (b <= vocab/20000, vocab >= 262144):
+#    old: md5 5fe45c65  /tmp/bswap/deep_select/deep_select_maca_xcore1000.so
+#    new: md5 c85b632d  /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+
+# selection kernels only (tests/test.py rule):
+  B        V     k      old us     new us  new/old
+  1   262144   512        62.8       64.4    1.026
+  1   262144  1024        79.4       81.0    1.020
+  1  1048576   512        90.2       92.6    1.026
+  1  1048576  1024       119.8      122.4    1.022
+  6   262144   512        63.3       66.5    1.051
+  6   262144  1024        80.4       83.7    1.042
+  6   524288   512        77.5       81.3    1.048
+  6   524288  1024        95.6       99.5    1.041
+  6  1048576   512        94.4       97.9    1.037
+  6  1048576  1024       124.9      128.1    1.025
+
+# all operator kernels (ab_snapshot rule):
+  B        V     k      old us     new us  new/old
+  1   262144   512        68.6       58.8    0.856
+  1   262144  1024        85.3       75.6    0.887
+  1  1048576   512       111.2       86.8    0.781
+  1  1048576  1024       141.0      116.6    0.826
+  6   262144   512        78.3       61.1    0.781
+  6   262144  1024        96.1       78.2    0.814
+  6   524288   512        98.5       75.7    0.768
+  6   524288  1024       116.8       93.5    0.801
+  6  1048576   512       126.9       92.4    0.728
+  6  1048576  1024       157.3      122.6    0.779
+
+# kernels the widened reading summed, per cell (arm `new`):
+#   1x262144 k=512: route=split ['topk_bf16_chunk_stage1_kernel_k<51', 'topk_bf16_chunk_stage2_kernel_k<51', 'topk_kernel_radix<__maca_bfloat16,']
+#   1x262144 k=1024: route=split ['topk_bf16_chunk_stage1_kernel_k<10', 'topk_bf16_chunk_stage2_kernel_k<10', 'topk_kernel_radix<__maca_bfloat16,']
+#   1x1048576 k=512: route=split ['topk_bf16_chunk_stage1_kernel_k<51', 'topk_bf16_chunk_stage2_kernel_k<51', 'topk_kernel_radix<__maca_bfloat16,']
+#   1x1048576 k=1024: route=split ['topk_bf16_chunk_stage1_kernel_k<10', 'topk_bf16_chunk_stage2_kernel_k<10', 'topk_kernel_radix<__maca_bfloat16,']
+#   6x262144 k=512: route=split ['topk_bf16_chunk_stage1_kernel_k<51', 'topk_bf16_chunk_stage2_kernel_k<51', 'topk_kernel_radix<__maca_bfloat16,']
+#   6x262144 k=1024: route=split ['topk_bf16_chunk_stage1_kernel_k<10', 'topk_bf16_chunk_stage2_kernel_k<10', 'topk_kernel_radix<__maca_bfloat16,']
+#   6x524288 k=512: route=split ['topk_bf16_chunk_stage1_kernel_k<51', 'topk_bf16_chunk_stage2_kernel_k<51', 'topk_kernel_radix<__maca_bfloat16,']
+#   6x524288 k=1024: route=split ['topk_bf16_chunk_stage1_kernel_k<10', 'topk_bf16_chunk_stage2_kernel_k<10', 'topk_kernel_radix<__maca_bfloat16,']
+#   6x1048576 k=512: route=split ['topk_bf16_chunk_stage1_kernel_k<51', 'topk_bf16_chunk_stage2_kernel_k<51', 'topk_kernel_radix<__maca_bfloat16,']
+#   6x1048576 k=1024: route=split ['topk_bf16_chunk_stage1_kernel_k<10', 'topk_bf16_chunk_stage2_kernel_k<10', 'topk_kernel_radix<__maca_bfloat16,']

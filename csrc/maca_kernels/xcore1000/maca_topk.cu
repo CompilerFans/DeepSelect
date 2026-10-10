@@ -427,12 +427,13 @@ static __device__ __forceinline__ bool row_has_nan(const ValueT *row,
 // asks the same question at the width the row needs.  `flags` is zeroed by the
 // caller and a row's flag is raised by whichever chunk read the bit pattern.
 //
-// **The fp32 split no longer launches this.**  Stage 1's pass 1 reads exactly
-// these bytes at exactly this width, so the scan rides its own load instead
-// (`rk::topk_f32_chunk_stage1_kernel`'s `kNan`, and the ledger's §10.7 for the
-// A/B: the whole walk goes, for ~3% on the pass that absorbs it).  What is
-// left here is the 16-bit split's scan, the fp32 row path's, and the A/B arm
-// `DS_FUSE_NAN_OFF=1` reaches -- which is why it is not deleted.
+// **Neither split launches this any more.**  Stage 1 reads exactly these bytes
+// at exactly this width, so the scan rides its own load instead: fp32 through
+// `rk::topk_f32_chunk_stage1_kernel`'s `kNan` (the ledger's §10.7 for the A/B:
+// the whole walk goes, for ~3% on the pass that absorbs it), the 16-bit split
+// through the stage-1 kernels', whose vote feeds this same `flags` table over
+// the same window.  What still reaches it is the fp32 *row* path and the fp32
+// A/B arm `DS_FUSE_NAN_OFF=1`, which is why it is not deleted.
 constexpr int kScanBlock = 256;
 
 template <typename ValueT>
@@ -1864,19 +1865,19 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
     const int chunks = chunked_chunks(params);
     const ChunkedWorkspace ws =
         chunked_workspace(workspace, batches, params.topk, (uint32_t)chunks);
-    if (params.check_nan) {
+    // The flags table is cleared rather than raised: stage 1 ORs a 1 into a
+    // row's slot when its chunk holds a NaN, so a row no chunk of which does
+    // stays clear.  The memset is `batches * 4` bytes against a walk that no
+    // longer happens.
+    if (params.check_nan)
         cudaMemsetAsync(ws.nan_flags, 0, (size_t)batches * sizeof(int32_t), stream);
-        nan_scan_kernel<maca_bfloat16><<<batches * chunks, kScanBlock, 0, stream>>>(
-            params.input, params.end_ptr,
-            (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)),
-            params.vocab_size, (uint32_t)chunks, ws.nan_flags);
-    }
     const cudaError_t rc = rk::launch_topk_bf16_chunked(
         (const maca_bfloat16 *)params.input, params.end_ptr, ws.merged,
         ws.candidate_indices, ws.candidate_values, (int)batches,
         (int)params.vocab_size, (int)params.topk, chunks, stream,
         // The row stride is in bytes at this layer and in elements there.
-        (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)));
+        (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)),
+        params.check_nan, params.check_nan ? ws.nan_flags : nullptr);
     RowParams merged = params;
     // A split that could not be launched leaves the workspace unfilled; the row
     // dataflow answers instead of the contract reading an empty slot.  The gate

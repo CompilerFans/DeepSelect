@@ -1302,7 +1302,18 @@ Beyond mcDeepGEMM's general rules (state the principle and the magnitude; keep r
 - A before→after table over the representative cells, in **both currencies** — µs **and** GB/s, with the trip count and the % of the read-only wall. Logical GB/s is `B × V × 2 B ÷ kernel time`; the wall is a measured **1,650 GB/s streaming read** on C500 (1,344 GB/s mixed) — do not back it out of the kernel. **1,487 was the old number and it is wrong** — it is the 104-block point on the ramp, not the wall; `C500-to-parity-plan.zh.md` §7.1 retracts it (104 blocks 767 GB/s, 208 → 1,298, 416 → 1,650, 832 → 1,641), and that retraction applies to every citation of 1,487 in this repo. **The wall is per-part; measure it for the part you are on.** On C600U it is **1,545 GB/s**, measured with a purpose-written `uint4` grid-stride read kernel (`/tmp/readwall.cu` in the session that took it — a torch reduction measures 274 GB/s on the same device and is *not* the wall): 224 blocks → 1,545, 448 → 1,532, 896 → 1,523, 1792 → 1,401. The two numbers being close is a coincidence of these two parts, not a constant.
 - A **roofline verdict** for the affected cell: if it is not bandwidth-bound, say what it *is* bound on (currently: per-CTA dependency chain — `load → key transform → compare → shared atomic` — and serialized shared atomics).
 - The gate results. Both suites: `95/95` perf (`./run_test.sh --perf`, ~100 s) **and** a correctness suite — `82170/82170` for the full-table 4-shard run on C500 (`~17.5 min`), or `200/200` for the seeded sample (`./run_test.sh --test`, ~63 s on C600U) when the change is being iterated rather than landed. Say which one you ran.
-- An architecture-boundary statement: changes confined to `csrc/maca_kernels/xcore1000/` leave xcore1600 byte-identical, so **no C600U validation is owed**. Say so explicitly when true. (Byte-identical is still the right claim — but as of this writing xcore1600 is *not itself validated*, so "no C600U validation is owed" is an argument about the byte-identity of the artifact, not a claim that xcore1600 works. See Known holes.)
+- An architecture-boundary statement, and it has to name what actually ships.
+  **There is no C500-only source tree here**: `setup.py`'s `SOURCES` is one entry
+  (`csrc/maca_kernels/xcore1000/maca_topk.cu`) and it is compiled once per family
+  (`setup.py:307` prints "compiling … once per family"), so a change written in
+  that directory goes into the xcore1500 **and** xcore1600 artifacts as well —
+  "byte-identical on the other families" is not available as a claim. What the
+  line says instead: which family was measured, and that the others were not
+  (C600U is not on this box). This bullet read "changes confined to
+  `csrc/maca_kernels/xcore1000/` leave xcore1600 byte-identical, so no C600U
+  validation is owed" until 2026-10-10, and it was wrong for as long as the
+  one-source-per-family build has existed — §9.12 of
+  `docs/experiments/20261009_c500_dsa_decode/` carries the correction.
 
 These cells frequently have **no compute roofline** — the kernel does a few comparisons and one histogram increment per element and has no FLOP — so "both currencies" lands as logical-GB/s × trips versus the read wall plus a per-CTA limiting factor.
 
@@ -1491,7 +1502,7 @@ source line numbers — so "the md5 moved" is not evidence of a behaviour change
   taken. So this tree cannot be benchmarked against the rerouted one cell for cell; there is no before to put beside the
   after.
 - `backend="deep_gemm"`'s kernel collects the members of the threshold *coarse* bin (half-precision ordered key `>> 6`) before refining, and the chunked kernel silently drops members past its staging capacity. A row with more than 4096 values in one such bucket gets a top-k of an arbitrary subset, varying run to run. Filed as a strict `xfail` in mcDeepGEMM: `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`. **`maca_c` has no such hole** — but note the xcore1600 hole above is a `maca_c` hole, so this sentence is about the `deep_gemm` backend only.
-- The `radix_topk_row_bf16_k` static-k row used by the chunked path still runs the 8-bit coarse level and the 3,514-slot arena; it has not received coarse12.
+- The `radix_topk_row_bf16_k` static-k row still runs the 8-bit coarse level and the 3,514-slot arena; it has not received coarse12. What the chunked path's *stage 1* ranks with is `radix_topk_row_bf16_b` (coarse12) — measured at 382 GB/s against 256 for `_k` on the same chunk, `docs/experiments/20261009_c500_dsa_decode/README.md` §9.12 — and `_k` is the merge's ranking kernel, where the input is `chunks * topk` candidates and the 16 KB coarse histogram would cost more than the walk it speeds up.
 - The fp32 row is a separate codebase path whose overflow handling is multi-round full-row rescan (up to 8 trips). Same "coarse level too coarse" disease, different cure — a 32-bit key cannot be resolved in two levels the way a 16-bit one can. Retesting fp32 cells is mandatory when touching it.
 
 ## Call logging — `deep_select/_log.py`, `DS_LOG`

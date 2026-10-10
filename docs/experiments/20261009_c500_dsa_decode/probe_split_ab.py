@@ -9,8 +9,15 @@ alternating the arms inside one session so clock and thermals land on both.
 
 Each child is one process, asserts which package it loaded, and prints the md5
 of the `.so` it resolved, so an arm cannot silently measure the other's binary.
-Timing is `tests/test.py`'s own rule (`official.bench_topk`), which is what the
-ledger's tables quote.
+
+**Two readings per cell, because one of them cannot see the change.**  The
+ledger's tables quote `tests/test.py`'s rule (`official.bench_topk`), which
+takes the **span over kernels whose name contains `topk`** -- and the old arm
+launches `nan_scan_kernel` *before* stage 1, so a fold that deletes the scan
+moves nothing that rule counts while it does add the test to stage 1's walk.
+The second reading is `ab_snapshot.py`'s "all operator kernels" (the sum over
+names containing `stage` / `nan` / `radix` / `coarse12`), which is what the
+call actually costs.  Both are printed per cell, with the matched names.
 """
 import argparse
 import hashlib
@@ -37,7 +44,7 @@ sys.path.insert(0, "__ARM__")
 sys.path.insert(0, "__TESTS__")
 import torch
 torch.set_default_device("cuda")
-import lib, test as official, deep_select
+import lib, test as official, kernelkit as kk, deep_select
 from deep_select._binding import extension_path
 assert os.path.dirname(deep_select.__file__) == "__ARM__/deep_select", deep_select.__file__
 so = extension_path("deep_select_maca")
@@ -57,8 +64,21 @@ for B, V, K in json.loads(sys.argv[1]):
             return_value=p.return_value, abort_when_nan_found=False,
             backend="maca_c")
     call()
+    # The ledger's rule, called rather than re-implemented: the span over
+    # `"topk"`-named kernels.
     us, _ = official.bench_topk(call, p, t, None, None)
-    out.append([B, V, K, us * 1e6])
+    # The operator's own cost: every selection kernel by name (`ab_snapshot.py`'s
+    # widened rule, which is the one that counts `nan_scan_kernel`).
+    res = kk.bench(call, p.num_runs)
+    d = {n: res.get_kernel_time(n) * 1e6 for n in res.get_kernel_names()
+         if "DeviceSynchronize" not in n}
+    op = sum(x for n, x in d.items()
+             if any(k in n for k in ("stage", "nan", "radix", "coarse12")))
+    names = [n.split("(")[0].split("::")[-1][:34] for n in d
+             if any(k in n for k in ("stage", "nan", "radix", "coarse12"))]
+    route = ("c12" if any("coarse12" in n for n in d)
+             else "split" if any("stage" in n for n in d) else "row")
+    out.append([B, V, K, us * 1e6, op, route, names])
 print("R " + json.dumps({"md5": hashlib.md5(open(so, "rb").read()).hexdigest()[:8],
                          "so": so, "rows": out}))
 '''
@@ -100,16 +120,26 @@ def main():
     print("\n# cells = the split's own (b <= vocab/20000, vocab >= 262144):")
     for name in acc:
         print(f"#   {name:>4}: md5 {receipt[name][0]}  {receipt[name][1]}")
-    hdr = f"\n{'B':>3} {'V':>8} {'k':>5} " + "".join(f"{n + ' us':>11}" for n, _ in arms)
-    if len(arms) == 2:
-        hdr += f"{'new/old':>9}"
-    print(hdr)
-    for i, (b, v, k) in enumerate(CELLS):
-        med = {n: statistics.median(rows[i][3] for rows in acc[n]) for n, _ in arms}
-        line = f"{b:>3} {v:>8} {k:>5} " + "".join(f"{med[n]:>11.1f}" for n, _ in arms)
+    for title, col in (("selection kernels only (tests/test.py rule)", 3),
+                       ("all operator kernels (ab_snapshot rule)", 4)):
+        print(f"\n# {title}:")
+        hdr = f"{'B':>3} {'V':>8} {'k':>5} " + "".join(f"{n + ' us':>11}" for n, _ in arms)
         if len(arms) == 2:
-            line += f"{med[arms[1][0]] / med[arms[0][0]]:>9.3f}"
-        print(line)
+            hdr += f"{'new/old':>9}"
+        print(hdr)
+        for i, (b, v, k) in enumerate(CELLS):
+            med = {n: statistics.median(rows[i][col] for rows in acc[n])
+                   for n, _ in arms}
+            line = (f"{b:>3} {v:>8} {k:>5} "
+                    + "".join(f"{med[n]:>11.1f}" for n, _ in arms))
+            if len(arms) == 2:
+                line += f"{med[arms[1][0]] / med[arms[0][0]]:>9.3f}"
+            print(line)
+    print("\n# kernels the widened reading summed, per cell (arm `%s`):"
+          % arms[-1][0])
+    for i, (b, v, k) in enumerate(CELLS):
+        print(f"#   {b}x{v} k={k}: route={acc[arms[-1][0]][0][i][5]} "
+              f"{acc[arms[-1][0]][0][i][6]}")
     return 0
 
 

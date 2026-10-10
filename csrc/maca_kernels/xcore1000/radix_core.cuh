@@ -2095,11 +2095,15 @@ RK_DEFINE_TOPK_BF16_LONG_KERNEL(topk_bf16_kernel_k1024_compact_long, 1024, true)
 
 #undef RK_DEFINE_TOPK_BF16_LONG_KERNEL
 
-template <uint32_t TOPK>
+// `kNan` is the caller's `check_nan`: with it on this kernel is *also* the NaN
+// scan and `flags` is the table it raises, in place of `nan_scan_kernel`.  The
+// two share the grid by construction (`nan_scan_kernel`'s comment), so the only
+// thing that changes is which kernel reads the chunk's bytes.
+template <uint32_t TOPK, bool kNan = false>
 __global__ void topk_bf16_chunk_stage1_kernel_k(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* candidate_indices,
     maca_bfloat16* candidate_values, int64_t score_stride, int B,
-    int num_chunks, int chunk_size)
+    int num_chunks, int chunk_size, int32_t* flags = nullptr)
 {
     const int global_bid = blockIdx.x;
     const int bid = global_bid / num_chunks;
@@ -2126,16 +2130,24 @@ __global__ void topk_bf16_chunk_stage1_kernel_k(
     }
 
     if (chunk_len <= TOPK_I) {
+        // The window is shorter than `topk`, so the copy already touches every
+        // byte the scan would read: the vote rides it, as in the fp32 split.
+        bool nan_local = false;
         for (int i = threadIdx.x; i < TOPK_I; i += BLOCK_SIZE) {
             if (i < chunk_len) {
                 const int32_t idx = start + i;
+                const maca_bfloat16 raw = __ldg(row + idx);
                 chunk_indices[i] = idx;
-                chunk_values[i] = __ldg(row + idx);
+                chunk_values[i] = raw;
+                if (kNan) nan_local |= is_nan_bits16(__bfloat16_as_ushort(raw));
             } else {
                 chunk_indices[i] = -1;
                 chunk_values[i] = invalid_value;
             }
         }
+        if (kNan && flags != nullptr && __syncthreads_or((int)nan_local) != 0
+            && threadIdx.x == 0)
+            atomicOr(flags + bid, 1);
         return;
     }
 
@@ -2147,8 +2159,12 @@ __global__ void topk_bf16_chunk_stage1_kernel_k(
     // `b6 x 262144 k512` goes from 103.9 to 70.5 us e2e against the row
     // kernel's 97.7.  The merge keeps `_k`: its input is `chunks * topk`
     // candidates, where the 16 KB coarse histogram costs more than it saves.
-    radix_topk_row_bf16_b<kChunkBlockSize, false, false>(
-        row + start, chunk_indices, chunk_len, (uint32_t)TOPK_I);
+    bool nan_row = false;
+    radix_topk_row_bf16_b<kChunkBlockSize, kNan, false>(
+        row + start, chunk_indices, chunk_len, (uint32_t)TOPK_I,
+        kNan ? &nan_row : nullptr);
+    if (kNan && flags != nullptr && nan_row && threadIdx.x == 0)
+        atomicOr(flags + bid, 1);
     for (int i = threadIdx.x; i < TOPK_I; i += BLOCK_SIZE) {
         const int32_t local_idx = chunk_indices[i];
         if (local_idx >= 0 && local_idx < chunk_len) {
@@ -2162,10 +2178,11 @@ __global__ void topk_bf16_chunk_stage1_kernel_k(
     }
 }
 
+template <bool kNan = false>
 __global__ void topk_bf16_chunk_stage1_kernel(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* candidate_indices,
     maca_bfloat16* candidate_values, int64_t score_stride, int topk, int B,
-    int num_chunks, int chunk_size)
+    int num_chunks, int chunk_size, int32_t* flags = nullptr)
 {
     const int global_bid = blockIdx.x;
     const int bid = global_bid / num_chunks;
@@ -2191,20 +2208,31 @@ __global__ void topk_bf16_chunk_stage1_kernel(
     }
 
     if (chunk_len <= topk) {
+        bool nan_local = false;
         for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
             if (i < chunk_len) {
                 const int32_t idx = start + i;
+                const maca_bfloat16 raw = __ldg(row + idx);
                 chunk_indices[i] = idx;
-                chunk_values[i] = __ldg(row + idx);
+                chunk_values[i] = raw;
+                if (kNan) nan_local |= is_nan_bits16(__bfloat16_as_ushort(raw));
             } else {
                 chunk_indices[i] = -1;
                 chunk_values[i] = invalid_value;
             }
         }
+        if (kNan && flags != nullptr && __syncthreads_or((int)nan_local) != 0
+            && threadIdx.x == 0)
+            atomicOr(flags + bid, 1);
         return;
     }
 
-    radix_topk_row_bf16_b<kChunkBlockSize>(row + start, chunk_indices, chunk_len, topk);
+    bool nan_row = false;
+    radix_topk_row_bf16_b<kChunkBlockSize, kNan>(
+        row + start, chunk_indices, chunk_len, (uint32_t)topk,
+        kNan ? &nan_row : nullptr);
+    if (kNan && flags != nullptr && nan_row && threadIdx.x == 0)
+        atomicOr(flags + bid, 1);
     for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
         const int32_t local_idx = chunk_indices[i];
         if (local_idx >= 0 && local_idx < chunk_len) {
@@ -2421,22 +2449,26 @@ inline cudaError_t launch_topk_bf16_chunked_k(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
     int32_t* candidate_indices, maca_bfloat16* candidate_values,
     int B, int L, int num_chunks, cudaStream_t stream,
-    int64_t score_stride = 0)
+    int64_t score_stride = 0, bool want_nan = false,
+    int32_t* nan_flags = nullptr)
 {
     if (TOPK > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
     // Stage 1 runs the coarse12 row, whose arena *is* the 16 KB coarse
     // histogram it aliases, followed by the `topk` staging the core writes.
     constexpr size_t kStage1Smem =
         kCoarse12HistBytes + sizeof(uint32_t) * (size_t)TOPK;
-    static bool init = false;
-    if (!init) {
+    static bool init[2] = {false, false};
+    const int arm = want_nan ? 1 : 0;
+    if (!init[arm]) {
         cudaError_t err = cudaFuncSetAttribute(
-            topk_bf16_chunk_stage1_kernel_k<TOPK>, cudaFuncAttributeMaxDynamicSharedMemorySize, kStage1Smem);
+            want_nan ? (const void*)topk_bf16_chunk_stage1_kernel_k<TOPK, true>
+                     : (const void*)topk_bf16_chunk_stage1_kernel_k<TOPK, false>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kStage1Smem);
         if (err != cudaSuccess) return err;
         err = cudaFuncSetAttribute(
             topk_bf16_chunk_stage2_kernel_k<TOPK>, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
         if (err != cudaSuccess) return err;
-        init = true;
+        init[arm] = true;
     }
 
     const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
@@ -2446,8 +2478,17 @@ inline cudaError_t launch_topk_bf16_chunked_k(
     // how a caller with padded input rows reaches this path; upstream passes
     // `L` and so can only split packed rows.
     const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
-    topk_bf16_chunk_stage1_kernel_k<TOPK><<<B * num_chunks, kChunkBlockSize, kStage1Smem, stream>>>(
-        scores, lengths, candidate_indices, candidate_values, stride, B, num_chunks, chunk_size);
+    if (want_nan) {
+        topk_bf16_chunk_stage1_kernel_k<TOPK, true>
+            <<<B * num_chunks, kChunkBlockSize, kStage1Smem, stream>>>(
+                scores, lengths, candidate_indices, candidate_values, stride, B,
+                num_chunks, chunk_size, nan_flags);
+    } else {
+        topk_bf16_chunk_stage1_kernel_k<TOPK, false>
+            <<<B * num_chunks, kChunkBlockSize, kStage1Smem, stream>>>(
+                scores, lengths, candidate_indices, candidate_values, stride, B,
+                num_chunks, chunk_size);
+    }
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return err;
 
@@ -2460,39 +2501,52 @@ inline cudaError_t launch_topk_bf16_chunked(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
     int32_t* candidate_indices, maca_bfloat16* candidate_values,
     int B, int L, int topk, int num_chunks, cudaStream_t stream,
-    int64_t score_stride = 0)
+    int64_t score_stride = 0, bool want_nan = false,
+    int32_t* nan_flags = nullptr)
 {
     if (topk > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
     switch (topk) {
     case 512:
         return launch_topk_bf16_chunked_k<512>(
             scores, lengths, indices, candidate_indices, candidate_values,
-            B, L, num_chunks, stream, score_stride);
+            B, L, num_chunks, stream, score_stride, want_nan, nan_flags);
     case 1024:
         return launch_topk_bf16_chunked_k<1024>(
             scores, lengths, indices, candidate_indices, candidate_values,
-            B, L, num_chunks, stream, score_stride);
+            B, L, num_chunks, stream, score_stride, want_nan, nan_flags);
     default:
         break;
     }
 
-    static bool init = false;
-    if (!init) {
+    static bool init[2] = {false, false};
+    const int arm = want_nan ? 1 : 0;
+    if (!init[arm]) {
         cudaError_t err = cudaFuncSetAttribute(
-            topk_bf16_chunk_stage1_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
+            want_nan ? (const void*)topk_bf16_chunk_stage1_kernel<true>
+                     : (const void*)topk_bf16_chunk_stage1_kernel<false>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
         if (err != cudaSuccess) return err;
         err = cudaFuncSetAttribute(
             topk_bf16_chunk_stage2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
         if (err != cudaSuccess) return err;
-        init = true;
+        init[arm] = true;
     }
 
     const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
     // Keep each chunk base aligned for the uint4 FP16 vectorized row path.
     const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
     const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
-    topk_bf16_chunk_stage1_kernel<<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
-        scores, lengths, candidate_indices, candidate_values, stride, topk, B, num_chunks, chunk_size);
+    if (want_nan) {
+        topk_bf16_chunk_stage1_kernel<true>
+            <<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
+                scores, lengths, candidate_indices, candidate_values, stride,
+                topk, B, num_chunks, chunk_size, nan_flags);
+    } else {
+        topk_bf16_chunk_stage1_kernel<false>
+            <<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
+                scores, lengths, candidate_indices, candidate_values, stride,
+                topk, B, num_chunks, chunk_size);
+    }
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return err;
 
