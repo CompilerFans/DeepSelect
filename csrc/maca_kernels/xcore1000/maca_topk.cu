@@ -758,12 +758,49 @@ inline void launch_radix(const RowParams &params, uint32_t batches,
     }
 }
 
+// **A set, not a count: the C600U ships at 28 APs and at 32, and both are
+// ordinary parts.**  Every gate fitted on that family takes the set.
+inline bool is_c600u_ap_count(uint32_t sm_count) {
+    return sm_count == 28 || sm_count == 32;
+}
+
+// `needs_long_row_bf16` sends every long row to the 1024-thread instantiation,
+// and its crossover is a C500 measurement -- its own comment says so.  On the
+// C600U the narrow row takes over once the batch alone is large: the AP holds
+// 2 x 1024- or 4 x 512-thread CTAs (128 KiB of registers, 2048 threads), so a
+// full wave gives the narrow row four independent CTAs against the wide row's
+// two, while below a wave the wide row's extra threads on a lone row win.
+//
+// Measured 2026-10-10 (the copy-and-point A/B the split's crossing used: each
+// width forced in its own tree, three rounds alternating in one session, seeds
+// pinned; ratio = narrow / wide, below 1.0 is the narrow row):
+//
+//     vocab    65536  131072  262144  524288  1048576
+//     b 64      0.97   1.03    1.07    1.09    1.10
+//     b 128     0.95   0.99    1.02    1.04    1.05
+//     b 192     0.91   0.97    1.00    1.01    1.03
+//     b 256     0.90   0.93    0.98    1.00    1.00
+//     b 4096    0.83   0.87    0.93    0.96    0.97
+//
+// The batch at which the ratio passes 1.0 climbs with the row length (45 at
+// 65536 through ~270 at 1048576), so no one batch crosses every row; 256 is
+// the smallest measured batch at which the narrow row wins **every** cell
+// (worst 1.004, best 0.826).  Below it the wide row is kept because that is
+// where the narrow row's losses are (1.37 at `b1..b6`, 1.10 at `64x1048576`).
+inline constexpr uint32_t kC600UNarrowRowBatches = 256;
+
 // The ported dispatcher's long-row regime is the only thing that differs
 // between the two block widths (`rk::needs_long_row_bf16`); the batch is the
 // launch's row count, one row per CTA.
-inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk) {
+inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk,
+                           uint32_t sm_count) {
     const rk::TopKConfig cfg{(int)batches, (int)vocab_size, (int)topk};
-    return rk::needs_long_row_bf16(cfg) ? rk::kLongRowBlockSize : rk::kBlockSize;
+    const bool long_row = rk::needs_long_row_bf16(cfg);
+    if (long_row && is_c600u_ap_count(sm_count) &&
+        batches >= kC600UNarrowRowBatches) {
+        return rk::kBlockSize;
+    }
+    return long_row ? rk::kLongRowBlockSize : rk::kBlockSize;
 }
 
 // ── the chunked split, for rows too long for one CTA to carry ───────────────
@@ -1370,9 +1407,9 @@ inline constexpr uint32_t kF32Coarse12NarrowVocab = 131072;
 // 1.0: `4096 x 129280 k=512` 8789 -> 5456 us (0.62), `768 x 129280 k=512`
 // 1702 -> 1076 (0.63), `512 x 66551 k=2048` 1138 -> 717 (0.63), `132 x 107520
 // k=2048` 584 -> 391 (0.67).
-// **A set, not a count: the C600U ships at 28 APs and at 32, and both are
-// ordinary parts.**  The ladder below was fitted on the 28-AP one, so the
-// 32-AP arm is served by *extrapolation*, and this is where that says so.
+// The ladder below was fitted on the 28-AP C600U -- the set
+// `is_c600u_ap_count` names -- so the 32-AP arm is served by *extrapolation*,
+// and this is where that says so.
 //
 // Two reasons it is extrapolated rather than declined.  The routes the floors
 // sit between are **both one CTA per row**, so the per-row costs the crossing
@@ -1388,9 +1425,6 @@ inline constexpr uint32_t kF32Coarse12NarrowVocab = 131072;
 // `DEEP_SELECT_F32_COARSE12` is how a 32-AP machine would turn the
 // extrapolation into a measurement, but it is read *below* the AP test, so a
 // probe has to be on a part in this set already.
-inline bool is_f32_coarse12_c600u_ap_count(uint32_t sm_count) {
-    return sm_count == 28 || sm_count == 32;
-}
 inline constexpr uint64_t kF32Coarse12C600UNarrowProduct = 9216;
 inline constexpr uint64_t kF32Coarse12C600UWideProduct = 49152;
 
@@ -1468,7 +1502,7 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // cannot reach a family the ladder was not measured on -- the `sm_count` test
 // above it runs first.  (It is what sited the C600U ladder: the knob is read
 // *after* the AP-count test, so a probe needs that test relaxed to reach the
-// arms at all -- see the note on `is_f32_coarse12_c600u_ap_count`.)
+// arms at all -- see the note on `is_c600u_ap_count`.)
 inline int f32_coarse12_override() {
     static const int v = [] {
         const char *s = std::getenv("DEEP_SELECT_F32_COARSE12");
@@ -1503,7 +1537,7 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         // table above), so the test is which of the two ladders applies rather
         // than whether any does.  A part that is neither takes the row path, as
         // before.
-        if (is_f32_coarse12_c600u_ap_count(params.sm_count)) {
+        if (is_c600u_ap_count(params.sm_count)) {
             if (params.topk > (uint32_t)rk::dg12::kMaxTopK) return false;
             if (batches == 0) return false;
             if (params.vocab_size < kF32Coarse12MinVocab) return false;
@@ -1907,7 +1941,8 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     const int block = (value_dtype == 0)
                           ? (int)rk::kBlockSize
                           : detail::radix_block_for(n, params.vocab_size,
-                                                    params.topk);
+                                                    params.topk,
+                                                    params.sm_count);
     // Long rows at a small batch go through the split; the caller sized the
     // workspace for exactly this gate, and the split reads 16-bit input.
     if (value_dtype == 1 && chunked_workspace != nullptr &&

@@ -1,0 +1,145 @@
+# probe 1: three arms (parent / b512 / b1024), long and short rows
+# round 0 arm parent md5=a0bab2e3
+# round 0 arm b512 md5=4f1b44a2
+# round 0 arm b1024 md5=a8a34af4
+# round 1 arm b1024 md5=a8a34af4
+# round 1 arm b512 md5=4f1b44a2
+# round 1 arm parent md5=a0bab2e3
+# round 2 arm parent md5=a0bab2e3
+# round 2 arm b512 md5=4f1b44a2
+# round 2 arm b1024 md5=a8a34af4
+#    parent: md5 a0bab2e3
+#      b512: md5 4f1b44a2
+#     b1024: md5 a8a34af4
+
+base arm = parent
+    b        V     k |     parent       b512      b1024 |  b512/base b1024/base
+
+ 4096  1048576   512 |    18531.9    17879.8    18547.8 |      0.965      1.001
+
+ 4096   524288   512 |    10028.8     9578.5    10036.2 |      0.955      1.001
+
+ 4096   262144   512 |     5841.4     5420.4     5840.9 |      0.928      1.000
+
+ 4096   131072  1024 |     4638.3     4042.8     4641.3 |      0.872      1.001
+
+ 4096    65536   512 |     2624.3     2167.4     2622.4 |      0.826      0.999
+ 4096    65536  1024 |     2837.6     2338.0     2837.3 |      0.824      1.000
+
+  768  1048576   512 |     3574.8     3485.4     3575.3 |      0.975      1.000
+
+  512   262144   512 |      774.1      736.2      774.3 |      0.951      1.000
+
+  256    65536   512 |      184.8      166.7      185.2 |      0.902      1.002
+
+   64  1048576   512 |      426.8      468.7      426.3 |      1.098      0.999
+
+ 4096    16384   512 |      788.4      788.9     1110.5 |      1.001      1.408
+ 4096    16384  1024 |      870.1      870.8     1207.2 |      1.001      1.387
+
+ 4096     4096   512 |      426.9      426.9      736.6 |      1.000      1.726
+
+  768    16384   512 |      159.4      159.2      215.3 |      0.999      1.351
+
+ 4096     1024   512 |      295.1      294.8      538.0 |      0.999      1.823
+  256     1024   512 |       24.7       24.9       39.5 |      1.008      1.602
+
+launched row kernel (arm, first cell):
+   parent: void deep_select_maca::topk_kernel_radix<__maca_bfloat16, int, 1024, false, false, false, false>(deep_select_maca::RowParams)
+     b512: void deep_select_maca::topk_kernel_radix<__maca_bfloat16, int, 512, false, false, false, false>(deep_select_maca::RowParams)
+    b1024: void deep_select_maca::topk_kernel_radix<__maca_bfloat16, int, 1024, false, false, false, false>(deep_select_maca::RowParams)
+
+[exited with code 0]
+
+# probe 2: batch sweep at v=1048576 65536 131072
+probe_block2.py written, 13 cell lines
+# round 0 arm parent md5=a0bab2e3
+# round 0 arm b512 md5=4f1b44a2
+# round 1 arm b512 md5=4f1b44a2
+# round 1 arm parent md5=a0bab2e3
+# round 2 arm parent md5=a0bab2e3
+# round 2 arm b512 md5=4f1b44a2
+#    parent: md5 a0bab2e3
+#      b512: md5 4f1b44a2
+
+base arm = parent
+    b        V     k |     parent       b512 |  b512/base
+
+   64  1048576   512 |      426.2      469.0 |      1.100
+   96  1048576   512 |      553.9      588.4 |      1.062
+  112  1048576   512 |      556.9      593.2 |      1.065
+  128  1048576   512 |      680.2      715.2 |      1.051
+  160  1048576   512 |      807.3      835.4 |      1.035
+  192  1048576   512 |      934.0      957.1 |      1.025
+  224  1048576   512 |     1061.2     1078.6 |      1.016
+  256  1048576   512 |     1305.3     1310.5 |      1.004
+
+   64    65536   512 |       64.8       62.7 |      0.968
+  128    65536   512 |      100.9       95.8 |      0.950
+  192    65536   512 |      136.8      123.7 |      0.905
+  256    65536   512 |      184.6      166.3 |      0.901
+
+   64   131072   512 |       91.6       94.4 |      1.030
+  128   131072   512 |      143.4      141.5 |      0.987
+  256   131072   512 |      269.0      251.0 |      0.933
+
+    1    65536   512 |       29.7       38.5 |      1.296
+    6    65536   512 |       29.0       38.4 |      1.322
+
+    1   131072   512 |       40.2       53.8 |      1.339
+    6   131072   512 |       40.9       56.1 |      1.370
+
+ 4096    65536   512 |     2615.6     2162.4 |      0.827
+
+ 4096  1048576   512 |    18523.3    17873.9 |      0.965
+
+launched row kernel (arm, first cell):
+   parent: void deep_select_maca::topk_kernel_radix<__maca_bfloat16, int, 1024, false, false, false, false>(deep_select_maca::RowParams)
+     b512: void deep_select_maca::topk_kernel_radix<__maca_bfloat16, int, 512, false, false, false, false>(deep_select_maca::RowParams)
+
+[exited with code 0]
+
+# probe 3: the v x b map
+probe_block3.py written
+# round 2 arm b512 md5=4f1b44a2
+#    parent: md5 a0bab2e3
+#      b512: md5 4f1b44a2
+
+base arm = parent
+    b        V     k |     parent       b512 |  b512/base
+
+   32    65536   512 |       42.1       49.9 |      1.184
+   96    65536   512 |       79.7       76.9 |      0.964
+
+   64   131072   512 |       91.6       94.1 |      1.027
+   96   131072   512 |      115.4      115.9 |      1.005
+  160   131072   512 |      168.4      163.6 |      0.971
+
+   64   262144   512 |      139.8      149.7 |      1.071
+  128   262144   512 |      220.4      224.9 |      1.020
+  192   262144   512 |      300.1      298.8 |      0.996
+  256   262144   512 |      415.0      404.7 |      0.975
+
+   64   524288   512 |      234.7      256.6 |      1.093
+  128   524288   512 |      372.3      387.1 |      1.040
+  192   524288   512 |      509.7      517.0 |      1.014
+  256   524288   512 |      710.2      707.9 |      0.997
+
+  384  1048576   512 |     1813.6     1799.4 |      0.992
+  512  1048576   512 |     2437.3     2396.9 |      0.983
+  768  1048576   512 |     3571.3     3485.0 |      0.976
+
+  128   131072  1024 |      176.7      173.8 |      0.983
+
+   64   262144  1024 |      167.1      178.0 |      1.065
+  128   262144  1024 |      262.7      266.7 |      1.015
+  256   262144  1024 |      495.8      477.5 |      0.963
+ 4096   262144   512 |     5823.8     5410.9 |      0.929
+
+ 4096   131072  1024 |     4625.9     4029.0 |      0.871
+
+launched row kernel (arm, first cell):
+   parent: void deep_select_maca::topk_kernel_radix<__maca_bfloat16, int, 1024, false, false, false, false>(deep_select_maca::RowParams)
+     b512: void deep_select_maca::topk_kernel_radix<__maca_bfloat16, int, 512, false, false, false, false>(deep_select_maca::RowParams)
+
+[exited with code 0]

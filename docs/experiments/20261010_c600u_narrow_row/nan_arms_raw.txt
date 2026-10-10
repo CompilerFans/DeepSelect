@@ -1,0 +1,34 @@
+# the NaN check's two arms on C600U (call-site switches, artifact md5 51f6d578)
+patched
+# round 0 arm on md5=51f6d578
+# round 0 arm off md5=51f6d578
+# round 0 arm abort md5=51f6d578
+# round 1 arm abort md5=51f6d578
+# round 1 arm off md5=51f6d578
+# round 1 arm on md5=51f6d578
+# round 2 arm on md5=51f6d578
+# round 2 arm off md5=51f6d578
+# round 2 arm abort md5=51f6d578
+# md5 51f6d578
+
+    b        V     k    dtype route |     on us    off us  off/on |  abort us abort/on | nan kern (official rule = 'topk'-matching kernels only)
+ 4096  1048576   512 bfloat16   row |   17885.8   16821.4   0.940 |   17892.3    1.000 |     1.92
+ 4096    65536   512 bfloat16   row |    2169.5    2062.9   0.951 |    2176.5    1.003 |     1.92
+  768  1048576   512 bfloat16   row |    3488.1    3280.7   0.941 |    3489.7    1.000 |     1.82
+ 4096    16384   512 bfloat16   row |     790.0     744.8   0.943 |     795.4    1.007 |     2.00
+    1  1048576   512 bfloat16 split |      49.4      49.0   0.992 |      49.7    1.006 |     1.84
+    6   262144   512 bfloat16 split |      55.0      53.4   0.971 |      55.1    1.001 |     1.87
+ 4096   131072  2048  float32   row |    6300.9    6243.2   0.991 |    6292.8    0.999 |     1.97
+    6   129280   512  float32 split |      57.8      56.8   0.983 |      58.1    1.005 |     1.89
+
+operator reading (every kernel, official arm) vs official:
+   4096  1048576   512 bfloat16: official   17885.8  operator   17883.6
+   4096    65536   512 bfloat16: official    2169.5  operator    2169.2
+    768  1048576   512 bfloat16: official    3488.1  operator    3487.4
+   4096    16384   512 bfloat16: official     790.0  operator     790.5
+      1  1048576   512 bfloat16: official      49.4  operator      45.2
+      6   262144   512 bfloat16: official      55.0  operator      50.8
+   4096   131072  2048  float32: official    6300.9  operator    6318.8
+      6   129280   512  float32: official      57.8  operator      53.5
+
+[exited with code 0]

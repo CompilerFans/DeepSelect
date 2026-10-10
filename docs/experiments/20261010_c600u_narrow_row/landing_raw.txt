@@ -1,0 +1,48 @@
+# landing verification: pristine HEAD (base) vs the changed tree (new)
+ # ratio = new/base; < 1.0 = the change helps; the last two lines are the
+ # instantiation each arm actually launched (the arm is a receipt, not a claim)
+
+# round 0 arm base md5=a83092e4
+# round 0 arm new md5=51f6d578
+# round 1 arm new md5=51f6d578
+# round 1 arm base md5=a83092e4
+# round 2 arm base md5=a83092e4
+# round 2 arm new md5=51f6d578
+#      base: md5 a83092e4
+#       new: md5 51f6d578
+
+base arm = base
+    b        V     k |       base        new |   new/base
+
+  256    65536   512 |      184.8      166.7 |      0.902
+
+  256   262144  1024 |      496.8      478.1 |      0.962
+
+  256  1048576   512 |     1307.1     1311.4 |      1.003
+
+  512   262144   512 |      774.4      736.3 |      0.951
+
+ 4096    65536   512 |     2619.9     2167.0 |      0.827
+
+ 4096   131072  1024 |     4638.6     4039.7 |      0.871
+
+ 4096   524288   512 |    10026.4     9573.3 |      0.955
+
+ 4096  1048576   512 |    18538.1    17873.0 |      0.964
+   64  1048576   512 |      426.2      425.9 |      0.999
+
+  128    65536   512 |      101.1      100.9 |      0.999
+
+    1   131072   512 |       40.1       40.1 |      1.000
+
+    6    65536   512 |       29.0       29.1 |      1.002
+
+ 4096    16384   512 |      787.8      787.8 |      1.000
+
+ 4096     1024   512 |      295.0      295.1 |      1.000
+
+   64   262144   512 |      139.7      139.6 |      1.000
+
+launched row kernel (arm, first cell):
+     base: void deep_select_maca::topk_kernel_radix<__maca_bfloat16, int, 1024, false, false, false, false>(deep_select_maca::RowParams)
+      new: void deep_select_maca::topk_kernel_radix<__maca_bfloat16, int, 512, false, false, false, false>(deep_select_maca::RowParams)
