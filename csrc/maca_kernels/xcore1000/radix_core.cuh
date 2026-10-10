@@ -2139,7 +2139,16 @@ __global__ void topk_bf16_chunk_stage1_kernel_k(
         return;
     }
 
-    radix_topk_row_bf16_k<TOPK, kChunkBlockSize>(row + start, chunk_indices, chunk_len);
+    // The chunk is ranked by the coarse12 row (`_b`), not by the static-k `_k`
+    // row the merge ranks with: this walk is over the input's bytes, and the
+    // 12-bit coarse level is what makes that walk a streaming one.  Measured on
+    // C500, device 2 (`docs/experiments/20261009_c500_dsa_decode/README.md`
+    // §9.11): the same chunk runs at 382 GB/s against 256 with `_k`, and
+    // `b6 x 262144 k512` goes from 103.9 to 70.5 us e2e against the row
+    // kernel's 97.7.  The merge keeps `_k`: its input is `chunks * topk`
+    // candidates, where the 16 KB coarse histogram costs more than it saves.
+    radix_topk_row_bf16_b<kChunkBlockSize, false, false>(
+        row + start, chunk_indices, chunk_len, (uint32_t)TOPK_I);
     for (int i = threadIdx.x; i < TOPK_I; i += BLOCK_SIZE) {
         const int32_t local_idx = chunk_indices[i];
         if (local_idx >= 0 && local_idx < chunk_len) {
@@ -2415,10 +2424,14 @@ inline cudaError_t launch_topk_bf16_chunked_k(
     int64_t score_stride = 0)
 {
     if (TOPK > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    // Stage 1 runs the coarse12 row, whose arena *is* the 16 KB coarse
+    // histogram it aliases, followed by the `topk` staging the core writes.
+    constexpr size_t kStage1Smem =
+        kCoarse12HistBytes + sizeof(uint32_t) * (size_t)TOPK;
     static bool init = false;
     if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            topk_bf16_chunk_stage1_kernel_k<TOPK>, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
+            topk_bf16_chunk_stage1_kernel_k<TOPK>, cudaFuncAttributeMaxDynamicSharedMemorySize, kStage1Smem);
         if (err != cudaSuccess) return err;
         err = cudaFuncSetAttribute(
             topk_bf16_chunk_stage2_kernel_k<TOPK>, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
@@ -2433,7 +2446,7 @@ inline cudaError_t launch_topk_bf16_chunked_k(
     // how a caller with padded input rows reaches this path; upstream passes
     // `L` and so can only split packed rows.
     const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
-    topk_bf16_chunk_stage1_kernel_k<TOPK><<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
+    topk_bf16_chunk_stage1_kernel_k<TOPK><<<B * num_chunks, kChunkBlockSize, kStage1Smem, stream>>>(
         scores, lengths, candidate_indices, candidate_values, stride, B, num_chunks, chunk_size);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return err;

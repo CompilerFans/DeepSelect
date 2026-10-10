@@ -1,0 +1,22 @@
+# round 0 arm old md5=7d7b0e1e
+# round 0 arm new md5=bb8ca2b7
+# round 1 arm new md5=bb8ca2b7
+# round 1 arm old md5=7d7b0e1e
+# round 2 arm old md5=7d7b0e1e
+# round 2 arm new md5=bb8ca2b7
+
+# cells = the split's own (b <= vocab/20000, vocab >= 262144):
+#    old: md5 7d7b0e1e  /tmp/ab_head/deep_select/deep_select_maca_xcore1000.so
+#    new: md5 bb8ca2b7  /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so
+
+  B        V     k      old us     new us  new/old
+  1   262144   512        82.2       62.9    0.765
+  1   262144  1024        98.2       79.6    0.811
+  1  1048576   512       105.2       90.2    0.858
+  1  1048576  1024       130.7      120.1    0.918
+  6   262144   512        82.5       63.4    0.769
+  6   262144  1024        99.0       80.6    0.814
+  6   524288   512        81.4       77.7    0.954
+  6   524288  1024       141.6       95.8    0.677
+  6  1048576   512       110.5       94.4    0.855
+  6  1048576  1024       138.0      125.2    0.907
