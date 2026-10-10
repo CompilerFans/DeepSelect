@@ -205,8 +205,8 @@ Each figure is drawn from one recording by
 <recording>` re-renders it -- so the picture and the record it came from cannot
 disagree. The two **C500** figures are drawn from
 `perf_data/MetaX_C500/20261009_202953` (artifact md5 `6c28a77b52b6`); the
-**C600-U** pair is from the 2026-10-08 re-measurement (commit `622a5b2`,
-28-AP part, artifact md5 `7844e79adcb664fb1a4f4d897c2fd011`).
+**C600-U** pair is from `perf_data/MetaX_C600-U/20261010_142107` (commit
+`39a85d1`, 28-AP part, artifact md5 `51f6d57875fd37351cbbc48397d797e4`).
 
 ### Lightning Indexer Scenario (MACA)
 
