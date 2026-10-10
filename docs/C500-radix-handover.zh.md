@@ -26,7 +26,7 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `main` |
-| 内核 HEAD | `ae26b0d` *the merge ranks with the coarse12 row too, not only stage 1* |
+| 内核 HEAD | `ca1c06d` *the row kernel's block-max tree steps through bsm_bpermute*（C600U 三笔见 §1 末段） |
 | 文档 HEAD | 本文件所在提交 |
 | 工作树 | **干净**（`git -C <DeepSelect> status --porcelain` 为空） |
 | 产物 | `deep_select_maca_xcore1000.so`，md5 `bb45b940`（`./develop.sh`，三族全建，`BUILD_RC=0`） |
@@ -37,7 +37,7 @@
 - 正确性样本（`run_test.sh --test`）：**All 339 cases passed**，收据
   `results/deepselect_run_20261010_141501.txt`
 
-`ae26b0d` 之后只有文档落地，内核一行没动，所以这两条门就是当前产物的数值。
+`ae26b0d` 之后到 C600U 三笔之前只有文档落地，内核一行没动，所以这两条门是当时产物的数值。
 **§9 的排序已按 2026-10-10 重排**——先读它。
 
 **decode 小 batch 长行的战役**（2026-10-09/10）已收尾：split 的两个 stage 都换成
@@ -46,14 +46,19 @@ coarse12、NaN 扫描并进 stage 1 自己的走法、门按实测重指（`kChu
 被判死的方向在 `docs/experiments/20261009_c500_dsa_decode/`（§9.12–§9.17）。
 它留下的下一步在 §9 第 1 条：**替换数据流，不是调参**。
 
-**C600U 侧的两笔（2026-10-10，`39a85d1` / `ca59be3`）**：`maca_topk.cu` 加了两条
-**C600U 专属**的运行期门，都在 `is_c600u_ap_count`（28/32 AP）上开、都在
-104-AP 的 C500 上走老分支：长行块宽在 `b ≥ 256` 改走 512 线程实例（**C600U 官方
-网格 −4.7%**，短 vocab 档最高 −17.7%）；bf16 split 的交叉按 `b² · 6400 ≤ vocab`
-重指（C600U 上它随 sqrt(vocab) 长，不是随 vocab；decode 形状 b=8..24 由慢
-1.06–2.2x 转正）。证据、探针与门在 `docs/experiments/20261010_c600u_narrow_row/`
-与 `docs/experiments/20261010_c600u_split_crossing/`。
-**C500 的行为不变，但源码变了 ⇒ xcore1000 重新构建后 md5 必变**（mxcc 嵌行号）。
+**C600U 侧的三笔（2026-10-10，`39a85d1` / `ca59be3` / `ca1c06d`）**：`maca_topk.cu` +
+`radix_core.cuh` 加了两条 **C600U 专属**运行期门（`is_c600u_ap_count` = 28/32 AP，
+104-AP 的 C500 走老分支）与一笔共享的指令选择：长行块宽在 `b ≥ 256` 改走 512 线程
+实例（**官方网格 −4.7%**，短 vocab 档最高 −17.7%）；bf16 split 的交叉按
+`b² · 6400 ≤ vocab` 重指（decode 形状 b=8..24 由慢 1.06–2.2x 转正）；行核的块 max
+摘要三步树从 `__shfl_down_sync` 包装换成 `bsm_bpermute`（**大格 −6.0%**，
+`4096×1M k512`: 17.9 → 16.8 ms，480 → 511 GB/s）。证据、相位、消融与门在
+`docs/experiments/20261010_c600u_{narrow_row,split_crossing,bperm_summary}/`。
+**C600U 当前带宽上限 511 GB/s（1M 长行，33% 墙）；pass 1 = 核的 84.5%，其地板
+（纯载入）≈47% 墙，剩余 28% 在共享原子（19%）与摘要（已砍一刀）里** —— 下一步
+候选见 `20261010_c600u_bperm_summary/README.md` §5。
+**C500 的行为不变（bperm 那笔是共享指令选择，C500 pass 1 处于 96.7% 墙的带宽受限区），
+但源码变了 ⇒ xcore1000 重新构建后 md5 必变**（mxcc 嵌行号）。
 
 ---
 
