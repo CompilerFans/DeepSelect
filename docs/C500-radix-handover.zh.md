@@ -46,6 +46,15 @@ coarse12、NaN 扫描并进 stage 1 自己的走法、门按实测重指（`kChu
 被判死的方向在 `docs/experiments/20261009_c500_dsa_decode/`（§9.12–§9.17）。
 它留下的下一步在 §9 第 1 条：**替换数据流，不是调参**。
 
+**C600U 侧的两笔（2026-10-10，`39a85d1` / `ca59be3`）**：`maca_topk.cu` 加了两条
+**C600U 专属**的运行期门，都在 `is_c600u_ap_count`（28/32 AP）上开、都在
+104-AP 的 C500 上走老分支：长行块宽在 `b ≥ 256` 改走 512 线程实例（**C600U 官方
+网格 −4.7%**，短 vocab 档最高 −17.7%）；bf16 split 的交叉按 `b² · 6400 ≤ vocab`
+重指（C600U 上它随 sqrt(vocab) 长，不是随 vocab；decode 形状 b=8..24 由慢
+1.06–2.2x 转正）。证据、探针与门在 `docs/experiments/20261010_c600u_narrow_row/`
+与 `docs/experiments/20261010_c600u_split_crossing/`。
+**C500 的行为不变，但源码变了 ⇒ xcore1000 重新构建后 md5 必变**（mxcc 嵌行号）。
+
 ---
 
 ## 2. 这个算子在干嘛（一句话版）
