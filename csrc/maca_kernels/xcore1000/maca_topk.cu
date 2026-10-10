@@ -114,6 +114,15 @@ struct RowParams {
     // bytes as `void*` so `structs.h` does not have to see the layout.  Null
     // means the allocation failed and the route answers with the row path.
     void *chunks_workspace;
+    // The 16-bit row's skip tables, `n_rows * ceil(vocab_size / 64)` entries
+    // each: pass 1 leaves one max bin per 64-element block in `row_block_max`
+    // (uint16) and the collect walks `row_block_list` (uint32), the blocks that
+    // can hold a candidate, instead of the row.  Both rows are indexed by
+    // `vocab_size` -- the allocation's row length, not this row's window -- so
+    // the table lines up with the row data it describes.  Null on the calls the
+    // gate below leaves out, and on every route that does not walk rows.
+    uint16_t *row_block_max;
+    uint32_t *row_block_list;
     uint64_t stride_input_batch;
     uint64_t stride_output_value_batch;
     uint64_t stride_output_index_batch;
@@ -335,23 +344,29 @@ static __device__ __forceinline__ void radix_layout(
 // own load and hand the CTA's vote back through `row_nan`.  It is the caller's
 // NaN scan either way; what it replaces is `row_has_nan` walking the whole row
 // first, which is a third read of a row that is read twice already.
-template <typename ValueT, int BLOCK>
+template <typename ValueT, int BLOCK, bool kSkip = true>
 static __device__ __forceinline__ void radix_select_row(
     const ValueT *input_row, uint32_t length, int32_t *out_idx, uint32_t topk,
-    bool check_nan, bool *row_nan) {
+    bool check_nan, bool *row_nan, uint16_t *block_max = nullptr,
+    uint32_t *block_list = nullptr) {
     if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
         if (check_nan)
-            rk::radix_topk_row_bf16_b<BLOCK, true>(input_row, out_idx, length,
-                                                   topk, row_nan);
+            rk::radix_topk_row_bf16_b<BLOCK, true, kSkip>(input_row, out_idx,
+                                                          length, topk, row_nan,
+                                                          block_max, block_list);
         else
-            rk::radix_topk_row_bf16_b<BLOCK, false>(input_row, out_idx, length,
-                                                    topk, row_nan);
+            rk::radix_topk_row_bf16_b<BLOCK, false, kSkip>(
+                input_row, out_idx, length, topk, row_nan, block_max,
+                block_list);
     } else {
         static_assert(std::is_same<ValueT, float>::value,
                       "the operator serves bfloat16 and float32 only");
         // The fp32 row picks its own block width, one width for every shape.
         static_assert(BLOCK == rk::kBlockSize,
                       "the fp32 row runs at rk::kBlockSize");
+        // `block_max` / `block_list` are not read here: the summary is a
+        // property of the 16-bit row's 12-bit coarse level, and the fp32 row's
+        // dataflow (and its multi-round rescan) is a different one.
         if (check_nan)
             rk::radix_topk_row_f32<true>(input_row, out_idx, length, topk, 0u,
                                          row_nan);
@@ -590,8 +605,18 @@ __global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
         rerank = __syncthreads_or((int)rerank) != 0;
     }
     if (!kPreSelected || rerank) {
-        radix_select_row<ValueT, BLOCK>(input_row, length, (int32_t *)selected,
-                                        topk, fold_nan, &nan_local);
+        // This row's slice of the skip tables, on the tables' own row length
+        // (`vocab_size`), so a row with a shorter window still finds its own.
+        const uint32_t blocks_per_row = (params.vocab_size + 63u) / 64u;
+        uint16_t *row_block_max =
+            params.row_block_max != nullptr
+                ? params.row_block_max + (uint64_t)row * blocks_per_row : nullptr;
+        uint32_t *row_block_list =
+            params.row_block_list != nullptr
+                ? params.row_block_list + (uint64_t)row * blocks_per_row : nullptr;
+        radix_select_row<ValueT, BLOCK, std::is_same<OutIdxT, int32_t>::value>(
+            input_row, length, (int32_t *)selected, topk, fold_nan, &nan_local,
+            row_block_max, row_block_list);
     }
 
     // The fold's vote lands only now, after the kernel has ranked the row.  The
@@ -659,6 +684,40 @@ inline size_t radix_smem_bytes(uint32_t topk, bool sorted, bool wide) {
     return lead + sizeof(uint32_t) * topk;
 }
 
+
+// ── the 16-bit row's skip tables ────────────────────────────────────────────
+//
+// The row kernel reads its row twice.  The second pass only acts on elements
+// whose 12-bit bin is at or above the threshold -- a constant ~600 of them at
+// k=512, regardless of the row's length -- so on a long row more than 95% of
+// that pass is reading lines it does nothing with.  Pass 1 leaves each
+// 64-element block's max bin in a summary; the collect compacts the blocks that
+// can hold a candidate into a list and walks that instead.
+//
+// The gate is the row length, because the summary is 2 bytes per 64 elements
+// (1.6% of the row, written and read back) and the kept-block *fraction* is
+// what decides whether that pays: measured on C500, 55% kept at 65536 elements
+// is already a 1.42x pass -2, 33% at 131072 is 2.0x, and 3.7% at 1048576 is
+// 7.0x, while below this floor the fraction climbs towards all-of-them and the
+// list is traffic on top of a walk that reads the row anyway.  Both tables are
+// sized by `vocab_size`; the kernel's own switch (a density past three quarters
+// falls back to walking the row) needs no host input.
+//
+// Measurements and the density sweep: docs/experiments/20261010_skim_rate/.
+constexpr uint32_t kSkipMinVocab = 65536;
+
+// The campaign's A/B switch for the tables above, read once per process:
+// `DEEP_SELECT_BF16_SKIP=0` answers every call with the row walk, which is what
+// a differential check and a paired A/B need -- one artifact, one environment
+// variable, no second build.  Unset or non-zero means the tables are built,
+// which is the shipping behavior.
+inline bool bf16_skip_enabled() {
+    static const bool v = [] {
+        const char *s = std::getenv("DEEP_SELECT_BF16_SKIP");
+        return s == nullptr || s[0] == '\0' || std::atoi(s) != 0;
+    }();
+    return v;
+}
 
 template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV,
           bool PRE = false>
@@ -2162,6 +2221,15 @@ struct ChunkedScratch {
     // interleave.  Grown like the rest and never shrunk.
     int32_t *coarse12_cols = nullptr;
     size_t coarse12_cols_count = 0;
+    // `RowParams::row_block_max` / `row_block_list`, one allocation each and
+    // grown like the rest.  Both count in *blocks* (64 elements), so one entry
+    // of `block_max_count` is one uint16 and one of `block_list_count` is one
+    // uint32; they are always grown together but kept as two buffers because
+    // they are two different widths.
+    uint16_t *block_max = nullptr;
+    size_t block_max_count = 0;
+    uint32_t *block_list = nullptr;
+    size_t block_list_count = 0;
     // The chunks route's per-row workspaces.  Separate from `coarse12_cols`
     // because the two have different shapes and different lifetimes: this one
     // is `n_rows * sizeof(TopKChunksWorkspace<NChunks>)` of opaque bytes, that
@@ -2419,6 +2487,34 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             scratch.coarse12_cols_count = need_cols;
         }
     }
+    // The row path's skip tables, `kSkipMinVocab` above.  Allocated for the
+    // calls whose shape passes the gate and whose row instantiation carries the
+    // round -- the 32-bit-index row (`kSkip` in `radix_topk_row_bf16_b`: the
+    // 64-bit row cannot afford the registers), and the routes that do not walk
+    // rows or say the same thing simply never read them.  Sized by
+    // `vocab_size`, the table's own row length, so a row with a shorter window
+    // still finds its own entry.
+    if (value_dtype == 0 && index_dtype == 0 &&
+        p.vocab_size >= detail::kSkipMinVocab &&
+        detail::bf16_skip_enabled()) {
+        const size_t need_blocks = (size_t)batches * (((size_t)p.vocab_size + 63) / 64);
+        if (need_blocks > scratch.block_max_count) {
+            uint16_t *grown = nullptr;
+            DS_CUDA_RUNTIME_CHECK(cudaMalloc(
+                &grown, need_blocks * sizeof(uint16_t)));
+            scratch_retire(scratch.retired, scratch.block_max);
+            scratch.block_max = grown;
+            scratch.block_max_count = need_blocks;
+        }
+        if (need_blocks > scratch.block_list_count) {
+            uint32_t *grown = nullptr;
+            DS_CUDA_RUNTIME_CHECK(cudaMalloc(
+                &grown, need_blocks * sizeof(uint32_t)));
+            scratch_retire(scratch.retired, scratch.block_list);
+            scratch.block_list = grown;
+            scratch.block_list_count = need_blocks;
+        }
+    }
     // The chunks route's workspace, on the same rule: sized for the row count
     // this call has, allocated once and grown, and its absence is a fallback to
     // the row path rather than a fault.  The count itself comes from
@@ -2546,6 +2642,12 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         p.nan_abort_flags = scratch.nan_abort_flags;
     }
     if (needs_coarse12_cols) p.coarse12_cols = scratch.coarse12_cols;
+    if (value_dtype == 0 && index_dtype == 0 &&
+        p.vocab_size >= detail::kSkipMinVocab &&
+        detail::bf16_skip_enabled()) {
+        p.row_block_max = scratch.block_max;
+        p.row_block_list = scratch.block_list;
+    }
     if (value_dtype == 0 && detail::f32_chunks_applies(p, (uint32_t)batches))
         p.chunks_workspace = scratch.chunks_workspace;
 

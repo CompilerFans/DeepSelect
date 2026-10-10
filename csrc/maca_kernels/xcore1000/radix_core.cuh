@@ -331,7 +331,12 @@ static_assert(kLongRowBlockSize >= 256 && kLongRowBlockSize <= 1024 &&
               "kLongRowBlockSize must cover the 256-bin scan and whole wavefronts");
 
 constexpr uint32_t kRadix = 256;
-// Static smem: histogram_buf[2][256+32] + s_counter + s_threshold_bin_id + s_high_threshold_bin_id + s_num_input[2] + s_last_remain
+// Static smem, as the floor the dynamic arena is sized against:
+// histogram_buf[2][256+32] + s_counter + s_threshold_bin_id +
+// s_high_threshold_bin_id + s_num_input[2] + s_last_remain.  A kernel that
+// carries more (the 16-bit row adds s_wide_above and s_nlist) carries it in
+// *its* static share, which is why this is a floor and not the row kernel's
+// footprint.
 constexpr uint32_t kSmemStaticBytes = 2 * (kRadix + 32) * sizeof(uint32_t)
                                     + sizeof(uint32_t) + sizeof(uint32_t)
                                     + sizeof(uint32_t) + 2 * sizeof(uint32_t) + sizeof(int32_t);
@@ -379,7 +384,8 @@ static_assert(kCoarse12ArenaEntries * sizeof(uint32_t) >= (size_t)kSmemInputSize
 // the scan is one compare per element here instead of a whole extra row walk.
 template <bool kNan = false>
 __device__ __forceinline__ bool hist_add_bf16_wide(
-    uint32_t* s_wide, const maca_bfloat16* input, uint32_t idx)
+    uint32_t* s_wide, const maca_bfloat16* input, uint32_t idx,
+    uint32_t* max_key = nullptr)
 {
     uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
     const uint32_t* w = reinterpret_cast<const uint32_t*>(&v);
@@ -397,12 +403,26 @@ __device__ __forceinline__ bool hist_add_bf16_wide(
     // 0x8000 - 0x7f81 = 0x7f >= 0.  Both forms are verified against the
     // per-element ones on all 65,536 half patterns.
     uint32_t z = 0u;
-    #pragma unroll
+    // Two words at a time, not four: a fully unrolled body that carries the
+    // caller's block-max accumulator costs the row kernel 3-4 MT of registers
+    // (measured with `--resource-usage`), which is the second CTA per SM at
+    // BLOCK=1024. `unroll 2` holds the same register peak as `unroll 1` and
+    // keeps more of the walk's memory-level parallelism.
+    #pragma unroll 2
     for (int i = 0; i < 4; i++) {
         const uint32_t kp =
             w[i] ^ ((((w[i] >> 15) & 0x00010001u) * 0x7FFFu) + 0x80008000u);
         atomicAdd(&s_wide[(kp >> kCoarse12Shift) & 0x0FFFu], 1u);
         atomicAdd(&s_wide[kp >> (16 + kCoarse12Shift)], 1u);
+        // The block-max summary (see `radix_topk_row_bf16_b`) wants the largest
+        // key in this thread's 8 elements; both halves are already in `kp`, and
+        // the key's order is the bin's, so one max over keys is one max over
+        // 12-bit bins without shifting either of them.
+        if (max_key != nullptr) {
+            const uint32_t lo = kp & 0xFFFFu, hi = kp >> 16;
+            const uint32_t m = lo > hi ? lo : hi;
+            *max_key = m > *max_key ? m : *max_key;
+        }
         if (kNan) {
             z |= (((w[i] & 0x7FFF7FFFu) | 0x80008000u) - 0x7F817F81u)
                  & 0x80008000u;
@@ -1271,10 +1291,58 @@ __device__ __forceinline__ void overflow_emit_member(
 // `kNan` / `row_nan` mirror `radix_topk_row_f32`: the contract's NaN scan rides
 // pass 1's own load, and the block-wide vote is handed back so the caller does
 // not walk the row a second time to ask the same question.
-template <uint32_t BLOCK_SIZE, bool kNan = false>
+// One summary entry per 64 elements -- 8 consecutive lanes' `uint4`, i.e. one
+// 128-byte line.  It is the granularity the collect walk already moves in, so
+// a skipped entry is exactly a line the walk would have fetched and found
+// nothing to do with.
+constexpr uint32_t kSkipBlockElems = 64;
+
+// Walk the blocks a summary named, with the aligned row walk's own layout: the
+// eight lanes of a group take one `uint4` each out of the same 64-element block
+// and `body(idx, raw)` sees the same elements, in the same per-lane order, that
+// the row walk hands it.  What changed is only which blocks the group visits --
+// a list of the ones that can hold a candidate, instead of the whole row.
+//
+// This is the shape the lever needs, not a detail: a test in front of the walk
+// leaves the decision and the line on one latency chain and measures at 0.45 of
+// the full walk even when 96% of the blocks are skipped, while this decoupled
+// form reaches 0.14 (docs/experiments/20261010_skim_rate/).
+template <uint32_t BLOCK_SIZE, typename F>
+__device__ __forceinline__ void walk_kept_blocks(const maca_bfloat16* input,
+                                                 const uint32_t* list,
+                                                 uint32_t n, F&& body) {
+    const uint32_t lane = threadIdx.x & 7u;
+    const uint32_t group = threadIdx.x >> 3;
+#pragma unroll 2
+    for (uint32_t j = group; j < n; j += BLOCK_SIZE / 8u) {
+        const uint32_t base = list[j] << 6;
+        const uint4 v = __ldg(reinterpret_cast<const uint4*>(input + base) + lane);
+        const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
+#pragma unroll
+        for (int i = 0; i < 8; i++) body(base + lane * 8u + (uint32_t)i, h[i]);
+    }
+}
+
+template <uint32_t BLOCK_SIZE, bool kNan = false, bool kSkip = true>
 __device__ __forceinline__ void radix_topk_row_bf16_b(
     const maca_bfloat16* input, int32_t* output, uint32_t length, uint32_t topk,
-    bool* row_nan = nullptr)
+    bool* row_nan = nullptr,
+    // The skip summary and its block list: pass 1 leaves each 64-element
+    // block's max key in `block_max` (2 bytes per block) and the collect
+    // compacts the blocks that can hold a candidate into `block_list`
+    // (`block_max`'s owner allocates; 4 bytes per block) and walks that instead
+    // of the row.  A block whose max bin is below the threshold holds no
+    // element either walk would act on, so the list is answer-preserving by
+    // construction.  Both null -- every other caller -- leaves this function
+    // exactly as it was.
+    //
+    // `kSkip` is the caller saying whether this build of the row carries the
+    // round at all: false compiles the summary, the list and the walks out.
+    // The 64-bit-index row is the one caller that says false -- its epilogue
+    // already costs it two registers more than the 32-bit row's, and carrying
+    // the summary on top of that puts it over the 32 MT a 1024-thread block
+    // needs for its second CTA per SM (measured with `--resource-usage`).
+    uint16_t* block_max = nullptr, uint32_t* block_list = nullptr)
 {
     constexpr uint32_t RADIX = kRadix;
     constexpr uint32_t SMEM_INPUT_SIZE = kCoarse12ArenaEntries;
@@ -1286,6 +1354,9 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     __shared__ uint32_t s_num_input[2];
     __shared__ uint32_t s_wide_above;
     __shared__ int32_t s_last_remain;
+    // The kept-block list's population count: eight lanes write it before the
+    // walk reads it, on the barrier between them.
+    __shared__ uint32_t s_nlist;
     extern __shared__ uint32_t s_input_flat[];
     // The coarse histogram is laid over the candidate arena: `s_input_flat`
     // holds the 4,096 bins until the narrow is done, and the staging writes
@@ -1303,10 +1374,51 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // 1024-thread blocks. Use one uniform load mode for odd-length rows.
     const bool input_aligned = (length & 7u) == 0 && bf16x8_is_aligned(input);
     uint32_t vec_len = length / 8 * 8;
+    // The summary is built on the aligned walk only, and that is not a
+    // limitation: eight consecutive lanes there cover exactly one 64-element
+    // block, which is the whole reason the alignment of the walk and the
+    // summary granularity can be the same number.  A row that takes the scalar
+    // walk gets no summary and is walked whole by the collect.
+    const bool summary_wanted = kSkip && block_max != nullptr && input_aligned;
     bool nan_local = false;
     if (input_aligned) {
-        for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8)
-            nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx);
+        if (summary_wanted) {
+            // The same walk, the same addresses: `blk` is `idx >> 6` with the
+            // bound hoisted to the 8-lane group, so a group enters and leaves
+            // the body together.  That is what makes the group's own mask (and
+            // not the full wave's) the exact set of participating lanes --
+            // including in the last, partially filled block of a row that is
+            // not 64-aligned, where some lanes of the group have no element to
+            // read.
+            const uint32_t group = tx >> 3;
+            const uint32_t lane = tx & 7u;
+            // Whole blocks only.  The list walk moves a `uint4` per lane and
+            // must not read past the row, so the elements past the last whole
+            // block stay with the tail loop both walks already carry -- and
+            // with this bound the guarded load below has nothing left to guard.
+            for (uint32_t blk = group; ((blk + 1u) << 6) <= vec_len;
+                 blk += BLOCK_SIZE / 8) {
+                const uint32_t idx = (blk << 6) + lane * 8u;
+                uint32_t key = 0;
+                nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx, &key);
+#ifdef __MACACC__
+                const unsigned long long gmask = 0xFFull << (tx & 0x38u);
+#else
+                const unsigned gmask = 0xFFu << (tx & 0x18u);
+#endif
+                const uint32_t d1 = (uint32_t)__shfl_down_sync(gmask, key, 1);
+                const uint32_t d2 = (uint32_t)__shfl_down_sync(gmask, key, 2);
+                const uint32_t d4 = (uint32_t)__shfl_down_sync(gmask, key, 4);
+                key = key > d1 ? key : d1;
+                key = key > d2 ? key : d2;
+                key = key > d4 ? key : d4;
+                if (lane == 0u)
+                    block_max[blk] = (uint16_t)(key >> kCoarse12Shift);
+            }
+        } else {
+            for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8)
+                nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx);
+        }
         for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE) {
             const maca_bfloat16 raw = __ldg(input + idx);
             atomicAdd(&s_wide[bf16_to_uint16(raw) >> kCoarse12Shift], 1u);
@@ -1371,66 +1483,111 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         }
         s_high_threshold_bin_id = (high << kCoarse12Shift) | sub;
         s_wide_above = above;
+        // The kept-block list's population, cleared here so the barrier that
+        // publishes the threshold publishes this too and the list build below
+        // needs only the one barrier it ends on.
+        s_nlist = 0;
     }
     __syncthreads();
 
+    // ── the kept-block list ─────────────────────────────────────────────────
+    // A block whose max bin is at or above the threshold is one the walks below
+    // can act on; every other block is a line they would fetch and do nothing
+    // with.  Those are 96% of the row on a long one, so compaction turns the
+    // second read of the row into a read of a list -- and the compaction has to
+    // be its own step: a test in front of the walk leaves the decision and the
+    // fetch on one latency chain and measures at 0.45 of the full walk, while
+    // this decoupled form reaches 0.14 (docs/experiments/20261010_skim_rate/).
+    //
+    // Past three quarters of the blocks it stops paying -- the walk reads most
+    // of the row anyway and the list is traffic on top of it (measured: 0.63 at
+    // half the blocks, 1.21 at all of them) -- so the count decides and the list
+    // is not written past the cap.  `nlist` counts every kept block either way.
+    const uint32_t coarse_threshold = s_high_threshold_bin_id;
+    // Whole blocks: the list covers `[0, nb << 6)` and every walk that follows
+    // the list owes the rest of the row to its own tail loop.
+    const uint32_t nb = vec_len >> 6;
+    const uint32_t list_cap = nb - (nb >> 2);
+    const uint32_t list_end = nb << 6;
+    uint32_t nlist = 0;
+    bool use_list = false;
+    if (summary_wanted) {
+        for (uint32_t b = tx; b < nb; b += BLOCK_SIZE) {
+            if (block_max[b] < coarse_threshold) continue;
+            const uint32_t pos = atomicAdd(&s_nlist, 1u);
+            if (pos < list_cap) block_list[pos] = b;
+        }
+        __syncthreads();
+        nlist = s_nlist;
+        // `list_cap > 0` matters on a row with no whole block at all: there the
+        // vector walk is the better of the two, and the list covers nothing.
+        use_list = list_cap > 0 && nlist <= list_cap;
+    }
+
     {
-        const auto threshold_bin = s_high_threshold_bin_id;
+        const auto threshold_bin = coarse_threshold;
         remain_topk -= s_wide_above;
         if (remain_topk == 0) {
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
-                if ((bf16_to_uint16(__ldg(input + idx)) >> kCoarse12Shift) > threshold_bin)
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+            if (use_list) {
+                walk_kept_blocks<BLOCK_SIZE>(
+                    input, block_list, nlist,
+                    [&](uint32_t idx, maca_bfloat16 raw) {
+                        if ((bf16_to_uint16(raw) >> kCoarse12Shift) > threshold_bin)
+                            output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+                    });
+                // What the list does not cover: the row past its last whole
+                // block.
+                for (uint32_t idx = list_end + tx; idx < length; idx += BLOCK_SIZE)
+                    if ((bf16_to_uint16(__ldg(input + idx)) >> kCoarse12Shift) > threshold_bin)
+                        output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+            } else {
+                for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
+                    if ((bf16_to_uint16(__ldg(input + idx)) >> kCoarse12Shift) > threshold_bin)
+                        output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+            }
             __syncthreads(); return;
         }
         __syncthreads();
         if (tx < RADIX + 1) s_histogram[tx] = 0;
         __syncthreads();
-        if (input_aligned) {
+        // One element of the collect, in the shape both walks hand it: the row
+        // walk's `idx + i` and the list walk's `base + lane*8 + i` are the same
+        // index for the same element.
+        const auto collect_one = [&](uint32_t idx, maca_bfloat16 raw) {
+            const uint32_t bin = bf16_to_uint16(raw) >> kCoarse12Shift;
+            if (bin > threshold_bin) {
+                output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+            } else if (bin == threshold_bin) {
+                // The count is over the bin, the staging is over the arena.
+                // Gating both on the arena made the refine's histogram partial
+                // whenever the bin overflowed, which is what the full-row
+                // rebuild below used to repair.
+                const uint32_t pos = atomicAdd(&s_num_input[0], 1u);
+                if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
+                atomicAdd(&s_histogram[bf16_to_uint16(raw) & (kCoarse12SubBins - 1u)], 1u);
+            }
+        };
+        if (use_list) {
+            walk_kept_blocks<BLOCK_SIZE>(input, block_list, nlist, collect_one);
+        } else if (input_aligned) {
             for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
                 uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
                 const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
                 #pragma unroll
-                for (int i = 0; i < 8; i++) {
-                    maca_bfloat16 raw = h[i];
-                    uint32_t bin = bf16_to_uint16(raw) >> kCoarse12Shift;
-                    if (bin > threshold_bin) {
-                        output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + i);
-                    } else if (bin == threshold_bin) {
-                        // The count is over the bin, the staging is over the
-                        // arena.  Gating both on the arena made the refine's
-                        // histogram partial whenever the bin overflowed, which
-                        // is what the full-row rebuild below used to repair.
-                        uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                        if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx + i;
-                        atomicAdd(&s_histogram[bf16_to_uint16(raw) & (kCoarse12SubBins - 1u)], 1u);
-                    }
-                }
-            }
-            for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE) {
-                maca_bfloat16 raw = __ldg(input + idx);
-                uint32_t bin = bf16_to_uint16(raw) >> kCoarse12Shift;
-                if (bin > threshold_bin) {
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-                } else if (bin == threshold_bin) {
-                    uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                    if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
-                    atomicAdd(&s_histogram[bf16_to_uint16(raw) & (kCoarse12SubBins - 1u)], 1u);
-                }
+                for (int i = 0; i < 8; i++) collect_one(idx + i, h[i]);
             }
         } else {
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
-                maca_bfloat16 raw = __ldg(input + idx);
-                uint32_t bin = bf16_to_uint16(raw) >> kCoarse12Shift;
-                if (bin > threshold_bin) {
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-                } else if (bin == threshold_bin) {
-                    uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                    if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
-                    atomicAdd(&s_histogram[bf16_to_uint16(raw) & (kCoarse12SubBins - 1u)], 1u);
-                }
-            }
+            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
+                collect_one(idx, __ldg(input + idx));
         }
+        // The tail of the row: the list walk covers whole blocks and the row
+        // walk covers `[0, vec_len)`, so what is left starts at `list_end` and
+        // `vec_len` respectively -- and the scalar walk has already covered the
+        // whole row.
+        const uint32_t tail_start =
+            use_list ? list_end : (input_aligned ? vec_len : length);
+        for (uint32_t idx = tail_start + tx; idx < length; idx += BLOCK_SIZE)
+            collect_one(idx, __ldg(input + idx));
         __syncthreads();
     }
 
@@ -1449,30 +1606,34 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         const auto threshold_bin = s_threshold_bin_id;
         remain_topk -= s_histogram[threshold_bin + 1];
         if (overflow) {
-            const auto high_threshold_bin = s_high_threshold_bin_id;
-            if (input_aligned) {
+            // The rescan answers for the coarse threshold bin's members, and the
+            // list is the blocks that can hold one of those, so it walks the
+            // list on the same terms as the collect above.
+            const auto high_threshold_bin = coarse_threshold;
+            const auto emit_member = [&](uint32_t idx, maca_bfloat16 raw) {
+                overflow_emit_member(idx, bf16_to_uint16(raw), high_threshold_bin,
+                                     threshold_bin, remain_topk, topk, output,
+                                     &s_counter, &s_last_remain);
+            };
+            if (use_list) {
+                walk_kept_blocks<BLOCK_SIZE>(input, block_list, nlist, emit_member);
+            } else if (input_aligned) {
                 for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
                     uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
                     const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
                     #pragma unroll
-                    for (int i = 0; i < 8; i++)
-                        overflow_emit_member(idx + i, bf16_to_uint16(h[i]),
-                                             high_threshold_bin, threshold_bin,
-                                             remain_topk, topk, output,
-                                             &s_counter, &s_last_remain);
+                    for (int i = 0; i < 8; i++) emit_member(idx + i, h[i]);
                 }
-                for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
-                    overflow_emit_member(idx, bf16_to_uint16(__ldg(input + idx)),
-                                         high_threshold_bin, threshold_bin,
-                                         remain_topk, topk, output, &s_counter,
-                                         &s_last_remain);
             } else {
                 for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
-                    overflow_emit_member(idx, bf16_to_uint16(__ldg(input + idx)),
-                                         high_threshold_bin, threshold_bin,
-                                         remain_topk, topk, output, &s_counter,
-                                         &s_last_remain);
+                    emit_member(idx, __ldg(input + idx));
             }
+            // Same tail split as the collect above.
+            const uint32_t emit_tail_start =
+                use_list ? list_end : (input_aligned ? vec_len : length);
+            for (uint32_t idx = emit_tail_start + tx; idx < length;
+                 idx += BLOCK_SIZE)
+                emit_member(idx, __ldg(input + idx));
             __syncthreads(); return;
         }
         const auto num = s_num_input[0];
