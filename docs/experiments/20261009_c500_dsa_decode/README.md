@@ -1867,10 +1867,12 @@ old = `2b56ba1`，md5 `de10778f`；new = 臂 `/tmp/merge_b`，md5 `a2f7cfc4`）�
 
 §9.16 把"加 chunk"判给"等 merge 并行"。这一节先去量 fix 成本本身，结论是
 **merge 并行也是个死方向**，而且死因和 chunk 数无关：`_b` 的开销是**按调用**
-计的，不是按 kernel 计的。全部数据在本机 device 2 上现测（探针在 `/tmp`，
-单变量、可复跑；生产树全程未改）。
+计的，不是按 kernel 计的。全部数据在本机 device 2 上现测（探针与本节同目录落库：
+`probe_lat.cu` 发射地板、`probe_c12.cu` 成本曲线、`probe_fuse.cu` 按调用计、
+`probe_atomic.cu` 原子聚合反证、`probe_crowd.cu` 拥挤度、`make_cut_arm.py` +
+`probe_cut.cu` 相位阶梯；单变量、可复跑，生产树全程未改）。
 
-**① 发射/操作地板**（`/tmp/probe_lat.cu`、`/tmp/probe_barr2.cu`）：
+**① 发射/操作地板**（`probe_lat.cu`、`probe_barr2.cu`）：
 
 | 操作 | 流水发射 | 单次（含 host 往返） |
 |---|---:|---:|
@@ -1883,7 +1885,7 @@ old = `2b56ba1`，md5 `de10778f`；new = 臂 `/tmp/merge_b`，md5 `a2f7cfc4`）�
 它解释不了 `_b`：16 条 barrier × 1.4 µs = 23 µs 已经超过 `_b` 自己 13.9 µs 的
 总时长，说明有真活儿夹在中间时 barrier 的偏斜被吸收，紧循环测到的是上界。）
 
-**② `_b` 的开销按调用计，不按 kernel 计**（`/tmp/probe_fuse.cu`）——这是
+**② `_b` 的开销按调用计，不按 kernel 计**（`probe_fuse.cu`）——这是
 杀死 merge 并行的那一枪：
 
 | len=2048, grid=6 | µs |
@@ -1898,8 +1900,7 @@ old = `2b56ba1`，md5 `de10778f`；new = 臂 `/tmp/merge_b`，md5 `a2f7cfc4`）�
 **净亏**。计划 §1b 的"并行 merge 再一次小合并"同理：两段 `_b` 就是两次调用，
 直接 2×。
 
-**③ 固定成本的来源：分段定价**（`/tmp/rkcut/` 复制头文件插 `RK_CUT` 提前返回，
-`/tmp/probe_crowd*.cu`）。len=8192、grid=6、block=1024，高斯数据：
+**③ 固定成本的来源：分段定价**（`make_cut_arm.py` 复制头文件插 `RK_CUT` 提前返回，`probe_crowd.cu`）。len=8192、grid=6、block=1024，高斯数据：
 
 | 累计到 | µs | 本段 |
 |---|---:|---:|
@@ -1911,7 +1912,7 @@ old = `2b56ba1`，md5 `de10778f`；new = 臂 `/tmp/merge_b`，md5 `a2f7cfc4`）�
 | + emit | 13.91 | +1.63 |
 
 没有哪一段是罪魁；collect 最大。**但 collect 的成本不是原子**：
-`/tmp/probe_atomic.cu` 把"每元素一次 `atomicAdd` 抢槽 + 散射写"和
+`probe_atomic.cu` 把"每元素一次 `atomicAdd` 抢槽 + 散射写"和
 "warp 聚合（ballot + 前缀 + 每 warp 一次原子）"对打，聚合版**在每个档都更慢**
 （len=8192：9.0 vs 7.0；len=262144：139 vs 91），因为本平台共享原子接近 1 拍，
 而那 10 条 shuffle/popc/索引算术是净增。这是本仓第三次量到同一件事
