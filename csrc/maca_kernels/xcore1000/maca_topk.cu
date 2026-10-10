@@ -843,6 +843,37 @@ constexpr uint32_t kChunkedMinVocab = 262144;
 // against the row kernel's 308, and 17000 or below cost 1.47x there instead.
 constexpr uint32_t kChunkedVocabPerRow = 21000;
 
+// ── the same crossing on the C600U: the batch grows like sqrt(vocab) ────────
+//
+// The constant above is a line through the origin, and on the C600U no line of
+// that shape holds the three crossings: they are ~6.7 / 9.3 / 12.7 batches at
+// 262144 / 524288 / 1048576, growing about half as fast as the rows do, and
+// the best line through the origin has a worst measured regret of 1.30 -- it
+// admits `1048576 x b16`, where the split is that much slower.  The
+// square-root form `batches^2 * 6400 <= vocab` holds all three to 0.7 batch
+// (the boundary lands at 6 / 9 / 12) and its worst measured regret is 1.008,
+// the boundary cell itself (`1048576 x b12`, k=1024).
+//
+// Measured 2026-10-10 on one 28-AP C600U, each route forced in its own tree,
+// three rounds alternating in one session, seeds pinned; ratio = row / split,
+// above 1.0 is the split (`docs/experiments/20261010_c600u_split_crossing/`):
+//
+//     vocab     262144     524288     1048576
+//     b=2       1.57       --         --
+//     b=4       1.26/1.32  1.60/1.63  --
+//     b=6       1.12/1.17  1.39/1.41  1.83/1.66
+//     b=8       0.90/0.94  1.08/1.11  1.38/1.26
+//     b=10      0.79/0.83  0.95/0.98  1.20/1.11
+//     b=12      0.72/0.76  0.86/0.89  1.09/0.99
+//     b=16      0.57/0.61  0.67/0.70  0.84/0.77
+//     b=24      0.42/0.46  0.49/0.52  0.61/0.56
+//
+// (k=512 / k=1024; the two agree to 1.5 batches, so the batch is the axis.)
+// The official grid has no cell in the band the rule moves -- its batches
+// below 64 are 1 and 6, which both rules send to the split -- so this is a
+// routing fix for decode shapes, not a grid number.
+constexpr uint32_t kC600UChunkedVocabPerBatchSq = 6400;
+
 // The split is SM-count-sensitive: a grid of `kBatch * chunks` CTAs leaves
 // `ctas mod SM` SMs idle unless it is a whole number of waves, and the same 16
 // is a different fraction of a wave on a 104-AP C500, a 28-SM C600 and a
@@ -905,6 +936,13 @@ inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
     if (batches == 0 || batches > kChunkedMaxBatches) return false;
     if (params.vocab_size < kChunkedMinVocab) return false;
     if (params.topk != 512 && params.topk != 1024) return false;
+    // The C600U's crossing has its own shape -- see the table on
+    // `kC600UChunkedVocabPerBatchSq`.  `batches` is <= 64 here, so the square
+    // cannot overflow.
+    if (is_c600u_ap_count(params.sm_count)) {
+        return batches * batches <=
+               params.vocab_size / kC600UChunkedVocabPerBatchSq;
+    }
     // `kChunkedVocabPerRow` is exact and overflow-free as a division; the
     // product would need 64-bit arithmetic to say the same thing.
     return batches <= params.vocab_size / kChunkedVocabPerRow;

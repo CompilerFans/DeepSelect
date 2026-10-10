@@ -1,0 +1,30 @@
+# the changed tree alone, 3 rounds, with the route receipt (which kernels ran)
+# round 0 new md5=0dd6fa10
+# round 1 new md5=0dd6fa10
+# round 2 new md5=0dd6fa10
+
+        V     k    b    new us  route
+   262144   512    4      48.2  split
+   262144   512    8      61.8    row
+   262144   512   10      61.9    row
+   262144   512   16      62.3    row
+   262144  1024    4      55.5  split
+   262144  1024    8      73.9    row
+   262144  1024   10      73.4    row
+   262144  1024   16      74.6    row
+   524288   512    4      62.7  split
+   524288   512   10     100.6    row
+   524288   512   12     100.6    row
+   524288   512   24     101.8    row
+   524288  1024    4      69.2  split
+   524288  1024   10     113.6    row
+   524288  1024   12     114.8    row
+   524288  1024   24     116.0    row
+  1048576   512   10     148.6  split
+  1048576   512   16     179.5    row
+  1048576   512   32     298.7    row
+  1048576  1024   10     173.5  split
+  1048576  1024   16     193.5    row
+  1048576  1024   32     319.9    row
+
+[exited with code 0]

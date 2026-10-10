@@ -1,0 +1,40 @@
+# interleaved 3-arm landing check (new = the changed tree, row/split = forced arms)
+# round 0 arm new md5=0dd6fa10
+# round 0 arm row md5=3d39ef9b
+# round 0 arm split md5=8497d4ce
+# round 1 arm split md5=8497d4ce
+# round 1 arm row md5=3d39ef9b
+# round 1 arm new md5=0dd6fa10
+# round 2 arm new md5=0dd6fa10
+# round 2 arm row md5=3d39ef9b
+# round 2 arm split md5=8497d4ce
+#     new: md5 0dd6fa10
+#     row: md5 3d39ef9b
+#   split: md5 8497d4ce
+
+        V     k    b     row us   split us  row/split  route
+
+   262144   512    4       60.7       48.2      1.261  split
+   262144   512    8       61.6       68.7      0.897  split
+   262144   512   10       61.9       78.3      0.790  split
+   262144   512   16       62.2      109.3      0.569  split
+   262144  1024    4       73.4       55.3      1.327  split
+   262144  1024    8       73.8       78.2      0.944  split
+   262144  1024   10       73.4       88.3      0.831  split
+   262144  1024   16       74.7      121.9      0.613  split
+
+   524288   512    4       99.6       62.6      1.591  split
+   524288   512   10      100.6      106.6      0.944  split
+   524288   512   12      100.6      117.7      0.854  split
+   524288   512   24      102.2      208.9      0.489  split
+   524288  1024    4      112.6       68.9      1.633  split
+   524288  1024   10      113.5      115.6      0.982  split
+   524288  1024   12      115.0      128.7      0.894  split
+   524288  1024   24      116.0      225.2      0.515  split
+
+  1048576   512   10      178.0      148.2      1.201  split
+  1048576   512   16      179.2      214.6      0.835  split
+  1048576   512   32      298.7      387.8      0.770  split
+  1048576  1024   10      191.5      173.4      1.105  split
+  1048576  1024   16      193.4      250.7      0.771  split
+  1048576  1024   32      320.1      458.7      0.698  split
