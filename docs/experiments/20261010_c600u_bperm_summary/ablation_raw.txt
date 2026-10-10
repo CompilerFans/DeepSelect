@@ -1,0 +1,35 @@
+# pass-1 ablation bench, C600U, 4096 rows x 1048576, 2 iters, arm sweep (raw)
+# arms: 0 full / 1 noatomic / 2 nosummary / 3 nosummary_noatomic / 4 bare
+#       5 full with the bsm_bpermute summary tree
+#       12 bare unroll2 / 14 bare unroll4 / 22 full unroll2 / 24 full unroll4
+
+arm 0 rows 4096 V 1048576 iters 2: 32.960 ms  521.2 GB/s  18.62 GB/s/AP
+arm 1 rows 4096 V 1048576 iters 2: 26.752 ms  642.2 GB/s  22.94 GB/s/AP
+arm 2 rows 4096 V 1048576 iters 2: 24.577 ms  699.0 GB/s  24.97 GB/s/AP
+arm 3 rows 4096 V 1048576 iters 2: 24.750 ms  694.1 GB/s  24.79 GB/s/AP
+arm 4 rows 4096 V 1048576 iters 2: 24.728 ms  694.8 GB/s  24.81 GB/s/AP
+---
+arm 0 rows 4096 V 1048576 iters 2: 32.967 ms  521.1 GB/s  18.61 GB/s/AP
+arm 1 rows 4096 V 1048576 iters 2: 26.740 ms  642.5 GB/s  22.95 GB/s/AP
+arm 2 rows 4096 V 1048576 iters 2: 24.558 ms  699.6 GB/s  24.98 GB/s/AP
+arm 3 rows 4096 V 1048576 iters 2: 22.708 ms  756.6 GB/s  27.02 GB/s/AP
+arm 4 rows 4096 V 1048576 iters 2: 27.421 ms  626.5 GB/s  22.38 GB/s/AP
+---
+arm 0 rows 4096 V 1048576 iters 2: 32.972 ms  521.1 GB/s  18.61 GB/s/AP
+arm 1 rows 4096 V 1048576 iters 2: 26.749 ms  642.3 GB/s  22.94 GB/s/AP
+arm 2 rows 4096 V 1048576 iters 2: 24.568 ms  699.3 GB/s  24.97 GB/s/AP
+arm 3 rows 4096 V 1048576 iters 2: 26.189 ms  656.0 GB/s  23.43 GB/s/AP
+arm 4 rows 4096 V 1048576 iters 2: 23.201 ms  740.5 GB/s  26.45 GB/s/AP
+---
+
+[exited with code 0]
+arm 4 rows 4096 V 1048576 iters 2: 23.794 ms  722.0 GB/s  25.79 GB/s/AP
+arm 12 rows 4096 V 1048576 iters 2: 25.565 ms  672.0 GB/s  24.00 GB/s/AP
+arm 14 rows 4096 V 1048576 iters 2: 24.780 ms  693.3 GB/s  24.76 GB/s/AP
+arm 22 rows 4096 V 1048576 iters 2: 33.006 ms  520.5 GB/s  18.59 GB/s/AP
+arm 24 rows 4096 V 1048576 iters 2: 32.311 ms  531.7 GB/s  18.99 GB/s/AP
+--- reps ---
+arm 12 rows 4096 V 1048576 iters 2: 22.309 ms  770.1 GB/s  27.50 GB/s/AP
+arm 24 rows 4096 V 1048576 iters 2: 32.315 ms  531.6 GB/s  18.99 GB/s/AP
+
+[exited with code 0]

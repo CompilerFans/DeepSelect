@@ -1410,10 +1410,26 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                 uint32_t key = 0;
                 nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx, &key);
 #ifdef __MACACC__
-                const unsigned long long gmask = 0xFFull << (tx & 0x38u);
+                // The step-down tree through the platform's own permute: a
+                // `__shfl_down_sync` is one shuffle plus ~5 instructions of
+                // index math the compiler does not hoist, and that wrapper was
+                // most of the summary's cost (measured: 524 -> 645 GB/s of
+                // pass-1 walk, tree bit-identical,
+                // `docs/experiments/20261010_c600u_bperm_summary/`).  No mask:
+                // only lane 0 is read and the tree chains, so the group-edge
+                // contamination `(tx + delta) & 63` can introduce reaches
+                // lanes >= 5 only, and lane 0's chain (0,1,2,4) never reads one.
+                uint32_t other = (uint32_t)__builtin_mxc_bsm_bpermute(
+                    (int)(((tx + 1u) & 63u) << 2), (int)key);
+                key = key > other ? key : other;
+                other = (uint32_t)__builtin_mxc_bsm_bpermute(
+                    (int)(((tx + 2u) & 63u) << 2), (int)key);
+                key = key > other ? key : other;
+                other = (uint32_t)__builtin_mxc_bsm_bpermute(
+                    (int)(((tx + 4u) & 63u) << 2), (int)key);
+                key = key > other ? key : other;
 #else
                 const unsigned gmask = 0xFFu << (tx & 0x18u);
-#endif
                 // The tree is chained -- each shuffle reads what the step before
                 // it produced.  Three shuffles taken off the *same* value would
                 // give lane 0 the max over lanes 0,1,2,4 only, and a summary
@@ -1427,6 +1443,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                 key = key > other ? key : other;
                 other = (uint32_t)__shfl_down_sync(gmask, key, 4);
                 key = key > other ? key : other;
+#endif
                 if (lane == 0u)
                     block_max[blk] = (uint16_t)(key >> kCoarse12Shift);
             }
