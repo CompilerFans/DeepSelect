@@ -57,12 +57,60 @@ parser.add_argument("--differential", action="store_true")
 parser.add_argument("--odd-ends", type=int, default=0, metavar="N",
                     help="part 3: this many odd-length cells from the "
                          "correctness table")
+parser.add_argument("--clustered", action="store_true",
+                    help="part 4: rows whose large values sit in one run "
+                         "(the density the generated data never reaches)")
 parser.add_argument("--cells", type=int, default=0,
                     help="cap part 1 at this many cells (0 = all)")
 args = parser.parse_args()
 
 B, V, K = 4096, 131072, 512
 DIFF_SHAPES = [(B, V, K), (B, 262144, 512), (512, 131072, 1024)]
+
+if args.clustered:
+    # ── part 4: the density the generated data never reaches ────────────────
+    # A block is kept when *any* of its 64 elements is at or above the
+    # threshold, so a row whose large values sit in one contiguous run keeps a
+    # whole run of blocks -- and when that run is wider than the coarse arena
+    # (4,096 entries on this row), the threshold's bin overflows and the rescan
+    # path runs with the list live.  Neither can happen on `randn`: it scatters
+    # its values, so the kept fraction stays in 3..39% and the arena never
+    # fills.  `k/V = 1/128` is the densest the gate admits, so these are the
+    # cells where the list is longest.
+    #
+    # The rows are written *into* a generated case, so the layout (the padded
+    # row stride `t.input` is a view of) is the harness's own rather than one
+    # this file re-derives.
+    CLUSTER = [(8, 131072, 1024, 6000), (4, 65536, 512, 6000)]
+    failed = []
+    for (b, v, k, run) in CLUSTER:
+        p = lib.TestParam(b, v, k, True, False, True, torch.bfloat16,
+                          torch.int32, num_runs=0)
+        p.seed = (b * 1_000_003 + v * 11 + k) % 2**31
+        t = lib.generate_testcase(p)
+        lo = (v - run) // 2
+        t.input[:, lo:lo + run] = 100.0        # exact in bf16, so the run ties
+        val, idx = deep_select.topk(
+            t.input, k, sorted=True, begin=None, end=t.end,
+            indices_type=p.out_idx_dtype, sorted_index=False, hint=None,
+            output_idx=None, output_idx_offset=t.output_idx_offset,
+            idx_oob_fill_value=p.idx_oob_fill_value,
+            value_oob_fill_value=p.value_oob_fill_value,
+            return_value=True, abort_when_nan_found=False, backend="maca_c")
+        ok = official.check_result(p, t, val.clone(), idx.clone())
+        # An independent second opinion on the values: the k largest of the row
+        # as torch computes them.  The contract check implies this, so it is a
+        # cross-check rather than the only evidence.
+        want = torch.topk(t.input, k, dim=-1).values
+        vals_ok = bool(torch.equal(torch.sort(val, dim=-1).values,
+                                   torch.sort(want, dim=-1).values))
+        print(f"--- {b}x{v} k={k} cluster={run} (kept run {run // 64} blocks) "
+              f"contract {ok} values {vals_ok}")
+        if not (ok and vals_ok):
+            failed.append((b, v, k))
+    print(f"\n{len(CLUSTER) - len(failed)}/{len(CLUSTER)} clustered cells "
+          f"passed the official checks and the torch value cross-check")
+    sys.exit(1 if failed else 0)
 
 if args.odd_ends:
     # ── part 3: the rows whose length is 8-aligned but not 64-aligned ───────

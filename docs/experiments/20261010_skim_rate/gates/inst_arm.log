@@ -1,0 +1,25 @@
+# round 0 arm old lib=e0414872 knob=(unset)
+# round 0 arm off lib=2d88e74f knob=0
+# round 0 arm on lib=2d88e74f knob=(unset)
+# round 1 arm old lib=e0414872 knob=(unset)
+# round 1 arm off lib=2d88e74f knob=0
+# round 1 arm on lib=2d88e74f knob=(unset)
+# round 2 arm old lib=e0414872 knob=(unset)
+# round 2 arm off lib=2d88e74f knob=0
+# round 2 arm on lib=2d88e74f knob=(unset)
+
+# cells [(4096, 1048576, 512), (4096, 262144, 512), (768, 1048576, 512), (64, 1048576, 512), (4096, 16384, 512), (4096, 65536, 1024)] ; rounds 3 ; iters 10
+# old: extension md5 e0414872, DEEP_SELECT_BF16_SKIP=(unset)
+# off: extension md5 2d88e74f, DEEP_SELECT_BF16_SKIP=0
+#  on: extension md5 2d88e74f, DEEP_SELECT_BF16_SKIP=(unset)
+
+    B        V     k     old us    off us     on us   off/old  on/off  on/old
+ 4096  1048576   512    11757.5   12015.7    8488.7     1.022   0.706   0.722
+ 4096   262144   512     3316.3    3407.7    2709.0     1.028   0.795   0.817
+  768  1048576   512     2461.5    2511.8    1753.7     1.020   0.698   0.712
+   64  1048576   512      444.6     449.9     288.9     1.012   0.642   0.650
+ 4096    16384   512      542.9     556.1     556.6     1.024   1.001   1.025
+ 4096    65536  1024     1318.9    1335.7    1334.5     1.013   0.999   1.012
+
+# old->off is the instantiation (both walk the row twice, neither reads a summary);
+# off->on is the lever.

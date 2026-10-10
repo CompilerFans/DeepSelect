@@ -49,10 +49,10 @@ body = sub1(body, "    for (uint32_t b = tx; b < kCoarse12Bins; b += BLOCK_SIZE)
                   "    for (uint32_t b = tx; b < kCoarse12Bins; b += BLOCK_SIZE) s_wide[b] = 0;\n    __syncthreads();\n    PHASE_MARK(0);\n")
 body = sub1(body, "        *row_nan = __syncthreads_or((int)nan_local) != 0;\n",
                   "        *row_nan = __syncthreads_or((int)nan_local) != 0;\n    PHASE_MARK(1);\n")
-body = sub1(body, "        s_wide_above = above;\n    }\n    __syncthreads();\n",
-                  "        s_wide_above = above;\n    }\n    __syncthreads();\n    PHASE_MARK(2);\n")
-body = sub1(body, "        __syncthreads();\n    }\n\n    {\n        const bool overflow",
-                  "        __syncthreads();\n    }\n    PHASE_MARK(3);\n\n    {\n        const bool overflow")
+body = sub1(body, "        s_nlist = 0;\n    }\n    __syncthreads();\n",
+                  "        s_nlist = 0;\n    }\n    __syncthreads();\n    PHASE_MARK(2);\n")
+body = sub1(body, "        use_list = list_cap > 0 && nlist <= list_cap;\n    }\n",
+                  "        use_list = list_cap > 0 && nlist <= list_cap;\n    }\n    PHASE_MARK(3);\n")
 body = sub1(body, "            __syncthreads(); return;\n", "            __syncthreads(); PROBE_DUMP(); return;\n", n=3)
 body = sub1(body, "                if (p > 0) output[topk - p] = static_cast<int32_t>(idx);\n            }\n        }\n        __syncthreads();\n    }\n}",
                   "                if (p > 0) output[topk - p] = static_cast<int32_t>(idx);\n            }\n        }\n        __syncthreads();\n        PHASE_MARK(4);\n        PROBE_DUMP();\n    }\n}\n#undef PHASE_MARK\n#undef PROBE_DUMP")

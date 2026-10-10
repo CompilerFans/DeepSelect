@@ -47,7 +47,7 @@ idx = r[1] if isinstance(r, (tuple, list)) else r
 print(f"return type={type(r).__name__} idx={type(idx).__name__} "
       f"shape={tuple(getattr(idx, 'shape', ()))} dtype={getattr(idx,'dtype',None)}")
 
-names = ["clear", "pass1", "fold/scan/narrow", "collect", "refine/emit"]
+names = ["clear", "pass1", "threshold", "compact", "collect+emit"]
 tail = idx[:8, p.topk - 8:p.topk].to("cpu")
 print(f"cell={B}x{V}x{K}")
 hdr = "  row  " + "".join(f"{n:>18}" for n in names) + f"{'sum':>14}"
