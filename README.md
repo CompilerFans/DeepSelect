@@ -165,7 +165,10 @@ What changes on a 128 KiB part, and in which direction:
   is gated on measurement rather than on the ratio.
 
 **A 128 KiB device therefore owes its own measurement of the same curve**, not a
-rescaling of the C500 one. The unvalidated port in `csrc/maca_kernels/xcore1600/` is the
+rescaling of the C500 one. That measurement now exists on a 28-AP C600U for the
+two runtime gates the part shares with C500: the long row's block width above
+256 batches, and the bf16 split's crossing (`docs/experiments/20261010_c600u_narrow_row/`,
+`docs/experiments/20261010_c600u_split_crossing/`). The unvalidated port in `csrc/maca_kernels/xcore1600/` is the
 other half of that story -- see [MACA support](#maca-support) and CLAUDE.md's
 "Known holes".
 

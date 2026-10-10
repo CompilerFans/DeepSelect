@@ -84,13 +84,14 @@ setup.py's build_for_maca."
 // 128 KiB every 128 KiB family has.  The 1600 row is the one that cannot be a
 // single number -- see below -- and that is exactly why the *performance* half
 // of every measured rule is guarded by the device it was measured on
-// (`kF32Coarse12MeasuredSmCount`, `is_f32_coarse12_c600u_ap_count`) rather
+// (`kF32Coarse12MeasuredSmCount`, `is_c600u_ap_count`) rather
 // than by this macro: geometry compiles in, tuning still has to be earned.
-// **The split predicates are the exception and the gap**: `chunked_f32_applies`
-// and `chunked_bf16_applies` have no such guard, so a 1600 image does route
-// its fp32 split on the C500 chunk counts (`f32_chunks_large_batch` and
-// `wave_filled_chunks` do branch on `sm_count`, so the count is adapted, but
-// the *band* was never re-fitted off this part).
+// **The split predicates are where this paragraph gets checked, and the two
+// are no longer in the same state**: `chunked_bf16_applies` grew a C600U arm
+// (2026-10-10, `kC600UChunkedVocabPerBatchSq`) keyed on the same set
+// `is_c600u_ap_count` names -- while `chunked_f32_applies` still has no such
+// guard, so a 1600 image routes its fp32 split on the C500 chunk *band*
+// (`wave_filled_chunks` adapts the count, not the band).
 //
 // **The C600U is built two ways -- 28 APs and 32 -- and both are ordinary
 // parts, so this row cannot name the family's count and the 1500 row's 28 is
@@ -103,7 +104,7 @@ setup.py's build_for_maca."
 // the same silicon generation".  They can: the family ships both.  So the
 // number picked here is the one the *ladder* was fitted on, and the gap it
 // leaves is closed at the route rather than here -- `maca_topk.cu`'s
-// `is_f32_coarse12_c600u_ap_count` accepts both, and says why.
+// `is_c600u_ap_count` accepts both, and says why.
 //
 // Nothing routes on *this* -- `ARCH_SM_COUNT` has no behavioral consumer (the
 // paragraph above is the audit finding that established that) -- so the value
@@ -144,7 +145,7 @@ static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 128 * 1024;
 #elif DEEP_SELECT_ARCH == 1600
 static constexpr uint32_t ARCH_FAMILY = 1600;
 static constexpr uint32_t ARCH_SM_COUNT = 28;               // C600U; the family
-// also ships at 32 -- see above, and `is_f32_coarse12_c600u_ap_count` for the
+// also ships at 32 -- see above, and `is_c600u_ap_count` for the
 // route that must accept both
 static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 128 * 1024;
 #else
