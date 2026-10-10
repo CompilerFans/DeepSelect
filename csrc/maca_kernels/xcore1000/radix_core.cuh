@@ -2152,13 +2152,12 @@ __global__ void topk_bf16_chunk_stage1_kernel_k(
     }
 
     // The chunk is ranked by the coarse12 row (`_b`), not by the static-k `_k`
-    // row the merge ranks with: this walk is over the input's bytes, and the
-    // 12-bit coarse level is what makes that walk a streaming one.  Measured on
-    // C500, device 2 (`docs/experiments/20261009_c500_dsa_decode/README.md`
-    // §9.11): the same chunk runs at 382 GB/s against 256 with `_k`, and
-    // `b6 x 262144 k512` goes from 103.9 to 70.5 us e2e against the row
-    // kernel's 97.7.  The merge keeps `_k`: its input is `chunks * topk`
-    // candidates, where the 16 KB coarse histogram costs more than it saves.
+    // row: this walk is over the input's bytes, and the 12-bit coarse level is
+    // what makes that walk a streaming one.  Measured on C500, device 2
+    // (`docs/experiments/20261009_c500_dsa_decode/README.md`): the same chunk
+    // runs at 382 GB/s against 256 with `_k` (§9.12), and `b6 x 262144 k512`
+    // goes from 103.9 to 70.5 us e2e against the row kernel's 97.7.  Both
+    // stages now rank with it, and both therefore take `kChunkSmem`.
     bool nan_row = false;
     radix_topk_row_bf16_b<kChunkBlockSize, kNan, false>(
         row + start, chunk_indices, chunk_len, (uint32_t)TOPK_I,
@@ -2259,7 +2258,13 @@ __global__ void topk_bf16_chunk_stage2_kernel_k(
     int32_t* out = indices + bid * TOPK;
     constexpr int BLOCK_SIZE = kChunkBlockSize;
 
-    radix_topk_row_bf16_k<TOPK, kChunkBlockSize>(values, out, candidate_stride);
+    // The merge's input is `chunks * topk` candidate values rather than the
+    // row's bytes, and the coarse12 row is the faster one over it too:
+    // measured at 10/10 of the split's cells, 0.804x summed, where the same
+    // swap on stage 1 was 0.832x (`README.md` §9.15 and §9.12).  The arena is
+    // `kCoarse12ArenaEntries` on a `chunks * topk` row, not the row kernel's
+    // longer one.
+    radix_topk_row_bf16_b<kChunkBlockSize, false, false>(values, out, candidate_stride, (uint32_t)TOPK);
     for (int i = threadIdx.x; i < static_cast<int>(TOPK); i += BLOCK_SIZE) {
         const int32_t candidate_pos = out[i];
         out[i] = (candidate_pos >= 0 && candidate_pos < candidate_stride)
@@ -2453,9 +2458,9 @@ inline cudaError_t launch_topk_bf16_chunked_k(
     int32_t* nan_flags = nullptr)
 {
     if (TOPK > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    // Stage 1 runs the coarse12 row, whose arena *is* the 16 KB coarse
+    // Both stages run the coarse12 row, whose arena *is* the 16 KB coarse
     // histogram it aliases, followed by the `topk` staging the core writes.
-    constexpr size_t kStage1Smem =
+    constexpr size_t kChunkSmem =
         kCoarse12HistBytes + sizeof(uint32_t) * (size_t)TOPK;
     static bool init[2] = {false, false};
     const int arm = want_nan ? 1 : 0;
@@ -2463,10 +2468,10 @@ inline cudaError_t launch_topk_bf16_chunked_k(
         cudaError_t err = cudaFuncSetAttribute(
             want_nan ? (const void*)topk_bf16_chunk_stage1_kernel_k<TOPK, true>
                      : (const void*)topk_bf16_chunk_stage1_kernel_k<TOPK, false>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, kStage1Smem);
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kChunkSmem);
         if (err != cudaSuccess) return err;
         err = cudaFuncSetAttribute(
-            topk_bf16_chunk_stage2_kernel_k<TOPK>, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
+            topk_bf16_chunk_stage2_kernel_k<TOPK>, cudaFuncAttributeMaxDynamicSharedMemorySize, kChunkSmem);
         if (err != cudaSuccess) return err;
         init[arm] = true;
     }
@@ -2480,19 +2485,19 @@ inline cudaError_t launch_topk_bf16_chunked_k(
     const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
     if (want_nan) {
         topk_bf16_chunk_stage1_kernel_k<TOPK, true>
-            <<<B * num_chunks, kChunkBlockSize, kStage1Smem, stream>>>(
+            <<<B * num_chunks, kChunkBlockSize, kChunkSmem, stream>>>(
                 scores, lengths, candidate_indices, candidate_values, stride, B,
                 num_chunks, chunk_size, nan_flags);
     } else {
         topk_bf16_chunk_stage1_kernel_k<TOPK, false>
-            <<<B * num_chunks, kChunkBlockSize, kStage1Smem, stream>>>(
+            <<<B * num_chunks, kChunkBlockSize, kChunkSmem, stream>>>(
                 scores, lengths, candidate_indices, candidate_values, stride, B,
                 num_chunks, chunk_size);
     }
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return err;
 
-    topk_bf16_chunk_stage2_kernel_k<TOPK><<<B, kChunkBlockSize, kSMEM, stream>>>(
+    topk_bf16_chunk_stage2_kernel_k<TOPK><<<B, kChunkBlockSize, kChunkSmem, stream>>>(
         candidate_values, candidate_indices, indices, candidate_stride, B);
     return cudaGetLastError();
 }
