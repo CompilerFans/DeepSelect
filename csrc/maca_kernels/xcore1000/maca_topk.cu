@@ -781,27 +781,30 @@ constexpr uint32_t kChunkedMinVocab = 262144;
 // Row length the split has to buy before it is worth a batch: the gate below
 // admits `vocab_size / kChunkedVocabPerRow` rows.
 //
-// The split pays four kernels (a separate NaN scan, two stages, and the
-// `preselected` row kernel) and reads the input a third time, and buys CTA
+// The split pays three kernels (two stages and the `preselected` row kernel),
+// reads the input once where the row kernel walks it twice, and buys CTA
 // parallelism for a row the row kernel would otherwise walk alone.  That stops
 // paying once the batch alone keeps the machine busy -- and the batch at which
 // it does grows with the row length, because the row kernel's cost is flat in
-// the batch for as long as it fits one wave.
+// the batch for as long as it fits one wave (measured: 96.0 -> 99.5 us over
+// `b2..b32` at vocab 262144, and 280.4 -> 287.9 over `b12..b64` at 1048576).
 //
-// Measured crossing on C500, paired A/B alternating both arms in one session
-// (`docs/experiments/20261009_c500_dsa_decode/`, ratios are split/row so >1
-// means the split won):
+// Measured crossing on C500, each route forced in its own copy-and-point arm
+// so both are reachable at every batch, three rounds alternating in one session
+// (`docs/experiments/20261009_c500_dsa_decode/`, `probe_crossing.py`):
 //
-//     vocab 262144   b=12 1.131 | b=16 0.909   -> crossing in (12, 16)
-//     vocab 524288   b=32 1.199 | b=40 (unmeasured, k=1024 crossed at 16)
-//     vocab 1048576  b=40 1.105 | b=48 0.922   -> crossing in (40, 48)
+//     vocab  262144   k512 b=19.4   k1024 b=17.7    (vocab/b 13523, 14803)
+//     vocab  524288   k512 b=29.4   k1024 b=29.7    (vocab/b 17808, 17672)
+//     vocab 1048576   k512 b=43.5   k1024 b=35.6    (vocab/b 24095, 29416)
 //
-// 20000 per row puts the boundary at 13 /         26 /        52 for those
-// three -- inside the first bracket, and on the conservative side of the
-// other two.  Being wrong towards the row kernel costs at most 1.20x on the
-// measured set; being wrong towards the split costs up to 2.51x (b=64
-// vocab 262144), which is what the boundary is here to stop.
-constexpr uint32_t kChunkedVocabPerRow = 20000;
+// The crossing is not proportional to the row length, so no single line
+// through the origin passes through all three, and 21000 is the constant with
+// the best worst case: the boundary lands at 12 / 24 / 49, and the worst
+// measured regret over the grid is 1.146 (vocab 524288, b=26 -- the row kernel
+// there costs 14.6% more than the split would have).  20000 -- 13 / 26 / 52 --
+// cost 1.249 at `vocab 1048576 k1024 b=52`, where the split runs 385 us
+// against the row kernel's 308, and 17000 or below cost 1.47x there instead.
+constexpr uint32_t kChunkedVocabPerRow = 21000;
 
 // The split is SM-count-sensitive: a grid of `kBatch * chunks` CTAs leaves
 // `ctas mod SM` SMs idle unless it is a whole number of waves, and the same 16
