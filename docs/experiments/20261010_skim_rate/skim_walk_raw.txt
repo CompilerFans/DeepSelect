@@ -1,0 +1,79 @@
+# Re-run of run_sweep.sh (device 2, 2026-10-10), then the global-list arm
+# (unroll=8) on every dataset, then V=65536.  Each block of lines is one
+# invocation of skim_walk; the '---' lines echo the arm.
+
+--- v1048576 rows=1024 V=1048576 k=512 BLOCK=1024 keep_every=1 unroll=1
+rows=1024 V=1048576 k=512 BLOCK=1024  blocks kept 3.73%  full 1818.7 us (1181 GB/s of 2.15 GB)  skim 813.0 us (139.9 effective GB/s over 0.114 GB)  summary 63.5 us  skim/full 0.447
+--- v1048576 rows=1024 V=1048576 k=512 BLOCK=1024 keep_every=1 unroll=4
+rows=1024 V=1048576 k=512 BLOCK=1024  blocks kept 3.73%  full 1814.2 us (1184 GB/s of 2.15 GB)  skim 795.8 us (142.9 effective GB/s over 0.114 GB)  summary 63.4 us  skim/full 0.439
+--- v1048576 rows=1024 V=1048576 k=512 BLOCK=1024 keep_every=1 unroll=9
+rows=1024 V=1048576 k=512 BLOCK=1024  blocks kept 3.73%  full 1824.7 us (1177 GB/s of 2.15 GB)  skim 258.4 us (440.3 effective GB/s over 0.114 GB)  summary 65.6 us  skim/full 0.142
+    gather: 6266100 kept-block reads over 10 launches (611.9/row), 0 rows over the 2048-entry list cap
+--- v1048576 rows=1024 V=1048576 k=512 BLOCK=512 keep_every=1 unroll=9
+rows=1024 V=1048576 k=512 BLOCK=512  blocks kept 3.73%  full 2203.2 us (975 GB/s of 2.15 GB)  skim 323.9 us (351.3 effective GB/s over 0.114 GB)  summary 63.5 us  skim/full 0.147
+    gather: 6266100 kept-block reads over 10 launches (611.9/row), 0 rows over the 2048-entry list cap
+--- v524288 rows=2048 V=524288 k=512 BLOCK=1024 keep_every=1 unroll=1
+rows=2048 V=524288 k=512 BLOCK=1024  blocks kept 8.48%  full 1850.1 us (1161 GB/s of 2.15 GB)  skim 1249.0 us (172.7 effective GB/s over 0.216 GB)  summary 63.3 us  skim/full 0.675
+--- v524288 rows=2048 V=524288 k=512 BLOCK=1024 keep_every=1 unroll=4
+rows=2048 V=524288 k=512 BLOCK=1024  blocks kept 8.48%  full 1852.5 us (1159 GB/s of 2.15 GB)  skim 1245.7 us (173.2 effective GB/s over 0.216 GB)  summary 63.3 us  skim/full 0.672
+--- v524288 rows=2048 V=524288 k=512 BLOCK=1024 keep_every=1 unroll=9
+rows=2048 V=524288 k=512 BLOCK=1024  blocks kept 8.48%  full 1852.6 us (1159 GB/s of 2.15 GB)  skim 420.1 us (513.5 effective GB/s over 0.216 GB)  summary 63.3 us  skim/full 0.227
+    gather: 14231800 kept-block reads over 10 launches (694.9/row), 0 rows over the 2048-entry list cap
+--- v524288 rows=2048 V=524288 k=512 BLOCK=512 keep_every=1 unroll=9
+rows=2048 V=524288 k=512 BLOCK=512  blocks kept 8.48%  full 2155.2 us (996 GB/s of 2.15 GB)  skim 523.8 us (411.9 effective GB/s over 0.216 GB)  summary 63.6 us  skim/full 0.243
+    gather: 14231800 kept-block reads over 10 launches (694.9/row), 0 rows over the 2048-entry list cap
+--- v262144 rows=1024 V=262144 k=512 BLOCK=1024 keep_every=1 unroll=1
+rows=1024 V=262144 k=512 BLOCK=1024  blocks kept 17.78%  full 568.7 us (944 GB/s of 0.54 GB)  skim 474.5 us (218.8 effective GB/s over 0.104 GB)  summary 27.2 us  skim/full 0.834
+--- v262144 rows=1024 V=262144 k=512 BLOCK=1024 keep_every=1 unroll=4
+rows=1024 V=262144 k=512 BLOCK=1024  blocks kept 17.78%  full 570.3 us (941 GB/s of 0.54 GB)  skim 475.8 us (218.2 effective GB/s over 0.104 GB)  summary 28.0 us  skim/full 0.834
+--- v262144 rows=1024 V=262144 k=512 BLOCK=1024 keep_every=1 unroll=9
+rows=1024 V=262144 k=512 BLOCK=1024  blocks kept 17.78%  full 572.1 us (938 GB/s of 0.54 GB)  skim 170.2 us (609.9 effective GB/s over 0.104 GB)  summary 27.9 us  skim/full 0.298
+    gather: 7456410 kept-block reads over 10 launches (728.2/row), 0 rows over the 2048-entry list cap
+--- v262144 rows=1024 V=262144 k=512 BLOCK=512 keep_every=1 unroll=9
+rows=1024 V=262144 k=512 BLOCK=512  blocks kept 17.78%  full 664.6 us (808 GB/s of 0.54 GB)  skim 233.4 us (444.9 effective GB/s over 0.104 GB)  summary 27.8 us  skim/full 0.351
+    gather: 7456410 kept-block reads over 10 launches (728.2/row), 0 rows over the 2048-entry list cap
+--- v131072 rows=4096 V=131072 k=512 BLOCK=1024 keep_every=1 unroll=1
+rows=4096 V=131072 k=512 BLOCK=1024  blocks kept 33.45%  full 1159.8 us (926 GB/s of 1.07 GB)  skim 1138.8 us (330.1 effective GB/s over 0.376 GB)  summary 56.7 us  skim/full 0.982
+--- v131072 rows=4096 V=131072 k=512 BLOCK=1024 keep_every=1 unroll=4
+rows=4096 V=131072 k=512 BLOCK=1024  blocks kept 33.45%  full 1154.5 us (930 GB/s of 1.07 GB)  skim 1142.2 us (329.1 effective GB/s over 0.376 GB)  summary 56.9 us  skim/full 0.989
+--- v131072 rows=4096 V=131072 k=512 BLOCK=1024 keep_every=1 unroll=9
+rows=4096 V=131072 k=512 BLOCK=1024  blocks kept 33.45%  full 1152.0 us (932 GB/s of 1.07 GB)  skim 553.7 us (679.0 effective GB/s over 0.376 GB)  summary 57.0 us  skim/full 0.481
+    gather: 28061350 kept-block reads over 10 launches (685.1/row), 0 rows over the 2048-entry list cap
+--- v131072 rows=4096 V=131072 k=512 BLOCK=512 keep_every=1 unroll=9
+rows=4096 V=131072 k=512 BLOCK=512  blocks kept 33.45%  full 1272.4 us (844 GB/s of 1.07 GB)  skim 767.1 us (490.1 effective GB/s over 0.376 GB)  summary 56.4 us  skim/full 0.603
+    gather: 28061350 kept-block reads over 10 launches (685.1/row), 0 rows over the 2048-entry list cap
+--- v1048576 rows=1024 V=1048576 k=512 BLOCK=1024 keep_every=4 unroll=1
+rows=1024 V=1048576 k=512 BLOCK=1024  blocks kept 25.00%  full 1813.5 us (1184 GB/s of 2.15 GB)  skim 1878.5 us (303.7 effective GB/s over 0.570 GB)  summary 63.2 us  skim/full 1.036
+--- v1048576 rows=1024 V=1048576 k=512 BLOCK=1024 keep_every=16 unroll=1
+rows=1024 V=1048576 k=512 BLOCK=1024  blocks kept 6.25%  full 1819.6 us (1180 GB/s of 2.15 GB)  skim 1795.5 us (93.4 effective GB/s over 0.168 GB)  summary 63.3 us  skim/full 0.987
+--- v1048576 rows=1024 V=1048576 k=512 BLOCK=1024 keep_every=64 unroll=1
+rows=1024 V=1048576 k=512 BLOCK=1024  blocks kept 1.56%  full 1813.5 us (1184 GB/s of 2.15 GB)  skim 1440.7 us (46.6 effective GB/s over 0.067 GB)  summary 63.6 us  skim/full 0.794
+--- v1048576 rows=1024 V=1048576 k=512 BLOCK=1024 keep_every=0 unroll=1
+rows=1024 V=1048576 k=512 BLOCK=1024  blocks kept 100.00%  full 1814.1 us (1184 GB/s of 2.15 GB)  skim 2065.7 us (1055.9 effective GB/s over 2.181 GB)  summary 63.2 us  skim/full 1.139
+--- v262144 rows=1024 V=262144 k=512 BLOCK=1024 keep_every=0 unroll=1
+rows=1024 V=262144 k=512 BLOCK=1024  blocks kept 100.00%  full 569.3 us (943 GB/s of 0.54 GB)  skim 578.0 us (943.4 effective GB/s over 0.545 GB)  summary 27.9 us  skim/full 1.015
+
+--- the global-list arm (unroll=8) vs smem (unroll=9), same datasets
+--- v1048576
+rows=1024 V=1048576 k=512 BLOCK=1024  blocks kept 3.73%  full 1855.4 us (1157 GB/s of 2.15 GB)  skim 256.6 us (443.4 effective GB/s over 0.114 GB)  summary 63.5 us  skim/full 0.138
+    gather: 6266100 kept-block reads over 10 launches (611.9/row), 0 rows over the 2048-entry list cap
+rows=1024 V=1048576 k=512 BLOCK=1024  blocks kept 3.73%  full 1853.8 us (1158 GB/s of 2.15 GB)  skim 264.0 us (430.8 effective GB/s over 0.114 GB)  summary 63.2 us  skim/full 0.142
+    gather: 6266100 kept-block reads over 10 launches (611.9/row), 0 rows over the 2048-entry list cap
+--- v131072
+rows=4096 V=131072 k=512 BLOCK=1024  blocks kept 33.45%  full 1162.9 us (923 GB/s of 1.07 GB)  skim 554.5 us (678.0 effective GB/s over 0.376 GB)  summary 56.4 us  skim/full 0.477
+    gather: 28061350 kept-block reads over 10 launches (685.1/row), 0 rows over the 2048-entry list cap
+rows=4096 V=131072 k=512 BLOCK=1024  blocks kept 33.45%  full 1164.5 us (922 GB/s of 1.07 GB)  skim 591.1 us (636.1 effective GB/s over 0.376 GB)  summary 56.5 us  skim/full 0.508
+    gather: 28061350 kept-block reads over 10 launches (685.1/row), 0 rows over the 2048-entry list cap
+/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/docs/experiments/20261010_skim_rate/gen_data.py:23: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+/tmp/skim_data/v65536: rows=4096 V=65536 k=512 blocks/row=1024 T=3073..3073 blocks kept/row = 565.7 (55.25%)
+rows=4096 V=65536 k=512 BLOCK=1024  blocks kept 55.25%  full 735.5 us (730 GB/s of 0.54 GB)  skim 699.1 us (436.2 effective GB/s over 0.305 GB)  summary 56.2 us  skim/full 0.951
+rows=4096 V=65536 k=512 BLOCK=1024  blocks kept 55.25%  full 724.7 us (741 GB/s of 0.54 GB)  skim 471.1 us (647.4 effective GB/s over 0.305 GB)  summary 56.3 us  skim/full 0.650
+    gather: 23172250 kept-block reads over 10 launches (565.7/row), 0 rows over the 2048-entry list cap
+rows=4096 V=65536 k=512 BLOCK=1024  blocks kept 55.25%  full 721.9 us (744 GB/s of 0.54 GB)  skim 508.7 us (599.5 effective GB/s over 0.305 GB)  summary 55.7 us  skim/full 0.705
+    gather: 23172250 kept-block reads over 10 launches (565.7/row), 0 rows over the 2048-entry list cap
+
+--- the global-list arm at 512K / 256K
+rows=2048 V=524288 k=512 BLOCK=1024  blocks kept 8.48%  full 1898.0 us (1131 GB/s of 2.15 GB)  skim 423.1 us (509.8 effective GB/s over 0.216 GB)  summary 63.3 us  skim/full 0.223
+    gather: 14231800 kept-block reads over 10 launches (694.9/row), 0 rows over the 2048-entry list cap
+rows=1024 V=262144 k=512 BLOCK=1024  blocks kept 17.78%  full 578.3 us (928 GB/s of 0.54 GB)  skim 180.4 us (575.5 effective GB/s over 0.104 GB)  summary 27.9 us  skim/full 0.312
+    gather: 7456410 kept-block reads over 10 launches (728.2/row), 0 rows over the 2048-entry list cap
