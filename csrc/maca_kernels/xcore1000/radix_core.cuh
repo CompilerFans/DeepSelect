@@ -403,12 +403,13 @@ __device__ __forceinline__ bool hist_add_bf16_wide(
     // 0x8000 - 0x7f81 = 0x7f >= 0.  Both forms are verified against the
     // per-element ones on all 65,536 half patterns.
     uint32_t z = 0u;
-    // Two words at a time, not four: a fully unrolled body that carries the
-    // caller's block-max accumulator costs the row kernel 3-4 MT of registers
-    // (measured with `--resource-usage`), which is the second CTA per SM at
-    // BLOCK=1024. `unroll 2` holds the same register peak as `unroll 1` and
-    // keeps more of the walk's memory-level parallelism.
-    #pragma unroll 2
+    // Fully unrolled, and that is a measured constraint rather than taste: the
+    // walk is memory-latency bound on a long row, and a partial unroll halves
+    // the loads in flight per thread.  `unroll 2` costs the row kernel +92% at
+    // `b4096 x 1048576 k512` bf16 (+14% at 16384, where the row is too short to
+    // be latency bound) while saving 3-4 MT of registers, which is the wrong
+    // trade at every length.
+    #pragma unroll
     for (int i = 0; i < 4; i++) {
         const uint32_t kp =
             w[i] ^ ((((w[i] >> 15) & 0x00010001u) * 0x7FFFu) + 0x80008000u);
@@ -1374,6 +1375,13 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // 1024-thread blocks. Use one uniform load mode for odd-length rows.
     const bool input_aligned = (length & 7u) == 0 && bf16x8_is_aligned(input);
     uint32_t vec_len = length / 8 * 8;
+    // Whole blocks: the summary, the list and every walk that follows one cover
+    // `[0, nb << 6)`, and each of them owes the rest of the row to its own tail
+    // loop.  The three tail loops have to agree on where that starts -- a
+    // histogram that stops at `vec_len` is short of the elements the collect's
+    // tail then finds, and the count it derives is what the stage is sized by.
+    const uint32_t nb = vec_len >> 6;
+    const uint32_t list_end = nb << 6;
     // The summary is built on the aligned walk only, and that is not a
     // limitation: eight consecutive lanes there cover exactly one 64-element
     // block, which is the whole reason the alignment of the walk and the
@@ -1406,12 +1414,19 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
 #else
                 const unsigned gmask = 0xFFu << (tx & 0x18u);
 #endif
-                const uint32_t d1 = (uint32_t)__shfl_down_sync(gmask, key, 1);
-                const uint32_t d2 = (uint32_t)__shfl_down_sync(gmask, key, 2);
-                const uint32_t d4 = (uint32_t)__shfl_down_sync(gmask, key, 4);
-                key = key > d1 ? key : d1;
-                key = key > d2 ? key : d2;
-                key = key > d4 ? key : d4;
+                // The tree is chained -- each shuffle reads what the step before
+                // it produced.  Three shuffles taken off the *same* value would
+                // give lane 0 the max over lanes 0,1,2,4 only, and a summary
+                // that can under-estimate a block's largest key is not a
+                // skip hint: a block holding a candidate would be compacted
+                // away, so the collect would count and stage a member of the
+                // threshold bin that the walk never reaches.
+                uint32_t other = (uint32_t)__shfl_down_sync(gmask, key, 1);
+                key = key > other ? key : other;
+                other = (uint32_t)__shfl_down_sync(gmask, key, 2);
+                key = key > other ? key : other;
+                other = (uint32_t)__shfl_down_sync(gmask, key, 4);
+                key = key > other ? key : other;
                 if (lane == 0u)
                     block_max[blk] = (uint16_t)(key >> kCoarse12Shift);
             }
@@ -1419,7 +1434,16 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8)
                 nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx);
         }
-        for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE) {
+        // The summary walk above is block-granular, so the row's last partial
+        // block is this loop's, and it starts where the collect's tail does --
+        // at `list_end`, not at `vec_len`.  Starting it at `vec_len` leaves
+        // `[list_end, vec_len)` out of the coarse histogram whenever the two
+        // differ, and those elements are ones the collect's tail goes on to
+        // find: the stage is then sized by a count short of what the walk
+        // writes, which runs it past the topk slots it owns.  It is also the
+        // only NaN vote those elements get.
+        const uint32_t hist_tail_start = summary_wanted ? list_end : vec_len;
+        for (uint32_t idx = hist_tail_start + tx; idx < length; idx += BLOCK_SIZE) {
             const maca_bfloat16 raw = __ldg(input + idx);
             atomicAdd(&s_wide[bf16_to_uint16(raw) >> kCoarse12Shift], 1u);
             if (kNan) nan_local |= is_nan_bits16(__bfloat16_as_ushort(raw));
@@ -1504,11 +1528,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // half the blocks, 1.21 at all of them) -- so the count decides and the list
     // is not written past the cap.  `nlist` counts every kept block either way.
     const uint32_t coarse_threshold = s_high_threshold_bin_id;
-    // Whole blocks: the list covers `[0, nb << 6)` and every walk that follows
-    // the list owes the rest of the row to its own tail loop.
-    const uint32_t nb = vec_len >> 6;
     const uint32_t list_cap = nb - (nb >> 2);
-    const uint32_t list_end = nb << 6;
     uint32_t nlist = 0;
     bool use_list = false;
     if (summary_wanted) {

@@ -706,6 +706,11 @@ inline size_t radix_smem_bytes(uint32_t topk, bool sorted, bool wide) {
 // Measurements and the density sweep: docs/experiments/20261010_skim_rate/.
 constexpr uint32_t kSkipMinVocab = 65536;
 
+// The density half of the same gate: `vocab_size >= kSkipMinRowPerSlot * topk`
+// bounds `k/V`, which is what the kept-block fraction `1 - (1 - k/V)^64` follows
+// from. See the gate for the two measurements that bracket it.
+constexpr uint32_t kSkipMinRowPerSlot = 128;
+
 // The campaign's A/B switch for the tables above, read once per process:
 // `DEEP_SELECT_BF16_SKIP=0` answers every call with the row walk, which is what
 // a differential check and a paired A/B need -- one artifact, one environment
@@ -2397,6 +2402,25 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
 
     const int value_dtype = float32 ? 0 : 1;
     const int index_dtype = dsf::same_dtype(output_index.dtype(), dsf::kInt32) ? 0 : 1;
+    // Both tables below are allocated and handed over on this one answer, so the
+    // two sites cannot drift apart: an allocated-but-unpassed table is a walk
+    // that reads a summary nothing wrote.
+    //
+    // `value_dtype == 1` is bf16 (`float32 ? 0 : 1` above) -- the round is
+    // compiled into the *16-bit* row's instantiation only, so this is the only
+    // dtype that has a reader.  The floor is a row length; the second comparison
+    // is a *density*, and it is the one that decides the sign of the change: a
+    // 64-element block is kept when any element in it is at or above the
+    // threshold, so the walk keeps `1 - (1 - k/V)^64` of the blocks.  Measured
+    // on the official grid (docs/experiments/20261010_skim_rate/): `k/V = 1/128`
+    // (39% kept) is a wash, `k/V = 1/64` (64% kept) costs +11..+16% -- the list
+    // is traffic on top of a walk that then reads most of the row anyway.
+    const bool skip_tables =
+        value_dtype == 1 && index_dtype == 0 &&
+        p.vocab_size >= detail::kSkipMinVocab &&
+        (uint64_t)p.vocab_size >=
+            (uint64_t)p.topk * detail::kSkipMinRowPerSlot &&
+        detail::bf16_skip_enabled();
     // The FFI environment holds torch's current stream while the python
     // facade is inside `tvm_ffi.use_torch_stream()` (deep_select/_binding.py).
     // Outside it TVMFFIEnvGetStream reports the null handle, which is the
@@ -2487,16 +2511,13 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             scratch.coarse12_cols_count = need_cols;
         }
     }
-    // The row path's skip tables, `kSkipMinVocab` above.  Allocated for the
-    // calls whose shape passes the gate and whose row instantiation carries the
-    // round -- the 32-bit-index row (`kSkip` in `radix_topk_row_bf16_b`: the
-    // 64-bit row cannot afford the registers), and the routes that do not walk
-    // rows or say the same thing simply never read them.  Sized by
-    // `vocab_size`, the table's own row length, so a row with a shorter window
-    // still finds its own entry.
-    if (value_dtype == 0 && index_dtype == 0 &&
-        p.vocab_size >= detail::kSkipMinVocab &&
-        detail::bf16_skip_enabled()) {
+    // The row path's skip tables.  Allocated for the calls whose shape passes
+    // `skip_tables` and whose row instantiation carries the round -- the
+    // 32-bit-index row (`kSkip` in `radix_topk_row_bf16_b`: the 64-bit row
+    // cannot afford the registers), and the routes that do not walk rows or say
+    // the same thing simply never read them.  Sized by `vocab_size`, the table's
+    // own row length, so a row with a shorter window still finds its own entry.
+    if (skip_tables) {
         const size_t need_blocks = (size_t)batches * (((size_t)p.vocab_size + 63) / 64);
         if (need_blocks > scratch.block_max_count) {
             uint16_t *grown = nullptr;
@@ -2642,9 +2663,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         p.nan_abort_flags = scratch.nan_abort_flags;
     }
     if (needs_coarse12_cols) p.coarse12_cols = scratch.coarse12_cols;
-    if (value_dtype == 0 && index_dtype == 0 &&
-        p.vocab_size >= detail::kSkipMinVocab &&
-        detail::bf16_skip_enabled()) {
+    if (skip_tables) {
         p.row_block_max = scratch.block_max;
         p.row_block_list = scratch.block_list;
     }

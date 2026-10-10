@@ -1,0 +1,3 @@
+# run_test.sh: test finished rc=0
+# extension_md5 2d88e74f707887bb208964992b739c45   (/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/deep_select/deep_select_maca_xcore1000.so)
+# cuda_visible_devices 2

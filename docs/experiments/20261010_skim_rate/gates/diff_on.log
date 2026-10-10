@@ -1,0 +1,5 @@
+/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/docs/experiments/20261010_skim_rate/check_skip.py:44: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+  import torch
+4096x131072 k=512  value-sequence sha256 23f1d8587903795a4e5c182d1d1f2178  contract True
+4096x262144 k=512  value-sequence sha256 27ca83928994c2325a823ea631d06aa3  contract True
+512x131072 k=1024  value-sequence sha256 f01c1f06566ba5d98692ee3aaa484a24  contract True

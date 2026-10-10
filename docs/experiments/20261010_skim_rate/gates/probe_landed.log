@@ -1,0 +1,5 @@
+/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/docs/experiments/20261010_skim_rate/probe_odd_length.py:24: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+  import torch
+want [65604, 65605, 65606, 65607]
+got  [65604, 65605, 65606, 65607]
+OK
