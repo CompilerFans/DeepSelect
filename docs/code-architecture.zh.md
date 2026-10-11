@@ -72,6 +72,8 @@ csrc/
         ├── maca_topk.cu                    唯一手写 TU：include + host 入口 + 按表派发
         ├── contract.cuh                    契约半：RowParams / 常量 / 键与 NaN / emit / 布局
         ├── routing.cuh                     选路：形状 → 数据流（纯函数，一处可读）
+        ├── radix_core.cuh                  数据流入口（伞头：只 include 下面四个；TU 只 include 它）
+        ├── radix_common.cuh                行族共享件：常数 / smem 尺寸 / 直方图与后缀和
         ├── radix_row_bf16.cuh              bf16 行：radix 两趟 + skip 表 + overflow
         ├── radix_row_fp32.cuh              fp32 行：+ 溢出重扫 + k2048 变体
         ├── radix_chunked.cuh               两条 dtype 的分块 split/merge（阶段核 + 发射）
@@ -100,15 +102,16 @@ csrc/
 
 | 阶段 | 内容 | 收据（§6） | 依赖 |
 |---|---|---|---|
-| P1 | 删 `radix_core.cuh` 里岛外零引用的静态-k 族（≈700 行）+ 重写描述它的注释 | 全绿 | 已批 |
-| P2 | `maca_topk.cu` 拆出 `contract.cuh` + `routing.cuh`；dg 两路的发射归位数据流文件 | 全绿 | P1 |
-| P3 | `radix_core.cuh` 按 dtype 拆成 `radix_row_bf16` / `radix_row_fp32` / `radix_chunked` | 全绿 | P1 |
+| P1 | 删 `radix_core.cuh` 里岛外零引用的静态-k 族（≈700 行）+ 重写描述它的注释 | 全绿 | 已落地 `e16138c` |
+| P2 | `maca_topk.cu` 拆出 `contract.cuh` + `routing.cuh`；dg 两路的发射归位数据流文件 | 全绿 | P1/P4 |
+| P3 | `radix_core.cuh` 按 dtype 拆成 `radix_common` / `radix_row_bf16` / `radix_row_fp32` / `radix_chunked`；`radix_core.cuh` 留作伞头 | 全绿 | P1 |
 | P4 | `dg_*` → `topk_coarse12` / `topk_chunks`（文件、namespace、调用点、`ref/` 臂、文档） | 全绿 | P1 |
 | P5 | 生成器 + 配置元组模板 + `instantiations/*.cu` + 表驱动派发 + `setup.py` | **内核符号集不变** + 文件数==核数 + 套件绿（`nm` 全表预期变动：host 派发改成表） | P2/P3 |
-| P6 | python 侧三层分文件（契约 / 后端 / 装载），`__init__` 导出不变 | 套件绿 + `inspect.signature` 不变 | 独立 |
+| P6 | python 侧分文件：`interface.py`（公开契约）+ `_backends.py`（torch / deep_gemm 参考后端）+ `_binding.py` / `_log.py` | 套件绿 + `inspect.signature` 不变 | 独立 |
 
-P1/P4 互不冲突（文件集不同），可并行；P2 与 P3 各自独立（文件集不同），可并行；
-P5 在 P2/P3 之后（它改的是它们刚整理出来的发射层）。
+**P3 与 P4 可并行，两者唯一的潜在交界是 `maca_topk.cu` 的 include 块**（`:50-52`）：伞头让 P3 完全不碰这个文件，
+P4 在其中只改 dg 的两行。P2 重写 `maca_topk.cu`（拆出契约半与选路），排在 P4 之后。
+P5 在 P2/P3 之后（它改的是它们刚整理出来的发射层）；P6 独立。
 
 ## 5b. P5 的元组表（实测，2026-10-12，供生成器照抄）
 
