@@ -45,26 +45,20 @@
 
 namespace rk {
 
-// The *static-k* dispatch's arm limit -- not the array bound, and not the
-// public contract.  Every reader of this constant is on the way to an arm that
-// instantiates `topk` at compile time: the
-// `static_assert(TOPK <= kMaxTopK)` in `radix_topk_row_bf16_k`, and the two
-// chunked entries.  The runtime-k row entries (`radix_topk_row_bf16_b`,
+// The bf16 *chunked* entries' arm guard -- not the array bound, and not the
+// public contract.  Its two readers (`launch_topk_bf16_chunked_k`,
+// `launch_topk_bf16_chunked`) are on the way to an arm that instantiates `topk`
+// at compile time.  The runtime-k row entries (`radix_topk_row_bf16_b`,
 // `radix_topk_row_f32`) do **not** read it, and the public contract is
 // `deep_select_maca::kMaxTopK` = 4096 in `maca_topk.cu` -- which is why the fp32
 // side has its own `kF32MaxTopK` (4096) below rather than reusing this.
 //
-// **`launch_topk_bf16_runtime` also reads it, and that reader is dead.**
-// Nothing in this tree calls `launch_topk_bf16_dispatch`, its only caller, so
-// the whole static-k family below -- k50/k100/…/k2048, `k2048_compact`, the
-// warp-scan pair, and `launch_topk_bf16_runtime` itself -- is compiled-in dead
-// weight of the same class as the `kF32K2048` block.  A 4096 bf16 topk reaches
-// `radix_topk_row_bf16_b` and is answered there; this constant does not bound
-// it.  That guard is the most misleading thing in the file for a reader asking
-// "what is the top-k limit", so it is called out here rather than left to be
-// discovered.
+// A 4096 bf16 topk reaches `radix_topk_row_bf16_b` and is answered there; this
+// constant does not bound it.  That guard is the most misleading thing in the
+// file for a reader asking "what is the top-k limit", so it is called out here
+// rather than left to be discovered.
 //
-// There are four constants with this name in the tree (2048 here,
+// There are three constants with this name in the tree (2048 here,
 // `dg_chunks.cuh`, `dg_coarse12.cuh`; 4096 in `maca_topk.cu`) and nothing links
 // them.  That is deliberate -- each is its own arm's bound -- but it means a
 // grep for `kMaxTopK` does not answer "what is the top-k limit".
@@ -120,18 +114,6 @@ constexpr size_t kSMEM = 48 * 1024;
 #else
 constexpr size_t kSMEM = KSMEM_BYTES;
 #endif
-
-#ifndef KTOPK_COMPACT_BF16_INDICES
-#define KTOPK_COMPACT_BF16_INDICES 1
-#endif
-
-// Compact indices are only dispatched for this measured 16-bit-safe window.
-#ifndef KCOMPACT_BF16_MAX_LENGTH
-#define KCOMPACT_BF16_MAX_LENGTH 65535
-#endif
-static_assert(KCOMPACT_BF16_MAX_LENGTH <= 65535,
-              "compact FP16 indices require a uint16-safe length");
-constexpr uint32_t kCompactBF16MaxLength = KCOMPACT_BF16_MAX_LENGTH;
 
 // ============================================================
 // 类型转换
@@ -1667,421 +1649,6 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     }
 }
 
-__device__ __forceinline__ void radix_topk_row_bf16(
-    const maca_bfloat16* input, int32_t* output, uint32_t length, uint32_t topk)
-{
-    radix_topk_row_bf16_b<kBlockSize>(input, output, length, topk);
-}
-
-template <uint32_t TOPK, uint32_t BLOCK_SIZE = kBlockSize, bool USE_COMPACT_INDICES = false>
-__device__ __forceinline__ void radix_topk_row_bf16_k(
-    const maca_bfloat16* input, int32_t* output, uint32_t length)
-{
-    static_assert(TOPK <= kMaxTopK, "TOPK exceeds kMaxTopK");
-    constexpr uint32_t RADIX = kRadix;
-    constexpr uint32_t SMEM_INPUT_SIZE = kSmemInputSize;
-
-    __shared__ uint32_t s_histogram_buf[2][RADIX + 32];
-    __shared__ uint32_t s_counter;
-    __shared__ uint32_t s_threshold_bin_id;
-    __shared__ uint32_t s_high_threshold_bin_id;
-    __shared__ uint32_t s_num_input[2];
-    __shared__ int32_t s_last_remain;
-    extern __shared__ uint32_t s_input_flat[];
-
-    const uint32_t tx = threadIdx.x;
-    constexpr bool use_compact_indices =
-        KTOPK_COMPACT_BF16_INDICES && USE_COMPACT_INDICES;
-    constexpr uint32_t input_capacity =
-        use_compact_indices ? SMEM_INPUT_SIZE * 2 : SMEM_INPUT_SIZE;
-    uint16_t* const s_input_compact = reinterpret_cast<uint16_t*>(s_input_flat);
-    uint32_t remain_topk = TOPK;
-    auto& s_histogram = s_histogram_buf[0];
-
-    if (tx < RADIX + 1) s_histogram[tx] = 0;
-    __syncthreads();
-
-    // C500 has an intermittent race in the mixed vector-plus-tail path for
-    // 1024-thread blocks. Use one uniform load mode for odd-length rows.
-    const bool input_aligned = (length & 7u) == 0 && bf16x8_is_aligned(input);
-    uint32_t vec_len = length / 8 * 8;
-    if (input_aligned) {
-        for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8)
-            hist_add_bf16_aligned(s_histogram, input, idx);
-        for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE)
-            atomicAdd(&s_histogram[bf16_to_uint8(__ldg(input + idx))], 1u);
-    } else {
-        for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
-            atomicAdd(&s_histogram[bf16_to_uint8(__ldg(input + idx))], 1u);
-    }
-    __syncthreads();
-    uint32_t exclusive_suffix = 0;
-    uint32_t inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
-
-    if (tx < RADIX && inclusive_suffix > remain_topk && exclusive_suffix <= remain_topk) {
-        s_threshold_bin_id = tx; s_high_threshold_bin_id = tx; s_num_input[0] = 0; s_counter = 0;
-    }
-    __syncthreads();
-
-    {
-        const auto threshold_bin = s_threshold_bin_id;
-        remain_topk -= s_histogram[threshold_bin + 1];
-        if (remain_topk == 0) {
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
-                if (bf16_to_uint8(__ldg(input + idx)) > threshold_bin)
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            __syncthreads(); return;
-        }
-        __syncthreads();
-        if (tx < RADIX + 1) s_histogram[tx] = 0;
-        __syncthreads();
-        if (input_aligned) {
-            for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
-                uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
-                const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
-                #pragma unroll
-                for (int i = 0; i < 8; i++) {
-                    maca_bfloat16 raw = h[i];
-                    uint32_t bin = bf16_to_uint8(raw);
-                    if (bin > threshold_bin) {
-                        output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx + i);
-                    } else if (bin == threshold_bin) {
-                        uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                        if (pos < input_capacity) {
-                            if (use_compact_indices) s_input_compact[pos] = static_cast<uint16_t>(idx + i);
-                            else s_input_flat[pos] = idx + i;
-                            atomicAdd(&s_histogram[refine_bin(raw) & 0xFF], 1u);
-                        }
-                    }
-                }
-            }
-            for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE) {
-                maca_bfloat16 raw = __ldg(input + idx);
-                uint32_t bin = bf16_to_uint8(raw);
-                if (bin > threshold_bin) {
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-                } else if (bin == threshold_bin) {
-                    uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                    if (pos < input_capacity) {
-                        if (use_compact_indices) s_input_compact[pos] = static_cast<uint16_t>(idx);
-                        else s_input_flat[pos] = idx;
-                        atomicAdd(&s_histogram[refine_bin(raw) & 0xFF], 1u);
-                    }
-                }
-            }
-        } else {
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
-                maca_bfloat16 raw = __ldg(input + idx);
-                uint32_t bin = bf16_to_uint8(raw);
-                if (bin > threshold_bin) {
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-                } else if (bin == threshold_bin) {
-                    uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                    if (pos < input_capacity) {
-                        if (use_compact_indices) s_input_compact[pos] = static_cast<uint16_t>(idx);
-                        else s_input_flat[pos] = idx;
-                        atomicAdd(&s_histogram[refine_bin(raw) & 0xFF], 1u);
-                    }
-                }
-            }
-        }
-        __syncthreads();
-    }
-
-    {
-        const bool overflow = s_num_input[0] > input_capacity;
-        if (overflow) {
-            if (tx < RADIX + 1) s_histogram[tx] = 0;
-            __syncthreads();
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
-                const maca_bfloat16 raw = __ldg(input + idx);
-                const uint32_t key = refine_bin(raw);
-                if ((key >> 8) == s_high_threshold_bin_id)
-                    atomicAdd(&s_histogram[key & 0xFF], 1u);
-            }
-            __syncthreads();
-        }
-        exclusive_suffix = 0;
-        inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
-        if (tx < RADIX && inclusive_suffix > remain_topk && exclusive_suffix <= remain_topk) {
-            s_threshold_bin_id = tx;
-            s_last_remain = static_cast<int32_t>(remain_topk - exclusive_suffix);
-        }
-        __syncthreads();
-        const auto threshold_bin = s_threshold_bin_id;
-        remain_topk -= s_histogram[threshold_bin + 1];
-        if (overflow) {
-            const auto high_threshold_bin = s_high_threshold_bin_id;
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
-                const maca_bfloat16 raw = __ldg(input + idx);
-                const uint32_t key = refine_bin(raw);
-                if ((key >> 8) == high_threshold_bin) {
-                    const uint32_t low = key & 0xFF;
-                    if (low > threshold_bin) {
-                        output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-                    } else if (low == threshold_bin && remain_topk != 0) {
-                        auto p = atomicAdd(&s_last_remain, -1);
-                        if (p > 0) output[TOPK - p] = static_cast<int32_t>(idx);
-                    }
-                }
-            }
-            __syncthreads(); return;
-        }
-        const auto num = s_num_input[0];
-        if (remain_topk == 0) {
-            for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
-                const uint32_t idx = use_compact_indices
-                    ? static_cast<uint32_t>(s_input_compact[i]) : s_input_flat[i];
-                if ((refine_bin(__ldg(input + idx)) & 0xFF) > threshold_bin)
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            }
-            __syncthreads(); return;
-        }
-        __syncthreads();
-        for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
-            const uint32_t idx = use_compact_indices
-                ? static_cast<uint32_t>(s_input_compact[i]) : s_input_flat[i];
-            uint32_t bin = refine_bin(__ldg(input + idx)) & 0xFF;
-            if (bin > threshold_bin) {
-                output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            } else if (bin == threshold_bin) {
-                auto p = atomicAdd(&s_last_remain, -1);
-                if (p > 0) output[TOPK - p] = static_cast<int32_t>(idx);
-            }
-        }
-        __syncthreads();
-    }
-}
-
-// ============================================================
-// FP16 radix topk row (寄存器直方图版本 - 后合并模式)
-// ============================================================
-
-__device__ __forceinline__ void radix_topk_row_bf16_reg(
-    const maca_bfloat16* input, int32_t* output, uint32_t length, uint32_t topk)
-{
-    constexpr uint32_t RADIX = 256;
-    constexpr uint32_t BLOCK_SIZE = kBlockSize;
-
-    constexpr uint32_t STATIC_BYTES = 2 * (RADIX + 32) * sizeof(uint32_t)
-                                    + sizeof(uint32_t) + sizeof(uint32_t)
-                                    + 2 * sizeof(uint32_t) + sizeof(int32_t);
-    constexpr uint32_t SMEM_INPUT_SIZE = (kSMEM - STATIC_BYTES) / (2 * sizeof(int32_t));
-
-    __shared__ uint32_t s_histogram_buf[2][RADIX + 32];
-    __shared__ uint32_t s_counter;
-    __shared__ uint32_t s_threshold_bin_id;
-    __shared__ uint32_t s_num_input[2];
-    __shared__ int32_t s_last_remain;
-    extern __shared__ uint32_t s_input_flat[];
-
-    const uint32_t tx = threadIdx.x;
-    const uint32_t lane = tx % kWarpSize;
-    const uint32_t warp_id = tx / kWarpSize;
-    uint32_t remain_topk = topk;
-    auto& s_histogram = s_histogram_buf[0];
-
-    // Stage 1: 本地累积寄存器直方图 (无 shuffle)
-    // 每个线程只累积自己拥有的 bins: [my_bin_start, my_bin_start + kBinsPerThread)
-    const uint32_t my_bin_start = tx * kBinsPerThread;  // 注意: 用 tx 而非 lane，避免跨 warp 冲突
-    uint32_t r_hist[kBinsPerThread] = {0};
-
-    // Keep the register variant consistent with the production row paths.
-    const bool input_aligned = (length & 7u) == 0 && bf16x8_is_aligned(input);
-    uint32_t vec_len = length / 8 * 8;
-    if (input_aligned) {
-        for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
-            uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
-            const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
-            #pragma unroll
-            for (int i = 0; i < 8; i++) {
-                uint32_t bin = bf16_to_uint8(h[i]);
-                if (bin >= my_bin_start && bin < my_bin_start + kBinsPerThread)
-                    r_hist[bin - my_bin_start]++;
-            }
-        }
-        for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE) {
-            uint32_t bin = bf16_to_uint8(__ldg(input + idx));
-            if (bin >= my_bin_start && bin < my_bin_start + kBinsPerThread)
-                r_hist[bin - my_bin_start]++;
-        }
-    } else {
-        for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
-            uint32_t bin = bf16_to_uint8(__ldg(input + idx));
-            if (bin >= my_bin_start && bin < my_bin_start + kBinsPerThread)
-                r_hist[bin - my_bin_start]++;
-        }
-    }
-
-    // Stage 1.5: 将寄存器直方图合并到 smem
-    if (tx < RADIX + 1) s_histogram[tx] = 0;
-    __syncthreads();
-    for (uint32_t b = 0; b < kBinsPerThread; b++) {
-        uint32_t bin = lane * kBinsPerThread + b;
-        if (bin < RADIX && r_hist[b] > 0)
-            atomicAdd(&s_histogram[bin], r_hist[b]);
-    }
-    __syncthreads();
-    uint32_t exclusive_suffix = 0;
-    uint32_t inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
-
-    if (tx < RADIX && inclusive_suffix > remain_topk && exclusive_suffix <= remain_topk) {
-        s_threshold_bin_id = tx; s_num_input[0] = 0; s_counter = 0;
-    }
-    __syncthreads();
-
-    // Stage 1.5 + Stage 2: 与标准版本相同
-    {
-        const auto threshold_bin = s_threshold_bin_id;
-        remain_topk -= s_histogram[threshold_bin + 1];
-        if (remain_topk == 0) {
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
-                if (bf16_to_uint8(__ldg(input + idx)) > threshold_bin)
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            __syncthreads(); return;
-        }
-        __syncthreads();
-        if (tx < RADIX + 1) s_histogram[tx] = 0;
-        __syncthreads();
-        for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
-            maca_bfloat16 raw = __ldg(input + idx);
-            uint32_t bin = bf16_to_uint8(raw);
-            if (bin > threshold_bin) {
-                output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            } else if (bin == threshold_bin) {
-                uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                if (pos < SMEM_INPUT_SIZE) {
-                    s_input_flat[pos] = idx;
-                    atomicAdd(&s_histogram[refine_bin(raw) & 0xFF], 1u);
-                }
-            }
-        }
-        __syncthreads();
-    }
-
-    {
-        const auto num = s_num_input[0] < SMEM_INPUT_SIZE ? s_num_input[0] : SMEM_INPUT_SIZE;
-        exclusive_suffix = 0;
-        inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
-        if (tx < RADIX && inclusive_suffix > remain_topk && exclusive_suffix <= remain_topk) {
-            s_threshold_bin_id = tx;
-            s_last_remain = static_cast<int32_t>(remain_topk - exclusive_suffix);
-        }
-        __syncthreads();
-        const auto threshold_bin = s_threshold_bin_id;
-        remain_topk -= s_histogram[threshold_bin + 1];
-        if (remain_topk == 0) {
-            for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
-                auto idx = s_input_flat[i];
-                if ((refine_bin(__ldg(input + idx)) & 0xFF) > threshold_bin)
-                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            }
-            __syncthreads(); return;
-        }
-        __syncthreads();
-        for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
-            auto idx = s_input_flat[i];
-            uint32_t bin = refine_bin(__ldg(input + idx)) & 0xFF;
-            if (bin > threshold_bin) {
-                output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            } else if (bin == threshold_bin) {
-                auto p = atomicAdd(&s_last_remain, -1);
-                if (p > 0) output[topk - p] = static_cast<int32_t>(idx);
-            }
-        }
-        __syncthreads();
-    }
-}
-
-}  // namespace rk
-
-namespace rk {
-
-__global__ void topk_bf16_kernel_runtime(
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
-    int64_t score_stride, int topk, int B)
-{
-    const int bid = blockIdx.x;
-    if (bid >= B) return;
-    const int32_t length = lengths[bid];
-    const maca_bfloat16* row = scores + bid * score_stride;
-    int32_t* out = indices + bid * topk;
-    if (length <= topk) {
-        for (int i = threadIdx.x; i < topk; i += kBlockSize)
-            out[i] = (i < length) ? static_cast<int32_t>(i) : -1;
-        return;
-    }
-    radix_topk_row_bf16(row, out, length, topk);
-}
-
-#define RK_DEFINE_TOPK_BF16_KERNEL(NAME, TOPK_VALUE, COMPACT_VALUE) \
-__global__ void NAME( \
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices, \
-    int64_t score_stride, int topk, int B) \
-{ \
-    (void)topk; \
-    constexpr uint32_t TOPK = TOPK_VALUE; \
-    const int bid = blockIdx.x; \
-    if (bid >= B) return; \
-    const int32_t length = lengths[bid]; \
-    const maca_bfloat16* row = scores + bid * score_stride; \
-    int32_t* out = indices + bid * TOPK; \
-    if (length <= static_cast<int32_t>(TOPK)) { \
-        for (int i = threadIdx.x; i < static_cast<int>(TOPK); i += kBlockSize) \
-            out[i] = (i < length) ? static_cast<int32_t>(i) : -1; \
-        return; \
-    } \
-    radix_topk_row_bf16_k<TOPK, kBlockSize, COMPACT_VALUE>(row, out, length); \
-}
-
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k50, 50, false)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k100, 100, false)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k512, 512, false)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k1024, 1024, false)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k1536, 1536, false)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k2028, 2028, false)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k2048, 2048, false)
-
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k50_compact, 50, true)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k100_compact, 100, true)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k512_compact, 512, true)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k1024_compact, 1024, true)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k1536_compact, 1536, true)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k2028_compact, 2028, true)
-RK_DEFINE_TOPK_BF16_KERNEL(topk_bf16_kernel_k2048_compact, 2048, true)
-
-#undef RK_DEFINE_TOPK_BF16_KERNEL
-
-// Long-row variants are intentionally narrow: the dispatch below only uses
-// k=512/1024, where the measured 1024-thread benefit outweighs the extra
-// launch footprint. All other top-k values keep the regular specialization.
-#define RK_DEFINE_TOPK_BF16_LONG_KERNEL(NAME, TOPK_VALUE, COMPACT_VALUE) \
-__global__ void NAME( \
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices, \
-    int64_t score_stride, int topk, int B) \
-{ \
-    (void)topk; \
-    constexpr uint32_t TOPK = TOPK_VALUE; \
-    const int bid = blockIdx.x; \
-    if (bid >= B) return; \
-    const int32_t length = lengths[bid]; \
-    const maca_bfloat16* row = scores + bid * score_stride; \
-    int32_t* out = indices + bid * TOPK; \
-    if (length <= static_cast<int32_t>(TOPK)) { \
-        for (int i = threadIdx.x; i < static_cast<int>(TOPK); i += kLongRowBlockSize) \
-            out[i] = (i < length) ? static_cast<int32_t>(i) : -1; \
-        return; \
-    } \
-    radix_topk_row_bf16_k<TOPK, kLongRowBlockSize, COMPACT_VALUE>(row, out, length); \
-}
-
-RK_DEFINE_TOPK_BF16_LONG_KERNEL(topk_bf16_kernel_k512_long, 512, false)
-RK_DEFINE_TOPK_BF16_LONG_KERNEL(topk_bf16_kernel_k1024_long, 1024, false)
-RK_DEFINE_TOPK_BF16_LONG_KERNEL(topk_bf16_kernel_k512_compact_long, 512, true)
-RK_DEFINE_TOPK_BF16_LONG_KERNEL(topk_bf16_kernel_k1024_compact_long, 1024, true)
-
-#undef RK_DEFINE_TOPK_BF16_LONG_KERNEL
-
 // `kNan` is the caller's `check_nan`: with it on this kernel is *also* the NaN
 // scan and `flags` is the table it raises, in place of `nan_scan_kernel`.  The
 // two share the grid by construction (`nan_scan_kernel`'s comment), so the only
@@ -2138,13 +1705,14 @@ __global__ void topk_bf16_chunk_stage1_kernel_k(
         return;
     }
 
-    // The chunk is ranked by the coarse12 row (`_b`), not by the static-k `_k`
-    // row: this walk is over the input's bytes, and the 12-bit coarse level is
-    // what makes that walk a streaming one.  Measured on C500, device 2
+    // The chunk is ranked by the coarse12 row: this walk is over the input's
+    // bytes, and the 12-bit coarse level is what makes that walk a streaming
+    // one.  Measured on C500, device 2
     // (`docs/experiments/20261009_c500_dsa_decode/README.md`): the same chunk
-    // runs at 382 GB/s against 256 with `_k` (§9.12), and `b6 x 262144 k512`
-    // goes from 103.9 to 70.5 us e2e against the row kernel's 97.7.  Both
-    // stages now rank with it, and both therefore take `kChunkSmem`.
+    // runs at 382 GB/s on the 12-bit level against 256 on the 8-bit one
+    // (§9.12), and `b6 x 262144 k512` goes from 103.9 to 70.5 us e2e against
+    // the row kernel's 97.7.  Both stages rank with it, and both therefore
+    // take `kChunkSmem`.
     bool nan_row = false;
     radix_topk_row_bf16_b<kChunkBlockSize, kNan, false>(
         row + start, chunk_indices, chunk_len, (uint32_t)TOPK_I,
@@ -2281,161 +1849,6 @@ __global__ void topk_bf16_chunk_stage2_kernel(
     }
 }
 
-inline cudaError_t launch_topk_bf16_runtime(
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
-    int B, int L, int topk, cudaStream_t stream)
-{
-    if (topk > kMaxTopK) return cudaErrorInvalidValue;
-    static bool init = false;
-    if (!init) {
-        cudaError_t err = cudaFuncSetAttribute(
-            topk_bf16_kernel_runtime, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
-        if (err != cudaSuccess) return err;
-        init = true;
-    }
-    topk_bf16_kernel_runtime<<<B, kBlockSize, kSMEM, stream>>>(scores, lengths, indices, L, topk, B);
-    return cudaGetLastError();
-}
-
-inline cudaError_t launch_topk_bf16_k50(
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
-    int B, int L, cudaStream_t stream)
-{
-    static bool init = false;
-    if (!init) {
-        cudaError_t err = cudaFuncSetAttribute(
-            topk_bf16_kernel_k50, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
-        if (err != cudaSuccess) return err;
-        init = true;
-    }
-    topk_bf16_kernel_k50<<<B, kBlockSize, kSMEM, stream>>>(scores, lengths, indices, L, 50, B);
-    return cudaGetLastError();
-}
-
-inline cudaError_t launch_topk_bf16_k100(
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
-    int B, int L, cudaStream_t stream)
-{
-    static bool init = false;
-    if (!init) {
-        cudaError_t err = cudaFuncSetAttribute(
-            topk_bf16_kernel_k100, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
-        if (err != cudaSuccess) return err;
-        init = true;
-    }
-    topk_bf16_kernel_k100<<<B, kBlockSize, kSMEM, stream>>>(scores, lengths, indices, L, 100, B);
-    return cudaGetLastError();
-}
-
-#define RK_DEFINE_TOPK_BF16_LAUNCH(NAME, KERNEL_NAME, TOPK_VALUE) \
-inline cudaError_t NAME( \
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices, \
-    int B, int L, cudaStream_t stream) \
-{ \
-    static bool init = false; \
-    if (!init) { \
-        cudaError_t err = cudaFuncSetAttribute( \
-            KERNEL_NAME, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM); \
-        if (err != cudaSuccess) return err; \
-        init = true; \
-    } \
-    KERNEL_NAME<<<B, kBlockSize, kSMEM, stream>>>(scores, lengths, indices, L, TOPK_VALUE, B); \
-    return cudaGetLastError(); \
-}
-
-RK_DEFINE_TOPK_BF16_LAUNCH(launch_topk_bf16_k512, topk_bf16_kernel_k512, 512)
-RK_DEFINE_TOPK_BF16_LAUNCH(launch_topk_bf16_k1024, topk_bf16_kernel_k1024, 1024)
-RK_DEFINE_TOPK_BF16_LAUNCH(launch_topk_bf16_k1536, topk_bf16_kernel_k1536, 1536)
-RK_DEFINE_TOPK_BF16_LAUNCH(launch_topk_bf16_k2028, topk_bf16_kernel_k2028, 2028)
-RK_DEFINE_TOPK_BF16_LAUNCH(launch_topk_bf16_k2048, topk_bf16_kernel_k2048, 2048)
-
-#define RK_DEFINE_TOPK_BF16_COMPACT_LAUNCH(NAME, KERNEL_NAME, FALLBACK_NAME, TOPK_VALUE) \
-inline cudaError_t NAME( \
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices, \
-    int B, int L, cudaStream_t stream) \
-{ \
-    if (KTOPK_COMPACT_BF16_INDICES && \
-        (kSMEM > 16 * 1024 || L > static_cast<int>(kCompactBF16MaxLength))) \
-        return FALLBACK_NAME(scores, lengths, indices, B, L, stream); \
-    static bool init = false; \
-    if (!init) { \
-        cudaError_t err = cudaFuncSetAttribute( \
-            KERNEL_NAME, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM); \
-        if (err != cudaSuccess) return err; \
-        init = true; \
-    } \
-    KERNEL_NAME<<<B, kBlockSize, kSMEM, stream>>>(scores, lengths, indices, L, TOPK_VALUE, B); \
-    return cudaGetLastError(); \
-}
-
-RK_DEFINE_TOPK_BF16_COMPACT_LAUNCH(
-    launch_topk_bf16_k50_compact, topk_bf16_kernel_k50_compact, launch_topk_bf16_k50, 50)
-RK_DEFINE_TOPK_BF16_COMPACT_LAUNCH(
-    launch_topk_bf16_k100_compact, topk_bf16_kernel_k100_compact, launch_topk_bf16_k100, 100)
-RK_DEFINE_TOPK_BF16_COMPACT_LAUNCH(
-    launch_topk_bf16_k512_compact, topk_bf16_kernel_k512_compact, launch_topk_bf16_k512, 512)
-RK_DEFINE_TOPK_BF16_COMPACT_LAUNCH(
-    launch_topk_bf16_k1024_compact, topk_bf16_kernel_k1024_compact, launch_topk_bf16_k1024, 1024)
-RK_DEFINE_TOPK_BF16_COMPACT_LAUNCH(
-    launch_topk_bf16_k1536_compact, topk_bf16_kernel_k1536_compact, launch_topk_bf16_k1536, 1536)
-RK_DEFINE_TOPK_BF16_COMPACT_LAUNCH(
-    launch_topk_bf16_k2028_compact, topk_bf16_kernel_k2028_compact, launch_topk_bf16_k2028, 2028)
-RK_DEFINE_TOPK_BF16_COMPACT_LAUNCH(
-    launch_topk_bf16_k2048_compact, topk_bf16_kernel_k2048_compact, launch_topk_bf16_k2048, 2048)
-
-#define RK_DEFINE_TOPK_BF16_LONG_LAUNCH(NAME, KERNEL_NAME, TOPK_VALUE) \
-inline cudaError_t NAME( \
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices, \
-    int B, int L, cudaStream_t stream) \
-{ \
-    static bool init = false; \
-    if (!init) { \
-        cudaError_t err = cudaFuncSetAttribute( \
-            KERNEL_NAME, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM); \
-        if (err != cudaSuccess) return err; \
-        init = true; \
-    } \
-    KERNEL_NAME<<<B, kLongRowBlockSize, kSMEM, stream>>>(scores, lengths, indices, L, TOPK_VALUE, B); \
-    return cudaGetLastError(); \
-}
-
-RK_DEFINE_TOPK_BF16_LONG_LAUNCH(
-    launch_topk_bf16_k512_long, topk_bf16_kernel_k512_long, 512)
-RK_DEFINE_TOPK_BF16_LONG_LAUNCH(
-    launch_topk_bf16_k1024_long, topk_bf16_kernel_k1024_long, 1024)
-
-#define RK_DEFINE_TOPK_BF16_LONG_COMPACT_LAUNCH(NAME, KERNEL_NAME, FALLBACK_NAME, TOPK_VALUE) \
-inline cudaError_t NAME( \
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices, \
-    int B, int L, cudaStream_t stream) \
-{ \
-    if (KTOPK_COMPACT_BF16_INDICES && \
-        (kSMEM > 16 * 1024 || L > static_cast<int>(kCompactBF16MaxLength))) \
-        return FALLBACK_NAME(scores, lengths, indices, B, L, stream); \
-    static bool init = false; \
-    if (!init) { \
-        cudaError_t err = cudaFuncSetAttribute( \
-            KERNEL_NAME, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM); \
-        if (err != cudaSuccess) return err; \
-        init = true; \
-    } \
-    KERNEL_NAME<<<B, kLongRowBlockSize, kSMEM, stream>>>(scores, lengths, indices, L, TOPK_VALUE, B); \
-    return cudaGetLastError(); \
-}
-
-RK_DEFINE_TOPK_BF16_LONG_COMPACT_LAUNCH(
-    launch_topk_bf16_k512_compact_long, topk_bf16_kernel_k512_compact_long,
-    launch_topk_bf16_k512_long, 512)
-RK_DEFINE_TOPK_BF16_LONG_COMPACT_LAUNCH(
-    launch_topk_bf16_k1024_compact_long, topk_bf16_kernel_k1024_compact_long,
-    launch_topk_bf16_k1024_long, 1024)
-
-#undef RK_DEFINE_TOPK_BF16_LONG_COMPACT_LAUNCH
-#undef RK_DEFINE_TOPK_BF16_LONG_LAUNCH
-
-#undef RK_DEFINE_TOPK_BF16_COMPACT_LAUNCH
-#undef RK_DEFINE_TOPK_BF16_LAUNCH
-
 template <uint32_t TOPK>
 inline cudaError_t launch_topk_bf16_chunked_k(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
@@ -2547,66 +1960,20 @@ inline cudaError_t launch_topk_bf16_chunked(
     return cudaGetLastError();
 }
 
-inline int recommend_topk_bf16_chunks(int B, int L, int topk)
-{
-    if (topk == 1024 && B <= 64 && L >= 1048576)
-        return 12;
-    if (topk == 512 && B <= 64 && L >= 1048576)
-        return 13;
-    return 1;
-}
-
-inline size_t topk_bf16_chunked_workspace_bytes(int B, int topk, int num_chunks)
-{
-    if (num_chunks <= 1) return 0;
-    return static_cast<size_t>(B) * num_chunks * topk * (sizeof(int32_t) + sizeof(maca_bfloat16));
-}
-
 // ============================================================
-// 配置驱动 dispatch
+// 块宽选择 — `maca_topk.cu` 的 `radix_block_for` 是唯一消费者
 // ============================================================
 //
-// The `-DKSMEM_BYTES=` size per workload is now decided by the launchers, not
-// by the caller: see `radix_smem_bytes()` in `maca_topk.cu`.
-//
-// The chunked path needs extra workspace: B * chunks * topk * (4 + 2) bytes.
+// `TopKConfig` is the triple that decision reads, and `needs_long_row_bf16`
+// is the regime test itself; the block widths, the launch's dynamic smem and
+// the chunked split's workspace are `maca_topk.cu`'s (`radix_smem_bytes`,
+// `chunked_workspace_bytes`).
 //
 struct TopKConfig {
     int B;
     int L;
     int topk;
 };
-
-inline bool needs_chunked(const TopKConfig& cfg)
-{
-    // dsv4 decode: B 小、L 极大，单 block 并行度不足
-    return cfg.B <= 64 && cfg.L >= 1048576 && cfg.topk >= 512;
-}
-
-inline int recommend_chunks(const TopKConfig& cfg)
-{
-    if (!needs_chunked(cfg)) return 1;
-    return recommend_topk_bf16_chunks(cfg.B, cfg.L, cfg.topk);
-}
-
-inline size_t workspace_bytes(const TopKConfig& cfg)
-{
-    int chunks = recommend_chunks(cfg);
-    return topk_bf16_chunked_workspace_bytes(cfg.B, cfg.topk, chunks);
-}
-
-inline bool needs_compact_bf16_indices(const TopKConfig& cfg)
-{
-#if KTOPK_COMPACT_BF16_INDICES
-    // The upper bound keeps every possible row offset representable in uint16;
-    // bucket overflow is handled by the overflow-safe full-row fallback.
-    if (kSMEM > 16 * 1024) return false;
-    return cfg.L >= 32768 && cfg.L <= static_cast<int>(kCompactBF16MaxLength);
-#else
-    (void)cfg;
-    return false;
-#endif
-}
 
 inline bool needs_long_row_bf16(const TopKConfig& cfg)
 {
@@ -2617,82 +1984,6 @@ inline bool needs_long_row_bf16(const TopKConfig& cfg)
         cfg.L < 60000)
         return false;
     return cfg.topk == 512 || cfg.topk == 1024;
-}
-
-// 单行 dispatch: 按 topk 值选择特化 kernel
-inline cudaError_t launch_topk_bf16_single_row(
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
-    int B, int L, int topk, cudaStream_t stream)
-{
-    const TopKConfig cfg{B, L, topk};
-    if (needs_long_row_bf16(cfg)) {
-        if (needs_compact_bf16_indices(cfg)) {
-            switch (topk) {
-            case 512:
-                return launch_topk_bf16_k512_compact_long(
-                    scores, lengths, indices, B, L, stream);
-            case 1024:
-                return launch_topk_bf16_k1024_compact_long(
-                    scores, lengths, indices, B, L, stream);
-            default:
-                break;
-            }
-        }
-        switch (topk) {
-        case 512:
-            return launch_topk_bf16_k512_long(scores, lengths, indices, B, L, stream);
-        case 1024:
-            return launch_topk_bf16_k1024_long(scores, lengths, indices, B, L, stream);
-        default:
-            break;
-        }
-    }
-    if (needs_compact_bf16_indices(cfg)) {
-        switch (topk) {
-        case 50: return launch_topk_bf16_k50_compact(scores, lengths, indices, B, L, stream);
-        case 100: return launch_topk_bf16_k100_compact(scores, lengths, indices, B, L, stream);
-        case 512: return launch_topk_bf16_k512_compact(scores, lengths, indices, B, L, stream);
-        case 1024: return launch_topk_bf16_k1024_compact(scores, lengths, indices, B, L, stream);
-        case 1536: return launch_topk_bf16_k1536_compact(scores, lengths, indices, B, L, stream);
-        case 2028: return launch_topk_bf16_k2028_compact(scores, lengths, indices, B, L, stream);
-        case 2048: return launch_topk_bf16_k2048_compact(scores, lengths, indices, B, L, stream);
-        default: break;
-        }
-    }
-    switch (topk) {
-    case 50: return launch_topk_bf16_k50(scores, lengths, indices, B, L, stream);
-    case 100: return launch_topk_bf16_k100(scores, lengths, indices, B, L, stream);
-    case 512: return launch_topk_bf16_k512(scores, lengths, indices, B, L, stream);
-    case 1024: return launch_topk_bf16_k1024(scores, lengths, indices, B, L, stream);
-    case 1536: return launch_topk_bf16_k1536(scores, lengths, indices, B, L, stream);
-    case 2028: return launch_topk_bf16_k2028(scores, lengths, indices, B, L, stream);
-    case 2048: return launch_topk_bf16_k2048(scores, lengths, indices, B, L, stream);
-    default: return launch_topk_bf16_runtime(scores, lengths, indices, B, L, topk, stream);
-    }
-}
-
-// 统一 dispatch 入口: 自动选择 single-row 或 chunked 路径
-inline cudaError_t launch_topk_bf16_dispatch(
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
-    int32_t* candidate_indices, maca_bfloat16* candidate_values,
-    const TopKConfig& cfg, cudaStream_t stream)
-{
-    if (needs_chunked(cfg)) {
-        int chunks = recommend_chunks(cfg);
-        return launch_topk_bf16_chunked(
-            scores, lengths, indices, candidate_indices, candidate_values,
-            cfg.B, cfg.L, cfg.topk, chunks, stream);
-    }
-    return launch_topk_bf16_single_row(
-        scores, lengths, indices, cfg.B, cfg.L, cfg.topk, stream);
-}
-
-// 兼容旧接口: 无 chunked 支持的简化 dispatch
-inline cudaError_t launch_topk_bf16_dispatch(
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
-    int B, int L, int topk, cudaStream_t stream)
-{
-    return launch_topk_bf16_single_row(scores, lengths, indices, B, L, topk, stream);
 }
 
 // stage 1's answer is a *value*, so the merge can rank `chunks * topk` of them
@@ -2801,7 +2092,7 @@ __global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage2_kernel(
 
 // ── the fp32 chunked split ──────────────────────────────────────────────────
 //
-// The 16-bit split above ranks each chunk with `radix_topk_row_bf16_k`, whose
+// The 16-bit split above ranks each chunk with `radix_topk_row_bf16_b`, whose
 // output is a position *inside the chunk*, so its merge ranks `chunks * topk`
 // candidate values and maps positions back.  The fp32 row entry writes row
 // columns instead (its `chunk_begin` is the chunk's column offset), so the

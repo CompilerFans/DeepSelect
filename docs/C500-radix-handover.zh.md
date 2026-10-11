@@ -73,7 +73,7 @@ C500（xcore1000）上走的是**行式 radix 选择**：一行一个 CTA，两�
 | 文件 | 角色 |
 |---|---|
 | `csrc/maca_kernels/xcore1000/maca_topk.cu` | **契约层 + 启动层**：`topk` 的对外契约（values / sorted / NaN / 窗口 / 偏移 / 短行）、NaN 扫描、动态 smem 尺寸与布局、kernel 启动 |
-| `csrc/maca_kernels/xcore1000/radix_core.cuh` | **选择数据流**（header-only）：`radix_topk_row_bf16_b`（16 位行，生产路径）、`radix_topk_row_f32*`（32 位行）、若干 static-k / register / chunked 变体 |
+| `csrc/maca_kernels/xcore1000/radix_core.cuh` | **选择数据流**（header-only）：`radix_topk_row_bf16_b`（16 位行，生产路径）、`radix_topk_row_f32*`（32 位行）、bf16 chunked split 的两级 stage 核与发射器 |
 | `csrc/structs.h` | `TopkSelectArgs` / `RowParams` |
 | `scripts/official_slice.py` | 官方大表的切片驱动（正确性门）——**2026-09-16 已删除，能力并入 `tests/test.py`**（见 §4 正确性门） |
 | `tests/test.py` | 官方性能表（每个 perf 用例先查正确性再计时） |
@@ -86,10 +86,9 @@ walk 合计 283 µs，对两趟下界 233.4 = 82% 可达速率。要看"下一�
 那份文档的 §5。
 
 **哪条路径在生产里活着**：`maca_topk.cu` 只启动两条行内核——
-`radix_topk_row_bf16_b<BLOCK>`（bf16）与 `radix_topk_row_f32`（fp32）。
-`radix_core.cuh` 里的 `radix_topk_row_bf16_k` / `_reg` 这些**不由 maca_topk.cu
-启动**，只被 `rk::launch_topk_bf16_chunked`（低 batch 长行的 split/merge）用
-到。改 `_b` 之前先确认自己改的是不是生产路径。
+`radix_topk_row_bf16_b<BLOCK>`（bf16）与 `radix_topk_row_f32`（fp32）；
+bf16 的 chunked split 两级（`topk_bf16_chunk_stage1/stage2_kernel_k`）也各自
+用 `_b` 排自己那一段。改 `_b` 之前先确认自己改的是不是生产路径。
 
 ---
 
@@ -346,7 +345,7 @@ git -C $D push origin main
 - **粗层 / coarse level**：直方图保留的 key 高位位数。现在是 12（`kCoarse12Bits`）。
 - **细层 / fine**：剩下的低位，现在 4 位（`kCoarse12SubBins = 16`）。
 - **arena**：`s_input_flat`，存阈值桶成员下标的地方；容量 `kCoarse12ArenaEntries`
-  = 4,096（16 位行）/ `rk::kSmemInputSize` = 3,514（fp32 行与 static-k 行）。
+  = 4,096（16 位行）/ `rk::kSmemInputSize` = 3,514（fp32 行）。
 - **overflow**：阈值桶成员数超过 arena 容量，回退整行重扫。
 - **occupancy（occ）**：每 AP 常驻 CTA 数。C500 是 104 AP、64 KB smem/AP、
   2,048 线程/AP；`静态 2328 B + 动态请求 < 32,768 B` 才有 2 个 CTA/AP。上限 2 是

@@ -293,26 +293,16 @@ static __device__ __forceinline__ void radix_layout(
 
 // Both row entries cover every key length and every k **up to the public
 // `kMaxTopK` (4096)**, not `rk::kMaxTopK` (2048).  The header's 2048 is the
-// *static-k* dispatch's arm limit, and every reader of it is on the way to an
-// arm that instantiates `topk` at compile time: the
-// `static_assert(TOPK <= kMaxTopK)` in `radix_topk_row_bf16_k`, and the two
-// chunked entries.  Neither of the two entries called here is one of those:
-// `radix_topk_row_bf16_b` takes `topk` at runtime and `radix_topk_row_f32` does
-// too, so a 4096 answer is legal for both and `radix_layout` sizes `selected`
-// and `sort_buf` for it.  This comment said `rk::kMaxTopK` until the public
-// entry's 4096 was traced through the row path; see the note above
-// `deep_select_maca::kMaxTopK` for why the two constants differ.
-//
-// **One name in that list is unreachable, and the distinction is the point.**
-// `launch_topk_bf16_runtime` (`radix_core.cuh`) *is* a runtime-k entry and it
-// *does* reject `topk > kMaxTopK` -- but nothing in this tree calls it:
-// `launch_topk_bf16_dispatch`, its only caller, has no caller either, so the
-// whole static-k family (k50/k100/…/k2048, `k2048_compact`, the warp-scan pair)
-// is the same class of compiled-in dead weight as the `kF32K2048` block.  So
-// the header's 2048 bounds **nothing reachable**: a 4096 bf16 topk arrives here
-// and `radix_topk_row_bf16_b` answers it, which is why the public contract can
-// be 4096 while the header still says 2048.  A reader who finds the guard and
-// concludes "2048 is the real limit" has found a dead path's guard.
+// bf16 *chunked* entries' arm guard, and its readers
+// (`launch_topk_bf16_chunked_k` / `launch_topk_bf16_chunked`) are on the way to
+// an arm that instantiates `topk` at compile time.  The split's own gate
+// (`chunked_bf16_applies` below) admits only `topk` 512 or 1024, so the guard
+// never fires; what the two entries called here cover is every key length and
+// every k up to 4096, because `radix_topk_row_bf16_b` takes `topk` at runtime
+// and `radix_topk_row_f32` does too, and `radix_layout` sizes `selected` and
+// `sort_buf` for it.  A reader who finds the 2048 guard and concludes "2048 is
+// the real limit" has found a guard on a route this operator does not take; see
+// the note above `deep_select_maca::kMaxTopK` for why the two constants differ.
 //
 // Both also resolve a threshold bin too large for the arena by re-walking the
 // row rather than by ranking a truncated candidate set.

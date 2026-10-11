@@ -170,7 +170,7 @@ maca_c 自洽。已知 deep_gemm 后端有分块截断漏洞（宿主仓以 stri
 一遍"，maca_c 的行核读两趟。两趟读在长行上就是 2× 的 DRAM 代价，
 `docs/C500-radix-profile.zh.md` §3 已实测两趟分别是单趟可达速率的 80%/89% ——
 **没有靠调度把这 2× 消化掉的余地**。所以逼近持平的路径是减少趟数
-（`radix_topk_row_bf16_k` 那套更轻的数据流，或改造成上游的 scan/filter/compact），
+（改造成上游的 scan/filter/compact），
 不是再调块宽/门槛（那条已由账本 §6 证否）。
 
 ---

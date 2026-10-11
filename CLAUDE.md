@@ -416,7 +416,7 @@ The contract layer and launch layer. Every mode shares one contract half — the
 - `radix_topk_row_bf16_b<BLOCK>` (16-bit rows) — the production path for bf16, one row per CTA, two passes over the row.
 - `radix_topk_row_f32` (32-bit rows) — same two-pass dataflow, with its own overflow rule (`radix_topk_row_f32_rescan`).
 
-`radix_core.cuh` is header-only and ported from a standalone C500 radix-TopK project (provenance banner at the top of the file records the source commit). Only `_b` and `_f32` are launched by `maca_topk.cu`; the `_k` / `_reg` static-k variants exist only for `rk::launch_topk_bf16_chunked` (the low-batch, long-row split/merge). **Check which one you are editing before assuming it is the production path.**
+`radix_core.cuh` is header-only and ported from a standalone C500 radix-TopK project (provenance banner at the top of the file records the source commit). Two row entries live in it — `radix_topk_row_bf16_b` (16-bit) and `radix_topk_row_f32` (32-bit) — and every kernel in the tree that ranks anything reaches one of them: the bf16 chunked split's two stages rank their chunk with `_b` as well. **Check which one you are editing before assuming it is the production path.**
 
 The current 16-bit dataflow is **coarse12** (see handover §3, ledger §2.3). Understand these three things before changing it:
 
@@ -424,7 +424,7 @@ The current 16-bit dataflow is **coarse12** (see handover §3, ledger §2.3). Un
 2. **Counts are a property of the bin, not of what fits.** In pass 2 the fine histogram counts *every* member of the threshold bin; only the write into the arena is capacity-limited. History: clamping both together under `pos < SMEM_INPUT_SIZE` forced a full-row rescan to repair overflow — deleted in `4cd740a`.
 3. **The narrow step's crossing test is `above + c > remain_topk`, i.e. the window itself**, not "how much is left after subtracting the byte above". The latter stops one sub-bin early when the byte has slack, leaving the window short; refine then finds no landing point and reads an uninitialized shared variable. This cost a memory violation and 379/512 wrong slots once. It does not raise — it silently mis-ranks.
 
-Coarse is 12 bits (`kCoarse12Bits`) leaving 4 fine bits, which is all of a bf16 key — so refine never has to rank past the fine ties. Arena capacity is `kCoarse12ArenaEntries` (4096) on the 16-bit row, `rk::kSmemInputSize` (3514) on the fp32 / static-k rows. **Overflow** (threshold bin wider than the arena) falls back to a full-row rescan; the fp32 row adds that rescan rule itself, where upstream silently mis-answers by ranking the truncated subset.
+Coarse is 12 bits (`kCoarse12Bits`) leaving 4 fine bits, which is all of a bf16 key — so refine never has to rank past the fine ties. Arena capacity is `kCoarse12ArenaEntries` (4096) on the 16-bit row, `rk::kSmemInputSize` (3514) on the fp32 row. **Overflow** (threshold bin wider than the arena) falls back to a full-row rescan; the fp32 row adds that rescan rule itself, where upstream silently mis-answers by ranking the truncated subset.
 
 Porting conventions: portable primitives only — `__shfl_down_sync`, `atomicAdd`, `__ldg`, `__syncthreads`, `__syncthreads_or`. No inline asm, no TMA, no mbarrier, no cluster. **The wave width is MACA's 64 lanes, not 32** — the CUDA-era code in this tree assumed 32 and does not hold here.
 
@@ -838,9 +838,10 @@ staticMaxWarps/PEU : <N>
 Measured 2026-09-14 on `maca_topk.cu` (xcore1000, the build's own flags): the
 launched device functions report a **48-byte stack frame, no spill**, with
 **`topk_kernel_radix<…,512,…>` at 44 MT / up to 78 STregisters** and
-**`topk_kernel_radix<…,1024,…>` at 46 MT / up to 78 ST**. The `topk_bf16_*_kernel_*`
-family (the runtime/static-k/chunked variants) is lighter — 24 MT / 42-52 ST — and
-those are only reached by the chunked path (below).
+**`topk_kernel_radix<…,1024,…>` at 46 MT / up to 78 ST**. The `topk_bf16_chunk_*`
+stage kernels (`topk_bf16_chunk_stage1_kernel_k` / `topk_bf16_chunk_stage2_kernel_k`,
+the bf16 split's live arm) measure 20-40 MT / 30-42 ST (2026-10-12, same `maca_topk.cu`
+compiled through `cucc --resource-usage`) and are reached only by the chunked path (below).
 
 ### 2. Occupancy — `~/maca_kernel_doctor`
 
@@ -943,9 +944,9 @@ suggestions are small:
 - **Both read the row twice where upstream reads once.** Our two passes are
   already at 80% and 89% of single-pass attainable rate, so the headroom in
   relentless MLP is small; a one-pass form is the structural way to the wall
-  and is a much larger change than it looks (`radix_topk_row_bf16_k` is a
-  different, lighter dataflow than the shipping `_b` row, and its exact
-  coverage has **not** been verified here — check before calling it a drop-in).
+  and is a much larger change than it looks (the chunked split is the closest
+  thing in the tree to reading a row once, and it is a split-and-merge over
+  `chunks` CTAs, not a single-pass row).
 - **`radix_topk_row_bf16_b` already has the `remain_topk == 0` exact-fit exit**
   (`csrc/maca_kernels/xcore1000/radix_core.cuh:1096`) — it returns after the coarse
   complement, exactly as deep_gemm's `topk_coarse12_impl` does. It is the
@@ -1512,7 +1513,6 @@ source line numbers — so "the md5 moved" is not evidence of a behaviour change
   taken. So this tree cannot be benchmarked against the rerouted one cell for cell; there is no before to put beside the
   after.
 - `backend="deep_gemm"`'s kernel collects the members of the threshold *coarse* bin (half-precision ordered key `>> 6`) before refining, and the chunked kernel silently drops members past its staging capacity. A row with more than 4096 values in one such bucket gets a top-k of an arbitrary subset, varying run to run. Filed as a strict `xfail` in mcDeepGEMM: `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`. **`maca_c` has no such hole** — but note the xcore1600 hole above is a `maca_c` hole, so this sentence is about the `deep_gemm` backend only.
-- The `radix_topk_row_bf16_k` static-k row still runs the 8-bit coarse level and the 3,514-slot arena; it has not received coarse12. What the chunked path's *stage 1* ranks with is `radix_topk_row_bf16_b` (coarse12) — measured at 382 GB/s against 256 for `_k` on the same chunk, `docs/experiments/20261009_c500_dsa_decode/README.md` §9.12 — and `_k` is the merge's ranking kernel, where the input is `chunks * topk` candidates and the 16 KB coarse histogram would cost more than the walk it speeds up.
 - The fp32 row is a separate codebase path whose overflow handling is multi-round full-row rescan (up to 8 trips). Same "coarse level too coarse" disease, different cure — a 32-bit key cannot be resolved in two levels the way a 16-bit one can. Retesting fp32 cells is mandatory when touching it.
 
 ## Call logging — `deep_select/_log.py`, `DS_LOG`
