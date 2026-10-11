@@ -110,6 +110,33 @@ csrc/
 P1/P4 互不冲突（文件集不同），可并行；P2 与 P3 各自独立（文件集不同），可并行；
 P5 在 P2/P3 之后（它改的是它们刚整理出来的发射层）。
 
+## 5b. P5 的元组表（实测，2026-10-12，供生成器照抄）
+
+行核族的模板头是 `topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, kPreSelected>`
+（`maca_topk.cu:474`），今天的实例化全部由 `launch_typed_radix`（`:949`）的 if-链枚举出来：
+
+| 轴 | 取值 | 出处 |
+|---|---|---|
+| `ValueT` | `maca_bfloat16` / `float` | 入口 dtype 检查 |
+| `OutIdxT` | `int32_t` / `int64_t` | 入口 out-idx 检查 |
+| `BLOCK` | 16 位行 `{rk::kBlockSize(512), rk::kLongRowBlockSize(1024)}`；fp32 行只有 512 | `maca_topk.cu:964-974`（`if constexpr` 只给 bf16 编宽块臂） |
+| `SI,SV,RV` | `{(1,1,1),(1,0,1),(1,0,0),(0,0,1),(0,0,0)}` 五种 | `sorted_value ⇒ return_value`，`launch_typed_radix` 的 `run(T,T,T)` 链 |
+| `kPreSelected` | `false` / `true` | 行路 vs 分块路的预选臂（`launch_radix` 的 `preselected`） |
+
+**2 × 2 × (2 或 1) × 5 × 2 = 60**，与产物里 `nm | grep -c topk_kernel_radix` 的 60 对得上——
+生成器的第一张表就是它，文件命名照官方把元组写进文件名：
+
+```
+instantiations/value_bf16_outidx_i32_block_512_si1_rv1_sv1_pre0.cu
+instantiations/value_fp32_outidx_i64_block_512_si0_rv0_sv0_pre1.cu
+```
+
+P5 的另一半是**把模板改成配置结构**（`template <typename Cfg> __global__ void topk_kernel_radix(...)`，
+`Cfg` 带 `ValueT/OutIdxT/BLOCK/SI/RV/SV/PRE` 七个成员），这样
+`template __global__ void topk_kernel_radix<Cfg>(RowParams);` 才是一条可以独立成文件的显式实例化，
+host 侧按表查 `{dtype, outidx, block, flags, pre} → 发射器`。其余三族（chunked 两阶段 / coarse12 /
+chunks）的元组轴在同一步里从各自发射点枚举，逐族一张表、逐元组一个文件。
+
 ## 6. 收据协议（所有阶段共用）
 
 ```bash
