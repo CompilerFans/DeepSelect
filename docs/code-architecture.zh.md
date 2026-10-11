@@ -82,6 +82,26 @@ csrc/
         └── instantiations/*.cu             生成物：一个配置元组一个文件
 ```
 
+### 3b. 命名空间（用户 2026-10-12 裁定 A：单根平铺）
+
+三条血统（我方 radix、deep_gemm 移植、上游 DeepSelect）不再各占一个命名空间；
+**单根 `deep_select::`，角色在下一层**：
+
+```
+deep_select::              契约半：RowParams / kMaxTopK(4096) / emit_ordered /
+                           radix_layout / radix_select_row / topk_kernel_radix / detail::
+deep_select::radix::       全部选择数据流（原 rk）：radix 行 + 移植两路
+  radix::coarse12::        12 位粗层的选择（原 rk::coarse12，deep_gemm 移植）
+  radix::chunks::          按 chunk 切分的候选合并（原 rk::chunks，deep_gemm 移植）
+deep_select::common::      跨族共享原语（原 deep_select_common）
+deep_select::ffi::         平台无关边缘（不变）
+```
+
+`_maca` 后缀去掉：平台由目录（`csrc/maca_kernels/`）与编译宏
+（`-DDEEP_SELECT_IS_BUILD_ON_MACA`）承载，命名空间不再重复声明它。`rk` 是
+血统缩写（radix kernel，来自 dsa_topk 的 `radix_core.cuh`），两样都不占——既不是
+读者可懂的名，也只是重复文件名。
+
 ## 4. 规则
 
 1. **命名：判据是"读者可懂"，不是"官方"**（用户 2026-10-12 裁定：「不是 dg 改成 official，
@@ -108,12 +128,15 @@ csrc/
 | P1 | 删 `radix_core.cuh` 里岛外零引用的静态-k 族（≈700 行）+ 重写描述它的注释 | 全绿 | 已落地 `e16138c` |
 | P2 | `maca_topk.cu` 拆出 `contract.cuh` + `routing.cuh`；dg 两路的发射归位数据流文件 | 全绿 | P1/P4 |
 | P3 | `radix_core.cuh` 按 dtype 拆成 `radix_common` / `radix_row_bf16` / `radix_row_fp32` / `radix_chunked`；`radix_core.cuh` 留作伞头 | 全绿 | P1 |
-| P4 | `dg_*` → `topk_coarse12` / `topk_chunks`（文件、namespace、调用点、`ref/` 臂、文档） | 全绿 | P1 |
+| P4 | `dg_*` → `topk_coarse12` / `topk_chunks`（文件、namespace、调用点、`ref/` 臂、文档） | 全绿 | 已落地 `2a795b1` |
+| N | 命名空间整合（§3b）：`rk` → `deep_select::radix`、`deep_select_maca` → `deep_select`、`deep_select_common` → `deep_select::common` | 全绿（rename 口径：demangle 名集模改后全等 + size 全等 + 冒烟） | P3 后、P2 前 |
 | P5 | 生成器 + 配置元组模板 + `instantiations/*.cu` + 表驱动派发 + `setup.py` | **内核符号集不变** + 文件数==核数 + 套件绿（`nm` 全表预期变动：host 派发改成表） | P2/P3 |
 | P6 | python 侧分文件：`interface.py`（公开契约）+ `_backends.py`（torch / deep_gemm 参考后端）+ `_binding.py` / `_log.py` | 套件绿 + `inspect.signature` 不变 | 独立 |
 
 **P3 与 P4 可并行，两者唯一的潜在交界是 `maca_topk.cu` 的 include 块**（`:50-52`）：伞头让 P3 完全不碰这个文件，
-P4 在其中只改 dg 的两行。P2 重写 `maca_topk.cu`（拆出契约半与选路），排在 P4 之后。
+P4 在其中只改 dg 的两行。**N 排在 P3 之后、P2 之前**：它在 P3 搬完的每一行上改名一次，且必须先于 P2
+（P2 的新文件要生在新命名空间里；否则 `using deep_select_common::…` 这类声明会留下两代拼写）。
+P2 重写 `maca_topk.cu`（拆出契约半与选路），因此在 P4 与 N 之后。
 P5 在 P2/P3 之后（它改的是它们刚整理出来的发射层）；P6 独立。
 
 ## 5b. P5 的元组表（实测，2026-10-12，供生成器照抄）
