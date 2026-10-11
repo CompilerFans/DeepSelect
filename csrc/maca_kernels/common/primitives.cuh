@@ -1,7 +1,7 @@
 // Device primitives shared by this operator's dataflows, one definition each.
 //
-// `xcore1000/` carries three of them -- `rk`'s radix rows, `rk::dg12`'s
-// coarse12 and `rk::dgchunks`' chunked merge -- and each was ported or written
+// `xcore1000/` carries three of them -- `rk`'s radix rows, `rk::coarse12`'s
+// selector and `rk::chunks`' chunked merge -- and each was ported or written
 // against its own copy of the same bit tricks, so the bodies could drift with
 // nothing to catch it.  What is here is what every one of them spelled the
 // same way: the NaN bit-pattern test, the order-preserving key, and the warp
@@ -11,8 +11,8 @@
 //
 // **The names are the source code's own, and they are the ones to keep.**
 // `refine_bin` and `warp_cumsum_histogram` are deep_gemm's (`fp32_topk`, the
-// file the `dg12` / `dgchunks` dataflows were ported from, whose call sites
-// spell both the same way); `bf16_is_nan` is upstream DeepSelect's
+// file the `rk::coarse12` / `rk::chunks` dataflows were ported from, whose call
+// sites spell both the same way); `bf16_is_nan` is upstream DeepSelect's
 // (`topk_select_common`, `bit_utils.cuh`).  Renaming one here diverges
 // silently from the code these dataflows are re-merged with.
 //
@@ -21,7 +21,7 @@
 // level, fp16-rounded for fp32) and `rk::run_cumsum_warp` (a 256-thread
 // two-level scan with a different barrier contract).  deep_gemm's template
 // carries a second arm -- the `kCoarseBins` walk that needs a thread per bin --
-// which `dg_chunks.cuh`'s `block_cumsum_histogram_1024` already implements and
+// which `topk_chunks.cuh`'s `block_cumsum_histogram_1024` already implements and
 // has no second caller for.
 
 #pragma once
