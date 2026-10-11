@@ -349,7 +349,7 @@ git -C $D push origin main
 - **粗层 / coarse level**：直方图保留的 key 高位位数。现在是 12（`kCoarse12Bits`）。
 - **细层 / fine**：剩下的低位，现在 4 位（`kCoarse12SubBins = 16`）。
 - **arena**：`s_input_flat`，存阈值桶成员下标的地方；容量 `kCoarse12ArenaEntries`
-  = 4,096（16 位行）/ `rk::kSmemInputSize` = 3,514（fp32 行）。
+  = 4,096（16 位行）/ `topk_select_radix::kSmemInputSize` = 3,514（fp32 行）。
 - **overflow**：阈值桶成员数超过 arena 容量，回退整行重扫。
 - **occupancy（occ）**：每 AP 常驻 CTA 数。C500 是 104 AP、64 KB smem/AP、
   2,048 线程/AP；`静态 2328 B + 动态请求 < 32,768 B` 才有 2 个 CTA/AP。上限 2 是

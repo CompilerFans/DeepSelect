@@ -34,8 +34,7 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace rk {
-namespace coarse12 {
+namespace topk_select_coarse12 {
 
 constexpr int kThreads = 640;
 constexpr int kMaxTopK = 2048;
@@ -44,14 +43,16 @@ constexpr int kCoarseBins = 1 << kCoarseBits;
 constexpr size_t kSmemBytes = 16 * 1024;
 constexpr int kCandidateCapacity = (int)(kSmemBytes / (2 * sizeof(int32_t)));
 
-}  // namespace coarse12
+}  // namespace topk_select_coarse12
+
+namespace topk_select_radix {
 
 // The split's own dynamic request, from `kF32SmemInputSize` at the default
 // `kSMEM`.  Stated rather than derived because this file must not include the
 // kernel tree -- see the header comment.
 constexpr size_t kF32RowSmemBytesRef = 2 * 1757 * sizeof(uint32_t);   // 14056
 
-}  // namespace rk
+}  // namespace topk_select_radix
 
 // ── the compile-time half ───────────────────────────────────────────────────
 //
@@ -80,9 +81,9 @@ static constexpr uint32_t kF32Coarse12MeasuredSmCount = 104;
 // predicate is deciding.  Exposed so `main.cu` can print it and so the
 // `if constexpr`'s truth value is a symbol rather than a claim in a comment.
 static constexpr uint32_t kNeeded =
-    (uint32_t)(rk::coarse12::kSmemBytes > rk::kF32RowSmemBytesRef
-                   ? rk::coarse12::kSmemBytes
-                   : rk::kF32RowSmemBytesRef);
+    (uint32_t)(topk_select_coarse12::kSmemBytes > topk_select_radix::kF32RowSmemBytesRef
+                   ? topk_select_coarse12::kSmemBytes
+                   : topk_select_radix::kF32RowSmemBytesRef);
 static constexpr bool kBudgetHalf = kArchSmemPerAp >= kNeeded;
 
 // `f32_coarse12_applies`, re-stated.  **No budget argument**, because the
@@ -95,16 +96,16 @@ extern "C" bool ref_c500_gate(uint32_t sm_count, uint32_t batches,
 {
     if (!kBudgetHalf) return false;
     if (sm_count != kF32Coarse12MeasuredSmCount) return false;
-    if (topk > (uint32_t)rk::coarse12::kMaxTopK) return false;
+    if (topk > (uint32_t)topk_select_coarse12::kMaxTopK) return false;
     if (batches == 0) return false;
     if (vocab_size < 2048) return false;                 // the original's bound
     if (vocab_size <= 131072) return batches >= 16;      // narrow arm
     return (uint64_t)batches * topk >= 114688;           // wide arm, the product
 }
 
-extern "C" int ref_candidate_capacity() { return rk::coarse12::kCandidateCapacity; }
-extern "C" int ref_smem_bytes() { return (int)rk::coarse12::kSmemBytes; }
-extern "C" int ref_row_smem_bytes() { return (int)rk::kF32RowSmemBytesRef; }
+extern "C" int ref_candidate_capacity() { return topk_select_coarse12::kCandidateCapacity; }
+extern "C" int ref_smem_bytes() { return (int)topk_select_coarse12::kSmemBytes; }
+extern "C" int ref_row_smem_bytes() { return (int)topk_select_radix::kF32RowSmemBytesRef; }
 extern "C" int ref_c500_smem_per_ap() { return (int)kC500SmemPerAp; }
 extern "C" int ref_measured_sm_count() { return (int)kF32Coarse12MeasuredSmCount; }
 extern "C" int ref_arch_smem_per_ap() { return (int)kArchSmemPerAp; }

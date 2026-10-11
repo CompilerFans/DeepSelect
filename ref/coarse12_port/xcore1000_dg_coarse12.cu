@@ -13,8 +13,7 @@
 // that makes it reusable at all.
 #include "../../csrc/maca_kernels/xcore1000/topk_coarse12.cuh"
 
-namespace rk {
-namespace coarse12_ref {
+namespace topk_select_coarse12_ref {
 
 // `default_length` is part of the shipping signature, not a driver convenience:
 // the driver here passes `n_cols` for both `stride` and `default_length` because
@@ -25,17 +24,16 @@ cudaError_t launch(const float *scores, const int32_t *lengths, int32_t *out,
                    int32_t *nan_flags, int B, int topk, int64_t stride,
                    int default_length, cudaStream_t stream)
 {
-    return rk::coarse12::launch_topk_coarse12(scores, lengths, out, nan_flags, B,
+    return topk_select_coarse12::launch_topk_coarse12(scores, lengths, out, nan_flags, B,
                                           topk, stride, default_length, stream);
 }
 
 // The two constants the driver prints: the arena the header sizes itself from,
 // and the candidate capacity that falls out of it.  Returned rather than
 // repeated so the driver cannot disagree with the kernel about them.
-int smem_bytes() { return (int)rk::coarse12::kSmemBytes; }
-int candidate_capacity() { return rk::coarse12::kCandidateCapacity; }
-int threads() { return rk::coarse12::kThreads; }
-int coarse_bins() { return rk::coarse12::kCoarseBins; }
+int smem_bytes() { return (int)topk_select_coarse12::kSmemBytes; }
+int candidate_capacity() { return topk_select_coarse12::kCandidateCapacity; }
+int threads() { return topk_select_coarse12::kThreads; }
+int coarse_bins() { return topk_select_coarse12::kCoarseBins; }
 
-}  // namespace coarse12_ref
-}  // namespace rk
+}  // namespace topk_select_coarse12_ref

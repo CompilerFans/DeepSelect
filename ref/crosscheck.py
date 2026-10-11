@@ -78,7 +78,7 @@ CFG = {
         # This driver spaces its labels (`time : 0.1402 ms`), hence its own regex.
         "time_re": re.compile(r"time\s*:\s*([0-9.]+)\s*ms"),
         "verify_re": re.compile(r"verify:\s*(PASS|FAIL)"),
-        "max_k": 4096,          # deep_select_maca::kMaxTopK
+        "max_k": 4096,          # deep_select::kMaxTopK
         "min_k": 1,
         "note": "fp32; row path below the chunk floor, split above it",
     },

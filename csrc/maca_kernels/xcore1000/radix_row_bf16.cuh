@@ -3,7 +3,7 @@
 
 #include "radix_common.cuh"
 
-namespace rk {
+namespace topk_select_radix {
 
 __device__ __forceinline__ uint8_t bf16_to_uint8(maca_bfloat16 x) {
     return static_cast<uint8_t>(refine_bin(x) >> 8);
@@ -611,6 +611,6 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     }
 }
 
-}  // namespace rk
+}  // namespace topk_select_radix
 
 #endif  // RADIX_ROW_BF16_CUH

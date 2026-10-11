@@ -5,7 +5,7 @@
 
 #include "radix_common.cuh"
 
-namespace rk {
+namespace topk_select_radix {
 
 // 与 SGLang 原始实现一致：先转 half 再取高 8 位
 __device__ __forceinline__ uint8_t float_to_uint8(float x) {
@@ -803,6 +803,6 @@ inline cudaError_t launch_topk_f32_k2048_b1024_c500(
         scores, lengths, row_starts, indices, B, score_stride, stream);
 }
 
-}  // namespace rk
+}  // namespace topk_select_radix
 
 #endif  // RADIX_ROW_FP32_CUH

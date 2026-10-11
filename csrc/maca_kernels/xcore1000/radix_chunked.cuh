@@ -7,7 +7,7 @@
 #include "radix_row_bf16.cuh"
 #include "radix_row_fp32.cuh"
 
-namespace rk {
+namespace topk_select_radix {
 
 // `kNan` is the caller's `check_nan`: with it on this kernel is *also* the NaN
 // scan and `flags` is the table it raises, in place of `nan_scan_kernel`.  The
@@ -660,6 +660,6 @@ inline cudaError_t launch_topk_f32_chunked(
         vals, cols, out, B, topk, num_chunks, stream);
 }
 
-}  // namespace rk
+}  // namespace topk_select_radix
 
 #endif  // RADIX_CHUNKED_CUH

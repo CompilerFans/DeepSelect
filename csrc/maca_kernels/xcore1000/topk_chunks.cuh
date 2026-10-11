@@ -67,8 +67,7 @@
 
 #include "../common/primitives.cuh"
 
-namespace rk {
-namespace chunks {
+namespace topk_select_chunks {
 
 // ── deep_gemm's `detail` constants, verbatim ───────────────────────────────
 constexpr int kThreads = 1024;
@@ -106,9 +105,9 @@ static_assert(kCandidateCapacity >= kMaxTopK,
 // is spelled that way.  `coarse_bin` below is this dataflow's own: it keys the
 // half-rounded value, which is the coarse level's shape rather than a shared
 // transform.
-using deep_select_common::is_nan_value;
-using deep_select_common::refine_bin;
-using deep_select_common::warp_cumsum_histogram;
+using topk_select_common::is_nan_value;
+using topk_select_common::refine_bin;
+using topk_select_common::warp_cumsum_histogram;
 
 // deep_gemm's `coarse_bin`, verbatim: the top 10 bits of the **half**-encoded
 // key.  Half, not float -- the coarse level only has to put the threshold in
@@ -127,7 +126,7 @@ __device__ __forceinline__ int coarse_bin(float value)
 }
 
 // The 256-bin histogram suffix sum the fine level walks is
-// `deep_select_common::warp_cumsum_histogram<kFineBins>` (`../common/primitives.cuh`,
+// `topk_select_common::warp_cumsum_histogram<kFineBins>` (`../common/primitives.cuh`,
 // pulled in above); this file's fine histogram is exactly the `[256 + 1]`
 // shape it takes.
 
@@ -948,5 +947,4 @@ inline cudaError_t launch_topk_chunks_impl(
     return cudaGetLastError();
 }
 
-}  // namespace chunks
-}  // namespace rk
+}  // namespace topk_select_chunks

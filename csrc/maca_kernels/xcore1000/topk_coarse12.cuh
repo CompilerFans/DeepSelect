@@ -48,8 +48,7 @@
 
 #include "../common/primitives.cuh"
 
-namespace rk {
-namespace coarse12 {
+namespace topk_select_coarse12 {
 
 // ── deep_gemm's `detail` constants, verbatim ───────────────────────────────
 //
@@ -92,9 +91,9 @@ constexpr float kNegativeInfinity = -__builtin_huge_valf();
 // The NaN predicate, the key encode and the warp histogram suffix sum come from
 // `../common/primitives.cuh`; unqualified here because every call site below
 // is spelled that way.
-using deep_select_common::is_nan_value;
-using deep_select_common::refine_bin;
-using deep_select_common::warp_cumsum_histogram;
+using topk_select_common::is_nan_value;
+using topk_select_common::refine_bin;
+using topk_select_common::warp_cumsum_histogram;
 
 // One row of `[0, length)`, ranking `requested_topk` of it.
 //
@@ -486,5 +485,4 @@ inline cudaError_t launch_topk_coarse12(
     return cudaGetLastError();
 }
 
-}  // namespace coarse12
-}  // namespace rk
+}  // namespace topk_select_coarse12

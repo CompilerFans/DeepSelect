@@ -51,7 +51,7 @@
 #include "topk_coarse12.cuh"
 #include "topk_chunks.cuh"
 
-namespace deep_select_maca {
+namespace deep_select {
 
 // ── tunables ────────────────────────────────────────────────────────────────
 // The public contract: `topk <= 4096` (checked in `topk()`), which the radix
@@ -78,7 +78,7 @@ struct RowParams {
     // one is allocated and zeroed by the dispatcher for any call that can
     // reach a route answering a row without ranking it.  There are **two** such
     // routes and both fold the scan into their own pass 1 -- the coarse12 arm
-    // (`rk::coarse12`) and the chunks arm (`rk::chunks`); `needs_scan_table`
+    // (`topk_select_coarse12`) and the chunks arm (`topk_select_chunks`); `needs_scan_table`
     // below is the single place that decides, and it names both.
     // Written by that kernel, read by the contract half.  Null when nothing
     // scans.
@@ -161,8 +161,8 @@ struct RowParams {
 // The value-typed key encode and NaN predicate live in
 // `../common/primitives.cuh`, so the row kernels' copies of the same bit
 // tricks cannot drift from the contract half's.
-using deep_select_common::is_nan_value;
-using deep_select_common::refine_bin;
+using topk_select_common::is_nan_value;
+using topk_select_common::refine_bin;
 
 
 // float -> ValueT.  MACA's `__maca_bfloat16` has no implicit float conversion,
@@ -266,7 +266,7 @@ static __device__ __forceinline__ void emit_ordered(
 // only live after the arena is dead, so it aliases it; the worst case
 // (topk = kMaxTopK, sorted) is 48 KB, what `kSmemBudgetBytes` reserves.
 constexpr size_t kRadixArenaBytes =
-    (size_t)rk::kSmemInputSize * sizeof(uint32_t);
+    (size_t)topk_select_radix::kSmemInputSize * sizeof(uint32_t);
 
 // The 16-bit row's 12-bit level lays its histogram over the arena, so its lead
 // region is the histogram's 16 KB rather than the arena's 14,056 B.  At k=512
@@ -274,7 +274,7 @@ constexpr size_t kRadixArenaBytes =
 // still under the 32 KB a second CTA needs; at topk >= 4096 both regimes are
 // past it already, so no k loses occupancy to this.
 constexpr size_t kCoarse12HistBytes =
-    (size_t)rk::kCoarse12ArenaEntries * sizeof(uint32_t);
+    (size_t)topk_select_radix::kCoarse12ArenaEntries * sizeof(uint32_t);
 
 static __device__ __forceinline__ void radix_layout(
     uint8_t *base, uint32_t topk, bool sorted, bool wide, uint32_t *&selected,
@@ -292,7 +292,7 @@ static __device__ __forceinline__ void radix_layout(
 }
 
 // Both row entries cover every key length and every k **up to the public
-// `kMaxTopK` (4096)**, not `rk::kMaxTopK` (2048).  The header's 2048 is the
+// `kMaxTopK` (4096)**, not `topk_select_radix::kMaxTopK` (2048).  The header's 2048 is the
 // bf16 *chunked* entries' arm guard, and its readers
 // (`launch_topk_bf16_chunked_k` / `launch_topk_bf16_chunked`) are on the way to
 // an arm that instantiates `topk` at compile time.  The split's own gate
@@ -302,7 +302,7 @@ static __device__ __forceinline__ void radix_layout(
 // and `radix_topk_row_f32` does too, and `radix_layout` sizes `selected` and
 // `sort_buf` for it.  A reader who finds the 2048 guard and concludes "2048 is
 // the real limit" has found a guard on a route this operator does not take; see
-// the note above `deep_select_maca::kMaxTopK` for why the two constants differ.
+// the note above `deep_select::kMaxTopK` for why the two constants differ.
 //
 // Both also resolve a threshold bin too large for the arena by re-walking the
 // row rather than by ranking a truncated candidate set.
@@ -317,27 +317,27 @@ static __device__ __forceinline__ void radix_select_row(
     uint32_t *block_list = nullptr) {
     if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
         if (check_nan)
-            rk::radix_topk_row_bf16_b<BLOCK, true, kSkip>(input_row, out_idx,
+            topk_select_radix::radix_topk_row_bf16_b<BLOCK, true, kSkip>(input_row, out_idx,
                                                           length, topk, row_nan,
                                                           block_max, block_list);
         else
-            rk::radix_topk_row_bf16_b<BLOCK, false, kSkip>(
+            topk_select_radix::radix_topk_row_bf16_b<BLOCK, false, kSkip>(
                 input_row, out_idx, length, topk, row_nan, block_max,
                 block_list);
     } else {
         static_assert(std::is_same<ValueT, float>::value,
                       "the operator serves bfloat16 and float32 only");
         // The fp32 row picks its own block width, one width for every shape.
-        static_assert(BLOCK == rk::kBlockSize,
-                      "the fp32 row runs at rk::kBlockSize");
+        static_assert(BLOCK == topk_select_radix::kBlockSize,
+                      "the fp32 row runs at topk_select_radix::kBlockSize");
         // `block_max` / `block_list` are not read here: the summary is a
         // property of the 16-bit row's 12-bit coarse level, and the fp32 row's
         // dataflow (and its multi-round rescan) is a different one.
         if (check_nan)
-            rk::radix_topk_row_f32<true>(input_row, out_idx, length, topk, 0u,
+            topk_select_radix::radix_topk_row_f32<true>(input_row, out_idx, length, topk, 0u,
                                          row_nan);
         else
-            rk::radix_topk_row_f32<false>(input_row, out_idx, length, topk, 0u,
+            topk_select_radix::radix_topk_row_f32<false>(input_row, out_idx, length, topk, 0u,
                                           row_nan);
     }
 }
@@ -395,7 +395,7 @@ static __device__ __forceinline__ bool row_has_nan(const ValueT *row,
 //
 // **Neither split launches this any more.**  Stage 1 reads exactly these bytes
 // at exactly this width, so the scan rides its own load instead: fp32 through
-// `rk::topk_f32_chunk_stage1_kernel`'s `kNan` (the ledger's §10.7 for the A/B:
+// `topk_select_radix::topk_f32_chunk_stage1_kernel`'s `kNan` (the ledger's §10.7 for the A/B:
 // the whole walk goes, for ~3% on the pass that absorbs it), the 16-bit split
 // through the stage-1 kernels', whose vote feeds this same `flags` table over
 // the same window.  What still reaches it is the fp32 *row* path and the fp32
@@ -450,7 +450,7 @@ __global__ __launch_bounds__(kNanAbortBlock) void nan_abort_kernel(
     }
 }
 
-// BLOCK is `rk::kBlockSize`, or `rk::kLongRowBlockSize` for the regime the
+// BLOCK is `topk_select_radix::kBlockSize`, or `topk_select_radix::kLongRowBlockSize` for the regime the
 // ported dispatcher picks the wider block for (see `needs_long_row_bf16`).
 //
 // `kPreSelected` is for the chunked path: the two-stage split over a long row
@@ -756,17 +756,17 @@ inline bool is_c600u_ap_count(uint32_t sm_count) {
 inline constexpr uint32_t kC600UNarrowRowBatches = 256;
 
 // The ported dispatcher's long-row regime is the only thing that differs
-// between the two block widths (`rk::needs_long_row_bf16`); the batch is the
+// between the two block widths (`topk_select_radix::needs_long_row_bf16`); the batch is the
 // launch's row count, one row per CTA.
 inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk,
                            uint32_t sm_count) {
-    const rk::TopKConfig cfg{(int)batches, (int)vocab_size, (int)topk};
-    const bool long_row = rk::needs_long_row_bf16(cfg);
+    const topk_select_radix::TopKConfig cfg{(int)batches, (int)vocab_size, (int)topk};
+    const bool long_row = topk_select_radix::needs_long_row_bf16(cfg);
     if (long_row && is_c600u_ap_count(sm_count) &&
         batches >= kC600UNarrowRowBatches) {
-        return rk::kBlockSize;
+        return topk_select_radix::kBlockSize;
     }
-    return long_row ? rk::kLongRowBlockSize : rk::kBlockSize;
+    return long_row ? topk_select_radix::kLongRowBlockSize : topk_select_radix::kBlockSize;
 }
 
 // ── the chunked split, for rows too long for one CTA to carry ───────────────
@@ -952,15 +952,15 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
         // wide-block arm (a runtime branch would instantiate it for fp32 too,
         // where it cannot be launched).
         if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
-            if (block == rk::kLongRowBlockSize) {
-                launch_radix<ValueT, OutIdxT, rk::kLongRowBlockSize, SI, RV, SV>(
+            if (block == topk_select_radix::kLongRowBlockSize) {
+                launch_radix<ValueT, OutIdxT, topk_select_radix::kLongRowBlockSize, SI, RV, SV>(
                     params, batches, stream, smem, preselected);
             } else {
-                launch_radix<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>(
+                launch_radix<ValueT, OutIdxT, topk_select_radix::kBlockSize, SI, RV, SV>(
                     params, batches, stream, smem, preselected);
             }
         } else {
-            launch_radix<ValueT, OutIdxT, rk::kBlockSize, SI, RV, SV>(
+            launch_radix<ValueT, OutIdxT, topk_select_radix::kBlockSize, SI, RV, SV>(
                 params, batches, stream, smem, preselected);
         }
     };
@@ -1023,7 +1023,7 @@ inline int f32_chunks_small_batch(uint32_t batches, int ceiling,
 
 // **The chunk count's own rule cannot see `topk`, and above 512 it is the
 // wrong axis.**  Stage 2's merge reads `num_chunks * topk` candidates per row
-// -- `candidate_stride` in `rk::launch_topk_f32_chunks_stage2` -- and
+// -- `candidate_stride` in `topk_select_radix::launch_topk_f32_chunks_stage2` -- and
 // `f32_chunks_for` sizes itself from the batch alone.  The batch rule is
 // already at the optimum for `topk <= 512`; above that the merge weights the
 // count and a `topk`-aware cap is what §8.6 added.  Small-batch tier only --
@@ -1236,7 +1236,7 @@ inline int f32_topk_chunk_cap(uint32_t topk, uint32_t vocab, uint32_t c_default,
 // behind -- the two numbers agreed at 1757 only because nothing had changed
 // `kSMEM`.  The second factor, 58, is the one measured quantity here and is
 // the only one that stays a literal.
-inline constexpr uint32_t kF32OverflowChunkLen = rk::kF32SmemInputSize * 58u;
+inline constexpr uint32_t kF32OverflowChunkLen = topk_select_radix::kF32SmemInputSize * 58u;
 // The 58 was measured against the default arena, and `f32_chunks_large_batch`
 // applies this bound to *every* `topk` -- so a build that moves `kSMEM` would
 // carry the old ratio into a new arena without anything noticing.
@@ -1263,7 +1263,7 @@ inline constexpr uint32_t kF32OverflowChunkLen = rk::kF32SmemInputSize * 58u;
 // passes: `16384` compiles, `32768` fails `'16384 >= 30440'`, `49152` fails
 // `'16384 >= 46824'`.
 #ifdef KSMEM_BYTES
-static_assert(rk::kF32SmemInputSize == 1757,
+static_assert(topk_select_radix::kF32SmemInputSize == 1757,
               "KSMEM_BYTES moved the arena, so kF32OverflowChunkLen's 58 is no "
               "longer the measured value: re-derive it against the new "
               "kF32SmemInputSize (the ladder is in the ledger, SS12.5) before "
@@ -1529,9 +1529,9 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
     // by the compiler, so a family that fails this half is a compile-time
     // fact visible in the generated code rather than a branch.
     constexpr uint32_t kNeeded =
-        rk::coarse12::kSmemBytes > rk::kF32RowSmemBytes
-            ? (uint32_t)rk::coarse12::kSmemBytes
-            : (uint32_t)rk::kF32RowSmemBytes;
+        topk_select_coarse12::kSmemBytes > topk_select_radix::kF32RowSmemBytes
+            ? (uint32_t)topk_select_coarse12::kSmemBytes
+            : (uint32_t)topk_select_radix::kF32RowSmemBytes;
     if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) {
         return false;
     } else {
@@ -1542,7 +1542,7 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         // than whether any does.  A part that is neither takes the row path, as
         // before.
         if (is_c600u_ap_count(params.sm_count)) {
-            if (params.topk > (uint32_t)rk::coarse12::kMaxTopK) return false;
+            if (params.topk > (uint32_t)topk_select_coarse12::kMaxTopK) return false;
             if (batches == 0) return false;
             if (params.vocab_size < kF32Coarse12MinVocab) return false;
             if (f32_coarse12_override() >= 0) return f32_coarse12_override() != 0;
@@ -1555,7 +1555,7 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         // The arena's bound, not a fitted one: `topk_coarse12_row` serves at
         // most what the candidate half can hold, and there is no overflow path
         // in the *staged* refine that can make a larger answer correct.
-        if (params.topk > (uint32_t)rk::coarse12::kMaxTopK) return false;
+        if (params.topk > (uint32_t)topk_select_coarse12::kMaxTopK) return false;
         if (batches == 0) return false;
         // The original's own width bound (`n_cols >= 2049`).  It matters more
         // now than it did: the narrow arm below is `return batches >= 16` with
@@ -1646,7 +1646,7 @@ inline int f32_chunks_route_override() {
 inline bool f32_chunks_applies(const RowParams &params, uint32_t batches) {
     // ── the limits: outside these the route is wrong or impossible ──
     if (params.sm_count != kF32Coarse12MeasuredSmCount) return false;
-    if (params.topk > (uint32_t)rk::chunks::kMaxTopK) return false;
+    if (params.topk > (uint32_t)topk_select_chunks::kMaxTopK) return false;
     // The original's own width bound, as on the coarse12 arm: `2048`, not
     // `2049`, because the facade already rejects a stride that is not a
     // multiple of 256 floats.
@@ -1778,7 +1778,7 @@ constexpr uint32_t kF32ChunkedMaxBatches = 4096;
 
 inline bool topk_worth_splitting_f32(const RowParams &params,
                                      uint32_t batches) {
-    if (params.topk <= 0 || params.topk > (int)rk::kF32MaxTopK) return false;
+    if (params.topk <= 0 || params.topk > (int)topk_select_radix::kF32MaxTopK) return false;
     if (batches == 0) return false;
     // V=32768 rows, and every row of V<=65536 at a batch past the 768 tier.
     if (params.vocab_size <= kF32ChunkedMinVocab) return false;
@@ -1799,7 +1799,7 @@ inline bool chunked_f32_applies(const RowParams &params, uint32_t batches) {
     if (batches > kF32ChunkedMaxBatches) return false;
     // The topk clause that used to sit here (`== 512 || == 1024`) was a *policy*
     // bound, not an instantiation one -- the fp32 chunk engine is dynamic-k
-    // (`rk::f32_chunk_engine_supports`) -- so it is replaced by a measured one
+    // (`topk_select_radix::f32_chunk_engine_supports`) -- so it is replaced by a measured one
     // rather than by a wider constant.  Plan §21.3 opened it to
     // `topk <= kF32MaxTopK` and got -71..-82% on the long rows but up to +26.5%
     // back on short ones at a large batch; the cause is the shape of what a
@@ -1810,16 +1810,16 @@ inline bool chunked_f32_applies(const RowParams &params, uint32_t batches) {
 
 inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
                                           int chunks) {
-    return rk::chunked_f32_workspace_bytes(batches, topk, (uint32_t)chunks) +
+    return topk_select_radix::chunked_f32_workspace_bytes(batches, topk, (uint32_t)chunks) +
            (size_t)batches * sizeof(int32_t);
 }
 
-// The workspace's layout.  `rk::chunked_f32_cols` / `_vals_offset` / `_out` are
+// The workspace's layout.  `topk_select_radix::chunked_f32_cols` / `_vals_offset` / `_out` are
 // the *definition* of it -- the split's own region order and the 16-byte pad
 // `radix_topk_row_f32`'s unguarded `float4` walkers need -- and this function
 // is the one place that composes them with the caller's own state in front
 // (the row-length table).  It used to re-derive the same arithmetic by hand
-// while `rk::launch_topk_f32_chunked` re-derived it a second time from the
+// while `topk_select_radix::launch_topk_f32_chunked` re-derived it a second time from the
 // arena base; those two copies agreed only because they were written the same
 // way, and the pad is exactly the kind of thing one of them would have missed.
 // The launch now takes the three pointers, so there is one composition site.
@@ -1837,7 +1837,7 @@ inline ChunkedF32Workspace chunked_f32_workspace(void *base, uint32_t batches,
     const size_t candidates = (size_t)b * c * k;
     ws.lengths = (int32_t *)base;
     ws.cols = ws.lengths + batches;
-    ws.vals = rk::chunked_f32_vals(ws.cols, b, k, c);
+    ws.vals = topk_select_radix::chunked_f32_vals(ws.cols, b, k, c);
     ws.merged = (int32_t *)(ws.vals + candidates);
     return ws;
 }
@@ -1870,7 +1870,7 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
     // here, OR-ed per row -- and only stage 1's own pass 1 walks the row.  One
     // row walk instead of two; the contract the flag answers is unchanged.
     const size_t table_bytes = (size_t)batches * sizeof(int32_t);
-    const bool fuse_scan = params.check_nan && rk::f32_stage1_fuses_scan();
+    const bool fuse_scan = params.check_nan && topk_select_radix::f32_stage1_fuses_scan();
     if (params.check_nan) {
         cudaMemsetAsync(ws.lengths, 0, table_bytes, stream);
         if (!fuse_scan) {
@@ -1880,7 +1880,7 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
                 params.vocab_size, (uint32_t)chunks, ws.lengths);
         }
     }
-    const cudaError_t rc = rk::launch_topk_f32_chunked(
+    const cudaError_t rc = topk_select_radix::launch_topk_f32_chunked(
         (const float *)params.input, params.end_ptr, ws.cols, ws.vals,
         ws.merged,
         (int)batches, (int)params.vocab_size, (int)params.topk, chunks, stream,
@@ -1912,7 +1912,7 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
     // longer happens.
     if (params.check_nan)
         cudaMemsetAsync(ws.nan_flags, 0, (size_t)batches * sizeof(int32_t), stream);
-    const cudaError_t rc = rk::launch_topk_bf16_chunked(
+    const cudaError_t rc = topk_select_radix::launch_topk_bf16_chunked(
         (const maca_bfloat16 *)params.input, params.end_ptr, ws.merged,
         ws.candidate_indices, ws.candidate_values, (int)batches,
         (int)params.vocab_size, (int)params.topk, chunks, stream,
@@ -1943,7 +1943,7 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     // Both dtypes run the ported radix dataflow; only the block width differs,
     // and the fp32 row has a single width.
     const int block = (value_dtype == 0)
-                          ? (int)rk::kBlockSize
+                          ? (int)topk_select_radix::kBlockSize
                           : detail::radix_block_for(n, params.vocab_size,
                                                     params.topk,
                                                     params.sm_count);
@@ -1989,7 +1989,7 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     if (value_dtype == 0 && detail::f32_chunks_applies(params, n)) {
         int32_t *const staging = params.coarse12_cols;
         if (staging != nullptr) {
-            const cudaError_t rc = rk::chunks::launch_topk_chunks(
+            const cudaError_t rc = topk_select_chunks::launch_topk_chunks(
                 (const float *)params.input, params.end_ptr, staging,
                 params.scan_flags, params.chunks_workspace, (int)n,
                 (int)params.topk,
@@ -2038,7 +2038,7 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
             // exactly what the benchmark harness does (`s[:, :L]`): the kernel
             // would then walk past the live prefix and rank columns that are
             // outside the tensor the caller asked about.
-            const cudaError_t rc = rk::coarse12::launch_topk_coarse12(
+            const cudaError_t rc = topk_select_coarse12::launch_topk_coarse12(
                 (const float *)params.input, params.end_ptr, staging,
                 params.scan_flags, (int)n, (int)params.topk,
                 (int64_t)(params.stride_input_batch / sizeof(float)),
@@ -2095,7 +2095,7 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
         // The engine's own bound, kept separate from the policy predicate so
         // the two cannot be confused (they were one expression until §21.2).
         // The row path serves anything the engine cannot.
-        rk::f32_chunk_engine_supports((int)params.topk)) {
+        topk_select_radix::f32_chunk_engine_supports((int)params.topk)) {
         if (index_dtype == 0) {
             detail::launch_typed_f32_chunked<int32_t>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block,
@@ -2126,7 +2126,12 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     }
 }
 
-}  // namespace deep_select_maca
+}  // namespace deep_select
+
+// The entry block reopens the namespace rather than merging with the one
+// above: the ffi/tvm headers included here must be included at global
+// scope (inside the namespace, tvm-ffi's `std::index_sequence` resolves as
+// `deep_select::std::index_sequence` and the TU does not compile).
 
 // ── the tvm-ffi entry points ────────────────────────────────────────────────
 //
@@ -2145,7 +2150,6 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
 
 namespace deep_select {
 
-using namespace deep_select_maca;
 namespace dsf = deep_select::ffi;
 
 // ── the chunked path's scratch, held across calls ───────────────────────────
@@ -2586,7 +2590,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // rather than passed in, because this is the sizing half and the launch
     // half has to agree with it exactly.
     if (value_dtype == 0 && detail::f32_chunks_applies(p, (uint32_t)batches)) {
-        const size_t need_ws = rk::chunks::chunks_workspace_bytes(
+        const size_t need_ws = topk_select_chunks::chunks_workspace_bytes(
             (uint32_t)batches, p.vocab_size, p.sm_count);
         if (need_ws > scratch.chunks_workspace_bytes) {
             void *grown = nullptr;

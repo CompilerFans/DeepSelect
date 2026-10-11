@@ -7,14 +7,14 @@
 
 #include "../common/primitives.cuh"
 
-namespace rk {
+namespace topk_select_radix {
 
 // The bf16 *chunked* entries' arm guard -- not the array bound, and not the
 // public contract.  Its two readers (`launch_topk_bf16_chunked_k`,
 // `launch_topk_bf16_chunked`) are on the way to an arm that instantiates `topk`
 // at compile time.  The runtime-k row entries (`radix_topk_row_bf16_b`,
 // `radix_topk_row_f32`) do **not** read it, and the public contract is
-// `deep_select_maca::kMaxTopK` = 4096 in `maca_topk.cu` -- which is why the fp32
+// `deep_select::kMaxTopK` = 4096 in `maca_topk.cu` -- which is why the fp32
 // side has its own `kF32MaxTopK` (4096) below rather than reusing this.
 //
 // A 4096 bf16 topk reaches `radix_topk_row_bf16_b` and is answered there; this
@@ -87,9 +87,9 @@ constexpr size_t kSMEM = KSMEM_BYTES;
 // (one definition, shared with the two ported dataflows and `maca_topk.cu`);
 // they are pulled in unqualified because every call site below is spelled that
 // way.
-using deep_select_common::is_nan_bits32;
-using deep_select_common::bf16_is_nan;
-using deep_select_common::refine_bin;
+using topk_select_common::is_nan_bits32;
+using topk_select_common::bf16_is_nan;
+using topk_select_common::refine_bin;
 
 #ifdef __MACACC__
 constexpr int kWarpSize = 64;
@@ -210,6 +210,6 @@ __device__ __forceinline__ uint32_t run_cumsum_warp(
     return val;
 }
 
-}  // namespace rk
+}  // namespace topk_select_radix
 
 #endif  // RADIX_COMMON_CUH

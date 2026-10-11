@@ -98,8 +98,8 @@ topk_select_common::    跨族共享原语（原 deep_select_common）：位运�
                         键编码 / cumsum。与官方同名同物——它里面的 bf16_is_nan
                         本就来自官方的 topk_select_common（bit_utils.cuh）
 topk_select_radix::     我方 radix 数据流（原 rk）：两趟行核（bf16 / fp32）+ chunked 分块
-topk_select_coarse12::  移植一（原 rk::coarse12），与文件 / 核名 topk_coarse12_* 同词干
-topk_select_chunks::    移植二（原 rk::chunks），与文件 / 核名 topk_chunks_* 同词干
+topk_select_coarse12::  移植一（原 topk_select_radix::coarse12），与文件 / 核名 topk_coarse12_* 同词干
+topk_select_chunks::    移植二（原 topk_select_radix::chunks），与文件 / 核名 topk_chunks_* 同词干
 deep_select::           契约半（RowParams / kMaxTopK(4096) / emit / 布局 / 选路）
                         与 tvm-ffi 入口同处一名（原 deep_select_maca 撤销并入；
                         `csrc/ffi/ffi_entries.h` 的入口本就在 `deep_select`）
@@ -145,7 +145,7 @@ deep_select::ffi::      平台无关边缘（不变）
 | P2 | `maca_topk.cu` 拆出 `contract.cuh` + `routing.cuh`；dg 两路的发射归位数据流文件 | 全绿 | P1/P4 |
 | P3 | `radix_core.cuh` 按 dtype 拆成 `radix_common` / `radix_row_bf16` / `radix_row_fp32` / `radix_chunked`；`radix_core.cuh` 留作伞头 | 全绿 | 已落地 `b02d872` |
 | P4 | `dg_*` → `topk_coarse12` / `topk_chunks`（文件、namespace、调用点、`ref/` 臂、文档） | 全绿 | 已落地 `2a795b1` |
-| N | 命名空间整合（§3b）：`rk`→`topk_select_radix`、`rk::coarse12`→`topk_select_coarse12`、`rk::chunks`→`topk_select_chunks`、`deep_select_common`→`topk_select_common`、`deep_select_maca`→并入 `deep_select` | 全绿（rename 口径：demangle 名集模改后全等 + size 全等 + 冒烟） | P3 后、P2 前 |
+| N | 命名空间整合（§3b）：`rk`→`topk_select_radix`、`topk_select_radix::coarse12`→`topk_select_coarse12`、`topk_select_radix::chunks`→`topk_select_chunks`、`deep_select_common`→`topk_select_common`、`deep_select_maca`→并入 `deep_select` | 全绿（rename 口径：demangle 名集模改后全等 + size 全等 + 冒烟） | P3 后、P2 前 |
 | P5 | 生成器 + 配置元组模板 + `instantiations/*.cu` + 表驱动派发 + `setup.py` | **内核符号集不变** + 文件数==核数 + 套件绿（`nm` 全表预期变动：host 派发改成表） | P2/P3 |
 | P6 | python 侧分文件：`interface.py`（公开契约）+ `_backends.py`（torch / deep_gemm 参考后端）+ `_binding.py` / `_log.py` | 套件绿 + `inspect.signature` 不变 | 已落地 `559b845` |
 
@@ -164,7 +164,7 @@ P5 在 P2/P3 之后（它改的是它们刚整理出来的发射层）；P6 独�
 |---|---|---|
 | `ValueT` | `maca_bfloat16` / `float` | 入口 dtype 检查 |
 | `OutIdxT` | `int32_t` / `int64_t` | 入口 out-idx 检查 |
-| `BLOCK` | 16 位行 `{rk::kBlockSize(512), rk::kLongRowBlockSize(1024)}`；fp32 行只有 512 | `maca_topk.cu:964-974`（`if constexpr` 只给 bf16 编宽块臂） |
+| `BLOCK` | 16 位行 `{topk_select_radix::kBlockSize(512), topk_select_radix::kLongRowBlockSize(1024)}`；fp32 行只有 512 | `maca_topk.cu:964-974`（`if constexpr` 只给 bf16 编宽块臂） |
 | `SI,SV,RV` | `{(1,1,1),(1,0,1),(1,0,0),(0,0,1),(0,0,0)}` 五种 | `sorted_value ⇒ return_value`，`launch_typed_radix` 的 `run(T,T,T)` 链 |
 | `kPreSelected` | `false` / `true` | 行路 vs 分块路的预选臂（`launch_radix` 的 `preselected`） |
 

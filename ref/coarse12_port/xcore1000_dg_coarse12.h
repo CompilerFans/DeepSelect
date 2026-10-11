@@ -8,8 +8,7 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
-namespace rk {
-namespace coarse12_ref {
+namespace topk_select_coarse12_ref {
 
 cudaError_t launch(const float *scores, const int32_t *lengths, int32_t *out,
                    int32_t *nan_flags, int B, int topk, int64_t stride,
@@ -20,5 +19,4 @@ int candidate_capacity();
 int threads();
 int coarse_bins();
 
-}  // namespace coarse12_ref
-}  // namespace rk
+}  // namespace topk_select_coarse12_ref
