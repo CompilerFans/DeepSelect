@@ -217,6 +217,26 @@ __device__ __forceinline__ void block_cumsum_histogram_1024(
 // longer than `topk`, or a threshold bin wider than `kCandidateCapacity`.  The
 // caller turns that into the per-row `-1` sentinel and the row path re-ranks
 // it, so a `false` is a coverage statement, never a wrong answer.
+// One launcher per kernel -- each owns its kernel's single `<<<>>>`, which is
+// what puts the device code and its only launch in the same generated TU.  The
+// workspace arrives as `void *` and is cast here, as in
+// `launch_topk_chunks_impl` below, so these can be declared before
+// `TopKChunksWorkspace` is defined.
+template <int ChunkCount>
+inline cudaError_t launch_chunks_init(void *workspace, const int32_t *lengths,
+                                      int rows, int default_length,
+                                      cudaStream_t stream);
+
+template <int ChunkCount>
+inline cudaError_t launch_chunks_coarse_hist(
+    const float *scores, void *workspace, int32_t *nan_flags, int topk,
+    int64_t stride, int default_length, int rows, cudaStream_t stream);
+
+template <int ChunkCount>
+inline cudaError_t launch_chunks_compact_refine(
+    const float *scores, int32_t *out, void *workspace, int topk, int64_t stride,
+    int default_length, int rows, cudaStream_t stream);
+
 template <int ChunkCount>
 inline cudaError_t launch_topk_chunks_impl(
     const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
@@ -931,24 +951,85 @@ __host__ __forceinline__ int chunks_for_shape(int rows, int64_t n_cols,
     return select_chunk_count((int64_t)rows, n_cols, num_sms);
 }
 
+// The window table: one block per row, 128 threads.
+template <int ChunkCount>
+inline cudaError_t launch_chunks_init(void *workspace, const int32_t *lengths,
+                                      int rows, int default_length,
+                                      cudaStream_t stream)
+{
+    auto *ws = reinterpret_cast<TopKChunksWorkspace<ChunkCount> *>(workspace);
+    topk_chunks_init<ChunkCount><<<rows, 2 * 64, 0, stream>>>(ws, lengths, rows,
+                                                              default_length);
+    return cudaGetLastError();
+}
+
+extern template cudaError_t launch_chunks_init<3>(void *, const int32_t *, int, int,
+                                                  cudaStream_t);
+extern template cudaError_t launch_chunks_init<4>(void *, const int32_t *, int, int,
+                                                  cudaStream_t);
+extern template cudaError_t launch_chunks_init<5>(void *, const int32_t *, int, int,
+                                                  cudaStream_t);
+extern template cudaError_t launch_chunks_init<6>(void *, const int32_t *, int, int,
+                                                  cudaStream_t);
+
+template <int ChunkCount>
+inline cudaError_t launch_chunks_coarse_hist(
+    const float *scores, void *workspace, int32_t *nan_flags, int topk,
+    int64_t stride, int default_length, int rows, cudaStream_t stream)
+{
+    auto *ws = reinterpret_cast<TopKChunksWorkspace<ChunkCount> *>(workspace);
+    const dim3 grid(ChunkCount, (unsigned)rows);
+    topk_chunks_coarse_hist<ChunkCount><<<grid, kThreads, 0, stream>>>(
+        scores, ws, nan_flags, topk, stride, default_length);
+    return cudaGetLastError();
+}
+
+extern template cudaError_t launch_chunks_coarse_hist<3>(
+    const float *, void *, int32_t *, int, int64_t, int, int, cudaStream_t);
+extern template cudaError_t launch_chunks_coarse_hist<4>(
+    const float *, void *, int32_t *, int, int64_t, int, int, cudaStream_t);
+extern template cudaError_t launch_chunks_coarse_hist<5>(
+    const float *, void *, int32_t *, int, int64_t, int, int, cudaStream_t);
+extern template cudaError_t launch_chunks_coarse_hist<6>(
+    const float *, void *, int32_t *, int, int64_t, int, int, cudaStream_t);
+
+template <int ChunkCount>
+inline cudaError_t launch_chunks_compact_refine(
+    const float *scores, int32_t *out, void *workspace, int topk, int64_t stride,
+    int default_length, int rows, cudaStream_t stream)
+{
+    auto *ws = reinterpret_cast<TopKChunksWorkspace<ChunkCount> *>(workspace);
+    const dim3 grid(ChunkCount, (unsigned)rows);
+    topk_chunks_compact_refine<ChunkCount><<<grid, kThreads, 0, stream>>>(
+        scores, out, ws, topk, stride, default_length);
+    return cudaGetLastError();
+}
+
+extern template cudaError_t launch_chunks_compact_refine<3>(
+    const float *, int32_t *, void *, int, int64_t, int, int, cudaStream_t);
+extern template cudaError_t launch_chunks_compact_refine<4>(
+    const float *, int32_t *, void *, int, int64_t, int, int, cudaStream_t);
+extern template cudaError_t launch_chunks_compact_refine<5>(
+    const float *, int32_t *, void *, int, int64_t, int, int, cudaStream_t);
+extern template cudaError_t launch_chunks_compact_refine<6>(
+    const float *, int32_t *, void *, int, int64_t, int, int, cudaStream_t);
+
+// The three in order.  Each owns one launch; this sequence owns the ordering.
 template <int ChunkCount>
 inline cudaError_t launch_topk_chunks_impl(
     const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
     void *workspace, int B, int topk, int64_t stride, int default_length,
     cudaStream_t stream)
 {
-    auto *ws = reinterpret_cast<TopKChunksWorkspace<ChunkCount> *>(workspace);
-    const dim3 grid(ChunkCount, (unsigned)B);
-    topk_chunks_init<ChunkCount><<<B, 2 * 64, 0, stream>>>(ws, lengths, B, default_length);
-    cudaError_t err = cudaGetLastError();
+    cudaError_t err = launch_chunks_init<ChunkCount>(workspace, lengths, B,
+                                                     default_length, stream);
     if (err != cudaSuccess) return err;
-    topk_chunks_coarse_hist<ChunkCount><<<grid, kThreads, 0, stream>>>(
-        scores, ws, nan_flags, topk, stride, default_length);
-    err = cudaGetLastError();
+    err = launch_chunks_coarse_hist<ChunkCount>(scores, workspace, nan_flags,
+                                                topk, stride, default_length, B,
+                                                stream);
     if (err != cudaSuccess) return err;
-    topk_chunks_compact_refine<ChunkCount><<<grid, kThreads, 0, stream>>>(
-        scores, out, ws, topk, stride, default_length);
-    return cudaGetLastError();
+    return launch_chunks_compact_refine<ChunkCount>(
+        scores, out, workspace, topk, stride, default_length, B, stream);
 }
 
 

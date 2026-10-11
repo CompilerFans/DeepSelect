@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <type_traits>
 
 // The NaN predicates and the order-preserving key encodes, shared with the
@@ -397,6 +398,23 @@ __global__ __launch_bounds__(kScanBlock) void nan_scan_kernel(
     }
 }
 
+// The grid is the caller's: one CTA per (row, chunk), so the launch is
+// `batches * chunks` blocks wide and the kernel's own `blockIdx.x` splits it.
+// Not cached in a `static bool` init like the kernel launchers below -- there
+// is no `cudaFuncSetAttribute` to do once, so there is nothing to cache.
+template <typename ValueT>
+inline void launch_nan_scan(const void *input, const int32_t *lengths,
+                            int64_t stride_elems, uint32_t vocab_size,
+                            uint32_t chunks, int32_t *flags, uint32_t batches,
+                            cudaStream_t stream) {
+    nan_scan_kernel<ValueT><<<batches * chunks, kScanBlock, 0, stream>>>(
+        input, lengths, stride_elems, vocab_size, chunks, flags);
+}
+
+extern template void launch_nan_scan<float>(
+    const void *, const int32_t *, int64_t, uint32_t, uint32_t, int32_t *,
+    uint32_t, cudaStream_t);
+
 // The abort half of the NaN contract, in its own kernel because the contract
 // half must not carry it: `printf` + `__trap` answered inline costs the row
 // kernel **15 MT of registers on C500** (37 -> 22, one source line at a time),
@@ -414,29 +432,88 @@ __global__ __launch_bounds__(kScanBlock) void nan_scan_kernel(
 // rather than on the row that got scheduled first.
 constexpr int kNanAbortBlock = 128;
 
-__global__ __launch_bounds__(kNanAbortBlock) void nan_abort_kernel(
+template <int kBlock>
+__global__ __launch_bounds__(kBlock) void nan_abort_kernel(
     const int32_t *flags, uint32_t batches) {
-    const uint32_t row = (uint32_t)blockIdx.x * kNanAbortBlock + threadIdx.x;
+    const uint32_t row = (uint32_t)blockIdx.x * kBlock + threadIdx.x;
     if (row < batches && __ldg(flags + row) != 0) {
         printf("[deep_select] NaN detected. Aborting.\n");
         __trap();
     }
 }
 
-// BLOCK is `topk_select_radix::kBlockSize`, or `topk_select_radix::kLongRowBlockSize` for the regime the
-// ported dispatcher picks the wider block for (see `needs_long_row_bf16`).
+template <int kBlock>
+inline void launch_nan_abort(const int32_t *flags, uint32_t batches,
+                             cudaStream_t stream) {
+    nan_abort_kernel<kBlock><<<(batches + kBlock - 1) / kBlock, kBlock, 0,
+                               stream>>>(flags, batches);
+}
+
+extern template void launch_nan_abort<kNanAbortBlock>(const int32_t *, uint32_t,
+                                                      cudaStream_t);
+
+// The seven axes the row kernel is compiled for, as one type.  A configuration
+// tuple is the unit of instantiation: one tuple, one generated `instantiations/
+// *.cu`, one explicit instantiation of `launch_radix_config<Cfg>` in that file
+// (see `scripts/generate_instantiations.py`), and one line in `kRadixTable`
+// below.
 //
-// `kPreSelected` is for the chunked path: the two-stage split over a long row
-// has already ranked it and left its answer in the workspace (raw column
-// indices, `topk` of them per row, plus the NaN flag its own wider scan raised),
-// so this kernel skips selection and starts from the emit -- the shortcut, the
-// NaN contract, the fills, the offsets and the ordering are the same code
-// either way.  That is what keeps `return_value` / `sorted_index` /
-// `sorted_value` / int64 indices / ragged windows on the split path free of
-// new cases.
-template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV,
-          bool kPreSelected = false>
-__global__ __launch_bounds__(BLOCK) void topk_kernel_radix(RowParams params) {
+// - `BLOCK` is `topk_select_radix::kBlockSize`, or `topk_select_radix::kLongRowBlockSize`
+//   for the regime the ported dispatcher picks the wider block for (see
+//   `needs_long_row_bf16`).  Only the 16-bit row has a wide-block arm.
+// - `PRE` is for the chunked path: the two-stage split over a long row has
+//   already ranked it and left its answer in the workspace (raw column indices,
+//   `topk` of them per row, plus the NaN flag its own wider scan raised), so
+//   this kernel skips selection and starts from the emit -- the shortcut, the
+//   NaN contract, the fills, the offsets and the ordering are the same code
+//   either way.  That is what keeps `return_value` / `sorted_index` /
+//   `sorted_value` / int64 indices / ragged windows on the split path free of
+//   new cases.
+template <typename ValueT_, typename OutIdxT_, int BLOCK_, bool SI_, bool RV_,
+          bool SV_, bool PRE_>
+struct TopkRadixConfig {
+    using ValueT = ValueT_;
+    using OutIdxT = OutIdxT_;
+    static constexpr int BLOCK = BLOCK_;
+    static constexpr bool SI = SI_;
+    static constexpr bool RV = RV_;
+    static constexpr bool SV = SV_;
+    static constexpr bool PRE = PRE_;
+};
+
+// The dispatch key's two halves: the entry point reads `value_dtype` /
+// `index_dtype` off the tensors (`float32 ? 0 : 1` and the output index width),
+// and the table below has to be keyed the same way.
+template <typename ValueT>
+struct radix_value_dtype;
+template <>
+struct radix_value_dtype<float> {
+    static constexpr int value = 0;
+};
+template <>
+struct radix_value_dtype<maca_bfloat16> {
+    static constexpr int value = 1;
+};
+template <typename OutIdxT>
+struct radix_index_dtype;
+template <>
+struct radix_index_dtype<int32_t> {
+    static constexpr int value = 0;
+};
+template <>
+struct radix_index_dtype<int64_t> {
+    static constexpr int value = 1;
+};
+
+template <typename Cfg>
+__global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params) {
+    using ValueT = typename Cfg::ValueT;
+    using OutIdxT = typename Cfg::OutIdxT;
+    constexpr int BLOCK = Cfg::BLOCK;
+    constexpr bool SI = Cfg::SI;
+    constexpr bool RV = Cfg::RV;
+    constexpr bool SV = Cfg::SV;
+    constexpr bool kPreSelected = Cfg::PRE;
     const int tid = threadIdx.x;
     const uint32_t row = blockIdx.x;
 
@@ -624,37 +701,156 @@ inline size_t radix_smem_bytes(uint32_t topk, bool sorted, bool wide) {
     return lead + sizeof(uint32_t) * topk;
 }
 
-template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV,
-          bool PRE = false>
-inline void set_radix_attr() {
+// One launch site for one configuration tuple: the row path selects, the
+// chunked path picks up the indices the split left in `params.preselected`.
+// Both dtypes have a split (16-bit above, fp32 below) and the preselected arm
+// is dtype-agnostic -- it reads `preselected` / `nan_flags` and skips selection
+// -- so the two differ only in the config's `PRE` member, which is why the
+// dispatcher below keys the table on it rather than branching.
+//
+// **The body owns the launch, and that is what makes a tuple one file.** The
+// explicit instantiation in `instantiations/*.cu` defines this function, so the
+// kernel's device code and the only launch that reaches it are compiled
+// together; the `extern template` below keeps this header's users from
+// instantiating it a second time, which would duplicate that device code.
+template <typename Cfg>
+inline void launch_radix_config(const RowParams &params, uint32_t batches,
+                                cudaStream_t stream, size_t smem) {
     // Every mode is configured with the one ceiling; each launch then asks for
     // exactly what its own mode needs (`radix_smem_bytes`).
     const cudaError_t rc = cudaFuncSetAttribute(
-        (const void *)topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, PRE>,
+        (const void *)topk_kernel_radix<Cfg>,
         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)kSmemBudgetBytes);
     if (rc != cudaSuccess) {
         std::fprintf(stderr, "[deep_select] radix smem attribute: %s\n",
                      cudaGetErrorString(rc));
     }
+    topk_kernel_radix<Cfg><<<batches, Cfg::BLOCK, smem, stream>>>(params);
 }
 
-// One launch site for both dataflows of a mode: the row path selects, the
-// chunked path picks up the indices the split left in `params.preselected`.
-// Both dtypes have a split (16-bit above, fp32 below) and the preselected arm
-// is dtype-agnostic -- it reads `preselected` / `nan_flags` and skips
-// selection -- so there is no `if constexpr` narrowing it here.
-template <typename ValueT, typename OutIdxT, int BLOCK, bool SI, bool RV, bool SV>
-inline void launch_radix(const RowParams &params, uint32_t batches,
-                         cudaStream_t stream, size_t smem, bool preselected) {
-    if (preselected) {
-        set_radix_attr<ValueT, OutIdxT, BLOCK, SI, RV, SV, true>();
-        topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, true>
-            <<<batches, BLOCK, smem, stream>>>(params);
-    } else {
-        set_radix_attr<ValueT, OutIdxT, BLOCK, SI, RV, SV>();
-        topk_kernel_radix<ValueT, OutIdxT, BLOCK, SI, RV, SV, false>
-            <<<batches, BLOCK, smem, stream>>>(params);
+// ── the instantiation list, and the table the ladder reads ──────────────────
+//
+// One line per tuple, spelled once and expanded twice: as the `extern
+// template` declaration that says "this tuple's launcher is defined in its own
+// `instantiations/*.cu`", and as the dispatch entry that points at it.  The
+// generator writes the matching list of files, so the two are two copies of
+// one table -- and a tuple they disagree about does **not** fail loudly: this
+// list's entry would name a symbol no TU defines, and a shared library links
+// with that symbol undefined.  What checks the agreement is the artifact
+// itself: `ls instantiations/*.cu | wc -l` against the kernel count, and the
+// device-kernel set against the previous build's.
+#define DEEP_SELECT_RADIX_CONFIGS(X)                                        \
+    X(maca_bfloat16, int32_t, 512, false, false, false, false)              \
+    X(maca_bfloat16, int32_t, 512, false, false, false, true)               \
+    X(maca_bfloat16, int32_t, 512, false, true, false, false)               \
+    X(maca_bfloat16, int32_t, 512, false, true, false, true)                \
+    X(maca_bfloat16, int32_t, 512, true, false, false, false)               \
+    X(maca_bfloat16, int32_t, 512, true, false, false, true)                \
+    X(maca_bfloat16, int32_t, 512, true, true, false, false)                \
+    X(maca_bfloat16, int32_t, 512, true, true, false, true)                 \
+    X(maca_bfloat16, int32_t, 512, true, true, true, false)                 \
+    X(maca_bfloat16, int32_t, 512, true, true, true, true)                  \
+    X(maca_bfloat16, int32_t, 1024, false, false, false, false)             \
+    X(maca_bfloat16, int32_t, 1024, false, false, false, true)              \
+    X(maca_bfloat16, int32_t, 1024, false, true, false, false)              \
+    X(maca_bfloat16, int32_t, 1024, false, true, false, true)               \
+    X(maca_bfloat16, int32_t, 1024, true, false, false, false)              \
+    X(maca_bfloat16, int32_t, 1024, true, false, false, true)               \
+    X(maca_bfloat16, int32_t, 1024, true, true, false, false)               \
+    X(maca_bfloat16, int32_t, 1024, true, true, false, true)                \
+    X(maca_bfloat16, int32_t, 1024, true, true, true, false)                \
+    X(maca_bfloat16, int32_t, 1024, true, true, true, true)                 \
+    X(maca_bfloat16, int64_t, 512, false, false, false, false)              \
+    X(maca_bfloat16, int64_t, 512, false, false, false, true)               \
+    X(maca_bfloat16, int64_t, 512, false, true, false, false)               \
+    X(maca_bfloat16, int64_t, 512, false, true, false, true)                \
+    X(maca_bfloat16, int64_t, 512, true, false, false, false)               \
+    X(maca_bfloat16, int64_t, 512, true, false, false, true)                \
+    X(maca_bfloat16, int64_t, 512, true, true, false, false)                \
+    X(maca_bfloat16, int64_t, 512, true, true, false, true)                 \
+    X(maca_bfloat16, int64_t, 512, true, true, true, false)                 \
+    X(maca_bfloat16, int64_t, 512, true, true, true, true)                  \
+    X(maca_bfloat16, int64_t, 1024, false, false, false, false)             \
+    X(maca_bfloat16, int64_t, 1024, false, false, false, true)              \
+    X(maca_bfloat16, int64_t, 1024, false, true, false, false)              \
+    X(maca_bfloat16, int64_t, 1024, false, true, false, true)               \
+    X(maca_bfloat16, int64_t, 1024, true, false, false, false)              \
+    X(maca_bfloat16, int64_t, 1024, true, false, false, true)               \
+    X(maca_bfloat16, int64_t, 1024, true, true, false, false)               \
+    X(maca_bfloat16, int64_t, 1024, true, true, false, true)                \
+    X(maca_bfloat16, int64_t, 1024, true, true, true, false)                \
+    X(maca_bfloat16, int64_t, 1024, true, true, true, true)                 \
+    X(float, int32_t, 512, false, false, false, false)                      \
+    X(float, int32_t, 512, false, false, false, true)                       \
+    X(float, int32_t, 512, false, true, false, false)                       \
+    X(float, int32_t, 512, false, true, false, true)                        \
+    X(float, int32_t, 512, true, false, false, false)                       \
+    X(float, int32_t, 512, true, false, false, true)                        \
+    X(float, int32_t, 512, true, true, false, false)                        \
+    X(float, int32_t, 512, true, true, false, true)                         \
+    X(float, int32_t, 512, true, true, true, false)                         \
+    X(float, int32_t, 512, true, true, true, true)                          \
+    X(float, int64_t, 512, false, false, false, false)                      \
+    X(float, int64_t, 512, false, false, false, true)                       \
+    X(float, int64_t, 512, false, true, false, false)                       \
+    X(float, int64_t, 512, false, true, false, true)                        \
+    X(float, int64_t, 512, true, false, false, false)                       \
+    X(float, int64_t, 512, true, false, false, true)                        \
+    X(float, int64_t, 512, true, true, false, false)                        \
+    X(float, int64_t, 512, true, true, false, true)                         \
+    X(float, int64_t, 512, true, true, true, false)                         \
+    X(float, int64_t, 512, true, true, true, true)                          \
+
+#define DEEP_SELECT_RADIX_EXTERN(VD, ID, BLK, SI, RV, SV, PRE)                \
+    extern template void launch_radix_config<                                 \
+        TopkRadixConfig<VD, ID, BLK, SI, RV, SV, PRE>>(                       \
+        const RowParams &, uint32_t, cudaStream_t, size_t);
+
+DEEP_SELECT_RADIX_CONFIGS(DEEP_SELECT_RADIX_EXTERN)
+#undef DEEP_SELECT_RADIX_EXTERN
+
+using radix_launcher_fn = void (*)(const RowParams &, uint32_t, cudaStream_t,
+                                   size_t);
+
+// `{value_dtype, index_dtype, block, SI, RV, SV, PRE} -> launcher`, in exactly
+// the key the entry point builds: `value_dtype` is `float32 ? 0 : 1` on the
+// input and `index_dtype` the output index width (see `maca_topk.cu`).
+struct RadixEntry {
+    int value_dtype;
+    int index_dtype;
+    int block;
+    bool si;
+    bool rv;
+    bool sv;
+    bool pre;
+    radix_launcher_fn launch;
+};
+
+#define DEEP_SELECT_RADIX_ENTRY(VD, ID, BLK, SI, RV, SV, PRE)                 \
+    {radix_value_dtype<VD>::value, radix_index_dtype<ID>::value, BLK, SI, RV, \
+     SV, PRE,                                                                 \
+     &launch_radix_config<TopkRadixConfig<VD, ID, BLK, SI, RV, SV, PRE>>},
+
+inline const RadixEntry kRadixTable[] = {
+    DEEP_SELECT_RADIX_CONFIGS(DEEP_SELECT_RADIX_ENTRY)
+};
+#undef DEEP_SELECT_RADIX_ENTRY
+#undef DEEP_SELECT_RADIX_CONFIGS
+
+// The two spellings of the key are the same number by construction: the table's
+// `value_dtype` / `index_dtype` come from the trait above, and the entry point
+// derives its pair from the tensor dtypes the same way.
+inline radix_launcher_fn radix_launcher_for(int value_dtype, int index_dtype,
+                                            int block, bool si, bool rv, bool sv,
+                                            bool pre) {
+    for (const RadixEntry &e : kRadixTable) {
+        if (e.value_dtype == value_dtype && e.index_dtype == index_dtype &&
+            e.block == block && e.si == si && e.rv == rv && e.sv == sv &&
+            e.pre == pre) {
+            return e.launch;
+        }
     }
+    return nullptr;
 }
 
 template <typename ValueT, typename OutIdxT>
@@ -665,38 +861,39 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
     const size_t smem = radix_smem_bytes(
         params.topk, sorted_index || sorted_value,
         std::is_same<ValueT, maca_bfloat16>::value);
-    auto run = [&](auto si, auto sv, auto rv) {
-        constexpr bool SI = decltype(si)::value;
-        constexpr bool SV = decltype(sv)::value;
-        constexpr bool RV = decltype(rv)::value;
-        // The fp32 row has a single width, so only the 16-bit row compiles the
-        // wide-block arm (a runtime branch would instantiate it for fp32 too,
-        // where it cannot be launched).
-        if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
-            if (block == topk_select_radix::kLongRowBlockSize) {
-                launch_radix<ValueT, OutIdxT, topk_select_radix::kLongRowBlockSize, SI, RV, SV>(
-                    params, batches, stream, smem, preselected);
-            } else {
-                launch_radix<ValueT, OutIdxT, topk_select_radix::kBlockSize, SI, RV, SV>(
-                    params, batches, stream, smem, preselected);
-            }
-        } else {
-            launch_radix<ValueT, OutIdxT, topk_select_radix::kBlockSize, SI, RV, SV>(
-                params, batches, stream, smem, preselected);
-        }
-    };
-    using T = std::true_type;
-    using F = std::false_type;
-    // sorted_value implies return_value (validated by the caller).
-    if (sorted_value) {
-        run(T{}, T{}, T{});
-    } else if (sorted_index) {
-        if (return_value) run(T{}, F{}, T{});
-        else run(T{}, F{}, F{});
-    } else {
-        if (return_value) run(F{}, F{}, T{});
-        else run(F{}, F{}, F{});
+    // The fp32 row has a single width, so only the 16-bit row selects between
+    // the two blocks -- and it selects `kLongRowBlockSize` **or** the default,
+    // not "whatever `block` says": a caller that passes anything else gets
+    // `kBlockSize`, which is what keeps `block` a two-valued axis rather than
+    // an open one.  A width outside the table would find no row at all.
+    const int width =
+        std::is_same<ValueT, maca_bfloat16>::value &&
+                block == (int)topk_select_radix::kLongRowBlockSize
+            ? (int)topk_select_radix::kLongRowBlockSize
+            : (int)topk_select_radix::kBlockSize;
+    // `sorted_value` implies `return_value` and is exclusive with
+    // `sorted_index` (both checked at the entry), so of the eight combinations
+    // these three expressions produce only the five the table carries.
+    const bool si = sorted_index || sorted_value;
+    const bool sv = sorted_value;
+    const bool rv = return_value || sorted_value;
+    radix_launcher_fn launch = radix_launcher_for(
+        radix_value_dtype<ValueT>::value, radix_index_dtype<OutIdxT>::value,
+        width, si, rv, sv, preselected);
+    // A miss means this image's table and the expressions above disagree, and
+    // the call then has no correct output to produce -- so it fails loudly
+    // rather than returning with the caller's buffer unwritten.
+    if (launch == nullptr) {
+        std::fprintf(stderr,
+                     "[deep_select] no radix instantiation for "
+                     "{value_dtype=%d, index_dtype=%d, block=%d, si=%d, rv=%d, "
+                     "sv=%d, pre=%d}\n",
+                     radix_value_dtype<ValueT>::value,
+                     radix_index_dtype<OutIdxT>::value, width, (int)si, (int)rv,
+                     (int)sv, (int)preselected);
+        std::abort();
     }
+    launch(params, batches, stream, smem);
 }
 
 }  // namespace detail

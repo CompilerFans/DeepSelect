@@ -1164,10 +1164,11 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
     if (params.check_nan) {
         cudaMemsetAsync(ws.lengths, 0, table_bytes, stream);
         if (!fuse_scan) {
-            nan_scan_kernel<float><<<batches * chunks, kScanBlock, 0, stream>>>(
+            launch_nan_scan<float>(
                 params.input, params.end_ptr,
                 (int64_t)(params.stride_input_batch / sizeof(float)),
-                params.vocab_size, (uint32_t)chunks, ws.lengths);
+                params.vocab_size, (uint32_t)chunks, ws.lengths, batches,
+                stream);
         }
     }
     const cudaError_t rc = topk_select_radix::launch_topk_f32_chunked(

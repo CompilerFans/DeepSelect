@@ -426,11 +426,18 @@ __device__ __forceinline__ bool topk_coarse12_row(
 // original chose it: the kernel's widest cooperative step is the 4096-bin
 // histogram clear and the candidate walk, and 640 is where deep_gemm measured
 // the balance between those and register pressure on this device.
-__global__ __launch_bounds__(kThreads) void topk_coarse12_kernel(
+//
+// The width is a template parameter because the kernel is instantiated
+// explicitly in the generated TU that owns its launch; the row body below is
+// written against the namespace's `kThreads`, which the assertion pins.
+template <int kThreads_>
+__global__ __launch_bounds__(kThreads_) void topk_coarse12_kernel(
     const float *__restrict__ scores, const int32_t *__restrict__ lengths,
     int32_t *__restrict__ out, int32_t *__restrict__ nan_flags, int topk, int B,
     int64_t stride, int default_length)
 {
+    static_assert(kThreads_ == kThreads,
+                  "`topk_coarse12_row` walks the row at the namespace's kThreads");
     const int row = blockIdx.x;
     if (row >= B) return;
 
@@ -471,7 +478,9 @@ __global__ __launch_bounds__(kThreads) void topk_coarse12_kernel(
     }
 }
 
-inline cudaError_t launch_topk_coarse12(
+// The launcher that owns this kernel's one `<<<>>>`.
+template <int kThreads_>
+inline cudaError_t launch_coarse12_kernel(
     const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
     int B, int topk, int64_t stride, int default_length, cudaStream_t stream)
 {
@@ -479,14 +488,26 @@ inline cudaError_t launch_topk_coarse12(
     static bool init = false;
     if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            topk_coarse12_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-            (int)kSmemBytes);
+            topk_coarse12_kernel<kThreads_>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, (int)kSmemBytes);
         if (err != cudaSuccess) return err;
         init = true;
     }
-    topk_coarse12_kernel<<<B, kThreads, kSmemBytes, stream>>>(
+    topk_coarse12_kernel<kThreads_><<<B, (int)kThreads_, kSmemBytes, stream>>>(
         scores, lengths, out, nan_flags, topk, B, stride, default_length);
     return cudaGetLastError();
+}
+
+extern template cudaError_t launch_coarse12_kernel<kThreads>(
+    const float *, const int32_t *, int32_t *, int32_t *, int, int, int64_t, int,
+    cudaStream_t);
+
+inline cudaError_t launch_topk_coarse12(
+    const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
+    int B, int topk, int64_t stride, int default_length, cudaStream_t stream)
+{
+    return launch_coarse12_kernel<kThreads>(scores, lengths, out, nan_flags, B,
+                                            topk, stride, default_length, stream);
 }
 
 

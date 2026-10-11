@@ -188,6 +188,7 @@ __global__ void topk_bf16_chunk_stage2_kernel_k(
     }
 }
 
+template <int kBlock>
 __global__ void topk_bf16_chunk_stage2_kernel(
     const maca_bfloat16* candidate_values, const int32_t* candidate_indices,
     int32_t* indices, int candidate_stride, int topk, int B)
@@ -198,9 +199,9 @@ __global__ void topk_bf16_chunk_stage2_kernel(
     const maca_bfloat16* values = candidate_values + bid * candidate_stride;
     const int32_t* candidates = candidate_indices + bid * candidate_stride;
     int32_t* out = indices + bid * topk;
-    constexpr int BLOCK_SIZE = kChunkBlockSize;
+    constexpr int BLOCK_SIZE = kBlock;
 
-    radix_topk_row_bf16_b<kChunkBlockSize>(values, out, candidate_stride, topk);
+    radix_topk_row_bf16_b<kBlock>(values, out, candidate_stride, topk);
     for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
         const int32_t candidate_pos = out[i];
         out[i] = (candidate_pos >= 0 && candidate_pos < candidate_stride)
@@ -209,6 +210,95 @@ __global__ void topk_bf16_chunk_stage2_kernel(
     }
 }
 
+// Stage 1 of the static-k arm.  **One launcher, one kernel**: a tuple is one
+// file (`scripts/generate_instantiations.py`), so each explicit instantiation
+// there wants a launcher that owns exactly one `<<<>>>` -- which is also what
+// puts the kernel's device code and the only launch that reaches it in the same
+// translation unit.
+//
+// `kNan` is the caller's `check_nan`: with it on this kernel is also the NaN
+// scan and `nan_flags` is the table it raises.  It is a template parameter here
+// rather than the composing function's runtime branch so the two arms are two
+// instantiations, which is what the two generated files are.
+template <uint32_t TOPK, bool kNan>
+inline cudaError_t launch_bf16_chunk_stage1_k(
+    const maca_bfloat16* scores, const int32_t* lengths,
+    int32_t* candidate_indices, maca_bfloat16* candidate_values,
+    int B, int L, int num_chunks, cudaStream_t stream, int64_t score_stride,
+    int32_t* nan_flags)
+{
+    if (TOPK > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    // Both stages run the coarse12 row, whose arena *is* the 16 KB coarse
+    // histogram it aliases, followed by the `topk` staging the core writes.
+    constexpr size_t kChunkSmem =
+        kCoarse12HistBytes + sizeof(uint32_t) * (size_t)TOPK;
+    static bool init = false;
+    if (!init) {
+        cudaError_t err = cudaFuncSetAttribute(
+            (const void*)topk_bf16_chunk_stage1_kernel_k<TOPK, kNan>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kChunkSmem);
+        if (err != cudaSuccess) return err;
+        init = true;
+    }
+
+    const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
+    const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
+    // Deviation 3: the row stride can be wider than the window (`L`), which is
+    // how a caller with padded input rows reaches this path; upstream passes
+    // `L` and so can only split packed rows.
+    const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
+    topk_bf16_chunk_stage1_kernel_k<TOPK, kNan>
+        <<<B * num_chunks, kChunkBlockSize, kChunkSmem, stream>>>(
+            scores, lengths, candidate_indices, candidate_values, stride, B,
+            num_chunks, chunk_size, kNan ? nan_flags : nullptr);
+    return cudaGetLastError();
+}
+
+extern template cudaError_t launch_bf16_chunk_stage1_k<512u, true>(
+    const maca_bfloat16*, const int32_t*, int32_t*, maca_bfloat16*, int, int,
+    int, cudaStream_t, int64_t, int32_t*);
+extern template cudaError_t launch_bf16_chunk_stage1_k<512u, false>(
+    const maca_bfloat16*, const int32_t*, int32_t*, maca_bfloat16*, int, int,
+    int, cudaStream_t, int64_t, int32_t*);
+extern template cudaError_t launch_bf16_chunk_stage1_k<1024u, true>(
+    const maca_bfloat16*, const int32_t*, int32_t*, maca_bfloat16*, int, int,
+    int, cudaStream_t, int64_t, int32_t*);
+extern template cudaError_t launch_bf16_chunk_stage1_k<1024u, false>(
+    const maca_bfloat16*, const int32_t*, int32_t*, maca_bfloat16*, int, int,
+    int, cudaStream_t, int64_t, int32_t*);
+
+// Stage 2 of the static-k arm: the merge over `num_chunks * TOPK` candidates.
+template <uint32_t TOPK>
+inline cudaError_t launch_bf16_chunk_stage2_k(
+    const maca_bfloat16* candidate_values, const int32_t* candidate_indices,
+    int32_t* indices, int B, int num_chunks, cudaStream_t stream)
+{
+    if (TOPK > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    constexpr size_t kChunkSmem =
+        kCoarse12HistBytes + sizeof(uint32_t) * (size_t)TOPK;
+    static bool init = false;
+    if (!init) {
+        cudaError_t err = cudaFuncSetAttribute(
+            topk_bf16_chunk_stage2_kernel_k<TOPK>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kChunkSmem);
+        if (err != cudaSuccess) return err;
+        init = true;
+    }
+
+    const int candidate_stride = num_chunks * static_cast<int>(TOPK);
+    topk_bf16_chunk_stage2_kernel_k<TOPK><<<B, kChunkBlockSize, kChunkSmem, stream>>>(
+        candidate_values, candidate_indices, indices, candidate_stride, B);
+    return cudaGetLastError();
+}
+
+extern template cudaError_t launch_bf16_chunk_stage2_k<512u>(
+    const maca_bfloat16*, const int32_t*, int32_t*, int, int, cudaStream_t);
+extern template cudaError_t launch_bf16_chunk_stage2_k<1024u>(
+    const maca_bfloat16*, const int32_t*, int32_t*, int, int, cudaStream_t);
+
+// The static-k arm's two stages, in order.  `want_nan` picks which of stage 1's
+// two instantiations runs; the launch itself belongs to the two functions
+// above, so this one compiles no device code.
 template <uint32_t TOPK>
 inline cudaError_t launch_topk_bf16_chunked_k(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
@@ -218,49 +308,77 @@ inline cudaError_t launch_topk_bf16_chunked_k(
     int32_t* nan_flags = nullptr)
 {
     if (TOPK > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    // Both stages run the coarse12 row, whose arena *is* the 16 KB coarse
-    // histogram it aliases, followed by the `topk` staging the core writes.
-    constexpr size_t kChunkSmem =
-        kCoarse12HistBytes + sizeof(uint32_t) * (size_t)TOPK;
-    static bool init[2] = {false, false};
-    const int arm = want_nan ? 1 : 0;
-    if (!init[arm]) {
+    cudaError_t err = want_nan
+        ? launch_bf16_chunk_stage1_k<TOPK, true>(
+              scores, lengths, candidate_indices, candidate_values, B, L,
+              num_chunks, stream, score_stride, nan_flags)
+        : launch_bf16_chunk_stage1_k<TOPK, false>(
+              scores, lengths, candidate_indices, candidate_values, B, L,
+              num_chunks, stream, score_stride, nan_flags);
+    if (err != cudaSuccess) return err;
+    return launch_bf16_chunk_stage2_k<TOPK>(candidate_values, candidate_indices,
+                                            indices, B, num_chunks, stream);
+}
+
+// Stage 1 of the runtime-`topk` arm: the same kernel with `topk` as an
+// argument rather than a template parameter, which is why it is one
+// instantiation per `kNan` instead of per (`TOPK`, `kNan`).
+template <bool kNan>
+inline cudaError_t launch_bf16_chunk_stage1_runtime(
+    const maca_bfloat16* scores, const int32_t* lengths,
+    int32_t* candidate_indices, maca_bfloat16* candidate_values,
+    int B, int L, int topk, int num_chunks, cudaStream_t stream,
+    int64_t score_stride, int32_t* nan_flags)
+{
+    if (topk > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    static bool init = false;
+    if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            want_nan ? (const void*)topk_bf16_chunk_stage1_kernel_k<TOPK, true>
-                     : (const void*)topk_bf16_chunk_stage1_kernel_k<TOPK, false>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, kChunkSmem);
+            (const void*)topk_bf16_chunk_stage1_kernel<kNan>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
         if (err != cudaSuccess) return err;
-        err = cudaFuncSetAttribute(
-            topk_bf16_chunk_stage2_kernel_k<TOPK>, cudaFuncAttributeMaxDynamicSharedMemorySize, kChunkSmem);
-        if (err != cudaSuccess) return err;
-        init[arm] = true;
+        init = true;
     }
 
     const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
+    // Keep each chunk base aligned for the uint4 FP16 vectorized row path.
     const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
-    const int candidate_stride = num_chunks * static_cast<int>(TOPK);
-    // Deviation 3: the row stride can be wider than the window (`L`), which is
-    // how a caller with padded input rows reaches this path; upstream passes
-    // `L` and so can only split packed rows.
     const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
-    if (want_nan) {
-        topk_bf16_chunk_stage1_kernel_k<TOPK, true>
-            <<<B * num_chunks, kChunkBlockSize, kChunkSmem, stream>>>(
-                scores, lengths, candidate_indices, candidate_values, stride, B,
-                num_chunks, chunk_size, nan_flags);
-    } else {
-        topk_bf16_chunk_stage1_kernel_k<TOPK, false>
-            <<<B * num_chunks, kChunkBlockSize, kChunkSmem, stream>>>(
-                scores, lengths, candidate_indices, candidate_values, stride, B,
-                num_chunks, chunk_size);
-    }
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) return err;
-
-    topk_bf16_chunk_stage2_kernel_k<TOPK><<<B, kChunkBlockSize, kChunkSmem, stream>>>(
-        candidate_values, candidate_indices, indices, candidate_stride, B);
+    topk_bf16_chunk_stage1_kernel<kNan>
+        <<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
+            scores, lengths, candidate_indices, candidate_values, stride,
+            topk, B, num_chunks, chunk_size, kNan ? nan_flags : nullptr);
     return cudaGetLastError();
 }
+
+extern template cudaError_t launch_bf16_chunk_stage1_runtime<true>(
+    const maca_bfloat16*, const int32_t*, int32_t*, maca_bfloat16*, int, int,
+    int, int, cudaStream_t, int64_t, int32_t*);
+extern template cudaError_t launch_bf16_chunk_stage1_runtime<false>(
+    const maca_bfloat16*, const int32_t*, int32_t*, maca_bfloat16*, int, int,
+    int, int, cudaStream_t, int64_t, int32_t*);
+
+template <int kBlock>
+inline cudaError_t launch_bf16_chunk_stage2_runtime(
+    const maca_bfloat16* candidate_values, const int32_t* candidate_indices,
+    int32_t* indices, int B, int num_chunks, int topk, cudaStream_t stream)
+{
+    if (topk > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    static bool init = false;
+    if (!init) {
+        cudaError_t err = cudaFuncSetAttribute(
+            topk_bf16_chunk_stage2_kernel<kBlock>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
+        if (err != cudaSuccess) return err;
+        init = true;
+    }
+    topk_bf16_chunk_stage2_kernel<kBlock><<<B, kBlock, kSMEM, stream>>>(
+        candidate_values, candidate_indices, indices, num_chunks * topk, topk, B);
+    return cudaGetLastError();
+}
+
+extern template cudaError_t launch_bf16_chunk_stage2_runtime<kChunkBlockSize>(
+    const maca_bfloat16*, const int32_t*, int32_t*, int, int, int, cudaStream_t);
 
 inline cudaError_t launch_topk_bf16_chunked(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
@@ -283,41 +401,16 @@ inline cudaError_t launch_topk_bf16_chunked(
         break;
     }
 
-    static bool init[2] = {false, false};
-    const int arm = want_nan ? 1 : 0;
-    if (!init[arm]) {
-        cudaError_t err = cudaFuncSetAttribute(
-            want_nan ? (const void*)topk_bf16_chunk_stage1_kernel<true>
-                     : (const void*)topk_bf16_chunk_stage1_kernel<false>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
-        if (err != cudaSuccess) return err;
-        err = cudaFuncSetAttribute(
-            topk_bf16_chunk_stage2_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
-        if (err != cudaSuccess) return err;
-        init[arm] = true;
-    }
-
-    const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
-    // Keep each chunk base aligned for the uint4 FP16 vectorized row path.
-    const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
-    const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
-    if (want_nan) {
-        topk_bf16_chunk_stage1_kernel<true>
-            <<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
-                scores, lengths, candidate_indices, candidate_values, stride,
-                topk, B, num_chunks, chunk_size, nan_flags);
-    } else {
-        topk_bf16_chunk_stage1_kernel<false>
-            <<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
-                scores, lengths, candidate_indices, candidate_values, stride,
-                topk, B, num_chunks, chunk_size);
-    }
-    cudaError_t err = cudaGetLastError();
+    cudaError_t err = want_nan
+        ? launch_bf16_chunk_stage1_runtime<true>(
+              scores, lengths, candidate_indices, candidate_values, B, L, topk,
+              num_chunks, stream, score_stride, nan_flags)
+        : launch_bf16_chunk_stage1_runtime<false>(
+              scores, lengths, candidate_indices, candidate_values, B, L, topk,
+              num_chunks, stream, score_stride, nan_flags);
     if (err != cudaSuccess) return err;
-
-    topk_bf16_chunk_stage2_kernel<<<B, kChunkBlockSize, kSMEM, stream>>>(
-        candidate_values, candidate_indices, indices, num_chunks * topk, topk, B);
-    return cudaGetLastError();
+    return launch_bf16_chunk_stage2_runtime<kChunkBlockSize>(
+        candidate_values, candidate_indices, indices, B, num_chunks, topk, stream);
 }
 
 // ============================================================
@@ -430,7 +523,8 @@ __global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage1_kernel(
 // The merge.  It ranks the candidate *values* -- so its answer is a position
 // into the candidate arrays, which is what lets `cols` be mapped back -- and
 // rewrites `topk` columns.
-__global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage2_kernel(
+template <int kBlock>
+__global__ __launch_bounds__(kBlock) void topk_f32_chunk_stage2_kernel(
     const float *vals, const int32_t *cols, int32_t *out, int topk, int B,
     int candidate_stride)
 {
@@ -440,7 +534,7 @@ __global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage2_kernel(
     const float *row_vals = vals + bid * candidate_stride;
     const int32_t *row_cols = cols + bid * candidate_stride;
     int32_t *row_out = out + (int64_t)bid * topk;
-    constexpr int BLOCK_SIZE = kBlockSize;
+    constexpr int BLOCK_SIZE = kBlock;
 
     radix_topk_row_f32(row_vals, row_out, (uint32_t)candidate_stride,
                        (uint32_t)topk);
@@ -555,40 +649,43 @@ inline int32_t *chunked_f32_out(void *base, uint32_t batches, uint32_t topk,
 // where a chunk starts, which is what lets `nan_scan_kernel` be shared.  With
 // `want_nan` the scan is not shared but *absorbed*: this launch is the only one
 // that walks the row, and `nan_flags` comes back from it.
-inline cudaError_t launch_topk_f32_chunks_stage1(
+// Stage 1 of the fp32 split.  **One launcher, one kernel** -- the same rule as
+// the 16-bit stages above: the generated TU for this tuple is where the device
+// code and its only launch both live.
+template <bool kNan>
+inline cudaError_t launch_f32_chunk_stage1(
     const float *scores, const int32_t *lengths, int32_t *cols, float *vals,
     int B, int L, int topk, int num_chunks, cudaStream_t stream,
-    int64_t score_stride, bool want_nan = false, int32_t *nan_flags = nullptr)
+    int64_t score_stride, int32_t *nan_flags)
 {
     if (topk > (int)kF32MaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    static bool init[2] = {false, false};
-    const int arm = want_nan ? 1 : 0;
-    if (!init[arm]) {
+    static bool init = false;
+    if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            want_nan ? (const void *)topk_f32_chunk_stage1_kernel<true>
-                     : (const void *)topk_f32_chunk_stage1_kernel<false>,
+            (const void *)topk_f32_chunk_stage1_kernel<kNan>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
         if (err != cudaSuccess) return err;
-        init[arm] = true;
+        init = true;
     }
     const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
     const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
     const int candidate_stride = num_chunks * topk;
-    if (want_nan) {
-        topk_f32_chunk_stage1_kernel<true>
-            <<<B * num_chunks, (int)kF32ChunkBlocks, kSMEM, stream>>>(
-                scores, lengths, cols, vals, score_stride, topk, B, num_chunks,
-                chunk_size, candidate_stride, nan_flags);
-    } else {
-        topk_f32_chunk_stage1_kernel<false>
-            <<<B * num_chunks, (int)kF32ChunkBlocks, kSMEM, stream>>>(
-                scores, lengths, cols, vals, score_stride, topk, B, num_chunks,
-                chunk_size, candidate_stride);
-    }
+    topk_f32_chunk_stage1_kernel<kNan>
+        <<<B * num_chunks, (int)kF32ChunkBlocks, kSMEM, stream>>>(
+            scores, lengths, cols, vals, score_stride, topk, B, num_chunks,
+            chunk_size, candidate_stride, kNan ? nan_flags : nullptr);
     return cudaGetLastError();
 }
 
-inline cudaError_t launch_topk_f32_chunks_stage2(
+extern template cudaError_t launch_f32_chunk_stage1<true>(
+    const float *, const int32_t *, int32_t *, float *, int, int, int, int,
+    cudaStream_t, int64_t, int32_t *);
+extern template cudaError_t launch_f32_chunk_stage1<false>(
+    const float *, const int32_t *, int32_t *, float *, int, int, int, int,
+    cudaStream_t, int64_t, int32_t *);
+
+template <int kBlock>
+inline cudaError_t launch_f32_chunk_stage2(
     const float *vals, const int32_t *cols, int32_t *out,
     int B, int topk, int num_chunks, cudaStream_t stream)
 {
@@ -596,15 +693,40 @@ inline cudaError_t launch_topk_f32_chunks_stage2(
     static bool init = false;
     if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            topk_f32_chunk_stage2_kernel,
+            topk_f32_chunk_stage2_kernel<kBlock>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
         if (err != cudaSuccess) return err;
         init = true;
     }
     const int candidate_stride = num_chunks * topk;
-    topk_f32_chunk_stage2_kernel<<<B, (int)kF32ChunkBlocks, kSMEM, stream>>>(
+    topk_f32_chunk_stage2_kernel<kBlock><<<B, (int)kBlock, kSMEM, stream>>>(
         vals, cols, out, topk, B, candidate_stride);
     return cudaGetLastError();
+}
+
+extern template cudaError_t launch_f32_chunk_stage2<(int)kF32ChunkBlocks>(
+    const float *, const int32_t *, int32_t *, int, int, int, cudaStream_t);
+
+// stage 1, then stage 2 -- the split's entry point for the fp32 row.
+inline cudaError_t launch_topk_f32_chunks_stage1(
+    const float *scores, const int32_t *lengths, int32_t *cols, float *vals,
+    int B, int L, int topk, int num_chunks, cudaStream_t stream,
+    int64_t score_stride, bool want_nan = false, int32_t *nan_flags = nullptr)
+{
+    return want_nan ? launch_f32_chunk_stage1<true>(
+                          scores, lengths, cols, vals, B, L, topk, num_chunks,
+                          stream, score_stride, nan_flags)
+                    : launch_f32_chunk_stage1<false>(
+                          scores, lengths, cols, vals, B, L, topk, num_chunks,
+                          stream, score_stride, nan_flags);
+}
+
+inline cudaError_t launch_topk_f32_chunks_stage2(
+    const float *vals, const int32_t *cols, int32_t *out,
+    int B, int topk, int num_chunks, cudaStream_t stream)
+{
+    return launch_f32_chunk_stage2<(int)kF32ChunkBlocks>(
+        vals, cols, out, B, topk, num_chunks, stream);
 }
 
 // stage 1, then stage 2.  `cols_base` is the start of the candidate arena the

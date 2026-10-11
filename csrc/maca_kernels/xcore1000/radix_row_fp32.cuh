@@ -584,7 +584,13 @@ __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024(
     }
 }
 
-__global__ __launch_bounds__(kF32K2048BlockSize) void topk_f32_kernel_k2048_b1024(
+// The static-k2048 pair, carried by the artifact but routed to by nothing.
+// Both are templates on their block size so the generated TU that owns their
+// launch can hold the explicit instantiation, exactly as the row kernel is:
+// a non-template `__global__` in a header is defined in every TU that
+// includes it.
+template <int kBlock>
+__global__ __launch_bounds__(kBlock) void topk_f32_kernel_k2048_b1024(
     const float* scores, const int32_t* lengths, const int32_t* row_starts,
     int32_t* indices, int64_t score_stride, int B)
 {
@@ -596,7 +602,7 @@ __global__ __launch_bounds__(kF32K2048BlockSize) void topk_f32_kernel_k2048_b102
     int32_t* out = indices + static_cast<int64_t>(bid) * kF32K2048TopK;
 
     if (length <= kF32K2048TopK) {
-        for (int i = threadIdx.x; i < kF32K2048TopK; i += kF32K2048BlockSize)
+        for (int i = threadIdx.x; i < kF32K2048TopK; i += kBlock)
             out[i] = (i < length) ? static_cast<int32_t>(i) : -1;
         return;
     }
@@ -604,23 +610,27 @@ __global__ __launch_bounds__(kF32K2048BlockSize) void topk_f32_kernel_k2048_b102
     radix_topk_row_f32_k2048_b1024(row, out, row_start, length);
 }
 
-inline cudaError_t launch_topk_f32_k2048_b1024(
+template <int kBlock>
+inline cudaError_t launch_f32_k2048_b1024(
     const float* scores, const int32_t* lengths, const int32_t* row_starts,
     int32_t* indices, int B, int L, cudaStream_t stream)
 {
     static bool init = false;
     if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            topk_f32_kernel_k2048_b1024,
+            topk_f32_kernel_k2048_b1024<kBlock>,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             kF32K2048Smem);
         if (err != cudaSuccess) return err;
         init = true;
     }
-    topk_f32_kernel_k2048_b1024<<<B, kF32K2048BlockSize, kF32K2048Smem, stream>>>(
+    topk_f32_kernel_k2048_b1024<kBlock><<<B, (int)kBlock, kF32K2048Smem, stream>>>(
         scores, lengths, row_starts, indices, L, B);
     return cudaGetLastError();
 }
+
+extern template cudaError_t launch_f32_k2048_b1024<kF32K2048BlockSize>(
+    const float*, const int32_t*, const int32_t*, int32_t*, int, int, cudaStream_t);
 
 __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024_warp_scan(
     const float* __restrict__ input, int32_t* __restrict__ output, int row_start, int length)
@@ -753,7 +763,8 @@ __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024_warp_scan(
     }
 }
 
-__global__ __launch_bounds__(kF32K2048BlockSize) void topk_f32_kernel_k2048_b1024_warp_scan(
+template <int kBlock>
+__global__ __launch_bounds__(kBlock) void topk_f32_kernel_k2048_b1024_warp_scan(
     const float* scores, const int32_t* lengths, const int32_t* row_starts,
     int32_t* indices, int64_t score_stride, int B)
 {
@@ -765,7 +776,7 @@ __global__ __launch_bounds__(kF32K2048BlockSize) void topk_f32_kernel_k2048_b102
     int32_t* out = indices + static_cast<int64_t>(bid) * kF32K2048TopK;
 
     if (length <= kF32K2048TopK) {
-        for (int i = threadIdx.x; i < kF32K2048TopK; i += kF32K2048BlockSize)
+        for (int i = threadIdx.x; i < kF32K2048TopK; i += kBlock)
             out[i] = (i < length) ? static_cast<int32_t>(i) : -1;
         return;
     }
@@ -773,33 +784,38 @@ __global__ __launch_bounds__(kF32K2048BlockSize) void topk_f32_kernel_k2048_b102
     radix_topk_row_f32_k2048_b1024_warp_scan(row, out, row_start, length);
 }
 
-inline cudaError_t launch_topk_f32_k2048_b1024_warp_scan(
+template <int kBlock>
+inline cudaError_t launch_f32_k2048_b1024_warp_scan(
     const float* scores, const int32_t* lengths, const int32_t* row_starts,
     int32_t* indices, int B, int L, cudaStream_t stream)
 {
     static bool init = false;
     if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            topk_f32_kernel_k2048_b1024_warp_scan,
+            topk_f32_kernel_k2048_b1024_warp_scan<kBlock>,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             kF32K2048Smem);
         if (err != cudaSuccess) return err;
         init = true;
     }
-    topk_f32_kernel_k2048_b1024_warp_scan<<<B, kF32K2048BlockSize, kF32K2048Smem, stream>>>(
-        scores, lengths, row_starts, indices, L, B);
+    topk_f32_kernel_k2048_b1024_warp_scan<kBlock>
+        <<<B, (int)kBlock, kF32K2048Smem, stream>>>(
+            scores, lengths, row_starts, indices, L, B);
     return cudaGetLastError();
 }
+
+extern template cudaError_t launch_f32_k2048_b1024_warp_scan<kF32K2048BlockSize>(
+    const float*, const int32_t*, const int32_t*, int32_t*, int, int, cudaStream_t);
 
 inline cudaError_t launch_topk_f32_k2048_b1024_c500(
     const float* scores, const int32_t* lengths, const int32_t* row_starts,
     int32_t* indices, int B, int score_stride, int common_length, cudaStream_t stream)
 {
     if (common_length > 0 && common_length <= kF32K2048WarpScanMaxLen) {
-        return launch_topk_f32_k2048_b1024_warp_scan(
+        return launch_f32_k2048_b1024_warp_scan<kF32K2048BlockSize>(
             scores, lengths, row_starts, indices, B, score_stride, stream);
     }
-    return launch_topk_f32_k2048_b1024(
+    return launch_f32_k2048_b1024<kF32K2048BlockSize>(
         scores, lengths, row_starts, indices, B, score_stride, stream);
 }
 

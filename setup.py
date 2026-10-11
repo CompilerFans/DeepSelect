@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import subprocess
 import warnings
@@ -40,9 +41,45 @@ exec(open("deep_select/__version__.py").read())
 # a family's own source set; no row points at that directory, and pointing one
 # there would also take its `kerutils` include back (`include_dirs` below is the
 # other half of that change).
+_REPO_ROOT = Path(__file__).resolve().parent
+GENERATOR = _REPO_ROOT / "scripts" / "generate_instantiations.py"
+
+_generated_sources = None
+
+
+def generated_sources():
+    """The `instantiations/*.cu` files, read from the generator that writes them.
+
+    Every configuration tuple is its own translation unit holding one explicit
+    instantiation, so the source list is a *table* -- `scripts/
+    generate_instantiations.py`'s -- and this reads it rather than repeating it.
+    89 file names transcribed here would be a second copy of a list that already
+    exists, and the two would drift in the direction nobody notices: a file the
+    build does not compile is a kernel the artifact silently loses.
+    """
+    global _generated_sources
+    if _generated_sources is None:
+        spec = importlib.util.spec_from_file_location(
+            "_deep_select_generate_instantiations", GENERATOR)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sources = list(module.xcore1000_sources())
+        missing = [s for s in sources if not (_REPO_ROOT / s).is_file()]
+        if missing:
+            raise SystemExit(
+                "deep_select: %d generated source(s) missing (e.g. %s).  They "
+                "are committed; regenerate with `python %s`."
+                % (len(missing), missing[0],
+                   GENERATOR.relative_to(_REPO_ROOT)))
+        _generated_sources = sources
+    return list(_generated_sources)
+
+
+# The hand-written half: the tvm-ffi entry point, the contract layer, the
+# dispatcher.  The generated half below it is one file per configuration tuple.
 SHARED_SOURCES = [
     "csrc/maca_kernels/xcore1000/maca_topk.cu",
-]
+] + generated_sources()
 SOURCES_BY_FAMILY = {
     1000: SHARED_SOURCES,   # C500
     1500: SHARED_SOURCES,   # C600
@@ -514,8 +551,16 @@ def build_for_maca():
     ]
     # One clause per *distinct* source set, read off the table rather than a
     # second copy of it: families that compile the same tree share a clause,
-    # and a family with its own kernel gets its own.
-    distinct = sorted({", ".join(sources_for_family(f)) for _, f in resolved})
+    # and a family with its own kernel gets its own.  The generated
+    # instantiations are counted rather than listed -- there are 89 of them and
+    # the list is the directory they live in.
+    def summarise(sources):
+        hand = [s for s in sources if "/instantiations/" not in s]
+        generated = len(sources) - len(hand)
+        clause = ", ".join(hand)
+        return f"{clause} + {generated} generated instantiations" if generated else clause
+
+    distinct = sorted({summarise(sources_for_family(f)) for _, f in resolved})
     print(f"deep_select: compiling {'; '.join(distinct)} once per family, "
           f"for {','.join(targets)}")
 

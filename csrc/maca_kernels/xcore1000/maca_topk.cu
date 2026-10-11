@@ -660,8 +660,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     if (check_nan && abort_when_nan_found && p.nan_abort_flags != nullptr &&
         batches > 0) {
         const uint32_t n = (uint32_t)batches;
-        nan_abort_kernel<<<(n + kNanAbortBlock - 1) / kNanAbortBlock,
-                           kNanAbortBlock, 0, stream>>>(p.nan_abort_flags, n);
+        launch_nan_abort<kNanAbortBlock>(p.nan_abort_flags, n, stream);
     }
     DS_CUDA_RUNTIME_CHECK(cudaGetLastError());
 }
