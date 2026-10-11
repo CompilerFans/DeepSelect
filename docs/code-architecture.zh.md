@@ -84,9 +84,12 @@ csrc/
 
 ## 4. 规则
 
-1. **命名**：官方名优先（`refine_bin` / `warp_cumsum_histogram<Bins>` / `bf16_is_nan` 已落地）；两条 deep_gemm
-   路线用官方核名 `topk_coarse12` / `topk_chunks`（文件、namespace、注册名一致）；**代码里不再有 `dg` 前缀**
-   （`rk::dg12` → `rk::coarse12`，`rk::dgchunks` → `rk::chunks`）。无官方名的一律用角色名，不用血统名。
+1. **命名：判据是"读者可懂"，不是"官方"**（用户 2026-10-12 裁定：「不是 dg 改成 official，
+   而是改成合理的、实际有意义的名称」）。名字要说清**做什么**：`refine_bin` /
+   `warp_cumsum_histogram<Bins>` / `bf16_is_nan` 说清了操作；`topk_coarse12`（12 位粗层的选择）、
+   `topk_chunks`（按 chunk 切分的候选合并）说清了算法。官方名是**重要来源**——调用方与计时器按它接，
+   且与文件里的 `__global__` 核名一致——但贴切才用；血统名（`dg12` / `dgchunks`）两样都不占，一律不用。
+   公开 API 名（`topk` / `fp8_*` / `bf16_*` …）是 ABI，官方拼写**不动**（2026-09-21 裁定仍有效）。
 2. **依赖方向单向**：`common ← contract ← 数据流 ← routing ← TU(入口)`；python 侧
    `interface → _binding → .so`。数据流文件**不 include routing**，routing 不 include 具体发射实现。
 3. **TU 结构**：手写 TU 恒为 1（`maca_topk.cu`）；设备核由生成出来的 `instantiations/*.cu` 提供，
