@@ -47,7 +47,7 @@ coarse12、NaN 扫描并进 stage 1 自己的走法、门按实测重指（`kChu
 它留下的下一步在 §9 第 1 条：**替换数据流，不是调参**。
 
 **C600U 侧的三笔（2026-10-10，`39a85d1` / `ca59be3` / `ca1c06d`）**：`maca_topk.cu` +
-`radix_core.cuh` 加了两条 **C600U 专属**运行期门（`is_c600u_ap_count` = 28/32 AP，
+radix 数据流头加了两条 **C600U 专属**运行期门（`is_c600u_ap_count` = 28/32 AP，
 104-AP 的 C500 走老分支）与一笔共享的指令选择：长行块宽在 `b ≥ 256` 改走 512 线程
 实例（**官方网格 −4.7%**，短 vocab 档最高 −17.7%）；bf16 split 的交叉按
 `b² · 6400 ≤ vocab` 重指（decode 形状 b=8..24 由慢 1.06–2.2x 转正）；行核的块 max
@@ -73,7 +73,11 @@ C500（xcore1000）上走的是**行式 radix 选择**：一行一个 CTA，两�
 | 文件 | 角色 |
 |---|---|
 | `csrc/maca_kernels/xcore1000/maca_topk.cu` | **契约层 + 启动层**：`topk` 的对外契约（values / sorted / NaN / 窗口 / 偏移 / 短行）、NaN 扫描、动态 smem 尺寸与布局、kernel 启动 |
-| `csrc/maca_kernels/xcore1000/radix_core.cuh` | **选择数据流**（header-only）：`radix_topk_row_bf16_b`（16 位行，生产路径）、`radix_topk_row_f32*`（32 位行）、bf16 chunked split 的两级 stage 核与发射器 |
+| `csrc/maca_kernels/xcore1000/radix_core.cuh` | **选择数据流伞头**（header-only）：只 include 下面四个；TU 只 include 它 |
+| `csrc/maca_kernels/xcore1000/radix_common.cuh` | 行族共享件：常数（四个 `kMaxTopK` 之一等）/ smem 尺寸 / 直方图与前缀和 helper |
+| `csrc/maca_kernels/xcore1000/radix_row_bf16.cuh` | `radix_topk_row_bf16_b`（16 位行，生产路径）+ skip 表 + overflow |
+| `csrc/maca_kernels/xcore1000/radix_row_fp32.cuh` | `radix_topk_row_f32*`（32 位行）+ 溢出重扫 + k2048 变体 |
+| `csrc/maca_kernels/xcore1000/radix_chunked.cuh` | bf16 / fp32 chunked split 的两级 stage 核与发射器 |
 | `csrc/structs.h` | `TopkSelectArgs` / `RowParams` |
 | `scripts/official_slice.py` | 官方大表的切片驱动（正确性门）——**2026-09-16 已删除，能力并入 `tests/test.py`**（见 §4 正确性门） |
 | `tests/test.py` | 官方性能表（每个 perf 用例先查正确性再计时） |
@@ -261,7 +265,7 @@ git -C $D push origin main
 | `Memory Violation(0x4)` / `ATU Fault` | 先查探针是不是漏了 `set_default_device`（§5.1）；再查阈值是否越界，越界会让共享变量未初始化 |
 | 整格变慢、其他格不动 | occupancy 掉了：算 `静态 2328 + 动态` 有没有过 32,768 |
 | 换源码后行为没变 | `.so` 陈旧（§4 的 `rm`） |
-| 编译期 `undeclared identifier` | `radix_core.cuh` 里常量与 helper 的**先后顺序**（helper 用了后面才定义的常量） |
+| 编译期 `undeclared identifier` | radix 头文件里常量与 helper 的**先后顺序**（helper 用了后面才定义的常量；常数在 `radix_common.cuh`，最先 include） |
 
 定位阈值类问题最快的办法：**把阈值塞进输出尾部再读回来**。把 kernel 算出的
 `{wide_threshold, above, fine_threshold, remain, num_staged, last_remain}` 在
@@ -280,8 +284,8 @@ git -C $D push origin main
 >
 > **归因查过了，不要按"我们读两趟"去改**（这条是写本节时先猜、随后被源码否掉的）：
 > `b4096-v131072` 上 `launch_topk_f32_chunked` 对输入行只有**一趟**——
-> `topk_f32_chunk_stage1_kernel` 走 chunk（`radix_core.cuh:2404`，读 `scores`），
-> `stage2` 只在候选缓冲 `vals`/`cols` 上跑 `radix_topk_row_f32`（`:2489`，不碰行）。
+> `topk_f32_chunk_stage1_kernel` 走 chunk（读 `scores`），
+> `stage2` 只在候选缓冲 `vals`/`cols` 上跑 `radix_topk_row_f32`（不碰行）。
 > 我们那多出来的一趟是 **NaN 扫描**（ledger §8 的 A/B：1612 µs，恒定 ~20%）。
 > 也就是说：**单趟对单趟，我们 334 GB/s，对方 659 GB/s**（2.147 GB / 6425 µs
 > vs / 3260 µs，1,650 GB/s 墙的 20% vs 40%）。差在那**每元素的活**上
@@ -312,7 +316,7 @@ git -C $D push origin main
    上游那套**寄存器常驻**单遍（它的常数前提是编译期 `topk`，与本核的运行期
    `topk` 不同源）——所以这条路要先回答"阈值从哪来"，不是照搬。
 2. **pass 1 的每元素共享原子（95–110 µs，§12.23）**：仍是内核里最大的已识别
-   单项。原设想的"现成寄存器直方图"是假的（`radix_core.cuh:365` 的
+   单项。原设想的"现成寄存器直方图"是假的（`radix_row_bf16.cuh` 的
    `hist_add_bf16_reg` 只记到 1.5% 的元素），要做得**新写**一个
    register-then-flush 直方图：每线程 `r_hist[16]`、索引 `(key >> 4) & 15`、
    结尾一次性 flush。风险从"冲突"变成"**依赖链**"（见"别做"第 1 条），先量。

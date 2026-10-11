@@ -409,14 +409,14 @@ Two things the family table is deliberately not:
 - **Not the build's target list.** `CUCC_TARGETS` says what images were compiled, not what device is in front of you; deriving the grid from it names the wrong artifact as soon as the list does not lead with this device's family (the same defect `perf_snapshot.provenance()` and the two `run_*` scripts each had once). It is also not the `--offload-arch` spelling resolved back: `mxcc`'s `native` is that vocabulary, not this one — and `setup.py` resolves `native` at build time to *this host's* family, which is a build-machine fact rather than a device answer.
 - **Not a performance table.** Only family 1000's row has a measurement behind it. The other two are the parts' own AP count and the 128 KiB every 128 KiB family has, and **every C500-only *tuning* rule is still guarded by `kF32Coarse12MeasuredSmCount` (104) at run time** rather than by the macro. Geometry compiles in; tuning has to be earned. `ref/c500_gate/` prints both halves against the device's own report.
 
-### xcore1000 — `maca_topk.cu` + `radix_core.cuh` (the shipping C500 kernel)
+### xcore1000 — `maca_topk.cu` + the `radix_*.cuh` headers (the shipping C500 kernel)
 
 The contract layer and launch layer. Every mode shares one contract half — the `length <= topk` shortcut, the NaN bit-pattern check, index offsets, out-of-band fills, the optional ordered emit — and **two** selection dataflows feed it, both radix:
 
 - `radix_topk_row_bf16_b<BLOCK>` (16-bit rows) — the production path for bf16, one row per CTA, two passes over the row.
 - `radix_topk_row_f32` (32-bit rows) — same two-pass dataflow, with its own overflow rule (`radix_topk_row_f32_rescan`).
 
-`radix_core.cuh` is header-only and ported from a standalone C500 radix-TopK project (provenance banner at the top of the file records the source commit). Two row entries live in it — `radix_topk_row_bf16_b` (16-bit) and `radix_topk_row_f32` (32-bit) — and every kernel in the tree that ranks anything reaches one of them: the bf16 chunked split's two stages rank their chunk with `_b` as well. **Check which one you are editing before assuming it is the production path.**
+`radix_core.cuh` is the umbrella header for the radix dataflows, split by role into `radix_common.cuh` (constants / shared histogram + cumsum helpers), `radix_row_bf16.cuh`, `radix_row_fp32.cuh` and `radix_chunked.cuh`; the provenance banner on the umbrella records the source port. Two row entries exist — `radix_topk_row_bf16_b` (16-bit, `radix_row_bf16.cuh`) and `radix_topk_row_f32` (32-bit, `radix_row_fp32.cuh`) — and every kernel in the tree that ranks anything reaches one of them: the bf16 chunked split's two stages (`radix_chunked.cuh`) rank their chunk with `_b` as well. **Check which one you are editing before assuming it is the production path.**
 
 The current 16-bit dataflow is **coarse12** (see handover §3, ledger §2.3). Understand these three things before changing it:
 
@@ -528,7 +528,7 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
 
 - Nothing in `csrc/maca_kernels/xcore1000/` is C500-specific code. No `__MACA_ARCH__` branch
   anywhere in the tree; every cross-lane primitive is already 64-lane
-  (`radix_core.cuh`'s `kWarpSize = 64` under `__MACACC__`); the ranking is
+  (`radix_common.cuh`'s `kWarpSize = 64` under `__MACACC__`); the ranking is
   integer key manipulation with no float math to differ per part.
 - **Capacity cannot fire in this direction, and there is no config-sized
   capacity constant left to fire.** `NATIVE_SHARED_MEMORY_PER_SM_BYTES` and the
@@ -772,21 +772,22 @@ are the port's texture, not a pattern to copy, and whether any of them is
 reachable on a 64-lane wave needs its own audit — treat them as suspect rather
 than as precedent, and write new cross-lane code in the 64-lane form above.
 
-`csrc/maca_kernels/xcore1000/radix_core.cuh` already does this correctly and is the model to
-follow: `kWarpSize = 64` under `__MACACC__` (`:187`), with `#ifdef` pairs like
+`csrc/maca_kernels/xcore1000/radix_common.cuh` already does this correctly and is the model to
+follow: `kWarpSize = 64` under `__MACACC__`, with `#ifdef` pairs like
 `__shfl_down_sync(0xFFFFFFFFFFFFFFFFULL, …)` / `0xFFFFFFFF` for the CUDA build.
 When you add a mask here, add it to the 64-lane arm.
 
-One caveat on that file as a *primitive-selection* model: three of its
-cross-lane sites are the wrapper form — `:255` in `hist_add_bf16_reg`, and
-`:339`/`:358` inside `run_cumsum_warp`, which the shipping `radix_topk_row_bf16_b`
-calls **twice per row** (`:1064`, `:1159`), i.e. once per pass. Those two are the
+One caveat on those headers as a *primitive-selection* model: three of the
+radix tree's cross-lane sites are the wrapper form — one in `hist_add_bf16_reg`
+(`radix_row_bf16.cuh`), and two inside `run_cumsum_warp` (`radix_common.cuh`),
+which the shipping `radix_topk_row_bf16_b` calls **twice per row**, i.e. once
+per pass. Those two are the
 71-vs-44 case above, six shuffle steps each. They are not where the time is —
 ~96 shuffle ops per CTA against pass 1's one shared atomic *per element* (16,384
 of them on the profiled row, the measured 102.5 µs) — so converting them is
 cleanup, not a lever.
 
-**`hist_add_bf16_reg` / `hist_reg_to_smem` (`:239`, `:269`) are dead, and they
+**`hist_add_bf16_reg` / `hist_reg_to_smem` are dead, and they
 do not work — do not wire them up.** They read as "a register histogram we could
 switch on to kill pass 1's atomics", and the handover twice proposed exactly
 that. They are actually a *per-element shuffle transport*, not a histogram: each
@@ -933,7 +934,7 @@ the port):
 - **`dsa_topk`** (`/home/compiler_gfx/dsa_topk`, port commit
   `61ab380c77b81669718bfb11b95a583b0e661001`): the two-pass radix row —
   histogram pass, then collect-and-stage into an arena. Realized here in
-  `csrc/maca_kernels/xcore1000/radix_core.cuh`. Note `opt/radix_topk.cuh` there is *newer*
+  the `csrc/maca_kernels/xcore1000/radix_*.cuh` headers. Note `opt/radix_topk.cuh` there is *newer*
   than the port source and **is not what we carry**; read it as a separate
   experiment, not as our ancestry.
 
@@ -948,10 +949,10 @@ suggestions are small:
   thing in the tree to reading a row once, and it is a split-and-merge over
   `chunks` CTAs, not a single-pass row).
 - **`radix_topk_row_bf16_b` already has the `remain_topk == 0` exact-fit exit**
-  (`csrc/maca_kernels/xcore1000/radix_core.cuh:1096`) — it returns after the coarse
+  (`radix_row_bf16.cuh`) — it returns after the coarse
   complement, exactly as deep_gemm's `topk_coarse12_impl` does. It is the
   *overflow* path that lacks the corresponding exit, and
-  **`overflow_emit_member` (`:987`) may write slot 0 twice**: its slots all use
+  **`overflow_emit_member` (`radix_row_bf16.cuh`) may write slot 0 twice**: its slots all use
   `output[atomicAdd(&s_counter, 1u)]`, but `output[0]` is already the coarse
   complement when `remain_topk == 0`. The condition appears reachable
   algebraically (`s_high_threshold_bin_id` is the sub-bin index while
@@ -1374,7 +1375,7 @@ Never a bare `git commit -a` (see repo identity, top).
 
 **Debugging mis-ranked output**: the fastest localizer is to write the kernel's threshold triple `{wide_threshold, above, fine_threshold, remain, num_staged, last_remain}` into `output[topk-8+tx]` on `blockIdx.x == 0 && tx < 8` and compare it against the same row computed with torch on CPU. That is how the `0xBFA` vs true `0xBFC`-class bug was found in one step. Clean it up afterwards — `rg RKPROBE` must be 0. (This probe is written for `maca_topk.cu`'s threshold triple; `csrc/maca_kernels/xcore1600/` has a different dataflow and no equivalent variables.)
 
-Symptom → first look (handover §8): wrong-but-not-much (a few slots, rank off by a few) → the threshold's subtraction convention (the `above + c > remain_topk` rule); `Memory Violation(0x4)` / `ATU Fault` → first the probe's missing `set_default_device`, then an out-of-range threshold leaving a shared variable uninitialized; one cell slow while others unchanged → occupancy, check `static + dynamic` against 32,768; source changed with no behavior change → a stale `.so`; compile-time `undeclared identifier` → constant/helper ordering in `radix_core.cuh`; **wrong indices that change run to run → a lane-width bug** (a 32-bit mask or `/ 32` on a 64-lane wave in `csrc/maca_kernels/xcore1600/`), not a threshold-convention one — a fixed offset is the threshold, a varying one is a race.
+Symptom → first look (handover §8): wrong-but-not-much (a few slots, rank off by a few) → the threshold's subtraction convention (the `above + c > remain_topk` rule); `Memory Violation(0x4)` / `ATU Fault` → first the probe's missing `set_default_device`, then an out-of-range threshold leaving a shared variable uninitialized; one cell slow while others unchanged → occupancy, check `static + dynamic` against 32,768; source changed with no behavior change → a stale `.so`; compile-time `undeclared identifier` → constant/helper ordering in the radix headers (constants live in `radix_common.cuh`, included first); **wrong indices that change run to run → a lane-width bug** (a 32-bit mask or `/ 32` on a 64-lane wave in `csrc/maca_kernels/xcore1600/`), not a threshold-convention one — a fixed offset is the threshold, a varying one is a race.
 
 Reproduce the xcore1600 hole with no seed and no harness, so the expected answer is written down rather than computed.
 **`backend="maca_c"` is not optional here** — the process default is `torch`, so a bare call would exercise the
