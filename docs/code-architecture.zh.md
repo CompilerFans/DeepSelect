@@ -27,6 +27,11 @@ deep_select/{__init__,__version__,interface}.py     Python 层 = 只放公开契
 scripts/generate_instantiations.py  setup.py  tests/{test.py, lib.py, kernelkit/}
 ```
 
+命名空间（同一实测里读的，§3b 照此）：共享件 `topk_select_common`
+（`bit_utils.cuh:6`、`common_parts.cuh:16`），bf16 树 `topk_select_bf16_normal`
+（`v3/topk_select.cuh:21`），fp32 树 `topk_select_fp32`（`v3_fp32/topk_select.cuh:21`），
+`api.cpp` 全局、无命名空间。**平级、每个数据流一个**——这就是官方词汇的全部形状。
+
 **官方的"程序生成模板文件"模型**（`scripts/generate_instantiations.py:100-127`）：
 
 - 每个配置元组生成一个 `.cu`，**文件名就是元组**，例如
@@ -82,25 +87,36 @@ csrc/
         └── instantiations/*.cu             生成物：一个配置元组一个文件
 ```
 
-### 3b. 命名空间（用户 2026-10-12 裁定 A：单根平铺）
+### 3b. 命名空间（用户 2026-10-12 裁定：一条逻辑、一套词汇，照官方的）
 
-三条血统（我方 radix、deep_gemm 移植、上游 DeepSelect）不再各占一个命名空间；
-**单根 `deep_select::`，角色在下一层**：
+三条血统（我方 radix、deep_gemm 移植、上游 DeepSelect）不再各占一个命名空间。
+词汇取自官方实测（§1）：`topk_select_common` 放共享件，`topk_select_<变体>`
+每个数据流一个；本项目照此：
 
 ```
-deep_select::              契约半：RowParams / kMaxTopK(4096) / emit_ordered /
-                           radix_layout / radix_select_row / topk_kernel_radix / detail::
-deep_select::radix::       全部选择数据流（原 rk）：radix 行 + 移植两路
-  radix::coarse12::        12 位粗层的选择（原 rk::coarse12，deep_gemm 移植）
-  radix::chunks::          按 chunk 切分的候选合并（原 rk::chunks，deep_gemm 移植）
-deep_select::common::      跨族共享原语（原 deep_select_common）
-deep_select::ffi::         平台无关边缘（不变）
+topk_select_common::    跨族共享原语（原 deep_select_common）：位运算 / NaN 位型 /
+                        键编码 / cumsum。与官方同名同物——它里面的 bf16_is_nan
+                        本就来自官方的 topk_select_common（bit_utils.cuh）
+topk_select_radix::     我方 radix 数据流（原 rk）：两趟行核（bf16 / fp32）+ chunked 分块
+topk_select_coarse12::  移植一（原 rk::coarse12），与文件 / 核名 topk_coarse12_* 同词干
+topk_select_chunks::    移植二（原 rk::chunks），与文件 / 核名 topk_chunks_* 同词干
+deep_select::           契约半（RowParams / kMaxTopK(4096) / emit / 布局 / 选路）
+                        与 tvm-ffi 入口同处一名（原 deep_select_maca 撤销并入；
+                        `csrc/ffi/ffi_entries.h` 的入口本就在 `deep_select`）
+deep_select::ffi::      平台无关边缘（不变）
 ```
 
-`_maca` 后缀去掉：平台由目录（`csrc/maca_kernels/`）与编译宏
-（`-DDEEP_SELECT_IS_BUILD_ON_MACA`）承载，命名空间不再重复声明它。`rk` 是
-血统缩写（radix kernel，来自 dsa_topk 的 `radix_core.cuh`），两样都不占——既不是
-读者可懂的名，也只是重复文件名。
+三条理由，都不是口味：
+
+- **平级不嵌套**：官方没有嵌套命名空间，三个数据流是**兄弟**。这正是"一条逻辑"的
+  形态——同一族命名规则，不是一个根下再分亲疏。
+- **host 侧不新起名**：官方 `api.cpp` 全局无命名空间；本项目的对应物是契约半，
+  它要跨 TU 被数据流与入口引用，并入既有的 `deep_select`（包名 = ABI 名）最省一个名字，
+  `using namespace deep_select_maca` 那道桥也随之消失。`_maca` 后缀去掉：平台已由目录
+  （`csrc/maca_kernels/`）与编译宏（`-DDEEP_SELECT_IS_BUILD_ON_MACA`）承载。
+- **`radix` 只管 radix，且只管数据流**：`rk` 是血统缩写（radix kernel，来自 dsa_topk），
+  读者不可懂；把 deep_gemm 移植挂在 radix 名下同样不实——移植不是 radix。移植两路
+  与自己的文件、核名同词干（P4 已定），命名空间跟上。
 
 ## 4. 规则
 
@@ -129,13 +145,13 @@ deep_select::ffi::         平台无关边缘（不变）
 | P2 | `maca_topk.cu` 拆出 `contract.cuh` + `routing.cuh`；dg 两路的发射归位数据流文件 | 全绿 | P1/P4 |
 | P3 | `radix_core.cuh` 按 dtype 拆成 `radix_common` / `radix_row_bf16` / `radix_row_fp32` / `radix_chunked`；`radix_core.cuh` 留作伞头 | 全绿 | P1 |
 | P4 | `dg_*` → `topk_coarse12` / `topk_chunks`（文件、namespace、调用点、`ref/` 臂、文档） | 全绿 | 已落地 `2a795b1` |
-| N | 命名空间整合（§3b）：`rk` → `deep_select::radix`、`deep_select_maca` → `deep_select`、`deep_select_common` → `deep_select::common` | 全绿（rename 口径：demangle 名集模改后全等 + size 全等 + 冒烟） | P3 后、P2 前 |
+| N | 命名空间整合（§3b）：`rk`→`topk_select_radix`、`rk::coarse12`→`topk_select_coarse12`、`rk::chunks`→`topk_select_chunks`、`deep_select_common`→`topk_select_common`、`deep_select_maca`→并入 `deep_select` | 全绿（rename 口径：demangle 名集模改后全等 + size 全等 + 冒烟） | P3 后、P2 前 |
 | P5 | 生成器 + 配置元组模板 + `instantiations/*.cu` + 表驱动派发 + `setup.py` | **内核符号集不变** + 文件数==核数 + 套件绿（`nm` 全表预期变动：host 派发改成表） | P2/P3 |
 | P6 | python 侧分文件：`interface.py`（公开契约）+ `_backends.py`（torch / deep_gemm 参考后端）+ `_binding.py` / `_log.py` | 套件绿 + `inspect.signature` 不变 | 独立 |
 
 **P3 与 P4 可并行，两者唯一的潜在交界是 `maca_topk.cu` 的 include 块**（`:50-52`）：伞头让 P3 完全不碰这个文件，
 P4 在其中只改 dg 的两行。**N 排在 P3 之后、P2 之前**：它在 P3 搬完的每一行上改名一次，且必须先于 P2
-（P2 的新文件要生在新命名空间里；否则 `using deep_select_common::…` 这类声明会留下两代拼写）。
+（P2 的新文件要生在新命名空间里；否则 `using topk_select_common::…` 这类声明会留下两代拼写）。
 P2 重写 `maca_topk.cu`（拆出契约半与选路），因此在 P4 与 N 之后。
 P5 在 P2/P3 之后（它改的是它们刚整理出来的发射层）；P6 独立。
 
