@@ -76,7 +76,7 @@ setup.py's build_for_maca."
 // `f32_chunk_work_target` take the *runtime* `params.sm_count`, deliberately,
 // so that a caller handing this entry a tensor on another part gets a grid
 // sized for the part in front of it (see the note above `f32_chunk_work_target`
-// in `maca_topk.cu`).  The macro is a number for the record and for a reader;
+// in `routing.cuh`).  The macro is a number for the record and for a reader;
 // the grids do not read it.  **That is what lets a two-SKU family have a row
 // at all** -- see the C600U note below.
 //
@@ -114,7 +114,7 @@ setup.py's build_for_maca."
 // got wrong was the inference that the two numbers "cannot both be right for
 // the same silicon generation".  They can: the family ships both.  So the
 // number picked here is the one the *ladder* was fitted on, and the gap it
-// leaves is closed at the route rather than here -- `maca_topk.cu`'s
+// leaves is closed at the route rather than here -- `routing.cuh`'s
 // `is_c600u_ap_count` accepts both, and says why.
 //
 // Nothing routes on *this* -- `ARCH_SM_COUNT` has no behavioral consumer (the

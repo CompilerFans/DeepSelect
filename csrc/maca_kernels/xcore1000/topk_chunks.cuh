@@ -43,7 +43,7 @@
 //     the row path.  That changes coverage, not correctness, and the branch it
 //     removes only fires on a bin wider than 4096, which `randn` at these
 //     widths does not produce (the same measurement `kF32OverflowChunkLen`
-//     rests on, `maca_topk.cu`).
+//     rests on, `routing.cuh`).
 //
 // **The multi-CTA chunking was originally dropped here and has since been
 // restored.**  The paragraph that used to sit in this list said the port was
@@ -66,6 +66,10 @@
 #include <cuda_runtime.h>
 
 #include "../common/primitives.cuh"
+
+// The contract half the answer is handed to (`launch_route` below), and through
+// it the radix row kernel every route emits through.
+#include "contract.cuh"
 
 namespace topk_select_chunks {
 
@@ -469,8 +473,8 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     //
     // The flag is not decoration and it is not ours to skip: the caller hands
     // this kernel's answer to the contract half as `preselected`
-    // (`maca_topk.cu:1578-1581`), and that arm **reads** the slot instead of
-    // scanning the row:
+    // (`contract.cuh`, `topk_kernel_radix`'s preselected arm), and that arm
+    // **reads** the slot instead of scanning the row:
     //
     //     if constexpr (kPreSelected)
     //         nan_local = params.check_nan && params.nan_flags[row] != 0;
@@ -485,7 +489,7 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     //
     // The `length <= topk` arm above returns *before* this point and writes no
     // slot.  That is not a gap: the contract half's shortcut arm runs before its
-    // NaN block (`maca_topk.cu:427` against `:462`) and returns the whole window
+    // NaN block (`contract.cuh`) and returns the whole window
     // as the answer without ever reading a flag.
     int32_t *const row_nan = nan_flags == nullptr ? nullptr : nan_flags + row;
     // The row's *window*, resolved once by `topk_chunks_init`.  Not
@@ -947,4 +951,38 @@ inline cudaError_t launch_topk_chunks_impl(
     return cudaGetLastError();
 }
 
+
+// The route's launch and emit, on the same handoff as the coarse12 route: the
+// kernels answer in row columns, the contract half reads them out of the
+// staging scratch, and a row they could not serve leaves an empty slot there
+// for the contract half to re-rank on the row path.  The gate that admits this
+// route is `deep_select::detail::f32_chunks_applies` (`routing.cuh`).
+template <typename OutIdxT>
+inline void launch_route(const deep_select::RowParams &params, uint32_t batches,
+                         cudaStream_t stream, bool sorted_index,
+                         bool sorted_value, bool return_value, int block) {
+    int32_t *const staging = params.coarse12_cols;
+    if (staging != nullptr) {
+        const cudaError_t rc = launch_topk_chunks(
+            (const float *)params.input, params.end_ptr, staging,
+            params.scan_flags, params.chunks_workspace, (int)batches,
+            (int)params.topk,
+            (int64_t)(params.stride_input_batch / sizeof(float)),
+            (int)params.vocab_size, params.sm_count, stream);
+        if (rc == cudaSuccess) {
+            deep_select::RowParams merged = params;
+            merged.preselected = staging;
+            merged.nan_flags = params.scan_flags;
+            deep_select::detail::launch_typed_radix<float, OutIdxT>(
+                merged, batches, stream, sorted_index, sorted_value, return_value,
+                block, /*preselected=*/true);
+            return;
+        }
+    }
+    deep_select::detail::launch_typed_radix<float, OutIdxT>(
+        params, batches, stream, sorted_index, sorted_value, return_value, block,
+        /*preselected=*/false);
+}
+
 }  // namespace topk_select_chunks
+
