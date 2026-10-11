@@ -30,7 +30,7 @@ three answer different questions:
 | dir             | what it is | why it is separate |
 |-----------------|------------|--------------------|
 | `c500_gate/`     | the dispatch gate, printed | It prints `ARCH_SMEM_PER_AP_BYTES` beside the device's own `cudaDevAttrMaxSharedMemoryPerBlockOptin` and evaluates `ref_c500_gate` over a shape sweep. It measures nothing — it is the place a threshold change is read against the constant it was compiled with. |
-| `coarse12_port/` | the *ported* coarse12 kernel, driven directly | `rk::dg12::launch_topk_coarse12` with no gate, no dispatch and no contract half, so the kernel itself can be timed against `deep_gemm/`'s original and its whole `top_k` range exercised. This is the only place the port runs without the facade around it. |
+| `coarse12_port/` | the *ported* coarse12 kernel, driven directly | `rk::coarse12::launch_topk_coarse12` with no gate, no dispatch and no contract half, so the kernel itself can be timed against `deep_gemm/`'s original and its whole `top_k` range exercised. This is the only place the port runs without the facade around it. |
 | `kerutils_platform_arms/` | the vendored `kerutils`' MACA platform arm, compiled and run | Nothing else in this repository instantiates that arm — its only consumer is off `SOURCES` — so without this probe "it builds" says nothing about it. `./run_probe.sh` there reads its flags out of `setup.py`. |
 
 The first two are referenced from `maca_topk.cu`'s gate comments; none of the
