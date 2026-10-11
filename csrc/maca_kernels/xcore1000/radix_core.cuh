@@ -7,12 +7,12 @@
 // Three deviations from that source:
 //
 //   1. The 16-bit path speaks bf16, not fp16.  DeepSelect's dtypes are bf16
-//      and fp32, so `half_to_uintN` became `bf16_to_uintN`, reading the
-//      value's own bit pattern (`__bfloat16_as_ushort`) instead of fp16's.
-//      The key transform is otherwise unchanged -- it only needs the sign bit
-//      at bit 15, which both formats have.  This is NOT the same as
-//      `float_to_uint8`, which rounds fp32 through fp16 before binning and so
-//      has no bf16 counterpart.
+//      and fp32, so the fp16 key encode became `refine_bin`'s 16-bit overload
+//      (`../common/primitives.cuh`), reading the value's own bit pattern
+//      (`__bfloat16_as_ushort`) instead of fp16's.  The key transform is
+//      otherwise unchanged -- it only needs the sign bit at bit 15, which both
+//      formats have.  This is NOT the same as `float_to_uint8`, which rounds
+//      fp32 through fp16 before binning and so has no bf16 counterpart.
 //   2. `radix_topk_row_f32_rescan` is added, called from
 //      `radix_topk_row_f32` when its coarse bin does not fit the candidate
 //      arena.  Without it that case ranks only the members it managed to
@@ -40,6 +40,8 @@
 #include <maca_bfloat16.h>   // the 16-bit path's value type
 #include <cstdint>
 #include <cstdlib>           // std::getenv, for the fused scan's A/B knob
+
+#include "../common/primitives.cuh"
 
 namespace rk {
 
@@ -135,27 +137,13 @@ constexpr uint32_t kCompactBF16MaxLength = KCOMPACT_BF16_MAX_LENGTH;
 // 类型转换
 // ============================================================
 
-// `is_nan_value<float>` in `maca_topk.cu` (:164), at this layer: exponent all
-// ones, mantissa non-zero.  Spelled here so the fused arm below and the
-// standalone `nan_scan_kernel` share one predicate *within this translation
-// unit* -- every in-file caller (:176, :627, :2389) goes through this, and
-// `nan_scan_kernel` is the same file's.
-//
-// **It is a copy, not a call, and the compiler cannot check that the two
-// agree.**  The `maca_topk.cu` specialization is templated on the value type
-// and takes a `ValueT`, so this file cannot call it without pulling that
-// header's type machinery in.  The bodies are identical today (compare the two
-// by hand if you touch either); nothing ties them, which is what the old
-// wording -- "provably share one predicate" -- claimed and did not deliver.
-__device__ __forceinline__ bool is_nan_bits(uint32_t bits) {
-    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
-}
-
-// The bf16 sibling: exponent all-ones and a non-zero payload, in 8+7 bits
-// rather than 8+23.  Same contract, same one compare per element.
-__device__ __forceinline__ bool is_nan_bits16(uint32_t bits) {
-    return (bits & 0x7F80u) == 0x7F80u && (bits & 0x007Fu) != 0u;
-}
+// The NaN predicates and the key encodes come from `../common/primitives.cuh`
+// (one definition, shared with the two `dg_*` dataflows and `maca_topk.cu`);
+// they are pulled in unqualified because every call site below is spelled that
+// way.
+using deep_select_common::is_nan_bits32;
+using deep_select_common::bf16_is_nan;
+using deep_select_common::refine_bin;
 
 // 与 SGLang 原始实现一致：先转 half 再取高 8 位
 __device__ __forceinline__ uint8_t float_to_uint8(float x) {
@@ -165,26 +153,8 @@ __device__ __forceinline__ uint8_t float_to_uint8(float x) {
     return static_cast<uint8_t>(key >> 8);
 }
 
-__device__ __forceinline__ uint32_t float_to_uint32(float x) {
-    uint32_t bits = __float_as_uint(x);
-    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
-}
-
-__device__ __forceinline__ uint16_t bf16_to_uint16(maca_bfloat16 x) {
-    uint16_t bits = __bfloat16_as_ushort(x);
-#ifdef __MACACC__
-    // C500: express the ordered-key transform without a divergent sign
-    // branch.  Positive keys xor 0x8000; negative keys xor 0xffff.
-    const uint32_t sign = static_cast<uint32_t>(bits >> 15);
-    const uint16_t mask = static_cast<uint16_t>(0x8000u | (0u - sign));
-    return static_cast<uint16_t>(bits ^ mask);
-#else
-    return (bits & 0x8000) ? static_cast<uint16_t>(~bits) : static_cast<uint16_t>(bits | 0x8000);
-#endif
-}
-
 __device__ __forceinline__ uint8_t bf16_to_uint8(maca_bfloat16 x) {
-    return static_cast<uint8_t>(bf16_to_uint16(x) >> 8);
+    return static_cast<uint8_t>(refine_bin(x) >> 8);
 }
 
 
@@ -226,8 +196,8 @@ __device__ __forceinline__ bool hist_add_f32(
     atomicAdd(&s_histogram[float_to_uint8(v.z)], 1u);
     atomicAdd(&s_histogram[float_to_uint8(v.w)], 1u);
     if (!kNan) return false;
-    return is_nan_bits(__float_as_uint(v.x)) | is_nan_bits(__float_as_uint(v.y))
-         | is_nan_bits(__float_as_uint(v.z)) | is_nan_bits(__float_as_uint(v.w));
+    return is_nan_bits32(__float_as_uint(v.x)) | is_nan_bits32(__float_as_uint(v.y))
+         | is_nan_bits32(__float_as_uint(v.z)) | is_nan_bits32(__float_as_uint(v.w));
 }
 
 // One element of the fp32 row's second pass.  Both walkers ask every element
@@ -254,7 +224,7 @@ __device__ __forceinline__ void stage_f32_lane(
         const uint32_t pos = atomicAdd(s_num_input0, 1u);
         if (pos < smem_input_size) {
             s_input_flat[pos] = idx;
-            atomicAdd(&s_histogram[(float_to_uint32(raw) >> 24) & 0xFFu], 1u);
+            atomicAdd(&s_histogram[(refine_bin(raw) >> 24) & 0xFFu], 1u);
         }
     }
 }
@@ -397,7 +367,7 @@ __device__ __forceinline__ bool hist_add_bf16_wide(
     // (0x7fff + 0x7fff0000 = 0x7fff7fff).
     //
     // The NaN test rides the raw word: `(h & 0x7fff) > 0x7f80` is
-    // `is_nan_bits16` exactly, and it holds for both halves at once because
+    // `bf16_is_nan` exactly, and it holds for both halves at once because
     // `| 0x80008000` puts each half's top bit within reach of one subtraction
     // of 0x7f817f81 -- the low half cannot borrow into the high one, since
     // 0x8000 - 0x7f81 = 0x7f >= 0.  Both forms are verified against the
@@ -637,7 +607,7 @@ __device__ __forceinline__ void radix_topk_row_f32_rescan(
         for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
             const float raw = __ldg(input + idx);
             if (float_to_uint8(raw) != coarse_bin) continue;
-            const uint32_t key = float_to_uint32(raw);
+            const uint32_t key = refine_bin(raw);
             if (filtered && (key & prefix_mask) != prefix_value) continue;
             atomicAdd(&s_histogram[(key >> shift) & 0xFFu], 1u);
         }
@@ -655,7 +625,7 @@ __device__ __forceinline__ void radix_topk_row_f32_rescan(
         for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
             const float raw = __ldg(input + idx);
             if (float_to_uint8(raw) != coarse_bin) continue;
-            const uint32_t key = float_to_uint32(raw);
+            const uint32_t key = refine_bin(raw);
             if (filtered && (key & prefix_mask) != prefix_value) continue;
             const uint32_t bin = (key >> shift) & 0xFFu;
             if (bin > pivot) {
@@ -748,7 +718,7 @@ __device__ __forceinline__ void radix_topk_row_f32(
     for (uint32_t idx = vec_len + tx; idx < length; idx += BLOCK_SIZE) {
         const float raw = __ldg(input + idx);
         atomicAdd(&s_histogram[float_to_uint8(raw)], 1u);
-        if (kNan) nan_local |= is_nan_bits(__float_as_uint(raw));
+        if (kNan) nan_local |= is_nan_bits32(__float_as_uint(raw));
     }
     __syncthreads();
     // Two things on the same barrier: the histogram is complete, and the CTA's
@@ -827,7 +797,7 @@ __device__ __forceinline__ void radix_topk_row_f32(
         if (remain_topk == 0) {
             for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
                 auto idx = s_input_flat[r_off + i];
-                if (((float_to_uint32(__ldg(input + idx)) >> (24 - round * 8)) & 0xFF) > threshold_bin)
+                if (((refine_bin(__ldg(input + idx)) >> (24 - round * 8)) & 0xFF) > threshold_bin)
                     output[atomicAdd(&s_counter, 1u)] =
                         static_cast<int32_t>(idx + chunk_begin);
             }
@@ -841,7 +811,7 @@ __device__ __forceinline__ void radix_topk_row_f32(
             auto idx = s_input_flat[r_off + i];
             float raw = __ldg(input + idx);
             auto offset = 24 - round * 8;
-            auto bin = (float_to_uint32(raw) >> offset) & 0xFF;
+            auto bin = (refine_bin(raw) >> offset) & 0xFF;
             if (bin > threshold_bin) {
                 output[atomicAdd(&s_counter, 1u)] =
                     static_cast<int32_t>(idx + chunk_begin);
@@ -854,7 +824,7 @@ __device__ __forceinline__ void radix_topk_row_f32(
                     uint32_t p = atomicAdd(&s_num_input[r_idx ^ 1], 1u);
                     if (p < SMEM_INPUT_SIZE) {
                         s_input_flat[r_off_next + p] = idx;
-                        atomicAdd(&s_histogram[(float_to_uint32(raw) >> (offset - 8)) & 0xFF], 1u);
+                        atomicAdd(&s_histogram[(refine_bin(raw) >> (offset - 8)) & 0xFF], 1u);
                     }
                 }
             }
@@ -976,7 +946,7 @@ __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024(
             const auto pos = atomicAdd(&s_num_input[0], 1);
             if (pos < SMEM_INPUT_SIZE) {
                 s_input_idx[0][pos] = idx;
-                const auto sub_bin = (float_to_uint32(raw_input) >> 24) & 0xFF;
+                const auto sub_bin = (refine_bin(raw_input) >> 24) & 0xFF;
                 atomicAdd(&s_histogram[sub_bin], 1);
             }
         }
@@ -1006,7 +976,7 @@ __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024(
             for (int i = tx; i < num_input; i += kF32K2048BlockSize) {
                 const auto idx = s_input_idx[r_idx][i];
                 const auto offset = 24 - round * 8;
-                const auto bin = (float_to_uint32(input[idx + row_start]) >> offset) & 0xFF;
+                const auto bin = (refine_bin(input[idx + row_start]) >> offset) & 0xFF;
                 if (bin > threshold_bin) {
                     const auto pos = atomicAdd(&s_counter, 1);
                     output[pos] = idx;
@@ -1023,7 +993,7 @@ __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024(
             const auto idx = s_input_idx[r_idx][i];
             const auto raw_input = input[idx + row_start];
             const auto offset = 24 - round * 8;
-            const auto bin = (float_to_uint32(raw_input) >> offset) & 0xFF;
+            const auto bin = (refine_bin(raw_input) >> offset) & 0xFF;
             if (bin > threshold_bin) {
                 const auto pos = atomicAdd(&s_counter, 1);
                 output[pos] = idx;
@@ -1037,7 +1007,7 @@ __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024(
                     const auto pos = atomicAdd(&s_num_input[r_idx ^ 1], 1);
                     if (pos < SMEM_INPUT_SIZE) {
                         s_input_idx[r_idx ^ 1][pos] = idx;
-                        const auto sub_bin = (float_to_uint32(raw_input) >> (offset - 8)) & 0xFF;
+                        const auto sub_bin = (refine_bin(raw_input) >> (offset - 8)) & 0xFF;
                         atomicAdd(&s_histogram[sub_bin], 1);
                     }
                 }
@@ -1147,7 +1117,7 @@ __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024_warp_scan(
             const uint32_t pos = atomicAdd(&s_num_input[0], 1u);
             if (pos < SMEM_INPUT_SIZE) {
                 s_input_flat[pos] = idx;
-                atomicAdd(&s_histogram[(float_to_uint32(raw) >> 24) & 0xFF], 1u);
+                atomicAdd(&s_histogram[(refine_bin(raw) >> 24) & 0xFF], 1u);
             }
         }
     }
@@ -1178,7 +1148,7 @@ __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024_warp_scan(
             for (uint32_t i = tx; i < num_input; i += kF32K2048BlockSize) {
                 const auto idx = s_input_flat[r_off + i];
                 const auto offset = 24 - round * 8;
-                const auto bin = (float_to_uint32(__ldg(input + row_start + idx)) >> offset) & 0xFF;
+                const auto bin = (refine_bin(__ldg(input + row_start + idx)) >> offset) & 0xFF;
                 if (bin > threshold_bin) {
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
                 }
@@ -1194,7 +1164,7 @@ __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024_warp_scan(
             const auto idx = s_input_flat[r_off + i];
             const float raw = __ldg(input + row_start + idx);
             const auto offset = 24 - round * 8;
-            const auto bin = (float_to_uint32(raw) >> offset) & 0xFF;
+            const auto bin = (refine_bin(raw) >> offset) & 0xFF;
             if (bin > threshold_bin) {
                 output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             } else if (bin == threshold_bin) {
@@ -1207,7 +1177,7 @@ __device__ __forceinline__ void radix_topk_row_f32_k2048_b1024_warp_scan(
                     const auto pos = atomicAdd(&s_num_input[r_idx ^ 1], 1u);
                     if (pos < SMEM_INPUT_SIZE) {
                         s_input_flat[r_off_next + pos] = idx;
-                        atomicAdd(&s_histogram[(float_to_uint32(raw) >> (offset - 8)) & 0xFF], 1u);
+                        atomicAdd(&s_histogram[(refine_bin(raw) >> (offset - 8)) & 0xFF], 1u);
                     }
                 }
             }
@@ -1462,14 +1432,14 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         const uint32_t hist_tail_start = summary_wanted ? list_end : vec_len;
         for (uint32_t idx = hist_tail_start + tx; idx < length; idx += BLOCK_SIZE) {
             const maca_bfloat16 raw = __ldg(input + idx);
-            atomicAdd(&s_wide[bf16_to_uint16(raw) >> kCoarse12Shift], 1u);
-            if (kNan) nan_local |= is_nan_bits16(__bfloat16_as_ushort(raw));
+            atomicAdd(&s_wide[refine_bin(raw) >> kCoarse12Shift], 1u);
+            if (kNan) nan_local |= bf16_is_nan(__bfloat16_as_ushort(raw));
         }
     } else {
         for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
             const maca_bfloat16 raw = __ldg(input + idx);
-            atomicAdd(&s_wide[bf16_to_uint16(raw) >> kCoarse12Shift], 1u);
-            if (kNan) nan_local |= is_nan_bits16(__bfloat16_as_ushort(raw));
+            atomicAdd(&s_wide[refine_bin(raw) >> kCoarse12Shift], 1u);
+            if (kNan) nan_local |= bf16_is_nan(__bfloat16_as_ushort(raw));
         }
     }
     __syncthreads();
@@ -1569,17 +1539,17 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                 walk_kept_blocks<BLOCK_SIZE>(
                     input, block_list, nlist,
                     [&](uint32_t idx, maca_bfloat16 raw) {
-                        if ((bf16_to_uint16(raw) >> kCoarse12Shift) > threshold_bin)
+                        if ((refine_bin(raw) >> kCoarse12Shift) > threshold_bin)
                             output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
                     });
                 // What the list does not cover: the row past its last whole
                 // block.
                 for (uint32_t idx = list_end + tx; idx < length; idx += BLOCK_SIZE)
-                    if ((bf16_to_uint16(__ldg(input + idx)) >> kCoarse12Shift) > threshold_bin)
+                    if ((refine_bin(__ldg(input + idx)) >> kCoarse12Shift) > threshold_bin)
                         output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             } else {
                 for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
-                    if ((bf16_to_uint16(__ldg(input + idx)) >> kCoarse12Shift) > threshold_bin)
+                    if ((refine_bin(__ldg(input + idx)) >> kCoarse12Shift) > threshold_bin)
                         output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             }
             __syncthreads(); return;
@@ -1591,7 +1561,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         // walk's `idx + i` and the list walk's `base + lane*8 + i` are the same
         // index for the same element.
         const auto collect_one = [&](uint32_t idx, maca_bfloat16 raw) {
-            const uint32_t bin = bf16_to_uint16(raw) >> kCoarse12Shift;
+            const uint32_t bin = refine_bin(raw) >> kCoarse12Shift;
             if (bin > threshold_bin) {
                 output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             } else if (bin == threshold_bin) {
@@ -1601,7 +1571,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                 // rebuild below used to repair.
                 const uint32_t pos = atomicAdd(&s_num_input[0], 1u);
                 if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
-                atomicAdd(&s_histogram[bf16_to_uint16(raw) & (kCoarse12SubBins - 1u)], 1u);
+                atomicAdd(&s_histogram[refine_bin(raw) & (kCoarse12SubBins - 1u)], 1u);
             }
         };
         if (use_list) {
@@ -1648,7 +1618,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             // list on the same terms as the collect above.
             const auto high_threshold_bin = coarse_threshold;
             const auto emit_member = [&](uint32_t idx, maca_bfloat16 raw) {
-                overflow_emit_member(idx, bf16_to_uint16(raw), high_threshold_bin,
+                overflow_emit_member(idx, refine_bin(raw), high_threshold_bin,
                                      threshold_bin, remain_topk, topk, output,
                                      &s_counter, &s_last_remain);
             };
@@ -1677,7 +1647,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         if (remain_topk == 0) {
             for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
                 auto idx = s_input_flat[i];
-                if ((bf16_to_uint16(__ldg(input + idx)) & (kCoarse12SubBins - 1u)) > threshold_bin)
+                if ((refine_bin(__ldg(input + idx)) & (kCoarse12SubBins - 1u)) > threshold_bin)
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             }
             __syncthreads(); return;
@@ -1685,7 +1655,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         __syncthreads();
         for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
             auto idx = s_input_flat[i];
-            uint32_t bin = bf16_to_uint16(__ldg(input + idx)) & (kCoarse12SubBins - 1u);
+            uint32_t bin = refine_bin(__ldg(input + idx)) & (kCoarse12SubBins - 1u);
             if (bin > threshold_bin) {
                 output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             } else if (bin == threshold_bin) {
@@ -1780,7 +1750,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_k(
                         if (pos < input_capacity) {
                             if (use_compact_indices) s_input_compact[pos] = static_cast<uint16_t>(idx + i);
                             else s_input_flat[pos] = idx + i;
-                            atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
+                            atomicAdd(&s_histogram[refine_bin(raw) & 0xFF], 1u);
                         }
                     }
                 }
@@ -1795,7 +1765,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_k(
                     if (pos < input_capacity) {
                         if (use_compact_indices) s_input_compact[pos] = static_cast<uint16_t>(idx);
                         else s_input_flat[pos] = idx;
-                        atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
+                        atomicAdd(&s_histogram[refine_bin(raw) & 0xFF], 1u);
                     }
                 }
             }
@@ -1810,7 +1780,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_k(
                     if (pos < input_capacity) {
                         if (use_compact_indices) s_input_compact[pos] = static_cast<uint16_t>(idx);
                         else s_input_flat[pos] = idx;
-                        atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
+                        atomicAdd(&s_histogram[refine_bin(raw) & 0xFF], 1u);
                     }
                 }
             }
@@ -1825,7 +1795,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_k(
             __syncthreads();
             for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
                 const maca_bfloat16 raw = __ldg(input + idx);
-                const uint32_t key = bf16_to_uint16(raw);
+                const uint32_t key = refine_bin(raw);
                 if ((key >> 8) == s_high_threshold_bin_id)
                     atomicAdd(&s_histogram[key & 0xFF], 1u);
             }
@@ -1844,7 +1814,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_k(
             const auto high_threshold_bin = s_high_threshold_bin_id;
             for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE) {
                 const maca_bfloat16 raw = __ldg(input + idx);
-                const uint32_t key = bf16_to_uint16(raw);
+                const uint32_t key = refine_bin(raw);
                 if ((key >> 8) == high_threshold_bin) {
                     const uint32_t low = key & 0xFF;
                     if (low > threshold_bin) {
@@ -1862,7 +1832,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_k(
             for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
                 const uint32_t idx = use_compact_indices
                     ? static_cast<uint32_t>(s_input_compact[i]) : s_input_flat[i];
-                if ((bf16_to_uint16(__ldg(input + idx)) & 0xFF) > threshold_bin)
+                if ((refine_bin(__ldg(input + idx)) & 0xFF) > threshold_bin)
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             }
             __syncthreads(); return;
@@ -1871,7 +1841,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_k(
         for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
             const uint32_t idx = use_compact_indices
                 ? static_cast<uint32_t>(s_input_compact[i]) : s_input_flat[i];
-            uint32_t bin = bf16_to_uint16(__ldg(input + idx)) & 0xFF;
+            uint32_t bin = refine_bin(__ldg(input + idx)) & 0xFF;
             if (bin > threshold_bin) {
                 output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             } else if (bin == threshold_bin) {
@@ -1982,7 +1952,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_reg(
                 uint32_t pos = atomicAdd(&s_num_input[0], 1u);
                 if (pos < SMEM_INPUT_SIZE) {
                     s_input_flat[pos] = idx;
-                    atomicAdd(&s_histogram[bf16_to_uint16(raw) & 0xFF], 1u);
+                    atomicAdd(&s_histogram[refine_bin(raw) & 0xFF], 1u);
                 }
             }
         }
@@ -2003,7 +1973,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_reg(
         if (remain_topk == 0) {
             for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
                 auto idx = s_input_flat[i];
-                if ((bf16_to_uint16(__ldg(input + idx)) & 0xFF) > threshold_bin)
+                if ((refine_bin(__ldg(input + idx)) & 0xFF) > threshold_bin)
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             }
             __syncthreads(); return;
@@ -2011,7 +1981,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_reg(
         __syncthreads();
         for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
             auto idx = s_input_flat[i];
-            uint32_t bin = bf16_to_uint16(__ldg(input + idx)) & 0xFF;
+            uint32_t bin = refine_bin(__ldg(input + idx)) & 0xFF;
             if (bin > threshold_bin) {
                 output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             } else if (bin == threshold_bin) {
@@ -2156,7 +2126,7 @@ __global__ void topk_bf16_chunk_stage1_kernel_k(
                 const maca_bfloat16 raw = __ldg(row + idx);
                 chunk_indices[i] = idx;
                 chunk_values[i] = raw;
-                if (kNan) nan_local |= is_nan_bits16(__bfloat16_as_ushort(raw));
+                if (kNan) nan_local |= bf16_is_nan(__bfloat16_as_ushort(raw));
             } else {
                 chunk_indices[i] = -1;
                 chunk_values[i] = invalid_value;
@@ -2231,7 +2201,7 @@ __global__ void topk_bf16_chunk_stage1_kernel(
                 const maca_bfloat16 raw = __ldg(row + idx);
                 chunk_indices[i] = idx;
                 chunk_values[i] = raw;
-                if (kNan) nan_local |= is_nan_bits16(__bfloat16_as_ushort(raw));
+                if (kNan) nan_local |= bf16_is_nan(__bfloat16_as_ushort(raw));
             } else {
                 chunk_indices[i] = -1;
                 chunk_values[i] = invalid_value;
@@ -2774,7 +2744,7 @@ __global__ __launch_bounds__(kBlockSize) void topk_f32_chunk_stage1_kernel(
                 const float v = __ldg(row + start + i);
                 chunk_cols[i] = start + i;
                 chunk_vals[i] = v;
-                if (kNan) nan_local |= is_nan_bits(__float_as_uint(v));
+                if (kNan) nan_local |= is_nan_bits32(__float_as_uint(v));
             } else {
                 chunk_cols[i] = -1;
                 chunk_vals[i] = -__builtin_huge_valf();

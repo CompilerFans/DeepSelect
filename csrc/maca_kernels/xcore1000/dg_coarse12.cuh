@@ -46,6 +46,8 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
+#include "../common/primitives.cuh"
+
 namespace rk {
 namespace dg12 {
 
@@ -87,75 +89,12 @@ static_assert((size_t)kCoarseBins * sizeof(int32_t) <= kSmemBytes,
 
 constexpr float kNegativeInfinity = -__builtin_huge_valf();
 
-// The NaN predicate `maca_topk.cu`'s row contract uses, in this file's own
-// namespace so the port stays self-contained: `radix_core.cuh` -- the only
-// header this is included beside -- defines it inside `deep_select_maca`, and
-// this file is included *before* that definition, so a call to the outer name
-// here would not resolve.  Same expression, `v != v` spelled out in bits
-// because the build enables `--use_fast_math`.
-__device__ __forceinline__ bool is_nan_value(float v)
-{
-    const uint32_t bits = __float_as_uint(v);
-    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
-}
-
-__device__ __forceinline__ uint32_t refine_bin(float value)
-{
-    const uint32_t bits = __float_as_uint(value);
-    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
-}
-
-// `warp_cumsum_histogram<kRadix>` at `kRadix == kFineBins == 256`, which is
-// the **fine** arm of deep_gemm's helper -- not the 1024-bin one.
-//
-// Which arm matters, and getting it wrong is not a tuning difference: the
-// coarse arm indexes `histogram[tid]` over *every* thread in the block, so at
-// 640 threads it walks 383 words past a `[257]` array and rewrites `counter`,
-// `threshold_bin_id` and the rest of the block's shared state on its way.  A
-// first version of this file did exactly that (it read the helper's shape off
-// the `kCoarseBins == 1024` instantiation), and the symptom was a threshold of
-// 3073 -- a 12-bit bin id, which cannot exist -- followed by an illegal shared
-// address.  The fine arm touches only lanes 0..63 for `Bins == 256`, and
-// `static_assert`s below keep that arithmetic tied to `kRadix` rather than to
-// the 64 it was written for.
-//
-// Shape: each of the 64 lanes owns `kItemsPerLane` consecutive bins, suffix-
-// sums them in registers, then one warp shuffle pass gives each lane the total
-// of the lanes above it.  The result is the same suffix sum over all 256 bins
-// the original produces; the ordering of the three steps is the original's.
-__device__ __forceinline__ void warp_cumsum_histogram_256(int (&histogram)[kRadix + kHistogramPadding])
-{
-    constexpr int kWarpSize = 64;
-    constexpr uint64_t kWarpMask = 0xffffffffffffffffULL;
-    constexpr int kItemsPerLane = kRadix / kWarpSize;
-    static_assert(kRadix % kWarpSize == 0 && kRadix / kWarpSize <= kWarpSize);
-
-    const int tid = threadIdx.x;
-    if (tid < kWarpSize) {
-        const int lane = tid;
-        int values[kItemsPerLane];
-#pragma unroll
-        for (int item = 0; item < kItemsPerLane; ++item)
-            values[item] = histogram[lane * kItemsPerLane + item];
-#pragma unroll
-        for (int item = kItemsPerLane - 2; item >= 0; --item)
-            values[item] += values[item + 1];
-
-        const int lane_total = values[0];
-        int warp_suffix = lane_total;
-#pragma unroll
-        for (int offset = 1; offset < kWarpSize; offset <<= 1) {
-            const int other = __shfl_down_sync(kWarpMask, warp_suffix, offset, kWarpSize);
-            if (lane + offset < kWarpSize) warp_suffix += other;
-        }
-        const int lane_offset = warp_suffix - lane_total;
-
-#pragma unroll
-        for (int item = 0; item < kItemsPerLane; ++item)
-            histogram[lane * kItemsPerLane + item] = values[item] + lane_offset;
-    }
-    __syncthreads();
-}
+// The NaN predicate, the key encode and the warp histogram suffix sum come from
+// `../common/primitives.cuh`; unqualified here because every call site below
+// is spelled that way.
+using deep_select_common::is_nan_value;
+using deep_select_common::refine_bin;
+using deep_select_common::warp_cumsum_histogram;
 
 // One row of `[0, length)`, ranking `requested_topk` of it.
 //
@@ -271,7 +210,7 @@ __device__ __forceinline__ bool topk_coarse12_row(
     }
     __syncthreads();
 
-    warp_cumsum_histogram_256(histogram);
+    warp_cumsum_histogram<kRadix>(histogram);
     if (tid < kRadix && histogram[tid] > requested_topk
         && histogram[tid + 1] <= requested_topk) {
         threshold_bin_id = tid;
@@ -380,7 +319,7 @@ __device__ __forceinline__ bool topk_coarse12_row(
             }
             __syncthreads();
 
-            warp_cumsum_histogram_256(histogram);
+            warp_cumsum_histogram<kRadix>(histogram);
             if (tid < kRadix && histogram[tid] > topk && histogram[tid + 1] <= topk) {
                 threshold_bin_id = tid;
                 threshold_exclusive_count = histogram[tid + 1];
@@ -423,7 +362,7 @@ __device__ __forceinline__ bool topk_coarse12_row(
         const int next_offset = (read ^ 1) * kCandidateCapacity;
         const int candidate_count = num_input[read];
 
-        warp_cumsum_histogram_256(histogram);
+        warp_cumsum_histogram<kRadix>(histogram);
         if (tid < kRadix && histogram[tid] > topk && histogram[tid + 1] <= topk) {
             threshold_bin_id = tid;
             threshold_exclusive_count = histogram[tid + 1];

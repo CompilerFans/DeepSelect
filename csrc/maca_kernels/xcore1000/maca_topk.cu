@@ -40,6 +40,9 @@
 #include <vector>
 
 #include "structs.h"
+// The NaN predicates and the order-preserving key encodes, shared with the
+// dataflow headers below.
+#include "../common/primitives.cuh"
 // The ported C500 dataflow (see the provenance banner in that file).  It is
 // included here so that this translation unit -- the one `setup.py` builds --
 // is what proves it compiles under the mxcc/cu-bridge toolchain, and so that
@@ -155,20 +158,11 @@ struct RowParams {
 };
 
 // ── key encode / decode ─────────────────────────────────────────────────────
-template <typename ValueT>
-static __device__ __forceinline__ uint32_t key_of(ValueT v);
-
-template <>
-__device__ __forceinline__ uint32_t key_of<float>(float v) {
-    const uint32_t bits = __float_as_uint(v);
-    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
-}
-
-template <>
-__device__ __forceinline__ uint32_t key_of<maca_bfloat16>(maca_bfloat16 v) {
-    const uint32_t bits = (uint32_t)__bfloat16_as_ushort(v);
-    return (bits & 0x8000u) ? (~bits & 0xFFFFu) : (bits | 0x8000u);
-}
+// The value-typed key encode and NaN predicate live in
+// `../common/primitives.cuh`, so the row kernels' copies of the same bit
+// tricks cannot drift from the contract half's.
+using deep_select_common::is_nan_value;
+using deep_select_common::refine_bin;
 
 
 // float -> ValueT.  MACA's `__maca_bfloat16` has no implicit float conversion,
@@ -183,29 +177,8 @@ __device__ __forceinline__ maca_bfloat16 float_to_value<maca_bfloat16>(float x) 
 }
 
 // ── NaN test ────────────────────────────────────────────────────────────────
-//
-// Test the raw BIT PATTERN, not the key.  The order-preserving encode sends the
-// two signed NaNs to opposite ends of the key space, so key comparison catches
-// only the single encoding 0x7FFFFFFF; a 16-bit bf16 key cannot even equal a
-// 32-bit all-ones constant.  Exponent all-ones with a non-zero payload is
-// exactly the NaN set, either sign, quiet or signaling.
-//
-// (`v != v` would be the obvious spelling but the build enables
-// `--use_fast_math`.)
-template <typename ValueT>
-static __device__ __forceinline__ bool is_nan_value(ValueT v);
-
-template <>
-__device__ __forceinline__ bool is_nan_value<float>(float v) {
-    const uint32_t bits = __float_as_uint(v);
-    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
-}
-
-template <>
-__device__ __forceinline__ bool is_nan_value<maca_bfloat16>(maca_bfloat16 v) {
-    const uint32_t bits = (uint32_t)__bfloat16_as_ushort(v);
-    return (bits & 0x7F80u) == 0x7F80u && (bits & 0x007Fu) != 0u;
-}
+// `is_nan_value<ValueT>` -- the raw-bit-pattern test, its contract in
+// `../common/primitives.cuh` -- is pulled in above with the key encode.
 
 // Ascending bitonic sort of `n` (power of two) 64-bit keys over the CTA.
 template <int BLOCK>
@@ -255,8 +228,11 @@ static __device__ __forceinline__ void emit_ordered(
         uint64_t pack = ~0ull;  // pads sort last and are never emitted
         if (i < n_out) {
             const uint32_t src = selected[i];
+            // Widened before the complement: the 16-bit row's key is
+            // `uint16_t`, and `~` on it would promote through `int` and
+            // sign-extend into the pack's high bits.
             const uint64_t cmp = SV
-                ? (uint64_t)(~key_of<ValueT>(__ldg(input_row + src)))
+                ? (uint64_t)(~static_cast<uint32_t>(refine_bin(__ldg(input_row + src))))
                 : (uint64_t)src;
             pack = (cmp << 12) | (uint64_t)i;
         }

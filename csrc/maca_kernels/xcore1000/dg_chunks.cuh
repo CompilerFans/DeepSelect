@@ -65,6 +65,8 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
+#include "../common/primitives.cuh"
+
 namespace rk {
 namespace dgchunks {
 
@@ -99,21 +101,14 @@ static_assert(kCandidateCapacity >= kMaxTopK,
               "answer -- which is what lets the `remaining == 0` arm write the "
               "boundary out of the staging buffer without a second walk");
 
-// `dg_coarse12.cuh`'s predicate, in this file's own namespace: `radix_core.cuh`
-// defines its copy inside `deep_select_maca` and this header is included before
-// that, so the outer name would not resolve here.  Same expression, `v != v`
-// spelled out in bits because the build enables `--use_fast_math`.
-__device__ __forceinline__ bool is_nan_value(float v)
-{
-    const uint32_t bits = __float_as_uint(v);
-    return (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0u;
-}
-
-__device__ __forceinline__ uint32_t refine_bin(float value)
-{
-    const uint32_t bits = __float_as_uint(value);
-    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
-}
+// The NaN predicate, the key encode and the 256-bin warp suffix sum come from
+// `../common/primitives.cuh`; unqualified here because every call site below
+// is spelled that way.  `coarse_bin` below is this dataflow's own: it keys the
+// half-rounded value, which is the coarse level's shape rather than a shared
+// transform.
+using deep_select_common::is_nan_value;
+using deep_select_common::refine_bin;
+using deep_select_common::warp_cumsum_histogram;
 
 // deep_gemm's `coarse_bin`, verbatim: the top 10 bits of the **half**-encoded
 // key.  Half, not float -- the coarse level only has to put the threshold in
@@ -131,50 +126,10 @@ __device__ __forceinline__ int coarse_bin(float value)
     return static_cast<int>(key >> 6);
 }
 
-// `warp_cumsum_histogram<Bins>` at `Bins == 256`, i.e. deep_gemm's **fine** arm
-// -- not the 1024-bin one.  The distinction is not cosmetic and
-// `dg_coarse12.cuh` already paid for learning it: the coarse arm indexes
-// `histogram[tid]` over every thread in the block, so at 1024 threads it walks
-// past a `[257]` array and rewrites the block's other shared state on the way.
-// The fine arm touches only lanes 0..63 for `Bins == 256`.
-//
-// Shape: each of the 64 lanes owns `kItemsPerLane` consecutive bins,
-// suffix-sums them in registers, then one warp shuffle pass gives each lane the
-// total of the lanes above it.
-__device__ __forceinline__ void warp_cumsum_histogram_256(
-    int (&histogram)[kFineBins + kHistogramPadding])
-{
-    constexpr int kWarpSize = 64;
-    constexpr uint64_t kWarpMask = 0xffffffffffffffffULL;
-    constexpr int kItemsPerLane = kFineBins / kWarpSize;
-    static_assert(kFineBins % kWarpSize == 0 && kFineBins / kWarpSize <= kWarpSize);
-
-    const int tid = threadIdx.x;
-    if (tid < kWarpSize) {
-        const int lane = tid;
-        int values[kItemsPerLane];
-#pragma unroll
-        for (int item = 0; item < kItemsPerLane; ++item)
-            values[item] = histogram[lane * kItemsPerLane + item];
-#pragma unroll
-        for (int item = kItemsPerLane - 2; item >= 0; --item)
-            values[item] += values[item + 1];
-
-        const int lane_total = values[0];
-        int warp_suffix = lane_total;
-#pragma unroll
-        for (int offset = 1; offset < kWarpSize; offset <<= 1) {
-            const int other = __shfl_down_sync(kWarpMask, warp_suffix, offset, kWarpSize);
-            if (lane + offset < kWarpSize) warp_suffix += other;
-        }
-        const int lane_offset = warp_suffix - lane_total;
-
-#pragma unroll
-        for (int item = 0; item < kItemsPerLane; ++item)
-            histogram[lane * kItemsPerLane + item] = values[item] + lane_offset;
-    }
-    __syncthreads();
-}
+// The 256-bin histogram suffix sum the fine level walks is
+// `deep_select_common::warp_cumsum_histogram<kFineBins>` (`../common/primitives.cuh`,
+// pulled in above); this file's fine histogram is exactly the `[256 + 1]`
+// shape it takes.
 
 // The same suffix sum over the 1024-bin coarse level: deep_gemm's
 // `warp_cumsum_histogram<kCoarseBins>`, i.e. its **coarse** arm.
@@ -856,7 +811,7 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_compact_refine(
     __syncthreads();
 
     int remaining = boundary_take;
-    warp_cumsum_histogram_256(histogram);
+    warp_cumsum_histogram<kFineBins>(histogram);
     if (tid < kFineBins && histogram[tid] >= remaining && histogram[tid + 1] < remaining) {
         threshold_bin_id = tid;
         last_remain = remaining - histogram[tid + 1];
@@ -907,7 +862,7 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_compact_refine(
     for (int round = 0; round < 3; ++round) {
         const int offset = 16 - round * 8;
         if (count == 0) break;
-        warp_cumsum_histogram_256(histogram);
+        warp_cumsum_histogram<kFineBins>(histogram);
         if (tid < kFineBins && histogram[tid] >= remaining
             && histogram[tid + 1] < remaining) {
             threshold_bin_id = tid;
