@@ -12,10 +12,10 @@ export CUDA_PATH="$MACA_PATH/tools/cu-bridge"
 export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
 export CUCC_PATH="$MACA_PATH/tools/cu-bridge"
 
-# Every family, so the installed wheel serves any device it lands on.
-# `native` is not accepted by setup.py: a per-family artifact must not have its
-# constants chosen by the build machine.
-export CUCC_TARGETS="${CUCC_TARGETS:-xcore1000,xcore1500,xcore1600}"
+# This machine's family, which `setup.py` resolves (`native` -> this host's
+# family): the install is for the machine it runs on.  `build.sh` is the path
+# whose default carries every family.
+export CUCC_TARGETS="${CUCC_TARGETS:-native}"
 
 # The toolkit version, for the version string `setup.py` builds -- it lands in
 # the wheel name, which is the only place a consumer can read which SDK

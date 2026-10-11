@@ -1,0 +1,51 @@
+=== landing build receipts (2026-10-12, post-dedupe-fix) ===
+HEAD        : 98ab0d8
+MACA_PATH   : /opt/maca
+/opt/maca   : /opt/maca-3.7.0
+md5 sources :
+0c8bd16be52c84442b1db50663d007cc  setup.py
+73156f6a9fa39d91f39041d4f3b89822  develop.sh
+9086c5494708f64a1b78a270a7084b2b  install.sh
+5c74e80967fbfe0b466bfda8fa4ec6fe  build.sh
+494ea89be3b56b7fe8347fa730d8585c  csrc/structs.h
+setup.py md5 at the end of the run is the same line -- checked below.
+=== B: CUCC_TARGETS=native  (the scripts' default) ===
+B rc=0
+deep_select: native -> xcore1000 (device sm 80)
+deep_select: device compiler is /opt/maca/tools/cu-bridge/bin/cucc, host compiler is /opt/maca/tools/cu-bridge/bin/gnu
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for native
+extensions constructed: 1
+offload-arch spells:    -offload-arch=xcore1000 
+--- artifacts ---
+6464392 deep_select/deep_select_maca_xcore1000.so
+topk_kernel_radix count: 60
+=== C: CUCC_TARGETS=native,xcore1000  (the dedupe case) ===
+C rc=0
+deep_select: native -> xcore1000 (device sm 80)
+deep_select: CUCC_TARGETS entries 'native' and 'xcore1000' both name xcore1000; building it once
+deep_select: device compiler is /opt/maca/tools/cu-bridge/bin/cucc, host compiler is /opt/maca/tools/cu-bridge/bin/gnu
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for native
+extensions constructed: 1   (must be 1 -- the fix)
+--- artifacts ---
+6464392 deep_select/deep_select_maca_xcore1000.so
+=== A: CUCC_TARGETS=xcore1000,xcore1500,xcore1600  (the explicit list, and the tree's final state) ===
+A rc=0
+deep_select: device compiler is /opt/maca/tools/cu-bridge/bin/cucc, host compiler is /opt/maca/tools/cu-bridge/bin/gnu
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1500,xcore1600
+extensions constructed: 3
+--- artifacts ---
+6464392 deep_select/deep_select_maca_xcore1000.so
+6468488 deep_select/deep_select_maca_xcore1500.so
+6468488 deep_select/deep_select_maca_xcore1600.so
+--- nm topk_kernel_radix per artifact ---
+deep_select/deep_select_maca_xcore1000.so -> 60
+deep_select/deep_select_maca_xcore1500.so -> 60
+deep_select/deep_select_maca_xcore1600.so -> 60
+--- readelf torch/c10 (must be empty) ---
+tvm_ffi exports: 2
+=== cross-build symbol check: native-build vs triple-build, same family (xcore1000) ===
+IDENTICAL symbol tables (345 lines each)
+=== md5 of setup.py at the end (must equal the top-of-file line) ===
+0c8bd16be52c84442b1db50663d007cc  setup.py
+STABLE: setup.py md5 0c8bd16be52c84442b1db50663d007cc held for the whole run
+DONE

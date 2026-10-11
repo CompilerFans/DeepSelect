@@ -56,11 +56,11 @@ split is the whole interface:
 
 | script | produces | targets default | installs? |
 | --- | --- | --- | --- |
-| `./develop.sh` | `deep_select/deep_select_maca_xcore<N>.so`, in place | every family | no |
+| `./develop.sh` | `deep_select/deep_select_maca_xcore<N>.so`, in place | `native` (this device) | no |
 | `./build.sh` | `dist/*.whl` (+ `${BUILDROOT}/wheel/` if set) | every family | no |
-| `./install.sh` | the same wheel, `pip install`ed | every family | yes |
+| `./install.sh` | the same wheel, `pip install`ed | `native` (this device) | yes |
 
-**All three build every family, and the artifact is named for the family it carries** — `CUCC_TARGETS` defaults to `xcore1000,xcore1500,xcore1600` in all three, because `setup.py` produces one `.so` per family and a wheel that carries one family cannot serve another. `setup.py` **refuses `native`**: a per-family artifact must not have its constants chosen by the build machine. `_binding.family_suffix()` reads the device and loads the matching file.
+**The artifact is named for the family it carries** — `setup.py` produces one `.so` per family, and a wheel that carries one family cannot serve another. `build.sh`, the shippable path, therefore defaults to one target per family; `develop.sh` and `install.sh` default to `native`, the target that means *this machine*, which `setup.py` resolves to this host's family. That resolution is what makes a local build one compile instead of three — and it is exactly why a wheel must not be built from it. `_binding.family_suffix()` reads the device and loads the matching file.
 
 **`./develop.sh` is the one that writes the in-place extension**, and
 `run_test.sh` calls it when it is passed `--allow-build` and finds nothing.
@@ -109,13 +109,22 @@ unrecognized target is rejected by `mxcc` rather than by a table here.
 `MACA_PATH` (default `/opt/maca`) and `MAX_JOBS` are honored.
 
 **There is no argument parsing — the target list is `CUCC_TARGETS` and nothing
-else**, which is mcDeepGEMM's shape. One thing `build.sh`'s default does that
-mcDeepGEMM's does not: it is one target per family this tree names
-(`xcore1000,xcore1500,xcore1600`) rather than mcDeepGEMM's list verbatim — that
-list's `xcore1008`/`xcore1502`/`xcore1520`/`xcore1610`/`xcore1620` are
-**aliases of a family already in the list**, and this `setup.py` names the
-extension after the *family*, so two targets in one family build the same
-extension twice while `mxcc` rejects several of those spellings outright.
+else**, which is mcDeepGEMM's shape. The list is **row keys and nothing else**
+(`xcore1000`, `xcore1500`, `xcore1600`), which is what makes `build.sh`'s
+default one target per family. mcDeepGEMM's own default list is wider
+(`native,xcore1000,xcore1008,xcore1500,xcore1502,xcore1520,xcore1600,xcore1610,xcore1620`)
+and inert — that repo exports the variable and nothing there reads it — so this
+`setup.py` is where such a list ever gets validated, and three of its entries
+(`xcore1008`, `xcore1610`, `xcore1620`) are spellings `mxcc` refuses outright
+(`invalid target ID`). The two `mxcc` *does* accept, `xcore1502` and `xcore1520`,
+are refused here too, and the message says why: a row carries constants (AP
+count, per-AP shared memory), so pointing `xcore1502` at the 1500 row asserts
+them for a part this build cannot check — and the obvious check is unavailable,
+since `xcore1500` and `xcore1600` compile byte-identical code
+(`docs/experiments/20261012_setup_family_detection/`). Repeating one spelling is
+the only way to name a family twice, and it is harmless (ninja hashes the command
+line; the second run is `no work to do`). `native` is the one entry that is
+resolved rather than refused — see the note under `install.sh` below.
 
 ```bash
 ./install.sh                                  # this device's family, installed
@@ -142,17 +151,17 @@ two are the local paths. (This paragraph said "neither script sets it" until
 2026-09-16, which was true of `build.sh` alone. The tree is the authority:
 `grep -n 'CUCC_TARGETS:-' *.sh`.)
 
-**Every spelling in that list goes to `mxcc` untouched, `native` included.**
-There is no arch table between the scripts and the compiler, and there should
-not be: `-offload-arch` is mxcc's own vocabulary, so a target list is one line
-of environment in each script rather than a value a lookup has to expand. An
-earlier revision translated `native` by asking torch for the device's
-capability and mapping it through a family table — measured, that made
-`CUCC_TARGETS=native` **fail on a card-less host** ("no MACA device visible")
-even though `mxcc -offload-arch=native` cross-compiles there fine, which is the
-one machine a build host is. `native` on this toolchain resolves to the
-xcore1000 family: measured on a C500, `-offload-arch=native` is byte-identical
-to `-offload-arch=xcore1000` and takes `__MACA_ARCH__` to the same `1000`.
+**Spellings are mxcc's vocabulary, and there is no arch table between the
+scripts and the compiler** — `-offload-arch` is that vocabulary, so a target
+list is one line of environment in each script rather than a value a lookup has
+to expand. `native` is the one entry not passed through: `setup.py` resolves it
+to this host's family, prints the resolution, and builds the artifact under the
+family name it names. The resolution needs a device — a card-less host gets an
+actionable refusal and passes explicit spellings instead, which is the machine
+`build.sh`'s default exists for. Resolving it at the build agrees with what the
+compiler would have done: `native` on this toolchain resolves to the xcore1000
+family (measured on a C500, `-offload-arch=native` is byte-identical to
+`-offload-arch=xcore1000` and takes `__MACA_ARCH__` to the same `1000`).
 
 The underlying call, if you need it directly (this bypasses the scripts' env
 derivation, so export `MACA_PATH`/`CUDA_PATH`/`CUDA_HOME`/`CUCC_PATH`
@@ -397,7 +406,7 @@ The form this replaced — one `.so`, one comma-separated `-offload-arch` — **
 
 Two things the family table is deliberately not:
 
-- **Not the build's target list.** `CUCC_TARGETS` says what images were compiled, not what device is in front of you; deriving the grid from it names the wrong artifact as soon as the list does not lead with this device's family (the same defect `perf_snapshot.provenance()` and the two `run_*` scripts each had once). It is also not the `--offload-arch` spelling resolved back: `mxcc`'s `native` is that vocabulary, not this one — and `setup.py` **refuses `native` outright**, because a per-family artifact must not have its constants chosen by the build machine.
+- **Not the build's target list.** `CUCC_TARGETS` says what images were compiled, not what device is in front of you; deriving the grid from it names the wrong artifact as soon as the list does not lead with this device's family (the same defect `perf_snapshot.provenance()` and the two `run_*` scripts each had once). It is also not the `--offload-arch` spelling resolved back: `mxcc`'s `native` is that vocabulary, not this one — and `setup.py` resolves `native` at build time to *this host's* family, which is a build-machine fact rather than a device answer.
 - **Not a performance table.** Only family 1000's row has a measurement behind it. The other two are the parts' own AP count and the 128 KiB every 128 KiB family has, and **every C500-only *tuning* rule is still guarded by `kF32Coarse12MeasuredSmCount` (104) at run time** rather than by the macro. Geometry compiles in; tuning has to be earned. `ref/c500_gate/` prints both halves against the device's own report.
 
 ### xcore1000 — `maca_topk.cu` + `radix_core.cuh` (the shipping C500 kernel)
@@ -1170,10 +1179,11 @@ this change help", and for `compare_snapshots.py` when it is "is the tree still
 where it was".
 
 **`<device>` is the device's own name, not an arch family** (`MetaX C500` ->
-`MetaX_C500`). The directory has to answer *which board was measured on* —
-`MetaX C600` and `MetaX C600-U` are both xcore1600 but have different clocks, a
-different read wall and a different SM count, so a family-named directory stacks
-two machines silently. **`chip` is that same string**, on every row and in the
+`MetaX_C500`). The directory has to answer *which board was measured on*, and a
+family name would stack two machines silently — `MetaX C600` is family 1500
+while `MetaX C600-U` is 1600, and one board name can still cover two machines:
+the C600U ships at 28 APs and at 32, and `MetaX_C600-U/` holds snapshots of
+both (`sm_count 32` in the two `20260915_*` manifests, 28 after). **`chip` is that same string**, on every row and in the
 manifest: it was `metax_xcore<N>`, derived from the capability pair, and while
 the two usually agreed they were two answers to one question — a part reporting
 anything but its familiar sm would have put one name in the directory and

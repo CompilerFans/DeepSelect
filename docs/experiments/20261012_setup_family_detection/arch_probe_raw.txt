@@ -1,0 +1,15 @@
+spelling    rc   MACA_ARCH      trivial_md5    crosslane_md5
+xcore1000   0    1000           34fcb6fb1443   f948cda367c3
+xcore1002   0    1002           8abd23b83d74   34b442511a4f
+xcore1004   0    1004           8abd23b83d74   34b442511a4f
+xcore1008   1    invalid target ID: xcore1008 (A target ID is a processor name, e.g. 'xcore1000'
+xcore1500   0    1500           289616f08383   1e52e5fce1ea
+xcore1501   0    1501           62ea524325a6   68db80c0b6cb
+xcore1502   0    1502           289616f08383   1e52e5fce1ea
+xcore1504   0    1504           289616f08383   1e52e5fce1ea
+xcore1520   0    1520           12d14b7861f9   14f2a8fc327d
+xcore1521   0    1521           f7675d30ee9b   0fe397865634
+xcore1600   0    1600           289616f08383   1e52e5fce1ea
+xcore1610   1    invalid target ID: xcore1610 (A target ID is a processor name, e.g. 'xcore1000'
+xcore1620   1    invalid target ID: xcore1620 (A target ID is a processor name, e.g. 'xcore1000'
+native      0    1000           34fcb6fb1443   f948cda367c3

@@ -1,0 +1,202 @@
+================================================================================
+SOURCES_BY_FAMILY -- build receipts (2026-10-12)
+================================================================================
+
+The claim: replacing the flat `SOURCES` constant with the per-family table
+(setup.py lines 18-62 + `sources=` + the print line) does not change what the
+build does.  Two runs of the SAME command -- `rm -rf build && ./develop.sh`,
+default CUCC_TARGETS (all three families), same machine, same shell -- one
+before the edit and one after.  Raw logs: /tmp/ds_build_{before,after}.log.
+
+setup.py md5, pristine tree   : f0c4ca7ba8a21faf8a0eebe6ac1f2a22
+setup.py md5, with the table  : 372bfee01e6ae2611d6634c2404ac9d2
+  (setup.py carries a second, unrelated edit from another agent in
+   _family_of_target; the two runs above both predate it, which is what
+   isolates this change.  See the merged-tree note in section E.)
+
+--------------------------------------------------------------------------------
+A. the 'compiling' line, before vs after
+--------------------------------------------------------------------------------
+  before: deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1500,xcore1600
+  after : deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1500,xcore1600
+  >>> byte-identical
+
+--------------------------------------------------------------------------------
+B. the 6 compile/link command lines, paths to this tree normalised to $REPO
+   diff -u /tmp/ds_cmds_before.txt /tmp/ds_cmds_after.txt
+--------------------------------------------------------------------------------
+  >>> IDENTICAL, byte for byte (3 cucc device compiles + 3 gnu links)
+
+  The whole build log, with only the version timestamp and the wall clock
+  normalised, diffs to that one timestamp line and nothing else:
+    -/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/setuptools/dist.py:332: InformationOnly: Normalizing '1.0.0+maca<VERSION>' to '1.0.0+maca0.0.0.0.98ab0d8.20261012.1702'
+    +/home/compiler_gfx/miniconda3/lib/python3.10/site-packages/setuptools/dist.py:332: InformationOnly: Normalizing '1.0.0+maca<VERSION>' to '1.0.0+maca0.0.0.0.98ab0d8.20261012.2122'
+
+--------------------------------------------------------------------------------
+C. artifact receipts
+--------------------------------------------------------------------------------
+  --- before ---
+  ### artifacts
+  -rwxrwxr-x 1 compiler_gfx compiler_gfx 6464392 10月 12 00:18 deep_select/deep_select_maca_xcore1000.so
+  -rwxrwxr-x 1 compiler_gfx compiler_gfx 6468488 10月 12 00:18 deep_select/deep_select_maca_xcore1500.so
+  -rwxrwxr-x 1 compiler_gfx compiler_gfx 6468488 10月 12 00:19 deep_select/deep_select_maca_xcore1600.so
+  
+  ### artifact md5
+  9ca8450ce520caf4033972434b8f2c46  deep_select/deep_select_maca_xcore1000.so
+  39a11ce21bd26545d31db36e5a7d8cdc  deep_select/deep_select_maca_xcore1500.so
+  4d2f30ff53b2e7728d465ee10d1e7464  deep_select/deep_select_maca_xcore1600.so
+  
+  ### nm symbol count: topk_kernel_radix per artifact
+    deep_select/deep_select_maca_xcore1000.so -> 60
+    deep_select/deep_select_maca_xcore1500.so -> 60
+    deep_select/deep_select_maca_xcore1600.so -> 60
+  
+  ### readelf -d: torch/c10 linkage (must be empty)
+    deep_select/deep_select_maca_xcore1000.so -> []
+    deep_select/deep_select_maca_xcore1500.so -> []
+    deep_select/deep_select_maca_xcore1600.so -> []
+  
+  ### tvm_ffi exports per artifact (expect 2)
+    deep_select/deep_select_maca_xcore1000.so -> 2
+    deep_select/deep_select_maca_xcore1500.so -> 2
+    deep_select/deep_select_maca_xcore1600.so -> 2
+  --- after ---
+  ### artifacts
+  -rwxrwxr-x 1 compiler_gfx compiler_gfx 6464392 10月 12 00:22 deep_select/deep_select_maca_xcore1000.so
+  -rwxrwxr-x 1 compiler_gfx compiler_gfx 6468488 10月 12 00:23 deep_select/deep_select_maca_xcore1500.so
+  -rwxrwxr-x 1 compiler_gfx compiler_gfx 6468488 10月 12 00:24 deep_select/deep_select_maca_xcore1600.so
+  
+  ### artifact md5
+  f60f7549e125a67a3533d1efec1a08b7  deep_select/deep_select_maca_xcore1000.so
+  da00cb75e6d403c0bd34c7b214a2e8ea  deep_select/deep_select_maca_xcore1500.so
+  e2e7f57c2ae859e1d6fbfdb7fb5a86eb  deep_select/deep_select_maca_xcore1600.so
+  
+  ### nm symbol count: topk_kernel_radix per artifact
+    deep_select/deep_select_maca_xcore1000.so -> 60
+    deep_select/deep_select_maca_xcore1500.so -> 60
+    deep_select/deep_select_maca_xcore1600.so -> 60
+  
+  ### readelf -d: torch/c10 linkage (must be empty)
+    deep_select/deep_select_maca_xcore1000.so -> []
+    deep_select/deep_select_maca_xcore1500.so -> []
+    deep_select/deep_select_maca_xcore1600.so -> []
+  
+  ### tvm_ffi exports per artifact (expect 2)
+    deep_select/deep_select_maca_xcore1000.so -> 2
+    deep_select/deep_select_maca_xcore1500.so -> 2
+    deep_select/deep_select_maca_xcore1600.so -> 2
+
+--------------------------------------------------------------------------------
+D. the .so md5s differ -- MEASURED, and it is the LINK that is nondeterministic
+--------------------------------------------------------------------------------
+
+  The md5s are not equal (9ca8450c.. -> f60f7549.. on xcore1000).  That is not
+  a signal about the change, and the reason is sharper than 'builds are
+  nondeterministic'.  Split it by stage:
+
+  D.1  THE COMPILE IS DETERMINISTIC.  The build's own xcore1000 cucc command,
+       run four times (two with the -o retargeted, two verbatim):
+         md5 of the produced maca_topk.o = c7b9b7b307e0dff86d6f7be030b994cb
+         6614560 B, all four runs, cmp -l empty between them.
+
+  D.2  THE LINK IS NOT.  The build's own xcore1000 gnu command, run twice on
+       that same object, into two different filenames:
+         link 1 -> md5 1081e6741aba6f9bd9a43dfccd8d0c35  6464392 B
+         link 2 -> md5 043eb2f535decd5415a9f0c395396def  6464392 B
+       cmp -l between them: 6 bytes, offsets 0x623a06..0x623a0b, ONE cluster.
+       The text around those offsets reads:
+           ...ay_entry | ds_link_probe-ac125e.cpp | __FRAME_END__...
+       i.e. the whole difference is inside a generated intermediate filename.
+
+  D.3  THE STRING IS MINTED AT LINK TIME, with a per-invocation random suffix.
+       In one single build's three artifacts:
+         deep_select_maca_xcore1000.so    maca_topk-d1037b.cpp
+         deep_select_maca_xcore1500.so    maca_topk-b7550c.cpp
+         deep_select_maca_xcore1600.so    maca_topk-221bd9.cpp
+       -- three different suffixes from ONE build, so it is per link call,
+       not per build or per family.  And in the compile-stage object:
+         strings -a maca_topk.o | grep -E 'maca_topk-[0-9a-f]{6}\.cpp'  ->  empty
+         strings -a maca_topk.o | grep -E '\.cpp'                      ->  empty
+       The compile emits no such name at all, which is why it is deterministic.
+
+       The stem is the OBJECT the link was handed, not the source: the link of
+       build/temp.../maca_topk.o produces 'maca_topk-<hex>.cpp', and the control
+       run above, which linked /tmp/ds_link_probe.o, produced
+       'ds_link_probe-ac125e.cpp'.  So the rule is cucc's: its link-stage
+       intermediate is named <basename of the input .o>-<6 hex>.cpp, and the
+       6 hex is minted per invocation.
+
+  D.4  SO: the receipt for 'this build change changed nothing' is the
+       byte-identical command lines (B) plus the identical artifact SIZES
+       and the identical symbol counts (C) -- never the md5.  Comparing the
+       COMPILED OBJECT is a stronger receipt than comparing the linked .so,
+       because it removes the one nondeterministic input.
+
+  This is the same 6-byte/one-filename-string shape the repository recorded
+  before (CLAUDE.md Build section: 0909cc25.. -> 4b29550a.., 6 bytes at
+  0x3a2af8..0x3a2afd in '...maca_topk-02b752.cpp\0__FRAME_END__...').  What
+  this measurement adds is WHICH STAGE: it is the link, and a compile-only
+  comparison is therefore stable.
+
+
+--------------------------------------------------------------------------------
+E. the SETTLED tree -- a third full build, with both agents' edits in
+--------------------------------------------------------------------------------
+
+  setup.py carries a second edit from a different agent in _family_of_target,
+  finished after the runs in A-C.  Both agents then stopped; this is a third
+  `rm -rf build && ./develop.sh`, same command, on the tree as it now stands.
+
+  setup.py md5 at this build: 35bc23355a94a9a2f07f30ff377e2b95
+
+  E.1  THE 6 COMMAND LINES ARE IDENTICAL ACROSS ALL THREE RUNS.
+         diff cmds_before_raw.txt cmds_final_raw.txt   -> empty  (verified)
+         diff cmds_after_raw.txt  cmds_final_raw.txt   -> empty
+       and the print line is the same in all three:
+         deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once
+         per family, for xcore1000,xcore1500,xcore1600
+
+       Scoped honestly: that second edit changes which target *spellings* are
+       accepted and what the refusals say, so it is invisible in the command
+       line for a valid target list.  What E.1 establishes is that for the
+       default list the settled tree compiles exactly what HEAD compiles -- not
+       that the other agent's change is a no-op on its own error paths.
+
+  E.2  ARTIFACTS, settled tree (expect 3, sizes == the runs in C):
+         deep_select_maca_xcore1000.so   6464392 B  symbols=60  torch-links=0  tvm_ffi=2
+         deep_select_maca_xcore1500.so   6468488 B  symbols=60  torch-links=0  tvm_ffi=2
+         deep_select_maca_xcore1600.so   6468488 B  symbols=60  torch-links=0  tvm_ffi=2
+       rc=0, 2m40s.
+
+--------------------------------------------------------------------------------
+F. one object path, three compiles -- why the families cannot share a stale .o
+--------------------------------------------------------------------------------
+
+  A reader looking at the build log will notice the thing that looks wrong:
+  all three per-family Extensions write the SAME object file,
+
+    build/temp.linux-x86_64-cpython-310/csrc/maca_kernels/xcore1000/maca_topk.o
+
+  -- the `xcore1000` there is the *source's* directory, not a per-family
+  artifact directory.  So the worry is fair: could family 1500 link family
+  1000's object?
+
+  No, and this is checkable in the same log rather than argued.  Every run
+  above prints THREE separate `[1/1] cucc ...` compile lines, one per family,
+  distinguished by their flags:
+
+    [1/1] cucc ... -offload-arch=xcore1000 -DDEEP_SELECT_ARCH=1000 ... -o .../maca_topk.o
+    [1/1] cucc ... -offload-arch=xcore1500 -DDEEP_SELECT_ARCH=1500 ... -o .../maca_topk.o
+    [1/1] cucc ... -offload-arch=xcore1600 -DDEEP_SELECT_ARCH=1600 ... -o .../maca_topk.o
+
+  The compile line is part of the target's identity as far as ninja is
+  concerned, so a changed `-offload-arch` / `-DDEEP_SELECT_ARCH` re-runs the
+  compile into that shared path; the object is never silently reused across
+  families.  The three `.so`s carrying three different device images (and two
+  different sizes) is the same fact from the other end.
+
+  Verified independently of the build by the run that produced this file:
+    grep -oE '\-o \S+/maca_topk\.o ' build_{before,after}.log | sort -u
+      -> one path
+    grep -oE '\-offload-arch=xcore[0-9]+' build_{before,after}.log | sort -u
+      -> xcore1000 xcore1500 xcore1600

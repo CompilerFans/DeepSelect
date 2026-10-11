@@ -1,0 +1,135 @@
+########## 修前：矩阵 a-f（第一次运行的原样输出；该次运行在 f 之后被 2 min 超时截断，g-o 见下一段） ##########
+=== a) unset === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1500,xcore1600
+error: no commands supplied
+
+=== b) empty string === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1500,xcore1600
+error: no commands supplied
+
+=== c) whitespace only === rc=1
+    raise RuntimeError(f"CUCC_TARGETS={os.environ.get('CUCC_TARGETS')!r} selects no target")
+RuntimeError: CUCC_TARGETS='   ' selects no target
+
+=== d) xcore1000 === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000
+error: no commands supplied
+
+=== e) 1000,1600 === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1600
+error: no commands supplied
+
+=== f) native === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'native' does not name an xcore family; this build produces one artifact per family and needs the family from the target spelling (expected `xcore<N>`, e.g. xcore1000)
+
+########## 修前：矩阵 g-o ##########
+=== g) xcore1008 === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'xcore1008' names family 1008, which has no row in csrc/structs.h (AP count and per-AP shared memory); add one there before building it
+
+=== h) xcore1502 === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'xcore1502' names family 1502, which has no row in csrc/structs.h (AP count and per-AP shared memory); add one there before building it
+
+=== i) xcore1610 === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'xcore1610' names family 1610, which has no row in csrc/structs.h (AP count and per-AP shared memory); add one there before building it
+
+=== j) xcore999 === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'xcore999' names family 999, which has no row in csrc/structs.h (AP count and per-AP shared memory); add one there before building it
+
+=== k) 1000,1000 (dup) === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1000
+error: no commands supplied
+
+=== l) 1000 (bare) === rc=1
+RuntimeError: CUCC_TARGETS entry '1000' does not name an xcore family; this build produces one artifact per family and needs the family from the target spelling (expected `xcore<N>`, e.g. xcore1000)
+
+=== m) XCORE1000 === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'XCORE1000' does not name an xcore family; this build produces one artifact per family and needs the family from the target spelling (expected `xcore<N>`, e.g. xcore1000)
+
+=== n) trailing comma === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000
+error: no commands supplied
+
+=== o) spaces around === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1600
+error: no commands supplied
+
+=== p) xcore1500 === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1500
+error: no commands supplied
+
+=== q) xcore1600 === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1600
+error: no commands supplied
+
+MATRIX-DONE
+
+########## 修后：同一矩阵，由 probe.sh targets 产出 ##########
+=== a) unset === rc=1
+deep_select: CUCC_TARGETS unset or empty; building DEFAULT_TARGETS=xcore1000,xcore1500,xcore1600
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1500,xcore1600
+error: no commands supplied
+
+=== b) empty === rc=1
+deep_select: CUCC_TARGETS unset or empty; building DEFAULT_TARGETS=xcore1000,xcore1500,xcore1600
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1500,xcore1600
+error: no commands supplied
+
+=== c) whitespace only === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS='   ' is set but names no target; leave it unset or empty for the default list xcore1000,xcore1500,xcore1600
+
+=== d) xcore1000 === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000
+error: no commands supplied
+
+=== e) 1000,1600 === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1600
+error: no commands supplied
+
+=== f) native === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'native' does not name an xcore family (expected `xcore<N>`).  `native` resolves to this build machine's family, and a per-family artifact must not have its constants chosen by the build machine -- pass the family explicitly.  The families this build has rows for are xcore1000, xcore1500, xcore1600.
+
+=== g) xcore1008 === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'xcore1008' names architecture 1008, which is not one of the families this build has a row for (xcore1000, xcore1500, xcore1600).  `csrc/structs.h` holds each family's AP count and per-AP shared memory and the artifact is named for the family, so a target this build cannot name cannot be built -- and a spelling like `xcore1502` or `xcore1520`, which mxcc does accept, is not evidence of which family it belongs to.  If the part shares one of the families above, pass that spelling; otherwise add the family's row to csrc/structs.h and to the tuple here.
+
+=== h) xcore1502 === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'xcore1502' names architecture 1502, which is not one of the families this build has a row for (xcore1000, xcore1500, xcore1600).  `csrc/structs.h` holds each family's AP count and per-AP shared memory and the artifact is named for the family, so a target this build cannot name cannot be built -- and a spelling like `xcore1502` or `xcore1520`, which mxcc does accept, is not evidence of which family it belongs to.  If the part shares one of the families above, pass that spelling; otherwise add the family's row to csrc/structs.h and to the tuple here.
+
+=== i) xcore1610 === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'xcore1610' names architecture 1610, which is not one of the families this build has a row for (xcore1000, xcore1500, xcore1600).  `csrc/structs.h` holds each family's AP count and per-AP shared memory and the artifact is named for the family, so a target this build cannot name cannot be built -- and a spelling like `xcore1502` or `xcore1520`, which mxcc does accept, is not evidence of which family it belongs to.  If the part shares one of the families above, pass that spelling; otherwise add the family's row to csrc/structs.h and to the tuple here.
+
+=== j) xcore999 === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'xcore999' names architecture 999, which is not one of the families this build has a row for (xcore1000, xcore1500, xcore1600).  `csrc/structs.h` holds each family's AP count and per-AP shared memory and the artifact is named for the family, so a target this build cannot name cannot be built -- and a spelling like `xcore1502` or `xcore1520`, which mxcc does accept, is not evidence of which family it belongs to.  If the part shares one of the families above, pass that spelling; otherwise add the family's row to csrc/structs.h and to the tuple here.
+
+=== k) 1000,1000 === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1000
+error: no commands supplied
+
+=== l) 1000 bare === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry '1000' does not name an xcore family (expected `xcore<N>`).  This build produces one artifact per family and needs the family from the target spelling.  The families this build has rows for are xcore1000, xcore1500, xcore1600.
+
+=== m) XCORE1000 === rc=1
+    raise RuntimeError(
+RuntimeError: CUCC_TARGETS entry 'XCORE1000' does not name an xcore family (expected `xcore<N>`).  This build produces one artifact per family and needs the family from the target spelling.  The families this build has rows for are xcore1000, xcore1500, xcore1600.
+
+=== n) trailing comma === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000
+error: no commands supplied
+
+=== o) spaces around === rc=1
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1600
+error: no commands supplied
+
+PROBE-TARGETS-RC=0

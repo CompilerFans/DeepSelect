@@ -1,0 +1,55 @@
+########## V1: rm -rf build && ./develop.sh (default targets) ##########
+deep_select: device compiler is /opt/maca/tools/cu-bridge/bin/cucc, host compiler is /opt/maca/tools/cu-bridge/bin/gnu
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1500,xcore1600
+building 'deep_select.deep_select_maca_xcore1000' extension
+building 'deep_select.deep_select_maca_xcore1500' extension
+building 'deep_select.deep_select_maca_xcore1600' extension
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1000.so -> deep_select
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1500.so -> deep_select
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1600.so -> deep_select
+develop.sh: in-place extensions:
+real	2m41.887s
+user	2m35.055s
+sys	0m15.310s
+RC=0
+
+########## V2/V3/V4 ##########
+deep_select: device compiler is /opt/maca/tools/cu-bridge/bin/cucc, host compiler is /opt/maca/tools/cu-bridge/bin/gnu
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000
+building 'deep_select.deep_select_maca_xcore1000' extension
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1000.so -> deep_select
+develop.sh: in-place extensions:
+V2-RC=0
+deep_select: device compiler is /opt/maca/tools/cu-bridge/bin/cucc, host compiler is /opt/maca/tools/cu-bridge/bin/gnu
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1600
+building 'deep_select.deep_select_maca_xcore1000' extension
+building 'deep_select.deep_select_maca_xcore1600' extension
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1000.so -> deep_select
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1600.so -> deep_select
+V3-RC=0
+deep_select: device compiler is /opt/maca/tools/cu-bridge/bin/cucc, host compiler is /opt/maca/tools/cu-bridge/bin/gnu
+deep_select: compiling csrc/maca_kernels/xcore1000/maca_topk.cu once per family, for xcore1000,xcore1000
+building 'deep_select.deep_select_maca_xcore1000' extension
+building 'deep_select.deep_select_maca_xcore1000' extension
+ninja: no work to do.
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1000.so -> deep_select
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1000.so -> deep_select
+V4-RC=0
+
+########## V5 (default = native) / V6 (explicit three) ##########
+deep_select: native -> xcore1000 (device sm 80)
+deep_select: device compiler is /opt/maca/tools/cu-bridge/bin/cucc, host compiler is /opt/maca/tools/cu-bridge/bin/gnu
+[1/1] /opt/maca/tools/cu-bridge/bin/cucc --generate-dependencies-with-compile --dependency-output /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/build/temp.linux-x86_64-cpython-310/csrc/maca_kernels/xcore1000/maca_topk.o.d -c -c /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/csrc/maca_kernels/xcore1000/maca_topk.cu -o /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/build/temp.linux-x86_64-cpython-310/csrc/maca_kernels/xcore1000/maca_topk.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -O3 -std=c++20 -DNDEBUG -DDEEP_SELECT_IS_BUILD_ON_MACA -Wno-deprecated-declarations -fPIC -use-fast-math -Xclang -fdenormal-fp-math-f32=ieee -offload-arch=xcore1000 ...
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1000.so -> deep_select
+real	1m6.018s
+user	1m1.068s
+V5-RC=0
+deep_select: device compiler is /opt/maca/tools/cu-bridge/bin/cucc, host compiler is /opt/maca/tools/cu-bridge/bin/gnu
+[1/1] /opt/maca/tools/cu-bridge/bin/cucc --generate-dependencies-with-compile --dependency-output /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/build/temp.linux-x86_64-cpython-310/csrc/maca_kernels/xcore1000/maca_topk.o.d -c -c /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/csrc/maca_kernels/xcore1000/maca_topk.cu -o /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/build/temp.linux-x86_64-cpython-310/csrc/maca_kernels/xcore1000/maca_topk.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -O3 -std=c++20 -DNDEBUG -DDEEP_SELECT_IS_BUILD_ON_MACA -Wno-deprecated-declarations -fPIC -use-fast-math -Xclang -fdenormal-fp-math-f32=ieee -offload-arch=xcore1000 ...
+[1/1] /opt/maca/tools/cu-bridge/bin/cucc --generate-dependencies-with-compile --dependency-output /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/build/temp.linux-x86_64-cpython-310/csrc/maca_kernels/xcore1000/maca_topk.o.d -c -c /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/csrc/maca_kernels/xcore1000/maca_topk.cu -o /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/build/temp.linux-x86_64-cpython-310/csrc/maca_kernels/xcore1000/maca_topk.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -O3 -std=c++20 -DNDEBUG -DDEEP_SELECT_IS_BUILD_ON_MACA -Wno-deprecated-declarations -fPIC -use-fast-math -Xclang -fdenormal-fp-math-f32=ieee -offload-arch=xcore1500 ...
+[1/1] /opt/maca/tools/cu-bridge/bin/cucc --generate-dependencies-with-compile --dependency-output /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/build/temp.linux-x86_64-cpython-310/csrc/maca_kernels/xcore1000/maca_topk.o.d -c -c /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/csrc/maca_kernels/xcore1000/maca_topk.cu -o /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/build/temp.linux-x86_64-cpython-310/csrc/maca_kernels/xcore1000/maca_topk.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -O3 -std=c++20 -DNDEBUG -DDEEP_SELECT_IS_BUILD_ON_MACA -Wno-deprecated-declarations -fPIC -use-fast-math -Xclang -fdenormal-fp-math-f32=ieee -offload-arch=xcore1600 ...
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1000.so -> deep_select
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1500.so -> deep_select
+copying build/lib.linux-x86_64-cpython-310/deep_select/deep_select_maca_xcore1600.so -> deep_select
+V6-RC=0
+V56-DONE

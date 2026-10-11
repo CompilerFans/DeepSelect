@@ -83,9 +83,20 @@ setup.py's build_for_maca."
 // The 1500 and 1600 rows carry the AP counts those families report and the
 // 128 KiB every 128 KiB family has.  The 1600 row is the one that cannot be a
 // single number -- see below -- and that is exactly why the *performance* half
-// of every measured rule is guarded by the device it was measured on
-// (`kF32Coarse12MeasuredSmCount`, `is_c600u_ap_count`) rather
-// than by this macro: geometry compiles in, tuning still has to be earned.
+// of every measured rule is guarded at run time rather than by this macro: a
+// C500 ladder by `kF32Coarse12MeasuredSmCount` (104, the only AP count it was
+// measured at), a C600U ladder by `is_c600u_ap_count`.  Geometry compiles in,
+// tuning still has to be earned.
+//
+// **`is_c600u_ap_count` is an AP-count set, not a family** -- it is
+// `sm_count == 28 || sm_count == 32`, so it catches the 1500 row's 28-AP C600
+// as well -- and the three ladders it admits all carry a C600U name:
+// `kC600UNarrowRowBatches` (`radix_block_for`), the constant below
+// (`chunked_bf16_applies`), and the two `kF32Coarse12C600U*` products
+// (`f32_coarse12_applies`).  Each was fitted on a C600U, and the C600 has no
+// measurement of its own in this tree, so a C600 is served by a set fitted on
+// its sibling.
+//
 // **The split predicates are where this paragraph gets checked, and the two
 // are no longer in the same state**: `chunked_bf16_applies` grew a C600U arm
 // (2026-10-10, `kC600UChunkedVocabPerBatchSq`) keyed on the same set

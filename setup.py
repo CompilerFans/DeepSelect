@@ -15,19 +15,150 @@ warnings.filterwarnings("ignore", message=".*flash_attn.*")
 
 exec(open("deep_select/__version__.py").read())
 
-# One source, one extension.  `csrc/maca_kernels/xcore1600/` is the ported
-# upstream kernel: it stays in the repo as source and is off the build entirely
-# -- see `build_for_maca`.
-SOURCES = [
+# ── which sources each family builds ────────────────────────────────────────
+#
+# The kernel *layout* is per-family (`csrc/maca_kernels/<family>/`) and this
+# table is the build saying the same thing.  It is the one place a family's
+# source set is decided, so both shapes this build has to express are edits
+# here and nowhere else:
+#
+#   - **the default** -- a family with no row of its own is compiled from
+#     `SHARED_SOURCES`;
+#   - **the exception** -- a family with its own kernel names that kernel in
+#     its row.
+#
+# All three rows name the same file today, and that is the measured answer
+# rather than a default of convenience: the C500 kernel is the artifact every
+# family ships, 1.5-2.9x faster than the ported upstream tree on a C600U and
+# passing the cells that tree fails (CLAUDE.md, "Can a C600U run the C500
+# kernel?").
+#
+# **`family 1600` and the directory `csrc/maca_kernels/xcore1600/` are two
+# different things, and the name collision is the trap this table has to
+# survive.**  The first is the C600U; the second is the *ported upstream* kernel
+# tree, which this build does not compile -- see `build_for_maca`.  A row names
+# a family's own source set; no row points at that directory, and pointing one
+# there would also take its `kerutils` include back (`include_dirs` below is the
+# other half of that change).
+SHARED_SOURCES = [
     "csrc/maca_kernels/xcore1000/maca_topk.cu",
 ]
+SOURCES_BY_FAMILY = {
+    1000: SHARED_SOURCES,   # C500
+    1500: SHARED_SOURCES,   # C600
+    1600: SHARED_SOURCES,   # C600U -- the shared kernel, not xcore1600/
+}
 
-# What this file builds when `CUCC_TARGETS` says nothing.  `build.sh` sets the
-# same list, and that is what a wheel has to carry -- one board's image cannot
-# be shipped to another; `develop.sh` / `install.sh` narrow it to `native`.
-# A direct `setup.py build_ext` here is the third caller, so it needs a default
-# of its own, and the family list is the safe one.
+
+def sources_for_family(family):
+    """The sources one family's artifact is compiled from.
+
+    Returns a fresh list per call, so the three `Extension`s below never share
+    one.  A family with no row takes `SHARED_SOURCES`: one kernel serving every
+    family is this tree's standing answer, so a family added to
+    `_family_of_target`'s tuple needs no edit here -- giving one its own kernel
+    is one row.
+    """
+    return list(SOURCES_BY_FAMILY.get(family, SHARED_SOURCES))
+
+
+# What this file builds when `CUCC_TARGETS` says nothing.  "Nothing" is
+# **unset or empty**: `${CUCC_TARGETS:-...}` substitutes for an empty value as
+# well as an unset one, so a script that sets it treats the two alike, and this
+# file's `or` below reads them the same way.
+#
+# The default is the **family list and not `native`**, because this file is also
+# what a packaging build runs: a wheel has to carry every family -- one board's
+# image cannot be shipped to another -- and a build host may have no card in it,
+# where `native` has no answer.  `build.sh` passes the same list explicitly;
+# `develop.sh` and `install.sh` act on this machine and pass `native`, which
+# `_native_family` resolves to this host's family.
+#
+# A *whitespace-only* value is neither unset nor empty.  It was set and it names
+# nothing, so `build_for_maca` refuses it rather than reading it as a default --
+# and a build that did take the default says so in its first lines, so the
+# artifacts nobody asked for are visible rather than merely silent.
 DEFAULT_TARGETS = "xcore1000,xcore1500,xcore1600"
+
+
+# `native`'s answer, held for the build.  The target list is resolved entry by
+# entry, so a list naming `native` twice would otherwise query the device and
+# print the report twice before the family collapse below notices that the two
+# entries are one target.
+_NATIVE_FAMILY = {}
+
+
+def _native_family(this_dir):
+    """This build host's xcore family, for the `native` target.
+
+    `native` is the one spelling that is *resolved* rather than passed through:
+    it names this machine, and the artifact is named for and carries its
+    family's constants, so the number has to be known here.  The map is the
+    loader's -- `deep_select/_binding.py`'s `device_family_suffix()`, the same
+    function that decides which artifact a run loads -- read out of that file by
+    path, so a build does not execute the `deep_select` package (and everything
+    its `__init__.py` imports) to answer one question.  The device query under
+    it is torch's either way.
+
+    **A host with no visible device cannot resolve it**, and that is refused
+    loudly rather than guessed at; a device whose sm is not one of the families
+    is refused separately, because the two want different fixes.  `mxcc
+    -offload-arch=native` cross-compiles on a card-less build host, but that is
+    the one machine where `native` has no answer.  `build.sh` never uses it --
+    its default is explicit spellings -- so the shippable path does not depend
+    on a device.
+
+    The resolution is printed, because the artifact that comes out of it carries
+    *this* host's numbers: a build log that says `native` and nothing else does
+    not record which family it built.
+    """
+    if "family" in _NATIVE_FAMILY:
+        return _NATIVE_FAMILY["family"]
+    import importlib.util
+
+    import torch
+
+    path = os.path.join(this_dir, "deep_select", "_binding.py")
+    spec = importlib.util.spec_from_file_location("_deep_select_binding", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    suffix = module.device_family_suffix()
+    known = suffix.startswith("_xcore") and suffix[len("_xcore"):].isdigit()
+    if not known:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUCC_TARGETS entry 'native' needs a device to resolve, and "
+                "this build host reports none (no MACA device visible to "
+                "torch).  On a card-less build host pass explicit spellings, "
+                "e.g. CUCC_TARGETS=xcore1000,xcore1500,xcore1600."
+            )
+        major, minor = torch.cuda.get_device_capability()
+        raise RuntimeError(
+            f"CUCC_TARGETS entry 'native' found a device at sm "
+            f"{major * 10 + minor}, which is not one of the families this "
+            f"build has a row for; pass that family's spelling explicitly."
+        )
+    family = int(suffix[len("_xcore"):])
+    if family not in (1000, 1500, 1600):
+        raise RuntimeError(
+            f"CUCC_TARGETS entry 'native' resolved to xcore{family}, which has "
+            f"no row in csrc/structs.h (AP count and per-AP shared memory); add "
+            f"one before building for it."
+        )
+    major, minor = torch.cuda.get_device_capability()
+    _NATIVE_FAMILY["family"] = family
+    print(f"deep_select: native -> xcore{family} (device sm {major * 10 + minor})")
+    return family
+
+
+def _offload_spelling(target, family):
+    """The `-offload-arch` spelling a target is built under.
+
+    The caller's spelling, except for `native`: it resolved to a family, and
+    passing that family on is what keeps `-offload-arch`, `-DDEEP_SELECT_ARCH`
+    and the artifact's name stating the same number.
+    """
+    return "xcore%d" % family if target == "native" else target
 
 
 def _family_of_target(target, this_dir):
@@ -39,24 +170,54 @@ def _family_of_target(target, this_dir):
     `DEEP_SELECT_ARCH` with its own `#error`; this is the same refusal one step
     earlier, where the message can name the offending `CUCC_TARGETS` entry.
 
-    `native` is deliberately not accepted.  It is a real mxcc spelling and it
-    would resolve to *this* host's family, which is the one thing a build
-    artifact must not depend on: a wheel built on a C500 would carry the C500's
-    numbers under a name that claims to be whatever the target machine is.
+    **A spelling is accepted only if its number is one of this build's
+    families**, and that is a decision rather than a shortcut: mxcc's target-ID
+    space is wider than these three (it also takes `xcore1002`, `xcore1502`,
+    `xcore1520` and others), and this file has nothing to resolve one of those
+    to a row.  A row carries the family's AP count and per-AP shared memory, so
+    an artifact built from the wrong row sizes its grids for the wrong machine,
+    and it does that silently.  Device code does not settle it either: on this
+    toolchain `xcore1500` and `xcore1600` compile the same kernel to identical
+    instructions, so "same codegen" is not "same family".  A part that needs a
+    family of its own gets a row -- the two constants in `csrc/structs.h` --
+    rather than a guess from its name.  Measured survey, including which
+    spellings mxcc accepts at all:
+    `docs/experiments/20261012_setup_family_detection/`.
+
+    **`native` is accepted, and resolved to this host's family**
+    (`_native_family` above): it is what `develop.sh` and `install.sh` default
+    to, and both act on *this* machine.  It is the one spelling a build must not
+    be *shipped* from -- a wheel built on a C500 carries the C500's numbers
+    under a name that claims to be whatever target machine lands on it -- which
+    is why `build.sh`'s default is the explicit list.  Resolution needs a device
+    and refuses loudly without one.  (Measured on this host,
+    `-offload-arch=native` is byte-identical to `-offload-arch=xcore1000`, so
+    resolving it here agrees with what the compiler would have done.)
     """
+    families = (1000, 1500, 1600)
+    spelled = ", ".join("xcore%d" % f for f in families)
+    if target == "native":
+        return _native_family(this_dir)
     prefix = "xcore"
     if not target.startswith(prefix) or not target[len(prefix):].isdigit():
         raise RuntimeError(
-            f"CUCC_TARGETS entry {target!r} does not name an xcore family; this "
-            f"build produces one artifact per family and needs the family from "
-            f"the target spelling (expected `xcore<N>`, e.g. xcore1000)"
+            f"CUCC_TARGETS entry {target!r} does not name an xcore family "
+            f"(expected `xcore<N>`).  This build produces one artifact per "
+            f"family and needs the family from the target spelling.  The "
+            f"families this build has rows for are {spelled}."
         )
     family = int(target[len(prefix):])
-    if family not in (1000, 1500, 1600):
+    if family not in families:
         raise RuntimeError(
-            f"CUCC_TARGETS entry {target!r} names family {family}, which has no "
-            f"row in csrc/structs.h (AP count and per-AP shared memory); add "
-            f"one there before building it"
+            f"CUCC_TARGETS entry {target!r} names architecture {family}, which "
+            f"is not one of the families this build has a row for ({spelled}).  "
+            f"`csrc/structs.h` holds each family's AP count and per-AP shared "
+            f"memory and the artifact is named for the family, so a target this "
+            f"build cannot name cannot be built -- and a spelling like "
+            f"`xcore1502` or `xcore1520`, which mxcc does accept, is not "
+            f"evidence of which family it belongs to.  If the part shares one "
+            f"of the families above, pass that spelling; otherwise add the "
+            f"family's row to csrc/structs.h and to the tuple here."
         )
     return family
 
@@ -105,7 +266,7 @@ def _maca_root() -> str:
 
 
 def build_for_maca():
-    """Build one extension per family: `SOURCES` compiled once per target.
+    """Build one extension per family: that family's sources, one compile each.
 
     **This is a csrc compile and nothing else.**  One `.cu`, one `.so` per
     target; everything under `deep_select/` is Python and reaches an artifact
@@ -118,14 +279,14 @@ def build_for_maca():
     memory, and refuses a target with no row.  Unset means `DEFAULT_TARGETS`
     below, one target per family, so a build host needs no MACA card.
 
-    **`native` is not accepted here**, which is a change from the form that
-    took one comma-separated `-offload-arch`.  `native` resolves to *this* host's
-    family, and a per-family artifact must not have its constants chosen by the
-    build machine -- a wheel built on a C500 would carry the C500's numbers
-    under a name that claims to be the target machine's.  `develop.sh` /
-    `install.sh` therefore build every family and let the *loader* pick; a
-    narrow `CUCC_TARGETS=xcore1000` is still allowed, and produces a wheel that
-    serves one family and names it in the error on any other.
+    **`native` is accepted and resolved to this host's family** -- it is what
+    `develop.sh` and `install.sh` default to, and both act on *this* machine.
+    A per-family artifact must not have its constants chosen by the build
+    machine, though, so a *wheel* must not be built that way: it would carry
+    this host's numbers under a name that claims to be the target machine's.
+    That is why `build.sh`'s default is the explicit family list; a narrow
+    `CUCC_TARGETS=xcore1000` is still allowed, and produces a wheel that serves
+    one family and names it in the error on any other.
 
     The two numbers the kernel sizes its grids against are compile-time
     constants again (`ARCH_SM_COUNT`, `ARCH_SMEM_PER_AP_BYTES`), which is the
@@ -135,9 +296,9 @@ def build_for_maca():
     it takes the `#else` branch on every architecture, and host code exists once
     in a fat binary regardless.
 
-    `csrc/maca_kernels/xcore1600/` is not built: its source is off `SOURCES` and
-    its `kerutils` include is off `include_dirs` below.  Re-adding both is what
-    building it would take.
+    `csrc/maca_kernels/xcore1600/` is not built: no row of
+    `SOURCES_BY_FAMILY` names it and its `kerutils` include is off
+    `include_dirs` below.  Re-adding both is what building it would take.
 
     **Run `ref/kerutils_platform_arms/run_probe.sh` first.**  The two edits above
     are the whole mechanical change, so they are what a reader looks at -- and a
@@ -161,10 +322,51 @@ def build_for_maca():
     # so asking that package beats guessing a prefix.  `lib_subdir` is
     # platform-dependent and resolved, because the rpath below points at it.
     tvm_ffi_root, lib_subdir = _tvm_ffi_root()
+
+    # Unset or empty means `DEFAULT_TARGETS` -- the scripts' `${VAR:-default}`
+    # reads an empty value the same way, so this `or` is that rule and not a
+    # coincidence (`DEFAULT_TARGETS` above).  A value that was set and names no
+    # target at all is a different thing and is refused: it is the shape a typo
+    # arrives in, and taking the default there would answer a question nobody
+    # asked.  A build that did fall back says so, because that fallback is the
+    # one that produces three artifacts on a bare `python setup.py`.
+    raw_targets = os.environ.get("CUCC_TARGETS")
     targets = [t.strip() for t in
-               (os.environ.get("CUCC_TARGETS") or DEFAULT_TARGETS).split(",") if t.strip()]
+               (raw_targets or DEFAULT_TARGETS).split(",") if t.strip()]
     if not targets:
-        raise RuntimeError(f"CUCC_TARGETS={os.environ.get('CUCC_TARGETS')!r} selects no target")
+        raise RuntimeError(
+            f"CUCC_TARGETS={raw_targets!r} is set but names no target; leave it "
+            f"unset or empty for the default list {DEFAULT_TARGETS}")
+    if not raw_targets:
+        print(f"deep_select: CUCC_TARGETS unset or empty; "
+              f"building DEFAULT_TARGETS={DEFAULT_TARGETS}")
+    # Resolved once, in order: the family decides the artifact's name, its
+    # constants and which sources it takes.  `native` is the only spelling whose
+    # name is not itself; it is resolved and reported by `_native_family`.
+    #
+    # **One artifact per family**, so two entries that resolve to one family are
+    # built once.  The case arrives without meaning to -- `native,xcore1000` on
+    # the host `native` names, or a doubled entry -- and it is not an error: the
+    # artifacts are the same set either way, so it is reported and collapsed
+    # rather than refused.  It has to be handled because the two Extensions
+    # would otherwise take the same `name=` and the same output path; measured,
+    # that builds the artifact twice (ninja dedupes the compile by command hash,
+    # so the cost is one relink and one extra copy).
+    #
+    # The collapse lands in `resolved` itself, and everything downstream reads
+    # that one list -- the Extension comprehension, the source summary, and the
+    # `targets` this print names, which is derived from it rather than kept
+    # beside it.
+    seen_family, resolved = {}, []
+    for target in targets:
+        family = _family_of_target(target, this_dir)
+        if family in seen_family:
+            print(f"deep_select: CUCC_TARGETS entries {seen_family[family]!r} "
+                  f"and {target!r} both name xcore{family}; building it once")
+            continue
+        seen_family[family] = target
+        resolved.append((target, family))
+    targets = [target for target, _ in resolved]
 
     # The compiler pair, printed rather than assumed -- see the cu-bridge note
     # above for why `CUDA_HOME` must be the one torch resolved.
@@ -267,14 +469,21 @@ def build_for_maca():
                 # family has to name the file, because the file's *host* half
                 # is what holds that family's constants.
                 name=f"deep_select.deep_select_maca_xcore{target_family}",
-                sources=SOURCES,
+                # This family's own source set, resolved once per Extension --
+                # `sources_for_family` hands back a fresh list, so no two
+                # artifacts share one.
+                sources=sources_for_family(target_family),
                 # Every source is a `.cu`, so the `nvcc` list is the only one
                 # torch reads, and its contents are mxcc's dialect because
                 # `$nvcc` resolves to cucc.  The two per-family flags are
                 # appended here rather than shared, which is the whole point of
                 # one Extension per target.
                 extra_compile_args={"nvcc": nvcc_args + [
-                    f"-offload-arch={target}",
+                    # `native` is resolved before it reaches here, so the
+                    # spelling passed on is the family it named: `-offload-arch`,
+                    # `-DDEEP_SELECT_ARCH` and the artifact's name then state the
+                    # same number.
+                    f"-offload-arch={_offload_spelling(target, target_family)}",
                     f"-DDEEP_SELECT_ARCH={target_family}",
                 ]},
                 # The MACA catalogue, the tvm-ffi headers the binding edge
@@ -301,10 +510,13 @@ def build_for_maca():
                     "-Wl,--enable-new-dtags",
                 ],
             ))
-        for target in targets
-        for target_family in [_family_of_target(target, this_dir)]
+        for target, target_family in resolved
     ]
-    print(f"deep_select: compiling {', '.join(SOURCES)} once per family, "
+    # One clause per *distinct* source set, read off the table rather than a
+    # second copy of it: families that compile the same tree share a clause,
+    # and a family with its own kernel gets its own.
+    distinct = sorted({", ".join(sources_for_family(f)) for _, f in resolved})
+    print(f"deep_select: compiling {'; '.join(distinct)} once per family, "
           f"for {','.join(targets)}")
 
     # `no_python_abi_suffix` belongs *here*, not on the Extension above: torch's

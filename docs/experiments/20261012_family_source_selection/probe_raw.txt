@@ -1,0 +1,36 @@
+── 1. which source each family builds (`setup.py`'s SOURCES_BY_FAMILY) ──
+  default (a family with no row)      <- csrc/maca_kernels/xcore1000/maca_topk.cu
+  family 1000  (ARCH_SM_COUNT=104,  65536 B/AP)   [    row] <- csrc/maca_kernels/xcore1000/maca_topk.cu
+  family 1500  (ARCH_SM_COUNT= 28, 131072 B/AP)   [    row] <- csrc/maca_kernels/xcore1000/maca_topk.cu
+  family 1600  (ARCH_SM_COUNT= 28, 131072 B/AP)   [    row] <- csrc/maca_kernels/xcore1000/maca_topk.cu
+  rows naming csrc/maca_kernels/xcore1600/ (the ported tree): none
+  that tree is on disk: True
+
+── 2. the AP-count set the family-shaped rules are keyed on ──
+  is_c600u_ap_count(sm_count) returns true for [28, 32]
+  ARCH_SM_COUNT for family 1500 (C600)            = 28
+  => a C600 satisfies it: True   << the finding: three ladders fitted on a C600U are taken by a C600
+
+  coarse12's budget half asks for 16384 B/AP = max(route arena 16384, the split it replaces 14056)
+  families whose budget is short of it: none -- the budget half is inert for every family this build ships
+
+── 3. the arm each (artifact family, device AP count) lands on ──
+  family  APs |  block | bf16 split |   coarse12 | f32 chunks | f32 split
+  -----------------------------------------------------------------------
+    1000   28 |    512 | sqrt(V/B2) |    C6U lad |        off | gate free
+    1000   32 |    512 | sqrt(V/B2) |    C6U lad |        off | gate free
+    1000  104 |   1024 |    V/21000 |     C5 lad |    C5 only | gate free
+    1500   28 |    512 | sqrt(V/B2) |    C6U lad |        off | gate free
+    1500   32 |    512 | sqrt(V/B2) |    C6U lad |        off | gate free
+    1500  104 |   1024 |    V/21000 |     C5 lad |    C5 only | gate free
+    1600   28 |    512 | sqrt(V/B2) |    C6U lad |        off | gate free
+    1600   32 |    512 | sqrt(V/B2) |    C6U lad |        off | gate free
+    1600  104 |   1024 |    V/21000 |     C5 lad |    C5 only | gate free
+
+── 4. what the two candidate keys would change ──
+  today      : key = AP count in [28, 32]   -> a 28-AP C600 takes all three C600U ladders
+  alternative: key = ARCH_FAMILY == 1600          -> the same C600 takes the C500 band for the block width and the
+               bf16 split, and is *denied* coarse12 / f32 chunks (neither ladder names 28)
+
+  Neither is measured on a C600.  Which is right is an open question;
+  see the README's section 5.
