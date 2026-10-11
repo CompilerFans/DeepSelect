@@ -339,7 +339,7 @@ and passing `check_result` on every cell the port fails. Nothing in that tree is
 C500-specific code, and the capacity gate cannot fire in this direction — see
 "Can a C600U run the C500 kernel" below.
 
-`csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel) and `TopkSelectArgs` (the port's params type; `maca_topk.cu` has its own `RowParams`, and `TopkSelectArgs::shared_memory_size_per_sm` is read only by `csrc/maca_kernels/xcore1600/`). It also carries **the per-family table** — `ARCH_FAMILY`, `ARCH_SM_COUNT` and `ARCH_SMEM_PER_AP_BYTES`, keyed on `DEEP_SELECT_ARCH` — see "the arch constants are compile-time" below, and the platform declaration it is compiled under — see "the platform layer" immediately below.
+`csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel) and `TopkSelectArgs` (the port's params type; `csrc/maca_kernels/xcore1000/contract.cuh` has its own `RowParams`, and `TopkSelectArgs::shared_memory_size_per_sm` is read only by `csrc/maca_kernels/xcore1600/`). It also carries **the per-family table** — `ARCH_FAMILY`, `ARCH_SM_COUNT` and `ARCH_SMEM_PER_AP_BYTES`, keyed on `DEEP_SELECT_ARCH` — see "the arch constants are compile-time" below, and the platform declaration it is compiled under — see "the platform layer" immediately below.
 
 ### The platform layer
 
@@ -409,7 +409,7 @@ Two things the family table is deliberately not:
 - **Not the build's target list.** `CUCC_TARGETS` says what images were compiled, not what device is in front of you; deriving the grid from it names the wrong artifact as soon as the list does not lead with this device's family (the same defect `perf_snapshot.provenance()` and the two `run_*` scripts each had once). It is also not the `--offload-arch` spelling resolved back: `mxcc`'s `native` is that vocabulary, not this one — and `setup.py` resolves `native` at build time to *this host's* family, which is a build-machine fact rather than a device answer.
 - **Not a performance table.** Only family 1000's row has a measurement behind it. The other two are the parts' own AP count and the 128 KiB every 128 KiB family has, and **every C500-only *tuning* rule is still guarded by `kF32Coarse12MeasuredSmCount` (104) at run time** rather than by the macro. Geometry compiles in; tuning has to be earned. `ref/c500_gate/` prints both halves against the device's own report.
 
-### xcore1000 — `maca_topk.cu` + the `radix_*.cuh` headers (the shipping C500 kernel)
+### xcore1000 — `maca_topk.cu` + `contract.cuh` / `routing.cuh` / the `radix_*.cuh` headers (the shipping C500 kernel)
 
 The contract layer and launch layer. Every mode shares one contract half — the `length <= topk` shortcut, the NaN bit-pattern check, index offsets, out-of-band fills, the optional ordered emit — and **two** selection dataflows feed it, both radix:
 
@@ -420,7 +420,7 @@ The contract layer and launch layer. Every mode shares one contract half — the
 
 The current 16-bit dataflow is **coarse12** (see handover §3, ledger §2.3). Understand these three things before changing it:
 
-1. **The coarse histogram and the candidate arena alias the same shared memory** (`s_wide = s_input_flat`). Stage 0 uses the arena region as a 4096-bin histogram; the histogram is dead after the halve/narrow steps, and a `__syncthreads()` separates the two uses. So the lead of `radix_smem_bytes(topk, sorted, wide=true)` is the histogram's 16 KB, not the arena's ~14 KB — and `maca_topk.cu`'s `radix_layout` must compute `selected`'s offset with the same flag, or the arena overwrites it.
+1. **The coarse histogram and the candidate arena alias the same shared memory** (`s_wide = s_input_flat`). Stage 0 uses the arena region as a 4096-bin histogram; the histogram is dead after the halve/narrow steps, and a `__syncthreads()` separates the two uses. So the lead of `radix_smem_bytes(topk, sorted, wide=true)` is the histogram's 16 KB, not the arena's ~14 KB — and `contract.cuh`'s `radix_layout` must compute `selected`'s offset with the same flag, or the arena overwrites it.
 2. **Counts are a property of the bin, not of what fits.** In pass 2 the fine histogram counts *every* member of the threshold bin; only the write into the arena is capacity-limited. History: clamping both together under `pos < SMEM_INPUT_SIZE` forced a full-row rescan to repair overflow — deleted in `4cd740a`.
 3. **The narrow step's crossing test is `above + c > remain_topk`, i.e. the window itself**, not "how much is left after subtracting the byte above". The latter stops one sub-bin early when the byte has slack, leaving the window short; refine then finds no landing point and reads an uninitialized shared variable. This cost a memory violation and 379/512 wrong slots once. It does not raise — it silently mis-ranks.
 
@@ -537,9 +537,8 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
   `csrc/structs.h`'s `ARCH_SMEM_PER_AP_BYTES`, per family, now that the build
   is one artifact per family again (see "the arch constants are compile-time").
   The gate it implemented — reject an oversized config at compile time — came
-  back with it, as the budget half of `maca_topk.cu`'s `f32_coarse12_applies`:
-  `if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) return false;` (`:1214`,
-  `kNeeded` at `:1210`). It is a compile-time property of the family, so a
+  back with it, as the budget half of `routing.cuh`'s `f32_coarse12_applies`:
+  `if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) return false;`. It is a compile-time property of the family, so a
   128 KiB part satisfies it for every shape and it cannot fire — which is the
   direction this bullet is about.
 - **The SM-count-sensitive numbers are arguments now**, not constants:
@@ -556,7 +555,7 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
   `maca_topk.cu` has neither. Its capacity gate is a *compile-time* one rather
   than an absent one — `f32_coarse12_applies` rejects at build time with
   `if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) return false;`
-  (`maca_topk.cu:1214`, `kNeeded` at `:1210`), keyed on the family's own smem
+  (`routing.cuh`, `kNeeded` just above it), keyed on the family's own smem
   budget rather than on the config, so "a 128 KiB SM runs it with room to
   spare" is a fact the compiler already decided. bf16 `sorted_value`, rejected
   by the port, is accepted here. Neither limit is reached by the official grid.
@@ -833,15 +832,15 @@ staticMaxWarps/PEU : <N>
   original has no separate counterpart here — what would be local memory is
   counted in the stack frame.
 - **48 bytes is the floor on this toolchain, not a spill.** 50 of
-  `maca_topk.cu`'s 78 devices report exactly 48; the other 28 report 0. A
+  the xcore1000 TU's 78 device functions report exactly 48; the other 28 report 0. A
   `--stack-baseline` of 48 therefore reports the floor and flags a real spill.
 
-Measured 2026-09-14 on `maca_topk.cu` (xcore1000, the build's own flags): the
+Measured 2026-09-14 on the xcore1000 TU (the build's own flags): the
 launched device functions report a **48-byte stack frame, no spill**, with
 **`topk_kernel_radix<…,512,…>` at 44 MT / up to 78 STregisters** and
 **`topk_kernel_radix<…,1024,…>` at 46 MT / up to 78 ST**. The `topk_bf16_chunk_*`
 stage kernels (`topk_bf16_chunk_stage1_kernel_k` / `topk_bf16_chunk_stage2_kernel_k`,
-the bf16 split's live arm) measure 20-40 MT / 30-42 ST (2026-10-12, same `maca_topk.cu`
+the bf16 split's live arm) measure 20-40 MT / 30-42 ST (2026-10-12, the same TU
 compiled through `cucc --resource-usage`) and are reached only by the chunked path (below).
 
 ### 2. Occupancy — `~/maca_kernel_doctor`
@@ -1373,7 +1372,7 @@ git -C $D push origin main
 
 Never a bare `git commit -a` (see repo identity, top).
 
-**Debugging mis-ranked output**: the fastest localizer is to write the kernel's threshold triple `{wide_threshold, above, fine_threshold, remain, num_staged, last_remain}` into `output[topk-8+tx]` on `blockIdx.x == 0 && tx < 8` and compare it against the same row computed with torch on CPU. That is how the `0xBFA` vs true `0xBFC`-class bug was found in one step. Clean it up afterwards — `rg RKPROBE` must be 0. (This probe is written for `maca_topk.cu`'s threshold triple; `csrc/maca_kernels/xcore1600/` has a different dataflow and no equivalent variables.)
+**Debugging mis-ranked output**: the fastest localizer is to write the kernel's threshold triple `{wide_threshold, above, fine_threshold, remain, num_staged, last_remain}` into `output[topk-8+tx]` on `blockIdx.x == 0 && tx < 8` and compare it against the same row computed with torch on CPU. That is how the `0xBFA` vs true `0xBFC`-class bug was found in one step. Clean it up afterwards — `rg RKPROBE` must be 0. (This probe is written for the radix row kernel's threshold triple (`radix_row_bf16.cuh`); `csrc/maca_kernels/xcore1600/` has a different dataflow and no equivalent variables.)
 
 Symptom → first look (handover §8): wrong-but-not-much (a few slots, rank off by a few) → the threshold's subtraction convention (the `above + c > remain_topk` rule); `Memory Violation(0x4)` / `ATU Fault` → first the probe's missing `set_default_device`, then an out-of-range threshold leaving a shared variable uninitialized; one cell slow while others unchanged → occupancy, check `static + dynamic` against 32,768; source changed with no behavior change → a stale `.so`; compile-time `undeclared identifier` → constant/helper ordering in the radix headers (constants live in `radix_common.cuh`, included first); **wrong indices that change run to run → a lane-width bug** (a 32-bit mask or `/ 32` on a 64-lane wave in `csrc/maca_kernels/xcore1600/`), not a threshold-convention one — a fixed offset is the threshold, a varying one is a race.
 

@@ -75,8 +75,8 @@ csrc/
     ├── common/primitives.cuh               跨族原语（已落地）
     └── xcore1000/                          族层
         ├── maca_topk.cu                    唯一手写 TU：include + host 入口 + 按表派发
-        ├── contract.cuh                    契约半：RowParams / 常量 / 键与 NaN / emit / 布局
-        ├── routing.cuh                     选路：形状 → 数据流（纯函数，一处可读）
+        ├── contract.cuh                    契约半：RowParams / 常量 / 键与 NaN / emit / 布局 / 行核与发射
+        ├── routing.cuh                     选路：形状 → 数据流（纯函数，一处可读）＋梯子 `topk_launch`
         ├── radix_core.cuh                  数据流入口（伞头：只 include 下面四个；TU 只 include 它）
         ├── radix_common.cuh                行族共享件：常数 / smem 尺寸 / 直方图与后缀和
         ├── radix_row_bf16.cuh              bf16 行：radix 两趟 + skip 表 + overflow
@@ -126,8 +126,14 @@ deep_select::ffi::      平台无关边缘（不变）
    `topk_chunks`（按 chunk 切分的候选合并）说清了算法。官方名是**重要来源**——调用方与计时器按它接，
    且与文件里的 `__global__` 核名一致——但贴切才用；血统名（`dg12` / `dgchunks`）两样都不占，一律不用。
    公开 API 名（`topk` / `fp8_*` / `bf16_*` …）是 ABI，官方拼写**不动**（2026-09-21 裁定仍有效）。
-2. **依赖方向单向**：`common ← contract ← 数据流 ← routing ← TU(入口)`；python 侧
-   `interface → _binding → .so`。数据流文件**不 include routing**，routing 不 include 具体发射实现。
+2. **依赖方向**（`X ← Y` 读作"Y include X"）：`primitives ← 数据流 ← contract ← routing ← TU(入口)`；
+   python 侧 `interface → _binding → .so`。P2 落地后实测的两点修正，两条都有理由、不是懒：
+   - `contract.cuh` include `radix_core.cuh`——契约半持有行核与它的布局/发射
+     （`radix_layout` / `radix_select_row` / `launch_radix` / `launch_typed_radix`），
+     所以它在数据流**之上**，不在其下。
+   - `routing.cuh` include 两个移植头——梯子读它们的 `kSmemBytes` / `kMaxTopK`，且分块发射器
+     是模板，定义必须在其实例化点可见。
+   数据流文件**不 include routing**（这条成立，是方向的承重面，必须保持）。
 3. **TU 结构**：手写 TU 恒为 1（`maca_topk.cu`）；设备核由生成出来的 `instantiations/*.cu` 提供，
    每个文件一条显式实例化。`setup.py` 的 `SOURCES` = 手写清单 + 生成器打印的清单。
 4. **路由即表**：所有形状判据（哪条数据流、几个 chunk、什么块宽）集中在 `routing.cuh`，纯函数、可读、可测；
@@ -142,7 +148,7 @@ deep_select::ffi::      平台无关边缘（不变）
 | 阶段 | 内容 | 收据（§6） | 依赖 |
 |---|---|---|---|
 | P1 | 删 `radix_core.cuh` 里岛外零引用的静态-k 族（≈700 行）+ 重写描述它的注释 | 全绿 | 已落地 `e16138c` |
-| P2 | `maca_topk.cu` 拆出 `contract.cuh` + `routing.cuh`；dg 两路的发射归位数据流文件 | 全绿 | P1/P4 |
+| P2 | `maca_topk.cu` 拆出 `contract.cuh` + `routing.cuh`；dg 两路的发射归位数据流文件 | 全绿 | 已落地 `d8470ca` |
 | P3 | `radix_core.cuh` 按 dtype 拆成 `radix_common` / `radix_row_bf16` / `radix_row_fp32` / `radix_chunked`；`radix_core.cuh` 留作伞头 | 全绿 | 已落地 `b02d872` |
 | P4 | `dg_*` → `topk_coarse12` / `topk_chunks`（文件、namespace、调用点、`ref/` 臂、文档） | 全绿 | 已落地 `2a795b1` |
 | N | 命名空间整合（§3b）：`rk`→`topk_select_radix`、`topk_select_radix::coarse12`→`topk_select_coarse12`、`topk_select_radix::chunks`→`topk_select_chunks`、`deep_select_common`→`topk_select_common`、`deep_select_maca`→并入 `deep_select` | 全绿（rename 口径：demangle 名集模改后全等 + size 全等 + 冒烟） | 已落地 `83b9b08` |

@@ -7,7 +7,7 @@ extracted into a torch-free, standalone repro:
 | dir         | what it is | source |
 |-------------|------------|--------|
 | `deep_gemm/` | `deep_gemm.fp32_indexer_topk_selector`, the csrc's own routing | `mcDeepGEMM/csrc/kernels/fp32_topk.cu` |
-| `ds/`        | DeepSelect's fp32 radix row kernel | `DeepSelect/csrc/maca_kernels/xcore1000/maca_topk.cu` |
+| `ds/`        | DeepSelect's fp32 radix row kernel | `DeepSelect/csrc/maca_kernels/xcore1000/` |
 | `mcoplib/`   | mcoplib's `topk_transform_v1` (SGLang port) | `mcoplib/op/sglang/jit_kernels/topk_v1.cu` |
 
 Each is a kernel TU + a public header + a `main.cu` driver + this README's
@@ -33,7 +33,7 @@ three answer different questions:
 | `coarse12_port/` | the *ported* coarse12 kernel, driven directly | `topk_select_coarse12::launch_topk_coarse12` with no gate, no dispatch and no contract half, so the kernel itself can be timed against `deep_gemm/`'s original and its whole `top_k` range exercised. This is the only place the port runs without the facade around it. |
 | `kerutils_platform_arms/` | the vendored `kerutils`' MACA platform arm, compiled and run | Nothing else in this repository instantiates that arm — its only consumer is off `SOURCES` — so without this probe "it builds" says nothing about it. `./run_probe.sh` there reads its flags out of `setup.py`. |
 
-The first two are referenced from `maca_topk.cu`'s gate comments; none of the
+The first two are referenced from `routing.cuh`'s gate comments; none of the
 three is part of the three-way comparison, and a number from any of them is not
 comparable to the table below (different shapes, different work).
 

@@ -72,7 +72,9 @@ C500（xcore1000）上走的是**行式 radix 选择**：一行一个 CTA，两�
 
 | 文件 | 角色 |
 |---|---|
-| `csrc/maca_kernels/xcore1000/maca_topk.cu` | **契约层 + 启动层**：`topk` 的对外契约（values / sorted / NaN / 窗口 / 偏移 / 短行）、NaN 扫描、动态 smem 尺寸与布局、kernel 启动 |
+| `csrc/maca_kernels/xcore1000/maca_topk.cu` | **唯一手写 TU + 对外入口**：include 清单 + tvm-ffi 入口（契约检查、scratch、`topk` 绑定） |
+| `csrc/maca_kernels/xcore1000/contract.cuh` | **契约半**：`RowParams` / 常量 / 键与 NaN / emit / smem 布局 / 行核与发射（`radix_layout`、`topk_kernel_radix`、`launch_radix`） |
+| `csrc/maca_kernels/xcore1000/routing.cuh` | **选路**：形状 → 数据流（纯函数）＋梯子 `topk_launch` |
 | `csrc/maca_kernels/xcore1000/radix_core.cuh` | **选择数据流伞头**（header-only）：只 include 下面四个；TU 只 include 它 |
 | `csrc/maca_kernels/xcore1000/radix_common.cuh` | 行族共享件：常数（四个 `kMaxTopK` 之一等）/ smem 尺寸 / 直方图与前缀和 helper |
 | `csrc/maca_kernels/xcore1000/radix_row_bf16.cuh` | `radix_topk_row_bf16_b`（16 位行，生产路径）+ skip 表 + overflow |
@@ -89,7 +91,7 @@ C500（xcore1000）上走的是**行式 radix 选择**：一行一个 CTA，两�
 walk 合计 283 µs，对两趟下界 233.4 = 82% 可达速率。要看"下一步动哪里"先读
 那份文档的 §5。
 
-**哪条路径在生产里活着**：`maca_topk.cu` 只启动两条行内核——
+**哪条路径在生产里活着**：梯子只启动两条行内核——
 `radix_topk_row_bf16_b<BLOCK>`（bf16）与 `radix_topk_row_f32`（fp32）；
 bf16 的 chunked split 两级（`topk_bf16_chunk_stage1/stage2_kernel_k`）也各自
 用 `_b` 排自己那一段。改 `_b` 之前先确认自己改的是不是生产路径。
@@ -121,7 +123,7 @@ refine  细直方图再做一次 256 宽扫描（只前 16 桶非零），得到
 1. **直方图与 arena 共用同一段 smem**（`s_wide = s_input_flat`）。直方图在折半
    + 收窄之后已死，arena 才开始写；中间有 `__syncthreads()` 隔开。所以
    `radix_smem_bytes(topk, sorted, wide=true)` 的 lead 是**直方图的 16 KB**，
-   不是 arena 的 14,056 B。`maca_topk.cu` 的 `radix_layout` 必须和它用同一个
+   不是 arena 的 14,056 B。`contract.cuh` 的 `radix_layout` 必须和它用同一个
    flag 算 `selected` 的偏移，否则 arena 会盖住 `selected`。
 2. **计数是"桶"的属性，不是"装得下多少"的属性**。趟 2 里细直方图对阈值桶的
    **每一个**成员计数，只有写入 arena 才受容量限制。历史上有过把两者一起夹在
