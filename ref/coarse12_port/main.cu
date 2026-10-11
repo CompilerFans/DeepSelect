@@ -4,7 +4,7 @@
 //   ./main [n_rows] [n_cols] [top_k] [iters]
 //
 // It fills a (n_rows, n_cols) fp32 matrix on the device, runs
-// `rk::dg12::launch_topk_coarse12` directly (no gate, no dispatch, no
+// `rk::coarse12::launch_topk_coarse12` directly (no gate, no dispatch, no
 // contract half), checks every row against a CPU `nth_element` reference, and
 // reports latency plus read bandwidth.  The row is scanned in full, so
 // `lengths` is `n_cols` for every row.
@@ -168,8 +168,8 @@ int main(int argc, char **argv)
   // the second is what makes the gate's `topk <= kMaxTopK` a real bound rather
   // than a fitted one.
   std::printf("arena %d bytes -> %d candidates (%d threads, %d coarse bins)\n",
-              rk::dg12_ref::smem_bytes(), rk::dg12_ref::candidate_capacity(),
-              rk::dg12_ref::threads(), rk::dg12_ref::coarse_bins());
+              rk::coarse12_ref::smem_bytes(), rk::coarse12_ref::candidate_capacity(),
+              rk::coarse12_ref::threads(), rk::coarse12_ref::coarse_bins());
 
 
   const size_t scores_bytes = (size_t)n_rows * n_cols * sizeof(float);
@@ -193,7 +193,7 @@ int main(int argc, char **argv)
   // No scan table: this driver measures the kernel, and the folded NaN scan
   // only runs where the caller asked for one (`nan_flags != nullptr`).
   auto launch = [&]() {
-    rk::dg12_ref::launch(scores, seq_lens, out_indices, /*nan_flags=*/nullptr,
+    rk::coarse12_ref::launch(scores, seq_lens, out_indices, /*nan_flags=*/nullptr,
                          (int)n_rows, (int)top_k, (int64_t)n_cols,
                          /*default_length=*/(int)n_cols, /*stream=*/nullptr);
   };

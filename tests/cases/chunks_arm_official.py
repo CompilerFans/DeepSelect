@@ -78,7 +78,7 @@ allok &= case("decline wide bin pivot", 2, 66551, 2048,
 # The arm answers a row *without ranking it* and hands the answer to the
 # contract half as `preselected`, and that half **reads** a per-row flag
 # instead of scanning (`maca_topk.cu:463`).  So the arm has to raise it, and
-# for a while it did not: `dg_chunks.cuh` took `nan_flags` and did
+# for a while it did not: `topk_chunks.cuh` took `nan_flags` and did
 # `(void)nan_flags;`, which served a NaN row a normal top-k with
 # `abort_when_nan_found` -- the default -- inert.  These cases are what would
 # have caught it.  They are here rather than in `tests/test.py`'s own table

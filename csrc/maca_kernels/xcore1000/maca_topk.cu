@@ -48,8 +48,8 @@
 // is what proves it compiles under the mxcc/cu-bridge toolchain, and so that
 // the bf16 selection path below is a header-only dependency.
 #include "radix_core.cuh"
-#include "dg_coarse12.cuh"
-#include "dg_chunks.cuh"
+#include "topk_coarse12.cuh"
+#include "topk_chunks.cuh"
 
 namespace deep_select_maca {
 
@@ -78,7 +78,7 @@ struct RowParams {
     // one is allocated and zeroed by the dispatcher for any call that can
     // reach a route answering a row without ranking it.  There are **two** such
     // routes and both fold the scan into their own pass 1 -- the coarse12 arm
-    // (`rk::dg12`) and the chunks arm (`rk::dgchunks`); `needs_scan_table`
+    // (`rk::coarse12`) and the chunks arm (`rk::chunks`); `needs_scan_table`
     // below is the single place that decides, and it names both.
     // Written by that kernel, read by the contract half.  Null when nothing
     // scans.
@@ -97,7 +97,7 @@ struct RowParams {
     // "Every row" is a property of the launch, and it is the invariant this
     // table rests on: `topk_kernel_radix` is launched `<<<batches, BLOCK>>>`,
     // one CTA per row, on *every* route -- the split, the coarse12 and the
-    // dgchunks arms each hand their answer to that same launch through
+    // chunks arms each hand their answer to that same launch through
     // `launch_typed_radix`, so none of them answers a row without it.  A route
     // that answered rows itself would have to clear its own rows here, and it
     // would need this table zeroed per call.
@@ -1446,7 +1446,7 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 
 // ── the deep_gemm coarse12 route ────────────────────────────────────────────
 //
-// `dg_coarse12.cuh` carries `topk_coarse12`, extracted whole from
+// `topk_coarse12.cuh` carries `topk_coarse12`, extracted whole from
 // `mcDeepGEMM/csrc/kernels/fp32_topk.cu`.  It answers one row in one CTA and
 // writes *positions in the row*, which is exactly what the contract half below
 // consumes, so it replaces the whole split for the shapes it serves rather than
@@ -1529,8 +1529,8 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
     // by the compiler, so a family that fails this half is a compile-time
     // fact visible in the generated code rather than a branch.
     constexpr uint32_t kNeeded =
-        rk::dg12::kSmemBytes > rk::kF32RowSmemBytes
-            ? (uint32_t)rk::dg12::kSmemBytes
+        rk::coarse12::kSmemBytes > rk::kF32RowSmemBytes
+            ? (uint32_t)rk::coarse12::kSmemBytes
             : (uint32_t)rk::kF32RowSmemBytes;
     if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) {
         return false;
@@ -1542,7 +1542,7 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         // than whether any does.  A part that is neither takes the row path, as
         // before.
         if (is_c600u_ap_count(params.sm_count)) {
-            if (params.topk > (uint32_t)rk::dg12::kMaxTopK) return false;
+            if (params.topk > (uint32_t)rk::coarse12::kMaxTopK) return false;
             if (batches == 0) return false;
             if (params.vocab_size < kF32Coarse12MinVocab) return false;
             if (f32_coarse12_override() >= 0) return f32_coarse12_override() != 0;
@@ -1555,7 +1555,7 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         // The arena's bound, not a fitted one: `topk_coarse12_row` serves at
         // most what the candidate half can hold, and there is no overflow path
         // in the *staged* refine that can make a larger answer correct.
-        if (params.topk > (uint32_t)rk::dg12::kMaxTopK) return false;
+        if (params.topk > (uint32_t)rk::coarse12::kMaxTopK) return false;
         if (batches == 0) return false;
         // The original's own width bound (`n_cols >= 2049`).  It matters more
         // now than it did: the narrow arm below is `return batches >= 16` with
@@ -1582,13 +1582,13 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
 
 // ── the deep_gemm chunks route: the `b <= 2` band ───────────────────────────
 //
-// `dg_chunks.cuh` carries `topk_chunks`, deep_gemm's third kernel family, in the
-// same shape as `dg_coarse12.cuh` carries the second.  It is here because the
+// `topk_chunks.cuh` carries `topk_chunks`, deep_gemm's third kernel family, in the
+// same shape as `topk_coarse12.cuh` carries the second.  It is here because the
 // two arms this file already has are both the wrong shape at one or two rows,
 // and that is measured rather than argued (ledger §12.16.6, interleaved five
 // rounds on device 2, `k = 2048`):
 //
-//     b     V        split    deep_gemm    dg/split
+//     b     V        split    deep_gemm    deep_gemm/split
 //     1     66551     90.8      53.0        0.584x
 //     2     66551     93.4      54.1        0.580x
 //     4     66551     93.8     360.8        3.844x
@@ -1611,7 +1611,7 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
 //
 // **Not `constexpr`-gated, and it does not need to be**: the arena here is
 // **device** memory in the per-row workspace (`TopKChunksWorkspace::candidate_indices`,
-// `dg_chunks.cuh`), not a shared buffer -- all three launches pass `0` dynamic
+// `topk_chunks.cuh`), not a shared buffer -- all three launches pass `0` dynamic
 // shared memory -- and every family this repository builds has at least 64 KB
 // per AP (`csrc/structs.h`), so the budget half of `f32_coarse12_applies` would
 // be satisfied by all three.  The one question is whether the machine in front
@@ -1646,7 +1646,7 @@ inline int f32_chunks_route_override() {
 inline bool f32_chunks_applies(const RowParams &params, uint32_t batches) {
     // ── the limits: outside these the route is wrong or impossible ──
     if (params.sm_count != kF32Coarse12MeasuredSmCount) return false;
-    if (params.topk > (uint32_t)rk::dgchunks::kMaxTopK) return false;
+    if (params.topk > (uint32_t)rk::chunks::kMaxTopK) return false;
     // The original's own width bound, as on the coarse12 arm: `2048`, not
     // `2049`, because the facade already rejects a stride that is not a
     // multiple of 256 floats.
@@ -1989,7 +1989,7 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     if (value_dtype == 0 && detail::f32_chunks_applies(params, n)) {
         int32_t *const staging = params.coarse12_cols;
         if (staging != nullptr) {
-            const cudaError_t rc = rk::dgchunks::launch_topk_chunks(
+            const cudaError_t rc = rk::chunks::launch_topk_chunks(
                 (const float *)params.input, params.end_ptr, staging,
                 params.scan_flags, params.chunks_workspace, (int)n,
                 (int)params.topk,
@@ -2038,7 +2038,7 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
             // exactly what the benchmark harness does (`s[:, :L]`): the kernel
             // would then walk past the live prefix and rank columns that are
             // outside the tensor the caller asked about.
-            const cudaError_t rc = rk::dg12::launch_topk_coarse12(
+            const cudaError_t rc = rk::coarse12::launch_topk_coarse12(
                 (const float *)params.input, params.end_ptr, staging,
                 params.scan_flags, (int)n, (int)params.topk,
                 (int64_t)(params.stride_input_batch / sizeof(float)),
@@ -2586,7 +2586,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // rather than passed in, because this is the sizing half and the launch
     // half has to agree with it exactly.
     if (value_dtype == 0 && detail::f32_chunks_applies(p, (uint32_t)batches)) {
-        const size_t need_ws = rk::dgchunks::chunks_workspace_bytes(
+        const size_t need_ws = rk::chunks::chunks_workspace_bytes(
             (uint32_t)batches, p.vocab_size, p.sm_count);
         if (need_ws > scratch.chunks_workspace_bytes) {
             void *grown = nullptr;

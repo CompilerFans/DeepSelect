@@ -58,8 +58,8 @@ namespace rk {
 // file for a reader asking "what is the top-k limit", so it is called out here
 // rather than left to be discovered.
 //
-// There are three constants with this name in the tree (2048 here,
-// `dg_chunks.cuh`, `dg_coarse12.cuh`; 4096 in `maca_topk.cu`) and nothing links
+// There are four constants with this name in the tree (2048 here,
+// `topk_chunks.cuh`, `topk_coarse12.cuh`; 4096 in `maca_topk.cu`) and nothing links
 // them.  That is deliberate -- each is its own arm's bound -- but it means a
 // grep for `kMaxTopK` does not answer "what is the top-k limit".
 constexpr int kMaxTopK = 2048;
@@ -120,7 +120,7 @@ constexpr size_t kSMEM = KSMEM_BYTES;
 // ============================================================
 
 // The NaN predicates and the key encodes come from `../common/primitives.cuh`
-// (one definition, shared with the two `dg_*` dataflows and `maca_topk.cu`);
+// (one definition, shared with the two ported dataflows and `maca_topk.cu`);
 // they are pulled in unqualified because every call site below is spelled that
 // way.
 using deep_select_common::is_nan_bits32;

@@ -49,7 +49,7 @@
 #include "../common/primitives.cuh"
 
 namespace rk {
-namespace dg12 {
+namespace coarse12 {
 
 // ── deep_gemm's `detail` constants, verbatim ───────────────────────────────
 //
@@ -486,5 +486,5 @@ inline cudaError_t launch_topk_coarse12(
     return cudaGetLastError();
 }
 
-}  // namespace dg12
+}  // namespace coarse12
 }  // namespace rk

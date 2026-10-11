@@ -3,11 +3,11 @@
 // Why this file exists
 // -------------------
 // `radix_topk_row_f32` (radix_core.cuh) and `topk_coarse12`
-// (`dg_coarse12.cuh`) both serve this operator, and neither is the right shape
+// (`topk_coarse12.cuh`) both serve this operator, and neither is the right shape
 // at one or two rows.  Measured, interleaved five rounds, device 2, `k = 2048`
 // (ledger §12.16.6):
 //
-//     b     V        ours     deep_gemm    dg/ours
+//     b     V        ours     deep_gemm    deep_gemm/ours
 //     1     66551     90.8      53.0        0.584x
 //     2     66551     93.4      54.1        0.580x
 //     4     66551     93.8     360.8        3.844x   <- deep_gemm's own cliff
@@ -35,7 +35,7 @@
 //
 //   * the `Transform` page-table half, which needs the `page_table` /
 //     `cu_seqlens_row` / `q_positions` plumbing this repository does not
-//     synthesize (the same subtraction `ref/` and `dg_coarse12.cuh` make);
+//     synthesize (the same subtraction `ref/` and `topk_coarse12.cuh` make);
 //   * the `rescanned` branch, where deep_gemm re-walks the row when the
 //     threshold bin is wider than `kCandidateCapacity`.  This port **declines**
 //     the row instead: the coarse merge sets `workspace.declined`, the refine
@@ -68,7 +68,7 @@
 #include "../common/primitives.cuh"
 
 namespace rk {
-namespace dgchunks {
+namespace chunks {
 
 // ── deep_gemm's `detail` constants, verbatim ───────────────────────────────
 constexpr int kThreads = 1024;
@@ -142,7 +142,7 @@ __device__ __forceinline__ int coarse_bin(float value)
 // arm (`Bins == kFineBins == 256`, 4 items per lane) -- the coarse arm is
 // `kWarps = 1024 / 64 = 16` warps each owning 64 consecutive bins.  The
 // `static_assert(kWarps <= kWarpSize)` the arm carries (16 <= 64) holds here,
-// and `dg_chunks.cuh`'s own `blockDim >= kCoarseBins` assert is what makes
+// and `topk_chunks.cuh`'s own `blockDim >= kCoarseBins` assert is what makes
 // `histogram[tid]` readable by every thread.
 //
 // The barrier count is the point, not the instruction count.  The walk was
@@ -206,7 +206,7 @@ __device__ __forceinline__ void block_cumsum_histogram_1024(
 //
 // `output` receives *positions in this window*, which on this path is the row's
 // own columns (the window always starts at column 0 here), so the caller's
-// contract half can treat them exactly like the split's or `dg12`'s answer.
+// contract half can treat them exactly like the split's or `coarse12`'s answer.
 // Ties are broken by whichever order the passes produce, exactly as in the
 // original: the caller compares as multisets.
 //
@@ -480,7 +480,7 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     // top-k, silently, with `abort_when_nan_found` -- the default -- inert.
     // Raising it here is what makes the route enterable under `check_nan` at
     // all, and it is why the scan is folded into pass 1 below rather than left
-    // to a separate pass: `dg_coarse12.cuh:223-245` pays the same predicate on
+    // to a separate pass: `topk_coarse12.cuh:223-245` pays the same predicate on
     // words it is already loading (ledger §10.7, ~3% of that pass), and this
     // kernel is already walking the row twice.
     //
@@ -552,7 +552,7 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     // What it costs when it *is* on: measured, ~2.3-3.5% of this route's own
     // time (b1-v66551 69.6 -> 71.8 us, b1-v131072 79.6 -> 82.4 us, snapshot
     // clock, device 2, interleaved rounds).  That is the same order as the ~3%
-    // of pass 1 `dg_coarse12.cuh` measured for the same fold (ledger §10.7);
+    // of pass 1 `topk_coarse12.cuh` measured for the same fold (ledger §10.7);
     // it is the price of the contract rather than an artifact of this port.
     const bool scan_nan = row_nan != nullptr;
     bool nan_found = false;
@@ -948,5 +948,5 @@ inline cudaError_t launch_topk_chunks_impl(
     return cudaGetLastError();
 }
 
-}  // namespace dgchunks
+}  // namespace chunks
 }  // namespace rk
