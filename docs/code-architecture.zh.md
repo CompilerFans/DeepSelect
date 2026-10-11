@@ -143,11 +143,19 @@ chunks）的元组轴在同一步里从各自发射点枚举，逐族一张表�
 ## 6. 收据协议（所有阶段共用）
 
 ```bash
+# 每个阶段自己的收据（便宜）：
 CUCC_TARGETS=xcore1000,xcore1500,xcore1600 ./develop.sh        # rc=0
 nm -S --defined-only deep_select/deep_select_maca_xcore<N>.so  # 与改前对照（判据见下）
-CUDA_VISIBLE_DEVICES=<独占的一张卡> ./run_test.sh --test       # 339 pass / 0 check_fail / 0 crash
 git status --porcelain                                          # 干净（不留残留）
+
+# 整轮收尾（P3/P4/P6… 全部落地 main 之后）跑一次，不按阶段跑：
+CUDA_VISIBLE_DEVICES=<独占的一张卡> ./run_test.sh --test       # 339 pass / 0 check_fail / 0 crash
 ```
+
+- **测试节奏：全量套件按"轮"跑，不按阶段跑**（用户 2026-10-12：「不需要每次修改都全量测试，
+  效率太低」）。阶段自身的收据 = 构建 rc=0 + nm 判据 + 该阶段特有的**便宜**检查（python 层：
+  `inspect.signature` 与导出表不变；冒烟用 `tests/test.py --sample 50`）。整轮收尾在 main 上跑
+  一次 339 格作为共同门。提交信息如实写"全量套件留待轮收尾"，不声称未跑的测试。
 
 - **搬迁 / 改名（码流未变）**：`nm -S --defined-only` 按**名字 → (size, type)** 比，存活符号逐项相同。
   无 size 的符号（`GCC_except_table*`、CRT 桩）按**去数字后缀的基名**比——编号与地址随布局移动，不算差异。
