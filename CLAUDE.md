@@ -324,8 +324,10 @@ The kernel tree is split **by per-SM shared memory**, because that is what a top
 | `csrc/maca_kernels/xcore1600/` | C600, C600U (128 KiB/SM) | the upstream kernels, ported — **reserved, not built, not reachable** |
 
 **Every family this tree builds compiles `csrc/maca_kernels/xcore1000/`, and there is no
-switch that says otherwise.** `setup.py`'s source list is one unconditional
-`SOURCES` constant holding `csrc/maca_kernels/xcore1000/maca_topk.cu` — there is no
+switch that says otherwise.** `setup.py`'s source list is that directory's — the
+hand-written TU (`maca_topk.cu`) plus `generated_sources()`, the 89
+`instantiations/*.cu` that `scripts/generate_instantiations.py` writes (one device
+kernel per file, the file name *is* the configuration tuple) — and there is no
 `_xcore1600_sources()` any more, and no branch that could select it. The port's
 `csrc/maca_kernels/xcore1600/` tree stays in the repo as source and is not merely uncalled
 but **unreachable**: its own sources are off `SOURCES` and its `kerutils`
@@ -589,7 +591,7 @@ on time today).
 
 Upstream's algorithm is kept (threshold-and-compact scan in a random block order, one global read per element); only its device-side dependencies were replaced: TMA tensor-map loads → cooperative `ldg`, mbarriers → a single buffer with `__syncthreads`, inline PTX → MACA builtins/plain C++. Config tuples were re-derived for 128 KiB (upstream's are sized for an H100's 227 KiB). `v3_cluster` was **deleted**, not ported — MACA has no cluster launch — and those shapes fall through to the general kernel with no dispatch arm.
 
-**The config table has two halves that must be edited together**: `scripts/generate_instantiations.py` (the table, its arithmetic, and the `check_fits_maca` refusal) and the `TopkSelectConfig<...>` call sites in `csrc/maca_kernels/xcore1600/api.cu`. A mismatch is a **link error**, not a runtime one. Note also that `tests/kernelkit/platform.py` duplicates the `deep_gemm` package's `utils/arch_config.py` `XcoreFamily` rows (capacity + family spelling) by hand — it cannot import that package, so a change to either belongs in the same review.
+**The config table has two halves that must be edited together**: `scripts/generate_instantiations.py` (the table, its arithmetic, and the `check_fits_maca` refusal) and the `TopkSelectConfig<...>` call sites in `csrc/maca_kernels/xcore1600/api.cu`. A mismatch is a **link error**, not a runtime one. The same script also carries the xcore1000 tables (six of them, 89 files) which feed `setup.py`'s source list — there the pairing is with `contract.cuh`'s X-macro list, and its receipt is `nm -D --undefined-only` containing none of our namespaces (`docs/code-architecture.zh.md` §5b). Note also that `tests/kernelkit/platform.py` duplicates the `deep_gemm` package's `utils/arch_config.py` `XcoreFamily` rows (capacity + family spelling) by hand — it cannot import that package, so a change to either belongs in the same review.
 
 Consequences of the port, all deliberate:
 
@@ -1293,7 +1295,7 @@ Facts the CSV records and the traps in reading it:
 3. **The official perf table seeds cases from a global counter**, so two runs use different data. A/B comparison must pin the seed yourself: build cases with `tests/lib.py`'s `TestParam`, set `p.seed`, call `lib.generate_testcase(p)`, and time **kernel time** (not e2e) with `tests/kernelkit`'s `kk.bench(fn, p.num_runs)`.
 4. **The baseline binary must be reproducible**: `git stash` to the tree under comparison → build → save the `.so` → switch back. That is how the ledger's numbers were obtained.
 5. **Alignment**: rows whose length is a multiple of 8 and offset-16 B-aligned take the vector path, otherwise a scalar fallback (`bf16x8_is_aligned`). Mixed vector + tail was intermittently racy on a 1024-thread block, so odd-length rows uniformly use one load mode.
-6. **There is nothing to JIT here: every instantiation is in the `.so`.** `setup.py` compiles one artifact per family at build time, so the instantiation count is an artifact property and the receipt for "this change added no instantiation" is the artifact's own symbol count — `nm -S --defined-only deep_select/deep_select_maca_xcore1000.so | grep -c topk_kernel_radix`, 60 as of 2026-10-10. (`DG_JIT_CACHE_DIR` and `kernel.*` belong to the host repository's csrc, whose kernels *are* JIT-compiled; asking for that here counts zero directories and proves nothing.)
+6. **There is nothing to JIT here: every instantiation is in the `.so`.** `setup.py` compiles one artifact per family at build time, so the instantiation count is an artifact property and the receipt for "this change added no instantiation" is the artifact's own symbol count — `nm -S --defined-only deep_select/deep_select_maca_xcore1000.so | grep -c topk_kernel_radix`, 60 as of 2026-10-10 — plus its companion on the build side, `ls csrc/maca_kernels/xcore1000/instantiations/*.cu | wc -l` against the artifact's `__device_stub__` count (89 = 89). (`DG_JIT_CACHE_DIR` and `kernel.*` belong to the host repository's csrc, whose kernels *are* JIT-compiled; asking for that here counts zero directories and proves nothing.)
 7. `NormalFloatDistribution` (the official table's data) is **not** bit-pattern uniform — many elements per row crowd into one high byte. This is the fact every optimization here is organized around.
 8. **A toolkit mismatch at *run* time reports as `mcErrorInvalidDeviceFunction`, and it looks exactly like a kernel defect.** The extension is linked against `libmcruntime.so` by soname, and the loader finds it through the rpath baked at link time — `/opt/maca/lib:/opt/maca/mxgpu_llvm/lib`. Whether `LD_LIBRARY_PATH` can *override* that depends on the ELF tag, and the two tags differ only in order: **`DT_RPATH`** (0xf) is searched **before** `LD_LIBRARY_PATH`, **`DT_RUNPATH`** (0x1d) **after** it. This file asserted "torch's `-Wl,-rpath` becomes a `DT_RUNPATH`, which `LD_LIBRARY_PATH` overrides" until 2026-09-15; measured at `48611b9` the shipped artifact was **`DT_RPATH`**, and a decoy `libtvm_ffi.so` placed on `LD_LIBRARY_PATH` was **ignored** in favour of the baked path. The trap's own numbers are still explained — both runs named `/opt/maca/lib`, and the symlink at `/opt/maca` is what moved — but the "overrides" half was wrong, and it mattered: with `RPATH` a target machine whose `/opt/maca` is the same path but a different SDK generation **cannot be rescued by the environment**. `setup.py` now passes `-Wl,--enable-new-dtags` and the artifact measures `DT_RUNPATH` with the decoy winning, so the sentence above is true of the build it describes. cucc emits `RUNPATH` on its own (measured on a plain `cucc -shared` link); this link did not, which is why the flag is explicit. Measured 2026-09-15 on this box, the *same* `deep_select_xcore1600*.so` (the per-architecture name the build used until `5f5a93c`; it is `deep_select_maca*.so` now, one file per family, and the trap is about the library a loaded artifact resolves, so the name is incidental), device 1, one variable changed:
 
@@ -1314,8 +1316,9 @@ Beyond mcDeepGEMM's general rules (state the principle and the magnitude; keep r
 - A **roofline verdict** for the affected cell: if it is not bandwidth-bound, say what it *is* bound on (currently: per-CTA dependency chain — `load → key transform → compare → shared atomic` — and serialized shared atomics).
 - The gate results. Both suites: `95/95` perf (`./run_test.sh --perf`, ~100 s) **and** a correctness suite — `82170/82170` for the full-table 4-shard run on C500 (`~17.5 min`), or `200/200` for the seeded sample (`./run_test.sh --test`, ~63 s on C600U) when the change is being iterated rather than landed. Say which one you ran.
 - An architecture-boundary statement, and it has to name what actually ships.
-  **There is no C500-only source tree here**: `setup.py`'s `SOURCES` is one entry
-  (`csrc/maca_kernels/xcore1000/maca_topk.cu`) and it is compiled once per family
+  **There is no C500-only source tree here**: `setup.py`'s `SOURCES` is one source
+  *set* (the hand-written `csrc/maca_kernels/xcore1000/maca_topk.cu` plus the 89
+  generated `instantiations/*.cu`) and it is compiled once per family
   (`setup.py:307` prints "compiling … once per family"), so a change written in
   that directory goes into the xcore1500 **and** xcore1600 artifacts as well —
   "byte-identical on the other families" is not available as a claim. What the

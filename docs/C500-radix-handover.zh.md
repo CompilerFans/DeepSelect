@@ -73,8 +73,10 @@ C500（xcore1000）上走的是**行式 radix 选择**：一行一个 CTA，两�
 | 文件 | 角色 |
 |---|---|
 | `csrc/maca_kernels/xcore1000/maca_topk.cu` | **唯一手写 TU + 对外入口**：include 清单 + tvm-ffi 入口（契约检查、scratch、`topk` 绑定） |
-| `csrc/maca_kernels/xcore1000/contract.cuh` | **契约半**：`RowParams` / 常量 / 键与 NaN / emit / smem 布局 / 行核与发射（`radix_layout`、`topk_kernel_radix`、`launch_radix`） |
+| `csrc/maca_kernels/xcore1000/contract.cuh` | **契约半**：`RowParams` / 常量 / 键与 NaN / emit / smem 布局 / 行核 `topk_kernel_radix<Cfg>` 与发射 `launch_radix_config<Cfg>` + 派发表 `kRadixTable` |
 | `csrc/maca_kernels/xcore1000/routing.cuh` | **选路**：形状 → 数据流（纯函数）＋梯子 `topk_launch` |
+| `csrc/maca_kernels/xcore1000/instantiations/*.cu` | **生成物**（89 个）：一个配置元组一个文件，每个显式实例化一个发射器；`setup.py` 的源清单与文件名都来自生成器 |
+| `scripts/generate_instantiations.py` | 元组表 → `instantiations/*.cu` + `setup.py` 读的源清单（`xcore1000_sources()`）；同时仍管 xcore1600 移植树的表 |
 | `csrc/maca_kernels/xcore1000/radix_core.cuh` | **选择数据流伞头**（header-only）：只 include 下面四个；TU 只 include 它 |
 | `csrc/maca_kernels/xcore1000/radix_common.cuh` | 行族共享件：常数（四个 `kMaxTopK` 之一等）/ smem 尺寸 / 直方图与前缀和 helper |
 | `csrc/maca_kernels/xcore1000/radix_row_bf16.cuh` | `radix_topk_row_bf16_b`（16 位行，生产路径）+ skip 表 + overflow |

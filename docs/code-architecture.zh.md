@@ -129,13 +129,14 @@ deep_select::ffi::      平台无关边缘（不变）
 2. **依赖方向**（`X ← Y` 读作"Y include X"）：`primitives ← 数据流 ← contract ← routing ← TU(入口)`；
    python 侧 `interface → _binding → .so`。P2 落地后实测的两点修正，两条都有理由、不是懒：
    - `contract.cuh` include `radix_core.cuh`——契约半持有行核与它的布局/发射
-     （`radix_layout` / `radix_select_row` / `launch_radix` / `launch_typed_radix`），
+     （`radix_layout` / `radix_select_row` / `launch_radix_config` / `launch_typed_radix`），
      所以它在数据流**之上**，不在其下。
    - `routing.cuh` include 两个移植头——梯子读它们的 `kSmemBytes` / `kMaxTopK`，且分块发射器
      是模板，定义必须在其实例化点可见。
    数据流文件**不 include routing**（这条成立，是方向的承重面，必须保持）。
 3. **TU 结构**：手写 TU 恒为 1（`maca_topk.cu`）；设备核由生成出来的 `instantiations/*.cu` 提供，
-   每个文件一条显式实例化。`setup.py` 的 `SOURCES` = 手写清单 + 生成器打印的清单。
+   每个文件一条显式实例化。`setup.py` 的 `SOURCES` = 手写清单 + 生成器的 `xcore1000_sources()`
+   （直接调用生成器函数，不解析它的打印输出——清单只有一份，没有第二份可漂移）。
 4. **路由即表**：所有形状判据（哪条数据流、几个 chunk、什么块宽）集中在 `routing.cuh`，纯函数、可读、可测；
    数据流文件里不出现形状门。
 5. **产物与平台不变**：每族一件产物、`-offload-arch` 与 `-DDEEP_SELECT_ARCH` 一一配对、`sm_count` 运行期读设备——
@@ -152,7 +153,7 @@ deep_select::ffi::      平台无关边缘（不变）
 | P3 | `radix_core.cuh` 按 dtype 拆成 `radix_common` / `radix_row_bf16` / `radix_row_fp32` / `radix_chunked`；`radix_core.cuh` 留作伞头 | 全绿 | 已落地 `b02d872` |
 | P4 | `dg_*` → `topk_coarse12` / `topk_chunks`（文件、namespace、调用点、`ref/` 臂、文档） | 全绿 | 已落地 `2a795b1` |
 | N | 命名空间整合（§3b）：`rk`→`topk_select_radix`、`topk_select_radix::coarse12`→`topk_select_coarse12`、`topk_select_radix::chunks`→`topk_select_chunks`、`deep_select_common`→`topk_select_common`、`deep_select_maca`→并入 `deep_select` | 全绿（rename 口径：demangle 名集模改后全等 + size 全等 + 冒烟） | 已落地 `83b9b08` |
-| P5 | 生成器 + 配置元组模板 + `instantiations/*.cu` + 表驱动派发 + `setup.py` | **内核符号集不变** + 文件数==核数 + 套件绿（`nm` 全表预期变动：host 派发改成表） | P2/P3 |
+| P5 | 生成器 + 配置元组模板 + `instantiations/*.cu` + 表驱动派发 + `setup.py` | **内核符号集不变**（demangle 后配置集逐项相同：89=89、两侧各 0）+ 文件数==核数 + 套件绿（`nm` 全表预期变动：host 派发 328→835/族） | 已落地 `ebb1117` |
 | P6 | python 侧分文件：`interface.py`（公开契约）+ `_backends.py`（torch / deep_gemm 参考后端）+ `_binding.py` / `_log.py` | 套件绿 + `inspect.signature` 不变 | 已落地 `559b845` |
 
 **P3 与 P4 可并行，两者唯一的潜在交界是 `maca_topk.cu` 的 include 块**（`:50-52`）：伞头让 P3 完全不碰这个文件，
@@ -172,7 +173,7 @@ P5 在 P2/P3 之后（它改的是它们刚整理出来的发射层）；P6 独�
 | `OutIdxT` | `int32_t` / `int64_t` | 入口 out-idx 检查 |
 | `BLOCK` | 16 位行 `{topk_select_radix::kBlockSize(512), topk_select_radix::kLongRowBlockSize(1024)}`；fp32 行只有 512 | `maca_topk.cu:964-974`（`if constexpr` 只给 bf16 编宽块臂） |
 | `SI,SV,RV` | `{(1,1,1),(1,0,1),(1,0,0),(0,0,1),(0,0,0)}` 五种 | `sorted_value ⇒ return_value`，`launch_typed_radix` 的 `run(T,T,T)` 链 |
-| `kPreSelected` | `false` / `true` | 行路 vs 分块路的预选臂（`launch_radix` 的 `preselected`） |
+| `kPreSelected` | `false` / `true` | 行路 vs 分块路的预选臂（`launch_typed_radix` 的 `preselected`） |
 
 **2 × 2 × (2 或 1) × 5 × 2 = 60**，与产物里 `nm | grep -c topk_kernel_radix` 的 60 对得上——
 生成器的第一张表就是它，文件命名照官方把元组写进文件名：
@@ -183,10 +184,26 @@ instantiations/value_fp32_outidx_i64_block_512_si0_rv0_sv0_pre1.cu
 ```
 
 P5 的另一半是**把模板改成配置结构**（`template <typename Cfg> __global__ void topk_kernel_radix(...)`，
-`Cfg` 带 `ValueT/OutIdxT/BLOCK/SI/RV/SV/PRE` 七个成员），这样
-`template __global__ void topk_kernel_radix<Cfg>(RowParams);` 才是一条可以独立成文件的显式实例化，
-host 侧按表查 `{dtype, outidx, block, flags, pre} → 发射器`。其余三族（chunked 两阶段 / coarse12 /
-chunks）的元组轴在同一步里从各自发射点枚举，逐族一张表、逐元组一个文件。
+`Cfg` 带 `ValueT/OutIdxT/BLOCK/SI/RV/SV/PRE` 七个成员），host 侧按表查
+`{dtype, outidx, block, flags, pre} → 发射器`。
+
+**实测把"被显式实例化的单位"从核改成了发射器**：在别的 TU 里对 `__global__` 模板本身做显式实例化，
+**链接后会跑到另一个核**——探针（A TU `k<Cfg><<<1,1>>>`、B TU `template __global__ void k<Cfg>(…)`）
+的返回值来自另一个模板：mxcc 为每个核发射 `__device_stub__`，launch 解析到的是**发射方 TU 的那个桩**。
+所以每个生成文件实例化的是一个 host 函数 `launch_radix_config<Cfg>`，**函数体持有该核唯一的
+`<<<>>>`**——设备码与唯一发射点同 TU。同一枚硬币的另一面：头文件里的**非模板** `__global__` 被
+两个 TU include 就是 `__device_stub__` 重复定义（链接错误），因此树里每个核都是模板——含原本不是的
+六个（chunked 两个 stage 2、coarse12、两个 fp32 static-k、`nan_abort_kernel`），各自以自己既有的
+块宽/线程数为模板参数（1024 / 512 / 640 / 1024 / 1024 / 128）。其余三族（chunked 两阶段 /
+coarse12 / chunks）的元组轴同一步里从各自发射点枚举，逐族一张表、逐元组一个文件：**89**
+（行核 60 / chunked 12 / chunks 12 / fp32 static-k 2 / coarse12 1 / contract 2）。
+
+表的两份副本（`contract.cuh` 的 X-macro 清单、生成器的文件表）由**收据**对齐，不由约定：
+第一版 X-macro 把可达的 `(SI,RV,SV)=(1,1,0)` 抄成了不可达的 `(0,0,1)`，产物**照常链接**
+（共享库容忍只有派发表引用的符号缺失），是 `nm -D --undefined-only` 里我方名字空间必须为 **0**
+这一条把它抓出来的（当时 12 个 `launch_radix_config<…>` 未定义）。而漏抄的元组在**运行期**查不到行，
+所以 `launch_typed_radix` 对查空的处置是**报出键值并 `abort`**，不是静默返回——查空意味着本镜像
+服务不了这次调用，没有正确输出可给。
 
 ## 6. 收据协议（所有阶段共用）
 
@@ -213,6 +230,9 @@ CUDA_VISIBLE_DEVICES=<独占的一张卡> ./run_test.sh --test       # 339 pass 
   判据是 **removals-only**：删除集恰好是被删族、**零新增**、存活符号除编译器发射的 `__mc_module_ctor`
   （登记被删桩的模块构造器，实测 5066 → 4192 B）外 size/type 不变。可达性由"每个被删项都是定义，
   任何活引用都会是编译错误"保证。
-- P5 例外：host 派发从 switch 改成表，`nm` 全表会动，判据换成"**设备核符号集不变**"（同 mangled 名同 size）
-  加上"文件数 == 核数"。
+- P5 例外：host 派发从 switch 改成表，`nm` 全表会动（328 → 835 sized 符号/族），判据换成
+  **设备核配置集不变**：`nm --defined-only` 的 `__device_stub__` 行 demangle 后，行核按**去
+  `TopkRadixConfig<…>` 包装**比、六个新模板核按基名比（实测 89=89、两侧各 0 独有、三族一致），
+  加上**文件数 == 核数**（89），加上 `nm -D --undefined-only` 里我方名字空间为 **0**
+  （只有派发表引用的符号缺失不报链接错——上一条里那次抄错就是这条收据抓的）。
 - 触及选路/阈值/数据流的阶段另跑 `./run_test.sh --perf`；纯搬迁不跑。
