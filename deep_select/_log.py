@@ -8,7 +8,7 @@ Off unless `DS_LOG` names a target:
     a directory             <dir>/deep_select_<date>_<time>.log
     anything else           that path, used verbatim
 
-Every public entry point in `interface.py` is decorated, so a call records the
+Every public entry point (`interface.py`, `_backends.py`) is decorated, so a call records the
 shapes and dtypes it was handed and the ones it returned -- which is what makes
 a shape mismatch on the caller's side readable after the fact, rather than only
 as a contract rejection.  Records are metadata only: a tensor is reported as
