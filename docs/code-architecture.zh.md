@@ -141,12 +141,19 @@ chunks）的元组轴在同一步里从各自发射点枚举，逐族一张表�
 
 ```bash
 CUCC_TARGETS=xcore1000,xcore1500,xcore1600 ./develop.sh        # rc=0
-nm -S --defined-only deep_select/deep_select_maca_xcore<N>.so  # 与改前逐行 diff
+nm -S --defined-only deep_select/deep_select_maca_xcore<N>.so  # 与改前对照（判据见下）
 CUDA_VISIBLE_DEVICES=<独占的一张卡> ./run_test.sh --test       # 339 pass / 0 check_fail / 0 crash
 git status --porcelain                                          # 干净（不留残留）
 ```
 
-- **逐行相同**是"码流未变"的判据；`.so` 字节**不**声称相同（mxcc 把源行号编进立即数，换文件必然移动）。
+- **搬迁 / 改名（码流未变）**：`nm -S --defined-only` 按**名字 → (size, type)** 比，存活符号逐项相同。
+  无 size 的符号（`GCC_except_table*`、CRT 桩）按**去数字后缀的基名**比——编号与地址随布局移动，不算差异。
+  `.so` 字节**不**声称相同（mxcc 把源行号编进立即数，换文件必然移动）。
+- **删除不可达代码**（P1 `e16138c` 实测）：`nm` **不是**逐行相同——被删的 `__global__` 即使在 host 侧
+  不可达也被发射进产物（实测 19 条 `__device_stub__topk_bf16_kernel_*`，产物 6,464,392 → 5,979,112 B）。
+  判据是 **removals-only**：删除集恰好是被删族、**零新增**、存活符号除编译器发射的 `__mc_module_ctor`
+  （登记被删桩的模块构造器，实测 5066 → 4192 B）外 size/type 不变。可达性由"每个被删项都是定义，
+  任何活引用都会是编译错误"保证。
 - P5 例外：host 派发从 switch 改成表，`nm` 全表会动，判据换成"**设备核符号集不变**"（同 mangled 名同 size）
   加上"文件数 == 核数"。
 - 触及选路/阈值/数据流的阶段另跑 `./run_test.sh --perf`；纯搬迁不跑。
