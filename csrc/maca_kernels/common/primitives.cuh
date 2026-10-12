@@ -12,9 +12,13 @@
 // **The names are the source code's own, and they are the ones to keep.**
 // `refine_bin` and `warp_cumsum_histogram` are deep_gemm's (`fp32_topk`, the
 // file the `topk_select_coarse12` / `topk_select_chunks` dataflows were ported from, whose call
-// sites spell both the same way); `bf16_is_nan` is upstream DeepSelect's
-// (`topk_select_common`, `bit_utils.cuh`).  Renaming one here diverges
-// silently from the code these dataflows are re-merged with.
+// sites spell both the same way); the NaN tests are **this port's** bit-pattern
+// spelling, in upstream's `topk_select_common` namespace -- upstream has no bit
+// test (it detects NaN with PTX `set.nan.bf16`), and the ported tree carries
+// the twin in `xcore1600/bit_utils.cuh`.  The key transform is upstream's
+// `distort` under deep_gemm's name: same operation, and the two lineages spell
+// it differently, so renaming either side diverges silently from the code the
+// dataflows are re-merged with.
 //
 // Siblings that look like these but are not the same operation stay where they
 // are: `topk_select_radix::float_to_uint8` / `bf16_to_uint8` (the radix row's 8-bit coarse
