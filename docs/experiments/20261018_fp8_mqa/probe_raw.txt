@@ -1,0 +1,10 @@
+device MetaX C600-U, 28 APs, grid 224 x 512 threads, buffer 256 MB
+A read-only x4 in flight (the wall)          192.0 us    1398.1 GB/s
+C hist 8 atomics/16B, uniform (bf16)         393.7 us     681.9 GB/s
+B hist 16 atomics/16B, uniform (fp8)         744.1 us     360.7 GB/s
+D ballot-aggregated, uniform (fp8)        149103.8 us       1.8 GB/s
+E per-warp replicated hist, uniform (fp8)     744.2 us     360.7 GB/s
+C hist 8 atomics/16B, crowded (bf16)        2307.2 us     116.3 GB/s
+B hist 16 atomics/16B, crowded (fp8)        4603.5 us      58.3 GB/s
+D ballot-aggregated, crowded (fp8)         23609.9 us      11.4 GB/s
+E per-warp replicated hist, crowded (fp8)    4603.6 us      58.3 GB/s
