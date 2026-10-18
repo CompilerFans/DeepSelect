@@ -18,37 +18,37 @@ exec(open("deep_select/__version__.py").read())
 
 # ── which sources each family builds ────────────────────────────────────────
 #
-# The kernel *layout* is per-family (`csrc/maca_kernels/<family>/`) and this
-# table is the build saying the same thing.  It is the one place a family's
-# source set is decided, so both shapes this build has to express are edits
-# here and nowhere else:
+# The kernel *layout* is per-family (`csrc/maca_kernels/xcore<N>/`) and the
+# build says the same thing: family <N>'s artifact is compiled from the shared
+# implementation in `csrc/maca_kernels/common/` plus that family's own
+# instantiation set in `csrc/maca_kernels/xcore<N>/instantiations/`.  The two
+# halves of that sum live in exactly one place each:
 #
-#   - **the default** -- a family with no row of its own is compiled from
-#     `SHARED_SOURCES`;
-#   - **the exception** -- a family with its own kernel names that kernel in
-#     its row.
+#   - **the shared half** -- `COMMON_SOURCES`, the hand-written TU every
+#     family's artifact carries;
+#   - **the per-family half** -- `generated_sources(family)`, the tuple table
+#     read from `scripts/generate_instantiations.py`.
 #
-# All three rows name the same file today, and that is the measured answer
-# rather than a default of convenience: the C500 kernel is the artifact every
-# family ships, 1.5-2.9x faster than the ported upstream tree on a C600U and
-# passing the cells that tree fails (CLAUDE.md, "Can a C600U run the C500
-# kernel?").
+# All three families share the six instantiation tables today, so the three
+# directories hold the same 89 files; a family-specific tuple set is a branch
+# in the generator's `family_instantiations()`, and a family-specific
+# hand-written TU is a row added to `sources_for_family` -- both land with the
+# measurement that earns them.
 #
-# **`family 1600` and the directory `csrc/maca_kernels/xcore1600/` are two
-# different things, and the name collision is the trap this table has to
-# survive.**  The first is the C600U; the second is the *ported upstream* kernel
-# tree, which this build does not compile -- see `build_for_maca`.  A row names
-# a family's own source set; no row points at that directory, and pointing one
-# there would also take its `kerutils` include back (`include_dirs` below is the
-# other half of that change).
+# `csrc/maca_kernels/legacy/` -- the ported upstream kernels that the
+# `xcore1600/` directory used to hold -- is **not** a family: no source list
+# points at it and its `kerutils` include is off `include_dirs`, so it is
+# kept as source and never compiled.  The name collision that made this table
+# a trap is retired: the directory `xcore1600/` now *is* family 1600's own
+# source set.
 _REPO_ROOT = Path(__file__).resolve().parent
 GENERATOR = _REPO_ROOT / "scripts" / "generate_instantiations.py"
 
-_generated_sources = None
+_generated_sources = {}
 
 
-def generated_sources():
-    """The `instantiations/*.cu` files, read from the generator that writes them.
+def generated_sources(family):
+    """The family's `instantiations/*.cu` files, read from their generator.
 
     Every configuration tuple is its own translation unit holding one explicit
     instantiation, so the source list is a *table* -- `scripts/
@@ -57,13 +57,12 @@ def generated_sources():
     exists, and the two would drift in the direction nobody notices: a file the
     build does not compile is a kernel the artifact silently loses.
     """
-    global _generated_sources
-    if _generated_sources is None:
+    if family not in _generated_sources:
         spec = importlib.util.spec_from_file_location(
             "_deep_select_generate_instantiations", GENERATOR)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        sources = list(module.xcore1000_sources())
+        sources = list(module.family_sources(family))
         missing = [s for s in sources if not (_REPO_ROOT / s).is_file()]
         if missing:
             raise SystemExit(
@@ -71,32 +70,26 @@ def generated_sources():
                 "are committed; regenerate with `python %s`."
                 % (len(missing), missing[0],
                    GENERATOR.relative_to(_REPO_ROOT)))
-        _generated_sources = sources
-    return list(_generated_sources)
+        _generated_sources[family] = sources
+    return list(_generated_sources[family])
 
 
 # The hand-written half: the tvm-ffi entry point, the contract layer, the
 # dispatcher.  The generated half below it is one file per configuration tuple.
-SHARED_SOURCES = [
-    "csrc/maca_kernels/xcore1000/maca_topk.cu",
-] + generated_sources()
-SOURCES_BY_FAMILY = {
-    1000: SHARED_SOURCES,   # C500
-    1500: SHARED_SOURCES,   # C600
-    1600: SHARED_SOURCES,   # C600U -- the shared kernel, not xcore1600/
-}
+COMMON_SOURCES = [
+    "csrc/maca_kernels/common/maca_topk.cu",
+]
 
 
 def sources_for_family(family):
     """The sources one family's artifact is compiled from.
 
-    Returns a fresh list per call, so the three `Extension`s below never share
-    one.  A family with no row takes `SHARED_SOURCES`: one kernel serving every
-    family is this tree's standing answer, so a family added to
-    `_family_of_target`'s tuple needs no edit here -- giving one its own kernel
-    is one row.
+    The shared implementation plus the family's own instantiation set.  Returns
+    a fresh list per call, so the three `Extension`s below never share one.  A
+    family that grows its own hand-written TU adds it here -- one row beside
+    `COMMON_SOURCES`, not a new mechanism.
     """
-    return list(SOURCES_BY_FAMILY.get(family, SHARED_SOURCES))
+    return COMMON_SOURCES + generated_sources(family)
 
 
 # What this file builds when `CUCC_TARGETS` says nothing.  "Nothing" is
@@ -333,8 +326,8 @@ def build_for_maca():
     it takes the `#else` branch on every architecture, and host code exists once
     in a fat binary regardless.
 
-    `csrc/maca_kernels/xcore1600/` is not built: no row of
-    `SOURCES_BY_FAMILY` names it and its `kerutils` include is off
+    `csrc/maca_kernels/legacy/` -- the ported upstream kernels -- is not built:
+    no family's source list points at it and its `kerutils` include is off
     `include_dirs` below.  Re-adding both is what building it would take.
 
     **Run `ref/kerutils_platform_arms/run_probe.sh` first.**  The two edits above
@@ -424,7 +417,7 @@ def build_for_maca():
         # these includes independent of where a kernel tree sits.
         os.path.join(this_dir, "csrc", "ffi"),
         os.path.join(maca_root, "include"),
-        # `csrc/maca_kernels/xcore1600/` is NOT on this list and neither is
+        # `csrc/maca_kernels/legacy/` is NOT on this list and neither is
         # `csrc/3rdparty/kerutils/include`, which only its kernels include
         # (`csrc/ffi/` names kerutils once, in a comment, and includes nothing
         # from it).  Both trees stay in the repo as source; neither is compiled.
@@ -549,11 +542,11 @@ def build_for_maca():
             ))
         for target, target_family in resolved
     ]
-    # One clause per *distinct* source set, read off the table rather than a
-    # second copy of it: families that compile the same tree share a clause,
-    # and a family with its own kernel gets its own.  The generated
-    # instantiations are counted rather than listed -- there are 89 of them and
-    # the list is the directory they live in.
+    # One clause per *distinct* source set, read off the lists rather than a
+    # second copy of them: families that compile the same sources share a
+    # clause.  The generated instantiations are counted rather than listed --
+    # there are 89 of them per family and the list is the family's own
+    # `xcore<N>/instantiations/` directory.
     def summarise(sources):
         hand = [s for s in sources if "/instantiations/" not in s]
         generated = len(sources) - len(hand)
@@ -583,7 +576,7 @@ def build_for_maca():
 # it is asked about (~60 s for `maca_topk.cu`).  Over a named subset of sources:
 #
 #     DEEP_SELECT_MACA_STACK_CHECK=1 ./build.sh
-#     DEEP_SELECT_MACA_STACK_CHECK=csrc/maca_kernels/xcore1000/maca_topk.cu ./build.sh
+#     DEEP_SELECT_MACA_STACK_CHECK=csrc/maca_kernels/common/maca_topk.cu ./build.sh
 #     DEEP_SELECT_MACA_STACK_BASELINE=64 DEEP_SELECT_MACA_STACK_CHECK=1 ./build.sh
 #
 # The baseline is bytes and is per toolchain: 48 is what this one reports for a

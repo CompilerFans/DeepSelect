@@ -46,7 +46,7 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
-#include "../common/primitives.cuh"
+#include "primitives.cuh"
 
 // The contract half the answer is handed to (`launch_route` below), and through
 // it the radix row kernel every route emits through.

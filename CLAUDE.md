@@ -10,7 +10,7 @@ This directory is **its own git repository** (`origin` = `git@github.com:Compile
 - Always address this repo explicitly: `git -C /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect <cmd>`. `cd` does not persist across Bash calls (cwd resets to the primary working directory), so absolute paths everywhere.
 - This repo is designed to be standalone: it must import and build with `deep_gemm` absent (see `topk_deep_gemm`'s lazy import in `deep_select/interface.py`). The outer package is a soft dependency, reached only when a caller asks for `backend="deep_gemm"`.
 
-`docs/C500-radix-handover.zh.md` is the current handover manual for the C500 row kernel; `docs/C500-radix-perf-ledger.zh.md` is its measured before→after ledger. Both are authoritative and current as of HEAD — read them before touching `csrc/maca_kernels/xcore1000/`.
+`docs/C500-radix-handover.zh.md` is the current handover manual for the C500 row kernel; `docs/C500-radix-perf-ledger.zh.md` is its measured before→after ledger. Both are authoritative and current as of HEAD — read them before touching `csrc/maca_kernels/common/`.
 
 ## What this is
 
@@ -318,34 +318,35 @@ a kernel for a device-function failure — see the run-time trap in the environm
 
 The kernel tree is split **by per-SM shared memory**, because that is what a top-K kernel's staging buffers are sized against. Which tree a device runs is a property of the device:
 
-| tree | parts | kernel |
-| --- | --- | --- |
-| `csrc/maca_kernels/xcore1000/` | C500 (64 KiB/SM), **and C600 / C600U** | `maca_topk.cu`, hand-written for MACA — **what every family builds**, one artifact per family |
-| `csrc/maca_kernels/xcore1600/` | C600, C600U (128 KiB/SM) | the upstream kernels, ported — **reserved, not built, not reachable** |
+| tree | what it is |
+| --- | --- |
+| `csrc/maca_kernels/common/` | the shared implementation — `maca_topk.cu` + the contract/routing/radix headers, hand-written for MACA — compiled into **every** family's artifact |
+| `csrc/maca_kernels/xcore<N>/instantiations/` | family `<N>`'s own template-instantiation set (89 generated `.cu` today, identical tables across families) — what makes an artifact family `<N>`'s |
+| `csrc/maca_kernels/legacy/` | the upstream kernels, ported — **reserved, not built, not reachable** (see its `README.md`) |
 
-**Every family this tree builds compiles `csrc/maca_kernels/xcore1000/`, and there is no
-switch that says otherwise.** `setup.py`'s source list is that directory's — the
-hand-written TU (`maca_topk.cu`) plus `generated_sources()`, the 89
-`instantiations/*.cu` that `scripts/generate_instantiations.py` writes (one device
-kernel per file, the file name *is* the configuration tuple) — and there is no
-`_xcore1600_sources()` any more, and no branch that could select it. The port's
-`csrc/maca_kernels/xcore1600/` tree stays in the repo as source and is not merely uncalled
-but **unreachable**: its own sources are off `SOURCES` and its `kerutils`
-dependency is off `include_dirs`. Wiring it back is a source change to both,
-deliberately rather than an environment variable — a switch that could put the
-broken kernel back is a switch that can be left on.
+**Every family this tree builds compiles `csrc/maca_kernels/common/` plus its own
+`csrc/maca_kernels/xcore<N>/instantiations/`, and there is no switch that says
+otherwise.** `setup.py`'s `sources_for_family()` is exactly that sum — the
+hand-written TU (`common/maca_topk.cu`) plus `generated_sources(family)`, the 89
+`xcore<N>/instantiations/*.cu` that `scripts/generate_instantiations.py` writes
+(one device kernel per file, the file name *is* the configuration tuple). The
+ported tree lives in `csrc/maca_kernels/legacy/` as source and is not merely
+uncalled but **unreachable**: its own sources are off every family's source list
+and its `kerutils` dependency is off `include_dirs`. Wiring it back is a source
+change to both, deliberately rather than an environment variable — a switch that
+could put the broken kernel back is a switch that can be left on.
 
 The reason is not only that the port selects wrong on a C600U (see Known holes);
 it is that the C500 kernel is the **better** artifact there: 1.5–2.9x faster,
-and passing `check_result` on every cell the port fails. Nothing in that tree is
+and passing `check_result` on every cell the port fails. Nothing in `common/` is
 C500-specific code, and the capacity gate cannot fire in this direction — see
 "Can a C600U run the C500 kernel" below.
 
-`csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel) and `TopkSelectArgs` (the port's params type; `csrc/maca_kernels/xcore1000/contract.cuh` has its own `RowParams`, and `TopkSelectArgs::shared_memory_size_per_sm` is read only by `csrc/maca_kernels/xcore1600/`). It also carries **the per-family table** — `ARCH_FAMILY`, `ARCH_SM_COUNT` and `ARCH_SMEM_PER_AP_BYTES`, keyed on `DEEP_SELECT_ARCH` — see "the arch constants are compile-time" below, and the platform declaration it is compiled under — see "the platform layer" immediately below.
+`csrc/structs.h` is shared by both. It defines the operator's contract constants — `INPUT_STRIDE_ALIGNMENT_REQUIREMENT` (1024 B), `OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT` (32 B), `MAX_VOCAB_SIZE` (`1 << 23`, from the fp32-simulated census in the ported kernel) and `TopkSelectArgs` (the port's params type; `csrc/maca_kernels/common/contract.cuh` has its own `RowParams`, and `TopkSelectArgs::shared_memory_size_per_sm` is read only by `csrc/maca_kernels/legacy/`). It also carries **the per-family table** — `ARCH_FAMILY`, `ARCH_SM_COUNT` and `ARCH_SMEM_PER_AP_BYTES`, keyed on `DEEP_SELECT_ARCH` — see "the arch constants are compile-time" below, and the platform declaration it is compiled under — see "the platform layer" immediately below.
 
 ### The platform layer
 
-**Two dimensions, not one.** A kernel tree is named for its *platform* and then for its *family*: `csrc/maca_kernels/xcore1000/` is the MACA platform's family-1000 variant. That is upstream's shape — `csrc/cuda_kernels/` and `csrc/ascend_kernels/` sit at the same level for the same reason — and the family is the variant *below* the platform, not its peer. `csrc/structs.h`, `csrc/ffi/` and `csrc/3rdparty/` stay above it: shared by every platform this tree builds, which is currently one.
+**Two dimensions, not one.** The kernel tree is named for its *platform* and then for its *family*: `csrc/maca_kernels/common/` is the MACA platform's shared implementation, `csrc/maca_kernels/xcore<N>/` family `<N>`'s own instantiation set under it. That is upstream's shape — `csrc/cuda_kernels/` and `csrc/ascend_kernels/` sit at the same level for the same reason — and the family is the variant *below* the platform, not its peer. `csrc/structs.h`, `csrc/ffi/` and `csrc/3rdparty/` stay above it: shared by every platform this tree builds, which is currently one.
 
 The platform also travels as a **compile-time declaration**, in three places that have to agree:
 
@@ -383,7 +384,7 @@ The arms themselves:
 
 `device/cuda/common.h` and `host/host.h`'s CUDA path are **byte-identical to `upstream/main`**, which is the property that makes a later re-merge cheap: the CUDA half of the vendored library is upstream's, and the MACA half is its own file. `device/maca/common.h` has **no cutlass dependency** — and cannot have one, since `/opt/maca/include/cutlass/` does not exist (the toolkit's cutlass-derived library is `include/mctlass/`) — so the `bf16` / `transac_bar_t` aliases the CUDA arm re-exports from cutlass are simply absent there; nothing in this tree uses them. `host/host.h` keeps `make_tensor_map` (TMA, driver API) CUDA-only for the same reason.
 
-**Nothing in the build compiles the MACA device arm.** Its only consumer, `csrc/maca_kernels/xcore1600/`, is off `SOURCES` and off `include_dirs`, so `./develop.sh` succeeding says nothing about it. `ref/kerutils_platform_arms/` is the compilation that does, and it reads its flags out of `setup.py`.
+**Nothing in the build compiles the MACA device arm.** Its only consumer, `csrc/maca_kernels/legacy/`, is off every source list and off `include_dirs`, so `./develop.sh` succeeding says nothing about it. `ref/kerutils_platform_arms/` is the compilation that does, and it reads its flags out of `setup.py`.
 
 ### The arch constants are compile-time
 
@@ -411,7 +412,7 @@ Two things the family table is deliberately not:
 - **Not the build's target list.** `CUCC_TARGETS` says what images were compiled, not what device is in front of you; deriving the grid from it names the wrong artifact as soon as the list does not lead with this device's family (the same defect `perf_snapshot.provenance()` and the two `run_*` scripts each had once). It is also not the `--offload-arch` spelling resolved back: `mxcc`'s `native` is that vocabulary, not this one — and `setup.py` resolves `native` at build time to *this host's* family, which is a build-machine fact rather than a device answer.
 - **Not a performance table.** Only family 1000's row has a measurement behind it. The other two are the parts' own AP count and the 128 KiB every 128 KiB family has, and **every C500-only *tuning* rule is still guarded by `kF32Coarse12MeasuredSmCount` (104) at run time** rather than by the macro. Geometry compiles in; tuning has to be earned. `ref/c500_gate/` prints both halves against the device's own report.
 
-### xcore1000 — `maca_topk.cu` + `contract.cuh` / `routing.cuh` / the `radix_*.cuh` headers (the shipping C500 kernel)
+### common/ — `maca_topk.cu` + `contract.cuh` / `routing.cuh` / the `radix_*.cuh` headers (the shipping kernel every family builds)
 
 The contract layer and launch layer. Every mode shares one contract half — the `length <= topk` shortcut, the NaN bit-pattern check, index offsets, out-of-band fills, the optional ordered emit — and **two** selection dataflows feed it, both radix:
 
@@ -510,25 +511,25 @@ Two general traps this cost, both of which this repo has now paid for twice:
 
 ### Can a C600U run the C500 kernel?  Yes — measured, and it already does
 
-The answer to "why not just build `csrc/maca_kernels/xcore1000/` on the 128 KiB parts" is
+The answer to "why not just build the shared kernel on the 128 KiB parts" is
 that the tree **already does**, and it is the better artifact, not a fallback.
 Measured on one C600U (device 1, MACA 3.8.1), both artifacts built for the same
 extension name, official cases / checks / timing rule:
 
-| cell | `csrc/maca_kernels/xcore1000/` | `csrc/maca_kernels/xcore1600/` |
+| cell | shared kernel (now `common/`; then `xcore1000/`) | ported tree (now `legacy/`) |
 | --- | --- | --- |
 | 4096 x 16384 k=512 bf16 | **1413.8 us / 94.9 GB/s** | 4146.8 us / 32.4 GB/s — FAIL |
 | 4096 x 1024 k=512 bf16 | **477.4 us / 17.6 GB/s** | 997.3 us / 8.4 GB/s — FAIL |
 | 512 x 262144 k=512 bf16 | **1793.1 us / 149.7 GB/s** | 2721.2 us / 98.6 GB/s — FAIL |
 | 8 x 4096 k=512 fp32 | 16.7 us / 7.9 GB/s | 16.4 us / 8.0 GB/s — FAIL |
 
-`check_result` passes all five cells on `csrc/maca_kernels/xcore1000/` and fails all five on
+`check_result` passes all five cells on the shared kernel and fails all five on
 the port. The two fp32 cells are latency-bound and identical; the rest is
 1.5–2.9x.
 
 **Why it is feasible, checkable rather than assumed:**
 
-- Nothing in `csrc/maca_kernels/xcore1000/` is C500-specific code. No `__MACA_ARCH__` branch
+- Nothing in `csrc/maca_kernels/common/` is C500-specific code. No `__MACA_ARCH__` branch
   anywhere in the tree; every cross-lane primitive is already 64-lane
   (`radix_common.cuh`'s `kWarpSize = 64` under `__MACACC__`); the ranking is
   integer key manipulation with no float math to differ per part.
@@ -564,16 +565,17 @@ the port. The two fp32 cells are latency-bound and identical; the rest is
 
 So the default is not a workaround standing in for a broken kernel: it is the
 shipping kernel, on a part it is correct and faster on. There is no override to
-reach the port — it takes a source change to `setup.py`'s `SOURCES` *and* to its
-`include_dirs`, and that is the point: a switch that could put the broken kernel
-back is a switch that can be left on.
-### xcore1600 — the ported upstream kernels
+reach the port — it takes a source change to `setup.py`'s `sources_for_family`
+*and* to its `include_dirs`, and that is the point: a switch that could put the
+broken kernel back is a switch that can be left on.
+
+### legacy/ — the ported upstream kernels
 
 **This tree does not currently pass on a C600U and is not built at all** — see
 Known holes for the measurement, the reproduction, and the 32-lane suspect list.
 Everything below describes it as written; treat it as unvalidated. To work on
-it, put `csrc/maca_kernels/xcore1600/api.cu` and its `instantiations/` into `SOURCES`, put
-`csrc/maca_kernels/xcore1600/` and `csrc/3rdparty/kerutils/include` back on `include_dirs`,
+it, point a family's source list in `setup.py` at `csrc/maca_kernels/legacy/api.cu` and its `instantiations/`, put
+`csrc/maca_kernels/legacy/` and `csrc/3rdparty/kerutils/include` back on `include_dirs`,
 and re-run `tests/test.py --backend maca_c` on a C600U. It will not
 compile as-is: its `NATIVE_SHARED_MEMORY_PER_SM_BYTES` went with the
 per-architecture build, so it needs that constant back — and it is
@@ -591,7 +593,7 @@ on time today).
 
 Upstream's algorithm is kept (threshold-and-compact scan in a random block order, one global read per element); only its device-side dependencies were replaced: TMA tensor-map loads → cooperative `ldg`, mbarriers → a single buffer with `__syncthreads`, inline PTX → MACA builtins/plain C++. Config tuples were re-derived for 128 KiB (upstream's are sized for an H100's 227 KiB). `v3_cluster` was **deleted**, not ported — MACA has no cluster launch — and those shapes fall through to the general kernel with no dispatch arm.
 
-**The config table has two halves that must be edited together**: `scripts/generate_instantiations.py` (the table, its arithmetic, and the `check_fits_maca` refusal) and the `TopkSelectConfig<...>` call sites in `csrc/maca_kernels/xcore1600/api.cu`. A mismatch is a **link error**, not a runtime one. The same script also carries the xcore1000 tables (six of them, 89 files) which feed `setup.py`'s source list — there the pairing is with `contract.cuh`'s X-macro list, and its receipt is `nm -D --undefined-only` containing none of our namespaces (`docs/code-architecture.zh.md` §5b). Note also that `tests/kernelkit/platform.py` duplicates the `deep_gemm` package's `utils/arch_config.py` `XcoreFamily` rows (capacity + family spelling) by hand — it cannot import that package, so a change to either belongs in the same review.
+**The config table has two halves that must be edited together**: `scripts/generate_instantiations.py` (the table, its arithmetic, and the `check_fits_maca` refusal) and the `TopkSelectConfig<...>` call sites in `csrc/maca_kernels/legacy/api.cu`. A mismatch is a **link error**, not a runtime one. The same script also carries the per-family instantiation tables (six of them, 89 files per family's `xcore<N>/instantiations/`) which feed `setup.py`'s source list — there the pairing is with `contract.cuh`'s X-macro list, and its receipt is `nm -D --undefined-only` containing none of our namespaces (`docs/code-architecture.zh.md` §5b). Note also that `tests/kernelkit/platform.py` duplicates the `deep_gemm` package's `utils/arch_config.py` `XcoreFamily` rows (capacity + family spelling) by hand — it cannot import that package, so a change to either belongs in the same review.
 
 Consequences of the port, all deliberate:
 
@@ -764,7 +766,7 @@ coalesced-group headers under `mxgpu_llvm/lib/clang/19/include/`
 (`maca_coalesced_scan.h`, `maca_partition.h`, `maca_cooperative_groups.h`) are
 the model, and they use **`__popcll`** (`maca_coalesced_scan.h:104`, `:119`).
 
-**Beware reading upstream's CUDA-era code as a model.** `csrc/maca_kernels/xcore1600/` (the
+**Beware reading upstream's CUDA-era code as a model.** `csrc/maca_kernels/legacy/` (the
 ported upstream kernels) is full of `__ballot_sync(0xFFFFFFFF, …)`,
 `__reduce_add_sync(0xFFFFFFFF, …)`, `__shfl_sync(0xFFFFFFFF, …)` and
 `threadIdx.x % 32` — with `NUM_WARPS = NUM_THREADS / 32`, i.e. CUDA's 32-lane
@@ -773,7 +775,7 @@ are the port's texture, not a pattern to copy, and whether any of them is
 reachable on a 64-lane wave needs its own audit — treat them as suspect rather
 than as precedent, and write new cross-lane code in the 64-lane form above.
 
-`csrc/maca_kernels/xcore1000/radix_common.cuh` already does this correctly and is the model to
+`csrc/maca_kernels/common/radix_common.cuh` already does this correctly and is the model to
 follow: `kWarpSize = 64` under `__MACACC__`, with `#ifdef` pairs like
 `__shfl_down_sync(0xFFFFFFFFFFFFFFFFULL, …)` / `0xFFFFFFFF` for the CUDA build.
 When you add a mask here, add it to the 64-lane arm.
@@ -922,7 +924,7 @@ follow-through once the audit says which limit you are actually on.
 ### 5. What the reference implementations say about this kernel
 
 Our C500 tree is a **merge** of two designs, and the reference sources are the
-two halves of it (`csrc/maca_kernels/xcore1000/radix_core.cuh`'s provenance banner records
+two halves of it (`csrc/maca_kernels/common/radix_core.cuh`'s provenance banner records
 the port):
 
 - **Upstream DeepSelect** (`docs/DeepSelect-deep-dive.{md,zh.md}`): scan random
@@ -931,11 +933,11 @@ the port):
   contiguous blocks; extra space is `O(k + B + B2)`, small enough for shared
   memory. Expected total elements processed is
   `E[W] <= (1 + k/B2) · L · H_m`, `L = k+B+B2`; with `B, B2 = Θ(k)` the extra
-  compute is `O(k log(N/k))`. Realized here in `csrc/maca_kernels/xcore1600/`.
+  compute is `O(k log(N/k))`. Realized here in `csrc/maca_kernels/legacy/`.
 - **`dsa_topk`** (`/home/compiler_gfx/dsa_topk`, port commit
   `61ab380c77b81669718bfb11b95a583b0e661001`): the two-pass radix row —
   histogram pass, then collect-and-stage into an arena. Realized here in
-  the `csrc/maca_kernels/xcore1000/radix_*.cuh` headers. Note `opt/radix_topk.cuh` there is *newer*
+  the `csrc/maca_kernels/common/radix_*.cuh` headers. Note `opt/radix_topk.cuh` there is *newer*
   than the port source and **is not what we carry**; read it as a separate
   experiment, not as our ancestry.
 
@@ -1295,7 +1297,7 @@ Facts the CSV records and the traps in reading it:
 3. **The official perf table seeds cases from a global counter**, so two runs use different data. A/B comparison must pin the seed yourself: build cases with `tests/lib.py`'s `TestParam`, set `p.seed`, call `lib.generate_testcase(p)`, and time **kernel time** (not e2e) with `tests/kernelkit`'s `kk.bench(fn, p.num_runs)`.
 4. **The baseline binary must be reproducible**: `git stash` to the tree under comparison → build → save the `.so` → switch back. That is how the ledger's numbers were obtained.
 5. **Alignment**: rows whose length is a multiple of 8 and offset-16 B-aligned take the vector path, otherwise a scalar fallback (`bf16x8_is_aligned`). Mixed vector + tail was intermittently racy on a 1024-thread block, so odd-length rows uniformly use one load mode.
-6. **There is nothing to JIT here: every instantiation is in the `.so`.** `setup.py` compiles one artifact per family at build time, so the instantiation count is an artifact property and the receipt for "this change added no instantiation" is the artifact's own symbol count — `nm -S --defined-only deep_select/deep_select_maca_xcore1000.so | grep -c topk_kernel_radix`, 60 as of 2026-10-10 — plus its companion on the build side, `ls csrc/maca_kernels/xcore1000/instantiations/*.cu | wc -l` against the artifact's `__device_stub__` count (89 = 89). (`DG_JIT_CACHE_DIR` and `kernel.*` belong to the host repository's csrc, whose kernels *are* JIT-compiled; asking for that here counts zero directories and proves nothing.)
+6. **There is nothing to JIT here: every instantiation is in the `.so`.** `setup.py` compiles one artifact per family at build time, so the instantiation count is an artifact property and the receipt for "this change added no instantiation" is the artifact's own symbol count — `nm -S --defined-only deep_select/deep_select_maca_xcore1000.so | grep -c topk_kernel_radix`, 60 as of 2026-10-10 — plus its companion on the build side, `ls csrc/maca_kernels/xcore<N>/instantiations/*.cu | wc -l` (per family) against the artifact's `__device_stub__` count (89 = 89). (`DG_JIT_CACHE_DIR` and `kernel.*` belong to the host repository's csrc, whose kernels *are* JIT-compiled; asking for that here counts zero directories and proves nothing.)
 7. `NormalFloatDistribution` (the official table's data) is **not** bit-pattern uniform — many elements per row crowd into one high byte. This is the fact every optimization here is organized around.
 8. **A toolkit mismatch at *run* time reports as `mcErrorInvalidDeviceFunction`, and it looks exactly like a kernel defect.** The extension is linked against `libmcruntime.so` by soname, and the loader finds it through the rpath baked at link time — `/opt/maca/lib:/opt/maca/mxgpu_llvm/lib`. Whether `LD_LIBRARY_PATH` can *override* that depends on the ELF tag, and the two tags differ only in order: **`DT_RPATH`** (0xf) is searched **before** `LD_LIBRARY_PATH`, **`DT_RUNPATH`** (0x1d) **after** it. This file asserted "torch's `-Wl,-rpath` becomes a `DT_RUNPATH`, which `LD_LIBRARY_PATH` overrides" until 2026-09-15; measured at `48611b9` the shipped artifact was **`DT_RPATH`**, and a decoy `libtvm_ffi.so` placed on `LD_LIBRARY_PATH` was **ignored** in favour of the baked path. The trap's own numbers are still explained — both runs named `/opt/maca/lib`, and the symlink at `/opt/maca` is what moved — but the "overrides" half was wrong, and it mattered: with `RPATH` a target machine whose `/opt/maca` is the same path but a different SDK generation **cannot be rescued by the environment**. `setup.py` now passes `-Wl,--enable-new-dtags` and the artifact measures `DT_RUNPATH` with the decoy winning, so the sentence above is true of the build it describes. cucc emits `RUNPATH` on its own (measured on a plain `cucc -shared` link); this link did not, which is why the flag is explicit. Measured 2026-09-15 on this box, the *same* `deep_select_xcore1600*.so` (the per-architecture name the build used until `5f5a93c`; it is `deep_select_maca*.so` now, one file per family, and the trap is about the library a loaded artifact resolves, so the name is incidental), device 1, one variable changed:
 
@@ -1316,18 +1318,22 @@ Beyond mcDeepGEMM's general rules (state the principle and the magnitude; keep r
 - A **roofline verdict** for the affected cell: if it is not bandwidth-bound, say what it *is* bound on (currently: per-CTA dependency chain — `load → key transform → compare → shared atomic` — and serialized shared atomics).
 - The gate results. Both suites: `95/95` perf (`./run_test.sh --perf`, ~100 s) **and** a correctness suite — `82170/82170` for the full-table 4-shard run on C500 (`~17.5 min`), or `200/200` for the seeded sample (`./run_test.sh --test`, ~63 s on C600U) when the change is being iterated rather than landed. Say which one you ran.
 - An architecture-boundary statement, and it has to name what actually ships.
-  **There is no C500-only source tree here**: `setup.py`'s `SOURCES` is one source
-  *set* (the hand-written `csrc/maca_kernels/xcore1000/maca_topk.cu` plus the 89
-  generated `instantiations/*.cu`) and it is compiled once per family
-  (`setup.py:307` prints "compiling … once per family"), so a change written in
-  that directory goes into the xcore1500 **and** xcore1600 artifacts as well —
-  "byte-identical on the other families" is not available as a claim. What the
-  line says instead: which family was measured, and that the others were not
-  (C600U is not on this box). This bullet read "changes confined to
+  A family's artifact is `csrc/maca_kernels/common/` **plus** that family's own
+  `xcore<N>/instantiations/` (`setup.py`'s `sources_for_family`, printed as
+  "compiling … once per family"), so the boundary has two cases: a change in
+  `common/` goes into the xcore1500 **and** xcore1600 artifacts as well —
+  "byte-identical on the other families" is not available as a claim there —
+  while a change confined to one family's instantiation table (the generator's
+  `family_instantiations()` branch) touches only that family's artifact, and the
+  other families' `.so`s rebuild unchanged. What the line says in both cases:
+  which family was measured, and that the others were not.
+  This bullet read "changes confined to
   `csrc/maca_kernels/xcore1000/` leave xcore1600 byte-identical, so no C600U
   validation is owed" until 2026-10-10, and it was wrong for as long as the
   one-source-per-family build has existed — §9.12 of
-  `docs/experiments/20261009_c500_dsa_decode/` carries the correction.
+  `docs/experiments/20261009_c500_dsa_decode/` carries the correction. The P6
+  layout (2026-10-18) is what made the family-local half of the claim available
+  again, this time by construction.
 
 These cells frequently have **no compute roofline** — the kernel does a few comparisons and one histogram increment per element and has no FLOP — so "both currencies" lands as logical-GB/s × trips versus the read wall plus a per-CTA limiting factor.
 
@@ -1375,11 +1381,11 @@ git -C $D push origin main
 
 Never a bare `git commit -a` (see repo identity, top).
 
-**Debugging mis-ranked output**: the fastest localizer is to write the kernel's threshold triple `{wide_threshold, above, fine_threshold, remain, num_staged, last_remain}` into `output[topk-8+tx]` on `blockIdx.x == 0 && tx < 8` and compare it against the same row computed with torch on CPU. That is how the `0xBFA` vs true `0xBFC`-class bug was found in one step. Clean it up afterwards — `rg RKPROBE` must be 0. (This probe is written for the radix row kernel's threshold triple (`radix_row_bf16.cuh`); `csrc/maca_kernels/xcore1600/` has a different dataflow and no equivalent variables.)
+**Debugging mis-ranked output**: the fastest localizer is to write the kernel's threshold triple `{wide_threshold, above, fine_threshold, remain, num_staged, last_remain}` into `output[topk-8+tx]` on `blockIdx.x == 0 && tx < 8` and compare it against the same row computed with torch on CPU. That is how the `0xBFA` vs true `0xBFC`-class bug was found in one step. Clean it up afterwards — `rg RKPROBE` must be 0. (This probe is written for the radix row kernel's threshold triple (`radix_row_bf16.cuh`); `csrc/maca_kernels/legacy/` has a different dataflow and no equivalent variables.)
 
-Symptom → first look (handover §8): wrong-but-not-much (a few slots, rank off by a few) → the threshold's subtraction convention (the `above + c > remain_topk` rule); `Memory Violation(0x4)` / `ATU Fault` → first the probe's missing `set_default_device`, then an out-of-range threshold leaving a shared variable uninitialized; one cell slow while others unchanged → occupancy, check `static + dynamic` against 32,768; source changed with no behavior change → a stale `.so`; compile-time `undeclared identifier` → constant/helper ordering in the radix headers (constants live in `radix_common.cuh`, included first); **wrong indices that change run to run → a lane-width bug** (a 32-bit mask or `/ 32` on a 64-lane wave in `csrc/maca_kernels/xcore1600/`), not a threshold-convention one — a fixed offset is the threshold, a varying one is a race.
+Symptom → first look (handover §8): wrong-but-not-much (a few slots, rank off by a few) → the threshold's subtraction convention (the `above + c > remain_topk` rule); `Memory Violation(0x4)` / `ATU Fault` → first the probe's missing `set_default_device`, then an out-of-range threshold leaving a shared variable uninitialized; one cell slow while others unchanged → occupancy, check `static + dynamic` against 32,768; source changed with no behavior change → a stale `.so`; compile-time `undeclared identifier` → constant/helper ordering in the radix headers (constants live in `radix_common.cuh`, included first); **wrong indices that change run to run → a lane-width bug** (a 32-bit mask or `/ 32` on a 64-lane wave in `csrc/maca_kernels/legacy/`), not a threshold-convention one — a fixed offset is the threshold, a varying one is a race.
 
-Reproduce the xcore1600 hole with no seed and no harness, so the expected answer is written down rather than computed.
+Reproduce the legacy tree's hole with no seed and no harness, so the expected answer is written down rather than computed.
 **`backend="maca_c"` is not optional here** — the process default is `torch`, so a bare call would exercise the
 reference and "reproduce" nothing at all.
 
@@ -1453,12 +1459,12 @@ source line numbers — so "the md5 moved" is not evidence of a behaviour change
 
 ## Known holes (recorded, not hidden)
 
-- **`csrc/maca_kernels/xcore1600/` selects wrong on a C600U. This is measured, not suspected, and it is the first thing to
-  fix.** It is *contained* — every family builds `csrc/maca_kernels/xcore1000/`, unconditionally and with no override
+- **`csrc/maca_kernels/legacy/` (the ported tree) selects wrong on a C600U. This is measured, not suspected, and it is the first thing to
+  fix.** It is *contained* — every family builds `common/` + its own instantiation set, unconditionally and with no override
   (see Kernel architecture above), which passes 200/200 on a C600U — and that is not merely
   correct there but **faster**: see "Can a C600U run the C500 kernel", which measures 1.5-2.9x against the port and
   records why the containment is the right answer rather than a fallback. The port is still in the tree as
-  source; building it is the two-line source change in `setup.py` described under "xcore1600 — the ported
+  source; building it is the two-line source change in `setup.py` described under "legacy/ — the ported
   upstream kernels", which is how the audit would be done.
   On a `MetaX C600-U` (reports `sm89` → family 1600, so `backend="maca_c"` resolved *here*, not to `maca_topk.cu`;
   that measurement was taken with the port built, which is no longer what a build produces):
@@ -1499,7 +1505,7 @@ source line numbers — so "the md5 moved" is not evidence of a behaviour change
   has since landed.** The port's 32-lane surface is now handled by two constants in `utils.cuh`: `MACA_WARP_SIZE`
   (= 64, `:11`) and `MACA_FULL_MASK` (`(uint64_t)0xFFFFFFFFFFFFFFFFull`, `:15`, spelled with the type because MACA
   ships both a `uint64_t` and an `unsigned` overload of `__reduce_*_sync` and an unsuffixed literal fails to compile).
-  Measured at `fdb65b9`'s tree, in `csrc/maca_kernels/xcore1600/`: **zero** `__ballot_sync(0xFFFFFFFF, …)`; **zero**
+  Measured at `fdb65b9`'s tree, in `csrc/maca_kernels/legacy/` (then `xcore1600/`): **zero** `__ballot_sync(0xFFFFFFFF, …)`; **zero**
   `__shfl_sync(0xFFFFFFFF, …)`; **zero** `threadIdx.x % 32` as code (it survives only as the text of a warning comment
   in `v3/topk_select.cuh` and `v3_fp32/topk_select.cuh`); `common_parts.cuh` fully migrated — **8**
   `__reduce_add_sync(MACA_FULL_MASK, …)` against **0** with a 32-bit mask, so the eight line numbers cited there
@@ -1507,15 +1513,15 @@ source line numbers — so "the md5 moved" is not evidence of a behaviour change
   **The live remainder is exactly three sites, all in `v3_fp32/topk_select.cuh` — `:483`, `:504`, `:508`** — bare
   `__reduce_add_sync(0xFFFFFFFF, …)` in that kernel's hit-count and warp-count reductions. On a 64-lane wave that mask
   names physical lanes 0..31, so those three sum the low half and under-count silently. That is the whole of the
-  32-lane target for the xcore1600 audit, and it is much narrower than this file claimed.
+  32-lane target for the legacy-tree audit, and it is much narrower than this file claimed.
   **Cite this paragraph by the re-audit, not by the old list** — if a future pass finds the counts moved, re-measure
-  (`git -C <repo> grep -c -- '<pattern>' HEAD -- csrc/maca_kernels/xcore1600/`) rather than restoring the list from memory.
+  (`git -C <repo> grep -c -- '<pattern>' HEAD -- csrc/maca_kernels/legacy/`) rather than restoring the list from memory.
   **It is worse than "wrong": it does not run.** With the port built (back when `setup.py` selected it) and *correct* inputs
   (`torch.set_default_device("cuda")` set, per the environment traps below), three cells — `b4096-v1024-k512`,
   `b4096-v16384-k512`, `b512-v262144-k512`, all bf16 — all die with `device-side assert` before a single timing is
   taken. So this tree cannot be benchmarked against the rerouted one cell for cell; there is no before to put beside the
   after.
-- `backend="deep_gemm"`'s kernel collects the members of the threshold *coarse* bin (half-precision ordered key `>> 6`) before refining, and the chunked kernel silently drops members past its staging capacity. A row with more than 4096 values in one such bucket gets a top-k of an arbitrary subset, varying run to run. Filed as a strict `xfail` in mcDeepGEMM: `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`. **`maca_c` has no such hole** — but note the xcore1600 hole above is a `maca_c` hole, so this sentence is about the `deep_gemm` backend only.
+- `backend="deep_gemm"`'s kernel collects the members of the threshold *coarse* bin (half-precision ordered key `>> 6`) before refining, and the chunked kernel silently drops members past its staging capacity. A row with more than 4096 values in one such bucket gets a top-k of an arbitrary subset, varying run to run. Filed as a strict `xfail` in mcDeepGEMM: `deep_gemm/tests/test_indexer_topk_selector.py::test_selector_candidate_overflow`. **`maca_c` has no such hole** — but note the legacy-tree hole above is a `maca_c` hole, so this sentence is about the `deep_gemm` backend only.
 - The fp32 row is a separate codebase path whose overflow handling is multi-round full-row rescan (up to 8 trips). Same "coarse level too coarse" disease, different cure — a 32-bit key cannot be resolved in two levels the way a 16-bit one can. Retesting fp32 cells is mandatory when touching it.
 
 ## Call logging — `deep_select/_log.py`, `DS_LOG`
@@ -1585,4 +1591,4 @@ reads the flag from its own kwargs); the artifact is `deep_select_maca.so`
 (`deep_select_maca_xcore<N>.so` since 2026-09-18, one per family) and the wheel
 is tagged `py3-none-linux_x86_64` (see the wheel table above).
 
-`csrc/maca_kernels/xcore1600/api.cu` is host code but is compiled by mxcc's host pass (clang 19), so `std::format` *is* available there now that the file is a `.cu`. The one check message that needs formatting keeps its `snprintf` anyway: it is the ABI-safe spelling at this boundary (and `<format>` needs GCC 13's libstdc++; the host is GCC 11.4). Do not "fix" it back. Anything including `<cuda_runtime_api.h>` must not depend on cu-bridge's compatibility layer for `__nv_bfloat16`: `csrc/structs.h` includes `<maca_bfloat16.h>` so that `api.cu` and every instantiation TU see the *same* `maca_bfloat16`, and `TopkSelectConfig<maca_bfloat16, ...>`'s template entity is one symbol on both sides.
+`csrc/maca_kernels/legacy/api.cu` is host code but is compiled by mxcc's host pass (clang 19), so `std::format` *is* available there now that the file is a `.cu`. The one check message that needs formatting keeps its `snprintf` anyway: it is the ABI-safe spelling at this boundary (and `<format>` needs GCC 13's libstdc++; the host is GCC 11.4). Do not "fix" it back. Anything including `<cuda_runtime_api.h>` must not depend on cu-bridge's compatibility layer for `__nv_bfloat16`: `csrc/structs.h` includes `<maca_bfloat16.h>` so that `api.cu` and every instantiation TU see the *same* `maca_bfloat16`, and `TopkSelectConfig<maca_bfloat16, ...>`'s template entity is one symbol on both sides.

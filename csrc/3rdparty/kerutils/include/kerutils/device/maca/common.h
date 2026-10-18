@@ -82,7 +82,7 @@ void trap() {
 // The CUDA arm's is `cutlass::canonical_warp_idx_sync()`, which reads the
 // `%warpid` register.  **MACA has no such register, and the number the callers
 // want is not MACA's wave index.**  The ported kernels in
-// `csrc/maca_kernels/xcore1600/` are written throughout against CUDA's
+// `csrc/maca_kernels/legacy/` are written throughout against CUDA's
 // 32-lane warp (`lane_idx = threadIdx.x % 32`, `NUM_WARPS = NUM_THREADS / 32`,
 // 32-bit ballot and shuffle masks), so what they index is the thread's
 // 32-thread group within the block, which is `threadIdx.x / 32u`.  Returning

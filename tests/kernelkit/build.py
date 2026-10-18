@@ -142,7 +142,7 @@ class SpillCheckBuildExtension(BuildExtension):
 #     `maca_topk.cu` report either 0 or 48).
 #   - `--resource-usage` is a second full device compile of the TU it is asked
 #     about: ~60 s for `maca_topk.cu` (one TU, 78 devices), against tens of
-#     minutes for a single xcore1600 instantiation.  That is why this is a
+#     minutes for a single `legacy/` (ported-kernel) instantiation.  That is why this is a
 #     script rather than a `build_ext` subclass, and why it is opt-in per
 #     source file rather than run over the build.
 

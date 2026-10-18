@@ -18,7 +18,7 @@
 
 // The NaN predicates and the order-preserving key encodes, shared with the
 // dataflow headers below.
-#include "../common/primitives.cuh"
+#include "primitives.cuh"
 // The ported C500 dataflow (see the provenance banner in that file).  Its row
 // entries are what `radix_select_row` dispatches to, and the launchers below
 // are how every route -- the two splits and the two ported ones -- hands its

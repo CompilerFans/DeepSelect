@@ -17,14 +17,17 @@
 //     `__syncthreads`, `__syncthreads_or`.  No inline asm, no TMA, no mbarrier,
 //     no cluster.
 //   * The wave is 64 lanes, not 32.  Any mask or `/ 32` inherited from the
-//     CUDA-era kernels is suspect -- see `csrc/maca_kernels/xcore1600/` for what that looks
-//     like when it is wrong.
+//     CUDA-era kernels is suspect -- see `csrc/maca_kernels/legacy/` for what
+//     that looks like when it is wrong.
 //
-// The upstream `v3` (bf16) and `v3_fp32` trees are ported under `csrc/maca_kernels/xcore1600/`
+// The upstream `v3` (bf16) and `v3_fp32` trees are ported under `csrc/maca_kernels/legacy/`
 // and are NOT built; `v3_cluster` is deleted (MACA has no cluster launch), so
 // the shapes it served fall through to this kernel -- the same path every other
 // shape takes, with `topk <= 1024 <= 4096` and no vocabulary bound, so they are
 // served, only without the cluster-specific scheduling.
+//
+// This file is the shared half of every family's artifact: family <N> compiles
+// `common/` plus its own tuple set in `csrc/maca_kernels/xcore<N>/instantiations/`.
 
 #include <cuda_runtime.h>
 // [MACA] 数据类型取 MACA 原生头，不经过 cu-bridge 的 <cuda_bf16.h> 兼容层
@@ -42,7 +45,7 @@
 #include "structs.h"
 // The NaN predicates and the order-preserving key encodes, shared with the
 // dataflow headers below.
-#include "../common/primitives.cuh"
+#include "primitives.cuh"
 // The ported C500 dataflow (see the provenance banner in that file).  It is
 // included here so that this translation unit -- the one `setup.py` builds --
 // is what proves it compiles under the mxcc/cu-bridge toolchain, and so that

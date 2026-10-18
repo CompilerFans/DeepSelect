@@ -5,7 +5,7 @@
 #include <maca_bfloat16.h>   // the 16-bit path's value type
 #include <cstdint>
 
-#include "../common/primitives.cuh"
+#include "primitives.cuh"
 
 namespace topk_select_radix {
 

@@ -1,6 +1,6 @@
 // Device primitives shared by this operator's dataflows, one definition each.
 //
-// `xcore1000/` carries three of them -- `topk_select_radix`'s radix rows, `topk_select_coarse12`'s
+// `common/` carries three of them -- `topk_select_radix`'s radix rows, `topk_select_coarse12`'s
 // selector and `topk_select_chunks`' chunked merge -- and each was ported or written
 // against its own copy of the same bit tricks, so the bodies could drift with
 // nothing to catch it.  What is here is what every one of them spelled the
@@ -15,7 +15,7 @@
 // sites spell both the same way); the NaN tests are **this port's** bit-pattern
 // spelling, in upstream's `topk_select_common` namespace -- upstream has no bit
 // test (it detects NaN with PTX `set.nan.bf16`), and the ported tree carries
-// the twin in `xcore1600/bit_utils.cuh`.  The key transform is upstream's
+// the twin in `legacy/bit_utils.cuh`.  The key transform is upstream's
 // `distort` under deep_gemm's name: same operation, and the two lineages spell
 // it differently, so renaming either side diverges silently from the code the
 // dataflows are re-merged with.

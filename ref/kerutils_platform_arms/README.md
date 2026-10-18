@@ -13,7 +13,7 @@ ARCH=xcore1600 ./run_probe.sh   # another family
 `KERUTILS_IS_BUILD_ON_ASCEND` or `KERUTILS_IS_BUILD_ON_MACA` — and **the MACA one
 is the only arm nothing else in this repository compiles.** `kerutils.cuh`,
 `device/device.cuh`, `host/host.h` and the three `device/<platform>/common.h`
-files all reach it, but the sole consumer, `csrc/maca_kernels/xcore1600/`, is off
+files all reach it, but the sole consumer, `csrc/maca_kernels/legacy/`, is off
 `setup.py`'s `SOURCES` and off `include_dirs`. So a full build of this tree runs
 `./develop.sh`, passes every suite, and never instantiates the arm. "It builds"
 is not evidence about it, and this probe is the compilation that is.
@@ -78,7 +78,7 @@ fails if someone "corrects" the function to the platform's answer.
 
 ## What it does *not* check
 
-**That `csrc/maca_kernels/xcore1600/` compiles.** It does not — that tree has its
+**That `csrc/maca_kernels/legacy/` compiles.** It does not — that tree has its
 own outstanding work, recorded under "Known holes" in `CLAUDE.md`. The subject
 here is the vendored library's platform arm, which is a strictly smaller claim
 than the port that would consume it. Do not read this probe's PASS as a

@@ -8,7 +8,7 @@
 // `KERUTILS_IS_BUILD_ON_CUDA`, `_ASCEND`, `_MACA` -- and the MACA one is the
 // only arm nothing else here compiles: `device/device.cuh`, `host/host.h` and
 // `kerutils.cuh` all reach it, but the sole consumer
-// (`csrc/maca_kernels/xcore1600/`) is off `setup.py`'s `SOURCES`, so an
+// (`csrc/maca_kernels/legacy/`) is off `setup.py`'s `SOURCES`, so an
 // ordinary build of this tree never instantiates it.  This probe is that
 // compilation.
 //
@@ -22,7 +22,7 @@
 // ---------------------------------------------------------------------------
 // WHAT IT DOES NOT PROVE
 //
-// That `csrc/maca_kernels/xcore1600/` compiles.  It does not, and the work
+// That `csrc/maca_kernels/legacy/` compiles.  It does not, and the work
 // outstanding there is recorded under "Known holes" in CLAUDE.md.  The subject
 // here is the vendored library's platform arm, which is a smaller claim than
 // the port that would consume it.
@@ -183,7 +183,7 @@ static int report_passes() {
 // 3. The device pass.
 //
 // `maca/common.h` is where these names come from; every one of them is called
-// from `csrc/maca_kernels/xcore1600/`.  `ku::trap()` is referenced but not
+// from `csrc/maca_kernels/legacy/`.  `ku::trap()` is referenced but not
 // reached -- it aborts, so it cannot be part of a passing run, and a call the
 // compiler must still typecheck is what this needs from it.
 // ---------------------------------------------------------------------------

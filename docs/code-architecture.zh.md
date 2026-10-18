@@ -72,19 +72,20 @@ csrc/
 ├── structs.h                               契约常量 + arch 家族表（编译期）
 ├── ffi/                                    tvm-ffi ABI、错误宏、host check
 └── maca_kernels/
-    ├── common/primitives.cuh               跨族原语（已落地）
-    └── xcore1000/                          族层
-        ├── maca_topk.cu                    唯一手写 TU：include + host 入口 + 按表派发
-        ├── contract.cuh                    契约半：RowParams / 常量 / 键与 NaN / emit / 布局 / 行核与发射
-        ├── routing.cuh                     选路：形状 → 数据流（纯函数，一处可读）＋梯子 `topk_launch`
-        ├── radix_core.cuh                  数据流入口（伞头：只 include 下面四个；TU 只 include 它）
-        ├── radix_common.cuh                行族共享件：常数 / smem 尺寸 / 直方图与后缀和
-        ├── radix_row_bf16.cuh              bf16 行：radix 两趟 + skip 表 + overflow
-        ├── radix_row_fp32.cuh              fp32 行：+ 溢出重扫 + k2048 变体
-        ├── radix_chunked.cuh               两条 dtype 的分块 split/merge（阶段核 + 发射）
-        ├── topk_coarse12.cuh               deep_gemm 路线一（官方核名）
-        ├── topk_chunks.cuh                 deep_gemm 路线二（官方核名）
-        └── instantiations/*.cu             生成物：一个配置元组一个文件
+    ├── common/                             共享实现（每族产物都编它）
+    │   ├── primitives.cuh                  跨族原语（已落地）
+    │   ├── maca_topk.cu                    唯一手写 TU：include + host 入口 + 按表派发
+    │   ├── contract.cuh                    契约半：RowParams / 常量 / 键与 NaN / emit / 布局 / 行核与发射
+    │   ├── routing.cuh                     选路：形状 → 数据流（纯函数，一处可读）＋梯子 `topk_launch`
+    │   ├── radix_core.cuh                  数据流入口（伞头：只 include 下面四个；TU 只 include 它）
+    │   ├── radix_common.cuh                行族共享件：常数 / smem 尺寸 / 直方图与后缀和
+    │   ├── radix_row_bf16.cuh              bf16 行：radix 两趟 + skip 表 + overflow
+    │   ├── radix_row_fp32.cuh              fp32 行：+ 溢出重扫 + k2048 变体
+    │   ├── radix_chunked.cuh               两条 dtype 的分块 split/merge（阶段核 + 发射）
+    │   ├── topk_coarse12.cuh               deep_gemm 路线一（官方核名）
+    │   └── topk_chunks.cuh                 deep_gemm 路线二（官方核名）
+    ├── xcore<N>/instantiations/*.cu        族层：每族自己的生成物（一个配置元组一个文件；今日三族同表，89 × 3）
+    └── legacy/                             移植版上游内核：不编译，仅史料/审计留存（见其 README.md）
 ```
 
 ### 3b. 命名空间（用户 2026-10-12 裁定：一条逻辑、一套词汇，照官方的）
@@ -134,8 +135,8 @@ deep_select::ffi::      平台无关边缘（不变）
    - `routing.cuh` include 两个移植头——梯子读它们的 `kSmemBytes` / `kMaxTopK`，且分块发射器
      是模板，定义必须在其实例化点可见。
    数据流文件**不 include routing**（这条成立，是方向的承重面，必须保持）。
-3. **TU 结构**：手写 TU 恒为 1（`maca_topk.cu`）；设备核由生成出来的 `instantiations/*.cu` 提供，
-   每个文件一条显式实例化。`setup.py` 的 `SOURCES` = 手写清单 + 生成器的 `xcore1000_sources()`
+3. **TU 结构**：手写 TU 恒为 1（`common/maca_topk.cu`）；设备核由生成出来的 `xcore<N>/instantiations/*.cu` 提供，
+   每个文件一条显式实例化。`setup.py` 的源清单 = 手写清单 + 生成器的 `family_sources(family)`
    （直接调用生成器函数，不解析它的打印输出——清单只有一份，没有第二份可漂移）。
 4. **路由即表**：所有形状判据（哪条数据流、几个 chunk、什么块宽）集中在 `routing.cuh`，纯函数、可读、可测；
    数据流文件里不出现形状门。

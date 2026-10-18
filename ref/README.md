@@ -7,7 +7,7 @@ extracted into a torch-free, standalone repro:
 | dir         | what it is | source |
 |-------------|------------|--------|
 | `deep_gemm/` | `deep_gemm.fp32_indexer_topk_selector`, the csrc's own routing | `mcDeepGEMM/csrc/kernels/fp32_topk.cu` |
-| `ds/`        | DeepSelect's fp32 radix row kernel | `DeepSelect/csrc/maca_kernels/xcore1000/` |
+| `ds/`        | DeepSelect's fp32 radix row kernel | `DeepSelect/csrc/maca_kernels/common/` |
 | `mcoplib/`   | mcoplib's `topk_transform_v1` (SGLang port) | `mcoplib/op/sglang/jit_kernels/topk_v1.cu` |
 
 Each is a kernel TU + a public header + a `main.cu` driver + this README's

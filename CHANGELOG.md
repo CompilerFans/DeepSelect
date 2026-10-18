@@ -7,6 +7,32 @@ there.
 
 ## Unreleased
 
+### The kernel tree's directories tell the truth (P6)
+
+The layout named two things it was not: `csrc/maca_kernels/xcore1000/` was the
+tree **every** family compiled, and `csrc/maca_kernels/xcore1600/` was the
+ported upstream tree **no** family compiled -- `setup.py` carried a comment
+warning that family 1600 and the directory `xcore1600/` were two different
+things, and that the name collision was the trap.  The collision is retired by
+structure:
+
+* `csrc/maca_kernels/common/` -- the shared implementation (`maca_topk.cu`, the
+  contract/routing/radix/topk headers, the existing `primitives.cuh`), compiled
+  into every family's artifact.
+* `csrc/maca_kernels/xcore<N>/instantiations/` -- family `<N>`'s own generated
+  tuple set (89 files per family; the three tables are identical today, and a
+  family-specific set is a branch in the generator's `family_instantiations()`).
+* `csrc/maca_kernels/legacy/` -- the ported upstream kernels, moved there
+  unchanged: still source-only, still unbuilt, and (as before) not compilable
+  without the `ARCH_SMEM_PER_AP_BYTES` substitution its two `static_assert`s
+  need.
+
+`setup.py`'s `SOURCES_BY_FAMILY` table is gone with the collision:
+`sources_for_family(f)` is `COMMON_SOURCES + generated_sources(f)`, and the
+generator's `xcore1000_sources()` is `family_sources(family)`.  Dated records
+(experiment docs, perf ledgers, prior handovers) keep the paths they were
+written against; this entry is the mapping.
+
 ### The wheel names the toolkit it was built against
 
 The version string carried the git revision and a build timestamp but nothing

@@ -71,7 +71,7 @@ namespace ku = kerutils;
 namespace kerutils {
 
 // Both are called from **device** code -- the ported kernels under
-// `csrc/maca_kernels/xcore1600/` size their tiles with them -- so both carry
+// `csrc/maca_kernels/legacy/` size their tiles with them -- so both carry
 // `__host__ __device__`.  That is a deliberate departure from upstream's
 // plain `inline constexpr`: the NVCC extension that makes a constexpr function
 // callable from device code without the attribute is `--expt-relaxed-constexpr`,

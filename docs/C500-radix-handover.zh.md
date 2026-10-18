@@ -72,16 +72,16 @@ C500（xcore1000）上走的是**行式 radix 选择**：一行一个 CTA，两�
 
 | 文件 | 角色 |
 |---|---|
-| `csrc/maca_kernels/xcore1000/maca_topk.cu` | **唯一手写 TU + 对外入口**：include 清单 + tvm-ffi 入口（契约检查、scratch、`topk` 绑定） |
-| `csrc/maca_kernels/xcore1000/contract.cuh` | **契约半**：`RowParams` / 常量 / 键与 NaN / emit / smem 布局 / 行核 `topk_kernel_radix<Cfg>` 与发射 `launch_radix_config<Cfg>` + 派发表 `kRadixTable` |
-| `csrc/maca_kernels/xcore1000/routing.cuh` | **选路**：形状 → 数据流（纯函数）＋梯子 `topk_launch` |
-| `csrc/maca_kernels/xcore1000/instantiations/*.cu` | **生成物**（89 个）：一个配置元组一个文件，每个显式实例化一个发射器；`setup.py` 的源清单与文件名都来自生成器 |
-| `scripts/generate_instantiations.py` | 元组表 → `instantiations/*.cu` + `setup.py` 读的源清单（`xcore1000_sources()`）；同时仍管 xcore1600 移植树的表 |
-| `csrc/maca_kernels/xcore1000/radix_core.cuh` | **选择数据流伞头**（header-only）：只 include 下面四个；TU 只 include 它 |
-| `csrc/maca_kernels/xcore1000/radix_common.cuh` | 行族共享件：常数（四个 `kMaxTopK` 之一等）/ smem 尺寸 / 直方图与前缀和 helper |
-| `csrc/maca_kernels/xcore1000/radix_row_bf16.cuh` | `radix_topk_row_bf16_b`（16 位行，生产路径）+ skip 表 + overflow |
-| `csrc/maca_kernels/xcore1000/radix_row_fp32.cuh` | `radix_topk_row_f32*`（32 位行）+ 溢出重扫 + k2048 变体 |
-| `csrc/maca_kernels/xcore1000/radix_chunked.cuh` | bf16 / fp32 chunked split 的两级 stage 核与发射器 |
+| `csrc/maca_kernels/common/maca_topk.cu` | **唯一手写 TU + 对外入口**：include 清单 + tvm-ffi 入口（契约检查、scratch、`topk` 绑定） |
+| `csrc/maca_kernels/common/contract.cuh` | **契约半**：`RowParams` / 常量 / 键与 NaN / emit / smem 布局 / 行核 `topk_kernel_radix<Cfg>` 与发射 `launch_radix_config<Cfg>` + 派发表 `kRadixTable` |
+| `csrc/maca_kernels/common/routing.cuh` | **选路**：形状 → 数据流（纯函数）＋梯子 `topk_launch` |
+| `csrc/maca_kernels/xcore<N>/instantiations/*.cu` | **生成物**（每族 89 个，今日三族同表）：一个配置元组一个文件，每个显式实例化一个发射器；`setup.py` 的源清单与文件名都来自生成器 |
+| `scripts/generate_instantiations.py` | 元组表 → `xcore<N>/instantiations/*.cu` + `setup.py` 读的源清单（`family_sources(family)`）；同时仍管 legacy 移植树的表 |
+| `csrc/maca_kernels/common/radix_core.cuh` | **选择数据流伞头**（header-only）：只 include 下面四个；TU 只 include 它 |
+| `csrc/maca_kernels/common/radix_common.cuh` | 行族共享件：常数（四个 `kMaxTopK` 之一等）/ smem 尺寸 / 直方图与前缀和 helper |
+| `csrc/maca_kernels/common/radix_row_bf16.cuh` | `radix_topk_row_bf16_b`（16 位行，生产路径）+ skip 表 + overflow |
+| `csrc/maca_kernels/common/radix_row_fp32.cuh` | `radix_topk_row_f32*`（32 位行）+ 溢出重扫 + k2048 变体 |
+| `csrc/maca_kernels/common/radix_chunked.cuh` | bf16 / fp32 chunked split 的两级 stage 核与发射器 |
 | `csrc/structs.h` | `TopkSelectArgs` / `RowParams` |
 | `scripts/official_slice.py` | 官方大表的切片驱动（正确性门）——**2026-09-16 已删除，能力并入 `tests/test.py`**（见 §4 正确性门） |
 | `tests/test.py` | 官方性能表（每个 perf 用例先查正确性再计时） |
@@ -246,7 +246,8 @@ PYTHONPATH=$PWD python tests/test.py --perf-only    # 95 个用例，先验后�
   只读墙的占比（不是 1,487：见 `C500-to-parity-plan.zh.md` §7.1 的更正）；
   不是的话写清绑定在什么上；
 - 门的结果（95/95 + 82170/82170）；
-- 架构边界声明（只动 `csrc/maca_kernels/xcore1000/` ⇒ xcore1600 逐字节不变 ⇒ 不欠 C600U 验证）。
+- 架构边界声明（`common/` 的改动进全部三族产物 ⇒ 不欠他族验证的说法不成立；
+  仅一族 `xcore<N>/instantiations/` 表的改动只触该族产物——P6 起此说法由结构保证）。
 
 落地顺序：
 
