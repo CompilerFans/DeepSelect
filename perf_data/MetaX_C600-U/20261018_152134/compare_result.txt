@@ -1,0 +1,109 @@
+# compare: 20261018_152134 vs baseline 20260915_081856
+# base      perf_data/MetaX_C600-U/baseline  (107 cells)
+# candidate perf_data/MetaX_C600-U/20261018_152134  (134 cells)
+# matched   107   only-in-candidate 27   only-in-base 0   tolerance ±3.0%
+
+# cells the candidate added (cannot be compared):
+#   + official lightn bfloat16 b1-v1048576-k1024
+#   + official lightn bfloat16 b1-v1048576-k2048
+#   + official lightn bfloat16 b1-v1048576-k512
+#   + official lightn bfloat16 b1-v131072-k1024
+#   + official lightn bfloat16 b1-v131072-k2048
+#   + official lightn bfloat16 b1-v131072-k512
+#   + official lightn bfloat16 b1-v262144-k1024
+#   + official lightn bfloat16 b1-v262144-k2048
+#   + official lightn bfloat16 b1-v262144-k512
+#   + official lightn bfloat16 b128-v1048576-k1024
+#   + official lightn bfloat16 b128-v1048576-k2048
+#   + official lightn bfloat16 b128-v1048576-k512
+#   + official lightn bfloat16 b128-v131072-k1024
+#   + official lightn bfloat16 b128-v131072-k2048
+#   + official lightn bfloat16 b128-v131072-k512
+#   + official lightn bfloat16 b128-v262144-k1024
+#   + official lightn bfloat16 b128-v262144-k2048
+#   + official lightn bfloat16 b128-v262144-k512
+#   + official lightn bfloat16 b64-v1048576-k1024
+#   + official lightn bfloat16 b64-v1048576-k2048
+#   + official lightn bfloat16 b64-v1048576-k512
+#   + official lightn bfloat16 b64-v131072-k1024
+#   + official lightn bfloat16 b64-v131072-k2048
+#   + official lightn bfloat16 b64-v131072-k512
+#   + official lightn bfloat16 b64-v262144-k1024
+#   + official lightn bfloat16 b64-v262144-k2048
+#   + official lightn bfloat16 b64-v262144-k512
+
+=== maca_c ===
+    2 regressed / 100 improved / 5 noise   (0 not comparable)
+    total 328200.1 -> 134191.6 us (-59.11%)
+    improved  official lightn bfloat16 b4096-v1048576-k512    49364.5 ->    16770.1 us    -66.0%
+    improved  official lightn bfloat16 b768-v1048576-k512     9534.8 ->     3282.1 us    -65.6%
+    improved  official lightn bfloat16 b512-v1048576-k512     6488.9 ->     2258.5 us    -65.2%
+    improved  official lightn bfloat16 b4096-v524288-k512    25490.4 ->     8978.7 us    -64.8%
+    improved  official lightn bfloat16 b4096-v1048576-k1024    50127.0 ->    17711.9 us    -64.7%
+    improved  official lightn bfloat16 b768-v524288-k512     4925.3 ->     1763.6 us    -64.2%
+    improved  official lightn bfloat16 b768-v1048576-k1024     9693.1 ->     3479.6 us    -64.1%
+    improved  official lightn bfloat16 b256-v1048576-k512     3444.0 ->     1237.2 us    -64.1%
+    improved  official lightn bfloat16 b512-v524288-k512     3340.1 ->     1216.1 us    -63.6%
+    improved  official lightn bfloat16 b512-v1048576-k1024     6579.8 ->     2400.1 us    -63.5%
+    improved  official lightn bfloat16 b4096-v262144-k512    13618.5 ->     5111.9 us    -62.5%
+    improved  official lightn bfloat16 b256-v1048576-k1024     3499.3 ->     1318.5 us    -62.3%
+    improved  official lightn bfloat16 b4096-v524288-k1024    26273.7 ->     9941.7 us    -62.2%
+    improved  official lightn bfloat16 b256-v524288-k512     1762.5 ->      668.6 us    -62.1%
+    regressed deep_gem lightn float32  b1-v107520-k2048       69.2 ->      111.8 us    +61.6%
+    improved  official lightn bfloat16 b768-v262144-k512     2616.9 ->     1009.2 us    -61.4%
+    improved  official lightn bfloat16 b768-v524288-k1024     5069.5 ->     1960.4 us    -61.3%
+    improved  official lightn bfloat16 b512-v262144-k512     1779.2 ->      697.1 us    -60.8%
+    improved  official lightn bfloat16 b512-v524288-k1024     3436.1 ->     1357.1 us    -60.5%
+    improved  official lightn bfloat16 b256-v524288-k1024     1817.5 ->      748.5 us    -58.8%
+    improved  official lightn bfloat16 b256-v262144-k512      936.8 ->      385.9 us    -58.8%
+    improved  official lightn bfloat16 b4096-v131072-k512     7652.7 ->     3164.8 us    -58.6%
+    improved  official lightn bfloat16 b4096-v262144-k1024    14315.2 ->     6024.6 us    -57.9%
+    improved  official lightn bfloat16 b768-v131072-k512     1472.2 ->      628.8 us    -57.3%
+    improved  official lightn bfloat16 b6-v524288-k1024      184.9 ->       79.0 us    -57.3%
+    improved  official lightn bfloat16 b768-v262144-k1024     2752.2 ->     1194.6 us    -56.6%
+    improved  official lightn bfloat16 b512-v131072-k512      998.5 ->      436.0 us    -56.3%
+    improved  official lightn bfloat16 b512-v262144-k1024     1868.4 ->      827.3 us    -55.7%
+    improved  official lightn bfloat16 b4096-v65536-k512     4609.9 ->     2118.5 us    -54.0%
+    improved  official lightn bfloat16 b256-v131072-k512      525.7 ->      242.6 us    -53.9%
+    improved  official lightn bfloat16 b256-v262144-k1024      982.4 ->      459.2 us    -53.3%
+    improved  official lightn bfloat16 b4096-v65536-k1024     4962.5 ->     2327.9 us    -53.1%
+    improved  official lightn bfloat16 b768-v65536-k512      883.6 ->      421.2 us    -52.3%
+    improved  official lightn bfloat16 b4096-v131072-k1024     8186.2 ->     3911.7 us    -52.2%
+    improved  official lightn bfloat16 b512-v65536-k512      600.0 ->      292.4 us    -51.3%
+    improved  official lightn bfloat16 b768-v65536-k1024      950.5 ->      467.1 us    -50.9%
+    improved  official lightn bfloat16 b768-v131072-k1024     1570.9 ->      776.4 us    -50.6%
+    improved  official lightn bfloat16 b512-v65536-k1024      644.9 ->      325.0 us    -49.6%
+    improved  official lightn bfloat16 b512-v131072-k1024     1068.0 ->      538.8 us    -49.6%
+    improved  official lightn bfloat16 b256-v65536-k512      315.6 ->      164.0 us    -48.0%
+
+=== torch ===
+    19 regressed / 0 improved / 78 noise   (10 not comparable)
+    total 1521965.4 -> 1527556.1 us (+0.37%)
+    regressed deep_gem lightn float32  b1-v66551-k2048      140.4 ->      174.2 us    +24.1%
+    regressed deep_gem lightn float32  b1-v131072-k2048      155.8 ->      181.9 us    +16.8%
+    regressed deep_gem lightn float32  b1-v107520-k2048      163.5 ->      181.7 us    +11.1%
+    regressed official sample float32  b6-v129280-k512      235.5 ->      259.3 us    +10.1%
+    regressed official lightn bfloat16 b6-v65536-k1024      140.6 ->      153.1 us     +8.9%
+    regressed official lightn bfloat16 b6-v65536-k512       142.7 ->      152.9 us     +7.1%
+    regressed deep_gem lightn float32  b16-v66551-k2048      273.0 ->      291.9 us     +6.9%
+    regressed official lightn bfloat16 b6-v131072-k512      171.9 ->      182.1 us     +5.9%
+    regressed official lightn bfloat16 b6-v131072-k1024      170.9 ->      180.9 us     +5.9%
+    regressed official lightn bfloat16 b256-v4096-k512      250.4 ->      264.1 us     +5.5%
+    regressed official lightn bfloat16 b512-v4096-k1024      277.2 ->      290.4 us     +4.8%
+    regressed official lightn bfloat16 b256-v4096-k1024      250.9 ->      262.8 us     +4.8%
+    regressed official lightn bfloat16 b6-v262144-k1024      236.2 ->      247.1 us     +4.6%
+    regressed official lightn bfloat16 b6-v262144-k512      236.3 ->      246.9 us     +4.5%
+    regressed official lightn bfloat16 b512-v4096-k512      278.7 ->      289.9 us     +4.0%
+    regressed official lightn bfloat16 b768-v4096-k1024      353.1 ->      366.1 us     +3.7%
+    regressed official lightn bfloat16 b6-v524288-k512      331.1 ->      342.6 us     +3.5%
+    regressed official lightn bfloat16 b768-v4096-k512      351.4 ->      363.1 us     +3.3%
+    regressed official lightn bfloat16 b6-v524288-k1024      346.1 ->      356.7 us     +3.1%
+
+=== deep_gemm ===
+    0 regressed / 3 improved / 9 noise   (95 not comparable)
+    total 11898.5 -> 12134.6 us (+1.98%)
+    improved  deep_gem lightn float32  b1-v131072-k2048       43.1 ->       39.8 us     -7.7%
+    improved  deep_gem lightn float32  b1-v107520-k2048       40.9 ->       38.1 us     -6.8%
+    improved  deep_gem lightn float32  b16-v66551-k2048       52.2 ->       49.8 us     -4.6%
+
+# VERDICT: REGRESSED (maca_c beyond ±3.0% or a status change)

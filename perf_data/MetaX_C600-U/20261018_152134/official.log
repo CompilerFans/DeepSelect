@@ -1,0 +1,589 @@
+/root/github/DeepSelect/tests/test.py:9: UserWarning: Could not find flash_attn package installed. Please try to install flash_attn whl pacakge using pip command and make sure it can be imported properly
+  import torch
+================
+[     1/   147,  0%] Running on TestParam(batch_size=6, vocab_size=256, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=0, check_correctness=True, num_runs=10)
+topk           :     2.304 us, 0.007 TB/s
+================
+[     2/   147,  1%] Running on TestParam(batch_size=6, vocab_size=1024, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=1, check_correctness=True, num_runs=10)
+topk           :    10.445 us, 0.002 TB/s
+torch.topk     :    22.656 us, 0.001 TB/s  (speedup 2.17x)
+================
+[     3/   147,  1%] Running on TestParam(batch_size=6, vocab_size=4096, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=2, check_correctness=True, num_runs=10)
+topk           :    11.648 us, 0.005 TB/s
+torch.topk     :    37.402 us, 0.002 TB/s  (speedup 3.21x)
+================
+[     4/   147,  2%] Running on TestParam(batch_size=6, vocab_size=16384, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=3, check_correctness=True, num_runs=10)
+topk           :    17.126 us, 0.012 TB/s
+torch.topk     :    92.237 us, 0.002 TB/s  (speedup 5.39x)
+================
+[     5/   147,  3%] Running on TestParam(batch_size=6, vocab_size=65536, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=4, check_correctness=True, num_runs=10)
+topk           :    28.570 us, 0.028 TB/s
+torch.topk     :   152.090 us, 0.005 TB/s  (speedup 5.32x)
+================
+[     6/   147,  3%] Running on TestParam(batch_size=6, vocab_size=131072, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=5, check_correctness=True, num_runs=10)
+topk           :    39.731 us, 0.040 TB/s
+torch.topk     :   181.760 us, 0.009 TB/s  (speedup 4.57x)
+================
+[     7/   147,  4%] Running on TestParam(batch_size=6, vocab_size=262144, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=6, check_correctness=True, num_runs=10)
+topk           :    55.501 us, 0.057 TB/s
+torch.topk     :   247.398 us, 0.013 TB/s  (speedup 4.46x)
+================
+[     8/   147,  5%] Running on TestParam(batch_size=6, vocab_size=524288, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=7, check_correctness=True, num_runs=10)
+topk           :    72.448 us, 0.087 TB/s
+torch.topk     :   342.886 us, 0.018 TB/s  (speedup 4.73x)
+================
+[     9/   147,  5%] Running on TestParam(batch_size=6, vocab_size=1048576, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=8, check_correctness=True, num_runs=10)
+topk           :    97.920 us, 0.129 TB/s
+torch.topk     :   518.400 us, 0.024 TB/s  (speedup 5.29x)
+================
+[    10/   147,  6%] Running on TestParam(batch_size=256, vocab_size=256, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=9, check_correctness=True, num_runs=10)
+topk           :     4.506 us, 0.145 TB/s
+================
+[    11/   147,  7%] Running on TestParam(batch_size=256, vocab_size=1024, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=10, check_correctness=True, num_runs=10)
+topk           :    25.523 us, 0.041 TB/s
+torch.topk     :   152.294 us, 0.007 TB/s  (speedup 5.97x)
+================
+[    12/   147,  7%] Running on TestParam(batch_size=256, vocab_size=4096, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=11, check_correctness=True, num_runs=10)
+topk           :    35.866 us, 0.073 TB/s
+torch.topk     :   263.347 us, 0.010 TB/s  (speedup 7.34x)
+================
+[    13/   147,  8%] Running on TestParam(batch_size=256, vocab_size=16384, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=12, check_correctness=True, num_runs=10)
+topk           :    63.590 us, 0.140 TB/s
+torch.topk     :   584.525 us, 0.015 TB/s  (speedup 9.19x)
+================
+[    14/   147,  9%] Running on TestParam(batch_size=256, vocab_size=65536, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=13, check_correctness=True, num_runs=10)
+topk           :   164.019 us, 0.208 TB/s
+torch.topk     :  1276.570 us, 0.027 TB/s  (speedup 7.78x)
+================
+[    15/   147, 10%] Running on TestParam(batch_size=256, vocab_size=131072, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=14, check_correctness=True, num_runs=10)
+topk           :   243.123 us, 0.278 TB/s
+torch.topk     :  2204.390 us, 0.031 TB/s  (speedup 9.07x)
+================
+[    16/   147, 10%] Running on TestParam(batch_size=256, vocab_size=262144, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=15, check_correctness=True, num_runs=10)
+topk           :   385.690 us, 0.349 TB/s
+torch.topk     :  4111.565 us, 0.033 TB/s  (speedup 10.66x)
+================
+[    17/   147, 11%] Running on TestParam(batch_size=256, vocab_size=524288, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=16, check_correctness=True, num_runs=10)
+topk           :   666.880 us, 0.403 TB/s
+torch.topk     :  7835.955 us, 0.034 TB/s  (speedup 11.75x)
+================
+[    18/   147, 12%] Running on TestParam(batch_size=256, vocab_size=1048576, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=17, check_correctness=True, num_runs=10)
+topk           :  1237.299 us, 0.434 TB/s
+torch.topk     : 15355.648 us, 0.035 TB/s  (speedup 12.41x)
+================
+[    19/   147, 12%] Running on TestParam(batch_size=512, vocab_size=256, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=18, check_correctness=True, num_runs=10)
+topk           :     6.016 us, 0.218 TB/s
+================
+[    20/   147, 13%] Running on TestParam(batch_size=512, vocab_size=1024, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=19, check_correctness=True, num_runs=10)
+topk           :    43.904 us, 0.048 TB/s
+torch.topk     :   294.554 us, 0.007 TB/s  (speedup 6.71x)
+================
+[    21/   147, 14%] Running on TestParam(batch_size=512, vocab_size=4096, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=20, check_correctness=True, num_runs=10)
+topk           :    61.517 us, 0.085 TB/s
+torch.topk     :   289.485 us, 0.018 TB/s  (speedup 4.71x)
+================
+[    22/   147, 14%] Running on TestParam(batch_size=512, vocab_size=16384, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=21, check_correctness=True, num_runs=10)
+topk           :   111.667 us, 0.160 TB/s
+torch.topk     :   715.264 us, 0.025 TB/s  (speedup 6.41x)
+================
+[    23/   147, 15%] Running on TestParam(batch_size=512, vocab_size=65536, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=22, check_correctness=True, num_runs=10)
+topk           :   292.352 us, 0.233 TB/s
+torch.topk     :  2352.051 us, 0.029 TB/s  (speedup 8.05x)
+================
+[    24/   147, 16%] Running on TestParam(batch_size=512, vocab_size=131072, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=23, check_correctness=True, num_runs=10)
+topk           :   436.019 us, 0.310 TB/s
+torch.topk     :  4228.685 us, 0.032 TB/s  (speedup 9.70x)
+================
+[    25/   147, 16%] Running on TestParam(batch_size=512, vocab_size=262144, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=24, check_correctness=True, num_runs=10)
+topk           :   697.088 us, 0.387 TB/s
+torch.topk     :  7984.333 us, 0.034 TB/s  (speedup 11.45x)
+================
+[    26/   147, 17%] Running on TestParam(batch_size=512, vocab_size=524288, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=25, check_correctness=True, num_runs=10)
+topk           :  1216.410 us, 0.442 TB/s
+torch.topk     : 15401.344 us, 0.035 TB/s  (speedup 12.66x)
+================
+[    27/   147, 18%] Running on TestParam(batch_size=512, vocab_size=1048576, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=26, check_correctness=True, num_runs=10)
+topk           :  2258.022 us, 0.476 TB/s
+torch.topk     : 30348.211 us, 0.035 TB/s  (speedup 13.44x)
+================
+[    28/   147, 18%] Running on TestParam(batch_size=768, vocab_size=256, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=27, check_correctness=True, num_runs=10)
+topk           :     8.064 us, 0.244 TB/s
+================
+[    29/   147, 19%] Running on TestParam(batch_size=768, vocab_size=1024, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=28, check_correctness=True, num_runs=10)
+topk           :    61.440 us, 0.051 TB/s
+torch.topk     :   433.613 us, 0.007 TB/s  (speedup 7.06x)
+================
+[    30/   147, 20%] Running on TestParam(batch_size=768, vocab_size=4096, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=29, check_correctness=True, num_runs=10)
+topk           :    87.834 us, 0.090 TB/s
+torch.topk     :   362.547 us, 0.022 TB/s  (speedup 4.13x)
+================
+[    31/   147, 20%] Running on TestParam(batch_size=768, vocab_size=16384, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=30, check_correctness=True, num_runs=10)
+topk           :   159.693 us, 0.167 TB/s
+torch.topk     :   957.798 us, 0.028 TB/s  (speedup 6.00x)
+================
+[    32/   147, 21%] Running on TestParam(batch_size=768, vocab_size=65536, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=31, check_correctness=True, num_runs=10)
+topk           :   420.531 us, 0.243 TB/s
+torch.topk     :  3422.208 us, 0.030 TB/s  (speedup 8.14x)
+================
+[    33/   147, 22%] Running on TestParam(batch_size=768, vocab_size=131072, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=32, check_correctness=True, num_runs=10)
+topk           :   628.429 us, 0.323 TB/s
+torch.topk     :  6247.245 us, 0.032 TB/s  (speedup 9.94x)
+================
+[    34/   147, 22%] Running on TestParam(batch_size=768, vocab_size=262144, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=33, check_correctness=True, num_runs=10)
+topk           :  1009.306 us, 0.400 TB/s
+torch.topk     : 11862.170 us, 0.034 TB/s  (speedup 11.75x)
+================
+[    35/   147, 23%] Running on TestParam(batch_size=768, vocab_size=524288, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=34, check_correctness=True, num_runs=10)
+topk           :  1761.946 us, 0.458 TB/s
+torch.topk     : 23033.856 us, 0.035 TB/s  (speedup 13.07x)
+================
+[    36/   147, 24%] Running on TestParam(batch_size=768, vocab_size=1048576, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=35, check_correctness=True, num_runs=10)
+topk           :  3279.923 us, 0.492 TB/s
+torch.topk     : 45186.253 us, 0.036 TB/s  (speedup 13.78x)
+================
+[    37/   147, 24%] Running on TestParam(batch_size=4096, vocab_size=256, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=36, check_correctness=True, num_runs=10)
+topk           :    31.565 us, 0.332 TB/s
+================
+[    38/   147, 25%] Running on TestParam(batch_size=4096, vocab_size=1024, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=37, check_correctness=True, num_runs=10)
+topk           :   297.088 us, 0.056 TB/s
+torch.topk     :   665.958 us, 0.025 TB/s  (speedup 2.24x)
+================
+[    39/   147, 26%] Running on TestParam(batch_size=4096, vocab_size=4096, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=38, check_correctness=True, num_runs=10)
+topk           :   430.234 us, 0.097 TB/s
+torch.topk     :  1356.032 us, 0.031 TB/s  (speedup 3.15x)
+================
+[    40/   147, 27%] Running on TestParam(batch_size=4096, vocab_size=16384, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=39, check_correctness=True, num_runs=10)
+topk           :   789.555 us, 0.181 TB/s
+torch.topk     :  4231.859 us, 0.034 TB/s  (speedup 5.36x)
+================
+[    41/   147, 27%] Running on TestParam(batch_size=4096, vocab_size=65536, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=40, check_correctness=True, num_runs=10)
+topk           :  2115.456 us, 0.258 TB/s
+torch.topk     : 17332.582 us, 0.031 TB/s  (speedup 8.19x)
+================
+[    42/   147, 28%] Running on TestParam(batch_size=4096, vocab_size=131072, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=41, check_correctness=True, num_runs=10)
+topk           :  3162.445 us, 0.342 TB/s
+torch.topk     : 32343.501 us, 0.033 TB/s  (speedup 10.23x)
+================
+[    43/   147, 29%] Running on TestParam(batch_size=4096, vocab_size=262144, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=42, check_correctness=True, num_runs=10)
+topk           :  5107.840 us, 0.422 TB/s
+torch.topk     : 63902.797 us, 0.034 TB/s  (speedup 12.51x)
+================
+[    44/   147, 29%] Running on TestParam(batch_size=4096, vocab_size=524288, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=43, check_correctness=True, num_runs=10)
+topk           :  8978.048 us, 0.479 TB/s
+torch.topk     : 127517.491 us, 0.034 TB/s  (speedup 14.20x)
+================
+[    45/   147, 30%] Running on TestParam(batch_size=4096, vocab_size=1048576, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=44, check_correctness=True, num_runs=10)
+topk           : 16762.010 us, 0.513 TB/s
+torch.topk     : 251843.072 us, 0.034 TB/s  (speedup 15.02x)
+================
+[    46/   147, 31%] Running on TestParam(batch_size=6, vocab_size=256, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=45, check_correctness=True, num_runs=10)
+topk           :     2.330 us, 0.012 TB/s
+================
+[    47/   147, 31%] Running on TestParam(batch_size=6, vocab_size=1024, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=46, check_correctness=True, num_runs=10)
+topk           :     2.304 us, 0.016 TB/s
+torch.topk     :    21.555 us, 0.002 TB/s  (speedup 9.36x)
+================
+[    48/   147, 32%] Running on TestParam(batch_size=6, vocab_size=4096, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=47, check_correctness=True, num_runs=10)
+topk           :    11.878 us, 0.006 TB/s
+torch.topk     :    35.891 us, 0.002 TB/s  (speedup 3.02x)
+================
+[    49/   147, 33%] Running on TestParam(batch_size=6, vocab_size=16384, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=48, check_correctness=True, num_runs=10)
+topk           :    17.818 us, 0.012 TB/s
+torch.topk     :    91.930 us, 0.002 TB/s  (speedup 5.16x)
+================
+[    50/   147, 33%] Running on TestParam(batch_size=6, vocab_size=65536, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=49, check_correctness=True, num_runs=10)
+topk           :    31.667 us, 0.026 TB/s
+torch.topk     :   152.934 us, 0.005 TB/s  (speedup 4.83x)
+================
+[    51/   147, 34%] Running on TestParam(batch_size=6, vocab_size=131072, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=50, check_correctness=True, num_runs=10)
+topk           :    48.896 us, 0.033 TB/s
+torch.topk     :   179.917 us, 0.009 TB/s  (speedup 3.68x)
+================
+[    52/   147, 35%] Running on TestParam(batch_size=6, vocab_size=262144, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=51, check_correctness=True, num_runs=10)
+topk           :    61.850 us, 0.051 TB/s
+torch.topk     :   247.296 us, 0.013 TB/s  (speedup 4.00x)
+================
+[    53/   147, 35%] Running on TestParam(batch_size=6, vocab_size=524288, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=52, check_correctness=True, num_runs=10)
+topk           :    79.334 us, 0.080 TB/s
+torch.topk     :   357.376 us, 0.018 TB/s  (speedup 4.50x)
+================
+[    54/   147, 36%] Running on TestParam(batch_size=6, vocab_size=1048576, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=53, check_correctness=True, num_runs=10)
+topk           :   114.765 us, 0.110 TB/s
+torch.topk     :   544.512 us, 0.023 TB/s  (speedup 4.74x)
+================
+[    55/   147, 37%] Running on TestParam(batch_size=256, vocab_size=256, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=54, check_correctness=True, num_runs=10)
+topk           :     4.531 us, 0.260 TB/s
+================
+[    56/   147, 37%] Running on TestParam(batch_size=256, vocab_size=1024, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=55, check_correctness=True, num_runs=10)
+topk           :     4.480 us, 0.351 TB/s
+torch.topk     :   134.630 us, 0.012 TB/s  (speedup 30.05x)
+================
+[    57/   147, 38%] Running on TestParam(batch_size=256, vocab_size=4096, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=56, check_correctness=True, num_runs=10)
+topk           :    38.067 us, 0.083 TB/s
+torch.topk     :   264.090 us, 0.012 TB/s  (speedup 6.94x)
+================
+[    58/   147, 39%] Running on TestParam(batch_size=256, vocab_size=16384, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=57, check_correctness=True, num_runs=10)
+topk           :    68.454 us, 0.138 TB/s
+torch.topk     :   597.146 us, 0.016 TB/s  (speedup 8.72x)
+================
+[    59/   147, 39%] Running on TestParam(batch_size=256, vocab_size=65536, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=58, check_correctness=True, num_runs=10)
+topk           :   182.451 us, 0.190 TB/s
+torch.topk     :  1276.544 us, 0.027 TB/s  (speedup 7.00x)
+================
+[    60/   147, 40%] Running on TestParam(batch_size=256, vocab_size=131072, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=59, check_correctness=True, num_runs=10)
+topk           :   299.622 us, 0.227 TB/s
+torch.topk     :  2226.995 us, 0.031 TB/s  (speedup 7.43x)
+================
+[    61/   147, 41%] Running on TestParam(batch_size=256, vocab_size=262144, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=60, check_correctness=True, num_runs=10)
+topk           :   459.187 us, 0.295 TB/s
+torch.topk     :  4110.234 us, 0.033 TB/s  (speedup 8.95x)
+================
+[    62/   147, 41%] Running on TestParam(batch_size=256, vocab_size=524288, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=61, check_correctness=True, num_runs=10)
+topk           :   749.158 us, 0.360 TB/s
+torch.topk     :  7882.906 us, 0.034 TB/s  (speedup 10.52x)
+================
+[    63/   147, 42%] Running on TestParam(batch_size=256, vocab_size=1048576, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=62, check_correctness=True, num_runs=10)
+topk           :  1318.170 us, 0.408 TB/s
+torch.topk     : 15262.771 us, 0.035 TB/s  (speedup 11.58x)
+================
+[    64/   147, 43%] Running on TestParam(batch_size=512, vocab_size=256, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=63, check_correctness=True, num_runs=10)
+topk           :     6.502 us, 0.363 TB/s
+================
+[    65/   147, 44%] Running on TestParam(batch_size=512, vocab_size=1024, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=64, check_correctness=True, num_runs=10)
+topk           :     6.579 us, 0.478 TB/s
+torch.topk     :   257.920 us, 0.012 TB/s  (speedup 39.20x)
+================
+[    66/   147, 44%] Running on TestParam(batch_size=512, vocab_size=4096, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=65, check_correctness=True, num_runs=10)
+topk           :    65.792 us, 0.096 TB/s
+torch.topk     :   290.637 us, 0.022 TB/s  (speedup 4.42x)
+================
+[    67/   147, 45%] Running on TestParam(batch_size=512, vocab_size=16384, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=66, check_correctness=True, num_runs=10)
+topk           :   121.523 us, 0.155 TB/s
+torch.topk     :   721.741 us, 0.026 TB/s  (speedup 5.94x)
+================
+[    68/   147, 46%] Running on TestParam(batch_size=512, vocab_size=65536, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=67, check_correctness=True, num_runs=10)
+topk           :   325.402 us, 0.213 TB/s
+torch.topk     :  2382.029 us, 0.029 TB/s  (speedup 7.32x)
+================
+[    69/   147, 46%] Running on TestParam(batch_size=512, vocab_size=131072, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=68, check_correctness=True, num_runs=10)
+topk           :   537.805 us, 0.253 TB/s
+torch.topk     :  4245.683 us, 0.032 TB/s  (speedup 7.89x)
+================
+[    70/   147, 47%] Running on TestParam(batch_size=512, vocab_size=262144, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=69, check_correctness=True, num_runs=10)
+topk           :   829.773 us, 0.326 TB/s
+torch.topk     :  7990.400 us, 0.034 TB/s  (speedup 9.63x)
+================
+[    71/   147, 48%] Running on TestParam(batch_size=512, vocab_size=524288, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=70, check_correctness=True, num_runs=10)
+topk           :  1355.674 us, 0.398 TB/s
+torch.topk     : 15515.059 us, 0.035 TB/s  (speedup 11.44x)
+================
+[    72/   147, 48%] Running on TestParam(batch_size=512, vocab_size=1048576, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=71, check_correctness=True, num_runs=10)
+topk           :  2398.592 us, 0.449 TB/s
+torch.topk     : 30805.427 us, 0.035 TB/s  (speedup 12.84x)
+================
+[    73/   147, 49%] Running on TestParam(batch_size=768, vocab_size=256, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=72, check_correctness=True, num_runs=10)
+topk           :     8.576 us, 0.413 TB/s
+================
+[    74/   147, 50%] Running on TestParam(batch_size=768, vocab_size=1024, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=73, check_correctness=True, num_runs=10)
+topk           :     8.525 us, 0.554 TB/s
+torch.topk     :   380.928 us, 0.012 TB/s  (speedup 44.68x)
+================
+[    75/   147, 50%] Running on TestParam(batch_size=768, vocab_size=4096, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=74, check_correctness=True, num_runs=10)
+topk           :    94.592 us, 0.100 TB/s
+torch.topk     :   365.414 us, 0.026 TB/s  (speedup 3.86x)
+================
+[    76/   147, 51%] Running on TestParam(batch_size=768, vocab_size=16384, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=75, check_correctness=True, num_runs=10)
+topk           :   174.746 us, 0.162 TB/s
+torch.topk     :   964.915 us, 0.029 TB/s  (speedup 5.52x)
+================
+[    77/   147, 52%] Running on TestParam(batch_size=768, vocab_size=65536, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=76, check_correctness=True, num_runs=10)
+topk           :   467.558 us, 0.222 TB/s
+torch.topk     :  3470.566 us, 0.030 TB/s  (speedup 7.42x)
+================
+[    78/   147, 52%] Running on TestParam(batch_size=768, vocab_size=131072, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=77, check_correctness=True, num_runs=10)
+topk           :   776.397 us, 0.263 TB/s
+torch.topk     :  6274.355 us, 0.033 TB/s  (speedup 8.08x)
+================
+[    79/   147, 53%] Running on TestParam(batch_size=768, vocab_size=262144, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=78, check_correctness=True, num_runs=10)
+topk           :  1196.544 us, 0.339 TB/s
+torch.topk     : 11911.501 us, 0.034 TB/s  (speedup 9.95x)
+================
+[    80/   147, 54%] Running on TestParam(batch_size=768, vocab_size=524288, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=79, check_correctness=True, num_runs=10)
+topk           :  1962.138 us, 0.412 TB/s
+torch.topk     : 23083.648 us, 0.035 TB/s  (speedup 11.76x)
+================
+[    81/   147, 54%] Running on TestParam(batch_size=768, vocab_size=1048576, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=80, check_correctness=True, num_runs=10)
+topk           :  3478.042 us, 0.464 TB/s
+torch.topk     : 45468.288 us, 0.035 TB/s  (speedup 13.07x)
+================
+[    82/   147, 55%] Running on TestParam(batch_size=4096, vocab_size=256, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=81, check_correctness=True, num_runs=10)
+topk           :    34.867 us, 0.541 TB/s
+================
+[    83/   147, 56%] Running on TestParam(batch_size=4096, vocab_size=1024, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=82, check_correctness=True, num_runs=10)
+topk           :    34.867 us, 0.722 TB/s
+torch.topk     :   667.341 us, 0.038 TB/s  (speedup 19.14x)
+================
+[    84/   147, 56%] Running on TestParam(batch_size=4096, vocab_size=4096, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=83, check_correctness=True, num_runs=10)
+topk           :   468.019 us, 0.108 TB/s
+torch.topk     :  1362.099 us, 0.037 TB/s  (speedup 2.91x)
+================
+[    85/   147, 57%] Running on TestParam(batch_size=4096, vocab_size=16384, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=84, check_correctness=True, num_runs=10)
+topk           :   868.531 us, 0.174 TB/s
+torch.topk     :  4248.141 us, 0.036 TB/s  (speedup 4.89x)
+================
+[    86/   147, 58%] Running on TestParam(batch_size=4096, vocab_size=65536, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=85, check_correctness=True, num_runs=10)
+topk           :  2330.163 us, 0.238 TB/s
+torch.topk     : 17585.997 us, 0.031 TB/s  (speedup 7.55x)
+================
+[    87/   147, 59%] Running on TestParam(batch_size=4096, vocab_size=131072, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=86, check_correctness=True, num_runs=10)
+topk           :  3914.598 us, 0.279 TB/s
+torch.topk     : 32707.149 us, 0.033 TB/s  (speedup 8.36x)
+================
+[    88/   147, 59%] Running on TestParam(batch_size=4096, vocab_size=262144, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=87, check_correctness=True, num_runs=10)
+topk           :  6023.962 us, 0.359 TB/s
+torch.topk     : 64411.853 us, 0.034 TB/s  (speedup 10.69x)
+================
+[    89/   147, 60%] Running on TestParam(batch_size=4096, vocab_size=524288, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=88, check_correctness=True, num_runs=10)
+topk           :  9947.085 us, 0.433 TB/s
+torch.topk     : 128697.805 us, 0.034 TB/s  (speedup 12.94x)
+================
+[    90/   147, 61%] Running on TestParam(batch_size=4096, vocab_size=1048576, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=89, check_correctness=True, num_runs=10)
+topk           : 17714.330 us, 0.486 TB/s
+torch.topk     : 252986.317 us, 0.034 TB/s  (speedup 14.28x)
+================
+[    91/   147, 61%] Running on TestParam(batch_size=1, vocab_size=131072, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=90, check_correctness=True, num_runs=10)
+topk           :    39.654 us, 0.007 TB/s
+torch.topk     :   128.077 us, 0.002 TB/s  (speedup 3.23x)
+================
+[    92/   147, 62%] Running on TestParam(batch_size=1, vocab_size=262144, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=91, check_correctness=True, num_runs=10)
+topk           :    34.586 us, 0.015 TB/s
+torch.topk     :   144.000 us, 0.004 TB/s  (speedup 4.16x)
+================
+[    93/   147, 63%] Running on TestParam(batch_size=1, vocab_size=1048576, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=92, check_correctness=True, num_runs=10)
+topk           :    50.202 us, 0.042 TB/s
+torch.topk     :   203.341 us, 0.010 TB/s  (speedup 4.05x)
+================
+[    94/   147, 63%] Running on TestParam(batch_size=64, vocab_size=131072, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=93, check_correctness=True, num_runs=10)
+topk           :    88.525 us, 0.191 TB/s
+torch.topk     :   716.365 us, 0.024 TB/s  (speedup 8.09x)
+================
+[    95/   147, 64%] Running on TestParam(batch_size=64, vocab_size=262144, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=94, check_correctness=True, num_runs=10)
+topk           :   132.915 us, 0.253 TB/s
+torch.topk     :  1169.766 us, 0.029 TB/s  (speedup 8.80x)
+================
+[    96/   147, 65%] Running on TestParam(batch_size=64, vocab_size=1048576, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=95, check_correctness=True, num_runs=10)
+topk           :   400.102 us, 0.336 TB/s
+torch.topk     :  4008.346 us, 0.034 TB/s  (speedup 10.02x)
+================
+[    97/   147, 65%] Running on TestParam(batch_size=128, vocab_size=131072, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=96, check_correctness=True, num_runs=10)
+topk           :   138.650 us, 0.244 TB/s
+torch.topk     :  1199.411 us, 0.028 TB/s  (speedup 8.65x)
+================
+[    98/   147, 66%] Running on TestParam(batch_size=128, vocab_size=262144, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=97, check_correctness=True, num_runs=10)
+topk           :   208.998 us, 0.322 TB/s
+torch.topk     :  2130.714 us, 0.032 TB/s  (speedup 10.19x)
+================
+[    99/   147, 67%] Running on TestParam(batch_size=128, vocab_size=1048576, topk=512, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=98, check_correctness=True, num_runs=10)
+topk           :   637.978 us, 0.421 TB/s
+torch.topk     :  7769.805 us, 0.035 TB/s  (speedup 12.18x)
+================
+[   100/   147, 67%] Running on TestParam(batch_size=1, vocab_size=131072, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=99, check_correctness=True, num_runs=10)
+topk           :    46.746 us, 0.006 TB/s
+torch.topk     :   128.384 us, 0.002 TB/s  (speedup 2.75x)
+================
+[   101/   147, 68%] Running on TestParam(batch_size=1, vocab_size=262144, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=100, check_correctness=True, num_runs=10)
+topk           :    38.605 us, 0.014 TB/s
+torch.topk     :   145.101 us, 0.004 TB/s  (speedup 3.76x)
+================
+[   102/   147, 69%] Running on TestParam(batch_size=1, vocab_size=1048576, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=101, check_correctness=True, num_runs=10)
+topk           :    58.189 us, 0.036 TB/s
+torch.topk     :   209.997 us, 0.010 TB/s  (speedup 3.61x)
+================
+[   103/   147, 69%] Running on TestParam(batch_size=64, vocab_size=131072, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=102, check_correctness=True, num_runs=10)
+topk           :   108.493 us, 0.157 TB/s
+torch.topk     :   720.102 us, 0.024 TB/s  (speedup 6.64x)
+================
+[   104/   147, 70%] Running on TestParam(batch_size=64, vocab_size=262144, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=103, check_correctness=True, num_runs=10)
+topk           :   160.614 us, 0.211 TB/s
+torch.topk     :  1189.709 us, 0.028 TB/s  (speedup 7.41x)
+================
+[   105/   147, 71%] Running on TestParam(batch_size=64, vocab_size=1048576, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=104, check_correctness=True, num_runs=10)
+topk           :   429.850 us, 0.313 TB/s
+torch.topk     :  3938.432 us, 0.034 TB/s  (speedup 9.16x)
+================
+[   106/   147, 71%] Running on TestParam(batch_size=128, vocab_size=131072, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=105, check_correctness=True, num_runs=10)
+topk           :   170.803 us, 0.200 TB/s
+torch.topk     :  1215.795 us, 0.028 TB/s  (speedup 7.12x)
+================
+[   107/   147, 72%] Running on TestParam(batch_size=128, vocab_size=262144, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=106, check_correctness=True, num_runs=10)
+topk           :   251.827 us, 0.269 TB/s
+torch.topk     :  2162.970 us, 0.031 TB/s  (speedup 8.59x)
+================
+[   108/   147, 73%] Running on TestParam(batch_size=128, vocab_size=1048576, topk=1024, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=107, check_correctness=True, num_runs=10)
+topk           :   682.368 us, 0.394 TB/s
+torch.topk     :  7764.736 us, 0.035 TB/s  (speedup 11.38x)
+================
+[   109/   147, 73%] Running on TestParam(batch_size=1, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=108, check_correctness=True, num_runs=10)
+topk           :    75.443 us, 0.004 TB/s
+torch.topk     :   127.053 us, 0.002 TB/s  (speedup 1.68x)
+================
+[   110/   147, 74%] Running on TestParam(batch_size=1, vocab_size=262144, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=109, check_correctness=True, num_runs=10)
+topk           :   121.574 us, 0.004 TB/s
+torch.topk     :   143.642 us, 0.004 TB/s  (speedup 1.18x)
+================
+[   111/   147, 75%] Running on TestParam(batch_size=1, vocab_size=1048576, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=110, check_correctness=True, num_runs=10)
+topk           :   302.080 us, 0.007 TB/s
+torch.topk     :   196.634 us, 0.011 TB/s  (speedup 0.65x)
+================
+[   112/   147, 76%] Running on TestParam(batch_size=64, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=111, check_correctness=True, num_runs=10)
+topk           :   124.262 us, 0.139 TB/s
+torch.topk     :   722.560 us, 0.024 TB/s  (speedup 5.81x)
+================
+[   113/   147, 76%] Running on TestParam(batch_size=64, vocab_size=262144, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=112, check_correctness=True, num_runs=10)
+topk           :   208.896 us, 0.163 TB/s
+torch.topk     :  1187.123 us, 0.029 TB/s  (speedup 5.68x)
+================
+[   114/   147, 77%] Running on TestParam(batch_size=64, vocab_size=1048576, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=113, check_correctness=True, num_runs=10)
+topk           :   537.523 us, 0.251 TB/s
+torch.topk     :  3923.712 us, 0.034 TB/s  (speedup 7.30x)
+================
+[   115/   147, 78%] Running on TestParam(batch_size=128, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=114, check_correctness=True, num_runs=10)
+topk           :   197.683 us, 0.175 TB/s
+torch.topk     :  1231.258 us, 0.028 TB/s  (speedup 6.23x)
+================
+[   116/   147, 78%] Running on TestParam(batch_size=128, vocab_size=262144, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=115, check_correctness=True, num_runs=10)
+topk           :   325.094 us, 0.210 TB/s
+torch.topk     :  2192.973 us, 0.031 TB/s  (speedup 6.75x)
+================
+[   117/   147, 79%] Running on TestParam(batch_size=128, vocab_size=1048576, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=116, check_correctness=True, num_runs=10)
+topk           :   827.392 us, 0.326 TB/s
+torch.topk     :  7856.051 us, 0.034 TB/s  (speedup 9.49x)
+================
+[   118/   147, 80%] Running on TestParam(batch_size=6, vocab_size=129280, topk=512, sorted_value=True, sorted_index=False, return_value=True, dtype=torch.float32, out_idx_dtype=torch.int64, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=117, check_correctness=True, num_runs=10)
+topk           :    72.192 us, 0.043 TB/s
+torch.topk     :   259.277 us, 0.012 TB/s  (speedup 3.59x)
+================
+[   119/   147, 80%] Running on TestParam(batch_size=256, vocab_size=129280, topk=512, sorted_value=True, sorted_index=False, return_value=True, dtype=torch.float32, out_idx_dtype=torch.int64, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=118, check_correctness=True, num_runs=10)
+topk           :   453.914 us, 0.295 TB/s
+torch.topk     :  2959.462 us, 0.045 TB/s  (speedup 6.52x)
+================
+[   120/   147, 81%] Running on TestParam(batch_size=512, vocab_size=129280, topk=512, sorted_value=True, sorted_index=False, return_value=True, dtype=torch.float32, out_idx_dtype=torch.int64, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=119, check_correctness=True, num_runs=10)
+topk           :   817.536 us, 0.328 TB/s
+torch.topk     :  5621.786 us, 0.048 TB/s  (speedup 6.88x)
+================
+[   121/   147, 82%] Running on TestParam(batch_size=768, vocab_size=129280, topk=512, sorted_value=True, sorted_index=False, return_value=True, dtype=torch.float32, out_idx_dtype=torch.int64, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=120, check_correctness=True, num_runs=10)
+topk           :  1182.182 us, 0.340 TB/s
+torch.topk     :  8223.258 us, 0.049 TB/s  (speedup 6.96x)
+================
+[   122/   147, 82%] Running on TestParam(batch_size=4096, vocab_size=129280, topk=512, sorted_value=True, sorted_index=False, return_value=True, dtype=torch.float32, out_idx_dtype=torch.int64, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=121, check_correctness=True, num_runs=10)
+topk           :  5980.134 us, 0.358 TB/s
+torch.topk     : 42818.586 us, 0.050 TB/s  (speedup 7.16x)
+================
+[   123/   147, 83%] Running on TestParam(batch_size=1, vocab_size=66551, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=122, check_correctness=True, num_runs=10)
+topk           :    57.830 us, 0.005 TB/s
+torch.topk     :   173.645 us, 0.002 TB/s  (speedup 3.00x)
+================
+[   124/   147, 84%] Running on TestParam(batch_size=16, vocab_size=66551, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=123, check_correctness=True, num_runs=10)
+topk           :    59.546 us, 0.074 TB/s
+torch.topk     :   289.843 us, 0.015 TB/s  (speedup 4.87x)
+================
+[   125/   147, 84%] Running on TestParam(batch_size=132, vocab_size=66551, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=124, check_correctness=True, num_runs=10)
+topk           :   144.435 us, 0.251 TB/s
+torch.topk     :  1003.622 us, 0.036 TB/s  (speedup 6.95x)
+================
+[   126/   147, 85%] Running on TestParam(batch_size=512, vocab_size=66551, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=125, check_correctness=True, num_runs=10)
+topk           :   468.634 us, 0.300 TB/s
+torch.topk     :  3018.701 us, 0.047 TB/s  (speedup 6.44x)
+================
+[   127/   147, 86%] Running on TestParam(batch_size=1, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=126, check_correctness=True, num_runs=10)
+topk           :    95.411 us, 0.006 TB/s
+torch.topk     :   181.018 us, 0.003 TB/s  (speedup 1.90x)
+================
+[   128/   147, 86%] Running on TestParam(batch_size=1, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=127, check_correctness=True, num_runs=10)
+topk           :    94.874 us, 0.006 TB/s
+torch.topk     :   183.270 us, 0.003 TB/s  (speedup 1.93x)
+================
+[   129/   147, 87%] Running on TestParam(batch_size=1, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=128, check_correctness=True, num_runs=10)
+topk           :    96.282 us, 0.006 TB/s
+torch.topk     :   180.915 us, 0.003 TB/s  (speedup 1.88x)
+================
+[   130/   147, 88%] Running on TestParam(batch_size=1, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=129, check_correctness=True, num_runs=10)
+topk           :   102.963 us, 0.005 TB/s
+torch.topk     :   180.813 us, 0.003 TB/s  (speedup 1.76x)
+================
+[   131/   147, 88%] Running on TestParam(batch_size=132, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=130, check_correctness=True, num_runs=10)
+topk           :   255.155 us, 0.275 TB/s
+torch.topk     :  1663.360 us, 0.042 TB/s  (speedup 6.52x)
+================
+[   132/   147, 89%] Running on TestParam(batch_size=132, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=131, check_correctness=True, num_runs=10)
+topk           :   255.283 us, 0.275 TB/s
+torch.topk     :  1658.982 us, 0.042 TB/s  (speedup 6.50x)
+================
+[   133/   147, 90%] Running on TestParam(batch_size=132, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=132, check_correctness=True, num_runs=10)
+topk           :   256.077 us, 0.274 TB/s
+torch.topk     :  1673.856 us, 0.042 TB/s  (speedup 6.54x)
+================
+[   134/   147, 90%] Running on TestParam(batch_size=132, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=133, check_correctness=True, num_runs=10)
+topk           :   255.590 us, 0.275 TB/s
+torch.topk     :  1684.045 us, 0.042 TB/s  (speedup 6.59x)
+================
+[   135/   147, 91%] Running on TestParam(batch_size=256, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=134, check_correctness=True, num_runs=10)
+topk           :   466.816 us, 0.292 TB/s
+torch.topk     :  3016.525 us, 0.045 TB/s  (speedup 6.46x)
+================
+[   136/   147, 92%] Running on TestParam(batch_size=256, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=135, check_correctness=True, num_runs=10)
+topk           :   466.611 us, 0.292 TB/s
+torch.topk     :  2999.270 us, 0.045 TB/s  (speedup 6.43x)
+================
+[   137/   147, 93%] Running on TestParam(batch_size=256, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=136, check_correctness=True, num_runs=10)
+topk           :   466.253 us, 0.292 TB/s
+torch.topk     :  3012.762 us, 0.045 TB/s  (speedup 6.46x)
+================
+[   138/   147, 93%] Running on TestParam(batch_size=256, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=137, check_correctness=True, num_runs=10)
+topk           :   467.226 us, 0.292 TB/s
+torch.topk     :  3001.728 us, 0.045 TB/s  (speedup 6.42x)
+================
+[   139/   147, 94%] Running on TestParam(batch_size=4096, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=138, check_correctness=True, num_runs=10)
+topk           :  6152.781 us, 0.354 TB/s
+torch.topk     : 43720.397 us, 0.050 TB/s  (speedup 7.11x)
+================
+[   140/   147, 95%] Running on TestParam(batch_size=4096, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=139, check_correctness=True, num_runs=10)
+topk           :  6167.475 us, 0.354 TB/s
+torch.topk     : 43687.910 us, 0.050 TB/s  (speedup 7.08x)
+================
+[   141/   147, 95%] Running on TestParam(batch_size=4096, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=140, check_correctness=True, num_runs=10)
+topk           :  6152.653 us, 0.354 TB/s
+torch.topk     : 43691.930 us, 0.050 TB/s  (speedup 7.10x)
+================
+[   142/   147, 96%] Running on TestParam(batch_size=4096, vocab_size=131072, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=141, check_correctness=True, num_runs=10)
+topk           :  6150.451 us, 0.355 TB/s
+torch.topk     : 43748.019 us, 0.050 TB/s  (speedup 7.11x)
+================
+[   143/   147, 97%] Running on TestParam(batch_size=1, vocab_size=107520, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=142, check_correctness=True, num_runs=10)
+topk           :   110.669 us, 0.004 TB/s
+torch.topk     :   179.840 us, 0.002 TB/s  (speedup 1.63x)
+================
+[   144/   147, 97%] Running on TestParam(batch_size=16, vocab_size=66551, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=143, check_correctness=True, num_runs=10)
+topk           :    59.341 us, 0.074 TB/s
+torch.topk     :   292.352 us, 0.015 TB/s  (speedup 4.93x)
+================
+[   145/   147, 98%] Running on TestParam(batch_size=132, vocab_size=107520, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=144, check_correctness=True, num_runs=10)
+topk           :   215.373 us, 0.269 TB/s
+torch.topk     :  1401.370 us, 0.041 TB/s  (speedup 6.51x)
+================
+[   146/   147, 99%] Running on TestParam(batch_size=256, vocab_size=107520, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=145, check_correctness=True, num_runs=10)
+topk           :   392.013 us, 0.286 TB/s
+torch.topk     :  2475.597 us, 0.045 TB/s  (speedup 6.32x)
+================
+[   147/   147, 99%] Running on TestParam(batch_size=4096, vocab_size=107520, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=146, check_correctness=True, num_runs=10)
+topk           :  5164.288 us, 0.348 TB/s
+torch.topk     : 34762.445 us, 0.052 TB/s  (speedup 6.73x)
+
+================================================================
+  pass             147
+  check_fail         0
+  crash              0
+  skip               0
+  unsupported        0
+[32m[1mAll 147 cases passed![0m
+# exit 0
