@@ -1,0 +1,21 @@
+=== tests/test.py --backend maca_c --perf-only --dtype bf16 ===
+================
+[   117/   117, 99%] Running on TestParam(batch_size=128, vocab_size=1048576, topk=2048, sorted_value=False, sorted_index=False, return_value=False, dtype=torch.bfloat16, out_idx_dtype=torch.int32, enable_end_position=False, enable_output_idx_offset=False, input_distrib=NormalFloatDistribution(), idx_oob_fill_value=-2147483647, value_oob_fill_value=-1234123412341234, seed=116, check_correctness=True, num_runs=10)
+topk           :   826.803 us, 0.326 TB/s
+torch.topk     :  7853.850 us, 0.034 TB/s  (speedup 9.50x)
+
+================================================================
+  pass             117
+  check_fail         0
+  crash              0
+  skip               0
+  unsupported        0
+[32m[1mAll 117 cases passed![0m
+
+=== run_test.sh --test (343-case sample) ===
+  skip         TestParam(batch_size=4096, vocab_size=998123, topk=2333, sorted_value=True, sorted_index=False, return_value=True, dtype=torch.float32, out_idx_dtype=torch.int32, enable_end_position=True, enable_output_idx_offset=False, input_distrib=UintDistributionWithHotspotAndSpecifiedPivot(pivot=None, topk=2333, hotspots=[(2139095041, 8)], allow_nan=True), idx_oob_fill_value=-1001877, value_oob_fill_value=-1234123412341234, seed=159, check_correctness=True, num_runs=0)
+               [out of memory: CUDA out of memory. Tried to allocate 30.46 GiB. GPU 0 has a total capacity of 71.89 GiB of which 23.88 GiB is free. Of ]
+  skip         TestParam(batch_size=512, vocab_size=8388607, topk=2048, sorted_value=False, sorted_index=True, return_value=True, dtype=torch.bfloat16, out_idx_dtype=torch.int64, enable_end_position=False, enable_output_idx_offset=False, input_distrib=UintDistributionWithHotspotAndSpecifiedPivot(pivot=None, topk=2048, hotspots=[(65409, 8)], allow_nan=True), idx_oob_fill_value=6388607, value_oob_fill_value=-1234123412341234, seed=167, check_correctness=True, num_runs=0)
+               [out of memory: CUDA out of memory. Tried to allocate 32.00 GiB. GPU 0 has a total capacity of 71.89 GiB of which 21.56 GiB is free. Of ]
+[32m[1mAll 343 cases passed![0m
+run_test.sh: receipt: results/deepselect_run_20261018_172323.txt
