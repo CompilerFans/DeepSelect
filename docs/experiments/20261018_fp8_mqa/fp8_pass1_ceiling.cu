@@ -26,6 +26,7 @@
 //   cucc -O2 -std=c++20 --offload-arch=xcore1600 fp8_pass1_ceiling.cu -o /tmp/fp8_probe
 
 #include <cstdint>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
@@ -139,6 +140,94 @@ __global__ void __launch_bounds__(kThreads) walk_hist_repl(
     if (s_hist[threadIdx.x & 7][threadIdx.x & 255] == 0xFFFFFFFFu) out[blockIdx.x] = 1;
 }
 
+// F/G: within-thread same-bin pre-aggregation -- the thread's own vector load
+// is aggregated in registers before any atomic is issued: each distinct bin in
+// the load costs one atomic carrying its in-load count.  Fixed triangular
+// compare (28 compares for 8 elems, 120 for 16), no divergence, no transport.
+// Uniform data buys ~nothing (few dups) and pays the compares; crowded data --
+// the DSA/NormalFloat shape, where elements crowd one high-byte bin -- cuts
+// the atomics by the crowding factor, exactly where B/C hurt most.
+template <int kElems>
+__global__ void __launch_bounds__(kThreads) walk_hist_agg(
+    const uint4* __restrict__ in, size_t n_vec, uint32_t* __restrict__ out) {
+    __shared__ uint32_t s_hist[256];
+    for (int t = threadIdx.x; t < 256; t += kThreads) s_hist[t] = 0;
+    __syncthreads();
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < n_vec; i += (size_t)gridDim.x * blockDim.x) {
+        uint4 v = __ldg(in + i);
+        uint8_t bin[kElems];
+        if constexpr (kElems == 16) {
+            const uint8_t* b = reinterpret_cast<const uint8_t*>(&v);
+#pragma unroll
+            for (int j = 0; j < 16; j++) bin[j] = b[j];
+        } else {
+            const uint16_t* h = reinterpret_cast<const uint16_t*>(&v);
+#pragma unroll
+            for (int j = 0; j < 8; j++) bin[j] = (uint8_t)(h[j] >> 8);
+        }
+#pragma unroll
+        for (int j = 0; j < kElems; j++) {
+            bool leader = true;
+#pragma unroll
+            for (int m = 0; m < j; m++) leader &= (bin[m] != bin[j]);
+            uint32_t cnt = 0;
+#pragma unroll
+            for (int m = j; m < kElems; m++) cnt += (bin[m] == bin[j]);
+            if (leader) atomicAdd(&s_hist[bin[j]], cnt);
+        }
+    }
+    __syncthreads();
+    if (s_hist[threadIdx.x & 255] == 0xFFFFFFFFu) out[blockIdx.x] = 1;
+}
+
+// C12/F12: the LIVE kernel's pass-1 shape -- elements are 16-bit keys, the
+// histogram is 4096 bins of `key >> 4` (coarse12), 16 KB of shared.  The 8-bit
+// arms above overstate crowding: NormalFloat crowds one *high byte*, which
+// spreads over ~16 sub-bins at 12 bits, relaxing same-bin serialization.
+__global__ void __launch_bounds__(kThreads) walk_hist12(
+    const uint4* __restrict__ in, size_t n_vec, uint32_t* __restrict__ out) {
+    __shared__ uint32_t s_hist[4096];
+    for (int t = threadIdx.x; t < 4096; t += kThreads) s_hist[t] = 0;
+    __syncthreads();
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < n_vec; i += (size_t)gridDim.x * blockDim.x) {
+        uint4 v = __ldg(in + i);
+        const uint16_t* h = reinterpret_cast<const uint16_t*>(&v);
+#pragma unroll
+        for (int j = 0; j < 8; j++) atomicAdd(&s_hist[h[j] >> 4], 1u);
+    }
+    __syncthreads();
+    if (s_hist[threadIdx.x & 4095] == 0xFFFFFFFFu) out[blockIdx.x] = 1;
+}
+
+__global__ void __launch_bounds__(kThreads) walk_hist12_agg(
+    const uint4* __restrict__ in, size_t n_vec, uint32_t* __restrict__ out) {
+    __shared__ uint32_t s_hist[4096];
+    for (int t = threadIdx.x; t < 4096; t += kThreads) s_hist[t] = 0;
+    __syncthreads();
+    for (size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < n_vec; i += (size_t)gridDim.x * blockDim.x) {
+        uint4 v = __ldg(in + i);
+        const uint16_t* h = reinterpret_cast<const uint16_t*>(&v);
+        uint16_t bin[8];
+#pragma unroll
+        for (int j = 0; j < 8; j++) bin[j] = h[j] >> 4;
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+            bool leader = true;
+#pragma unroll
+            for (int m = 0; m < j; m++) leader &= (bin[m] != bin[j]);
+            uint32_t cnt = 0;
+#pragma unroll
+            for (int m = j; m < 8; m++) cnt += (bin[m] == bin[j]);
+            if (leader) atomicAdd(&s_hist[bin[j]], cnt);
+        }
+    }
+    __syncthreads();
+    if (s_hist[threadIdx.x & 4095] == 0xFFFFFFFFu) out[blockIdx.x] = 1;
+}
+
 template <typename F>
 float time_kernel(F&& launch, const char* name, size_t bytes, int reps) {
     cudaEvent_t t0, t1;
@@ -156,6 +245,16 @@ float time_kernel(F&& launch, const char* name, size_t bytes, int reps) {
     return us;
 }
 
+static uint32_t __float_as_uint_host(float x) { union { float f; uint32_t u; } u; u.f = x; return u.u; }
+
+// The kernel's bf16 order-preserving key, host-side: truncate to bf16 bits,
+// then the sign-flip encode (`refine_bin` in primitives.cuh).
+static uint16_t host_key16(float x) {
+    uint16_t bits = (uint16_t)(__float_as_uint_host(x) >> 16);
+    return (bits & 0x8000u) ? (uint16_t)~bits : (uint16_t)(bits | 0x8000u);
+}
+static uint8_t host_key_hi8(float x) { return (uint8_t)(host_key16(x) >> 8); }
+
 int main() {
     int dev = 0; CK(cudaGetDevice(&dev));
     cudaDeviceProp p; CK(cudaGetDeviceProperties(&p, dev));
@@ -164,39 +263,71 @@ int main() {
     const size_t bytes = size_t(1) << 28;      // 256 MB, streaming (no L2 reuse)
     uint8_t* buf; CK(cudaMalloc(&buf, bytes));
     uint32_t* out; CK(cudaMalloc(&out, ctas * sizeof(uint32_t)));
-
-    // Two data distributions, built on the host and uploaded.
     uint8_t* host = (uint8_t*)malloc(bytes);
     srand(20261018);
-    for (size_t i = 0; i < bytes; i++) host[i] = (uint8_t)rand();      // uniform
-    CK(cudaMemcpy(buf, host, bytes, cudaMemcpyHostToDevice));
 
     size_t n_vec = bytes / sizeof(uint4);
     int reps = 5;
     printf("device %s, %d APs, grid %d x %d threads, buffer %zu MB\n",
            p.name, p.multiProcessorCount, ctas, kThreads, bytes >> 20);
+
+    // The wall, once.
+    for (size_t i = 0; i < bytes; i++) host[i] = (uint8_t)rand();      // uniform
+    CK(cudaMemcpy(buf, host, bytes, cudaMemcpyHostToDevice));
     time_kernel([&]{ walk_read<<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
                 "A read-only x4 in flight (the wall)", bytes, reps);
-    time_kernel([&]{ walk_hist<8><<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
-                "C hist 8 atomics/16B, uniform (bf16)", bytes, reps);
-    time_kernel([&]{ walk_hist<16><<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
-                "B hist 16 atomics/16B, uniform (fp8)", bytes, reps);
-    time_kernel([&]{ walk_hist_ballot<<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
-                "D ballot-aggregated, uniform (fp8)", bytes, reps);
-    time_kernel([&]{ walk_hist_repl<<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
-                "E per-warp replicated hist, uniform (fp8)", bytes, reps);
 
-    for (size_t i = 0; i < bytes; i++)
-        host[i] = (rand() & 7) ? 0x80 : (uint8_t)rand();               // 7/8 one bin
-    CK(cudaMemcpy(buf, host, bytes, cudaMemcpyHostToDevice));
-    time_kernel([&]{ walk_hist<8><<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
-                "C hist 8 atomics/16B, crowded (bf16)", bytes, reps);
-    time_kernel([&]{ walk_hist<16><<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
-                "B hist 16 atomics/16B, crowded (fp8)", bytes, reps);
-    time_kernel([&]{ walk_hist_ballot<<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
-                "D ballot-aggregated, crowded (fp8)", bytes, reps);
-    time_kernel([&]{ walk_hist_repl<<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
-                "E per-warp replicated hist, crowded (fp8)", bytes, reps);
+    // Three distributions: uniform / normal (the official generator's shape:
+    // ~27% of elements crowd one high-byte bin) / extreme (87.5% one bin).
+    // The bf16 arms run on 16-bit keys (the live kernel's element, coarse12
+    // bins); the fp8 arms on bytes.  Each gets its own faithful buffer.
+    uint8_t* buf8;  CK(cudaMalloc(&buf8, bytes));
+    uint8_t* host8 = (uint8_t*)malloc(bytes);
+    uint16_t* host16 = (uint16_t*)malloc(bytes);
+    struct Dist { const char* name; int kind; };
+    const Dist dists[] = {{"uniform", 0}, {"normal~27%", 1}, {"crowded87.5%", 2}};
+    for (const auto& d : dists) {
+        if (d.kind == 0) {
+            for (size_t i = 0; i < bytes; i++) host8[i] = (uint8_t)rand();
+            for (size_t i = 0; i < bytes / 2; i++) host16[i] = (uint16_t)rand();
+        } else if (d.kind == 1) {
+            // Box-Muller N(0,1), through the kernel's own key encodes.
+            for (size_t k = 0; k < bytes; k += 2) {
+                float u1 = (rand() + 1.0f) / (RAND_MAX + 2.0f);
+                float u2 = (rand() + 0.0f) / (RAND_MAX + 1.0f);
+                float r = sqrtf(-2.0f * logf(u1)), t = 6.2831853f * u2;
+                host8[k] = host_key_hi8(r * cosf(t));
+                if (k + 1 < bytes) host8[k + 1] = host_key_hi8(r * sinf(t));
+            }
+            for (size_t k = 0; k < bytes / 2; k += 2) {
+                float u1 = (rand() + 1.0f) / (RAND_MAX + 2.0f);
+                float u2 = (rand() + 0.0f) / (RAND_MAX + 1.0f);
+                float r = sqrtf(-2.0f * logf(u1)), t = 6.2831853f * u2;
+                host16[k] = host_key16(r * cosf(t));
+                if (k + 1 < bytes / 2) host16[k + 1] = host_key16(r * sinf(t));
+            }
+        } else {
+            for (size_t i = 0; i < bytes; i++)
+                host8[i] = (rand() & 7) ? 0x80 : (uint8_t)rand();
+            for (size_t i = 0; i < bytes / 2; i++)
+                host16[i] = (rand() & 7) ? (uint16_t)0x8080u : (uint16_t)rand();
+        }
+        CK(cudaMemcpy(buf8, host8, bytes, cudaMemcpyHostToDevice));
+        CK(cudaMemcpy(buf, host16, bytes, cudaMemcpyHostToDevice));
+        printf("── %s ──\n", d.name);
+        time_kernel([&]{ walk_hist12<<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
+                    "C12 bf16 plain, coarse12 bins (live shape)", bytes, reps);
+        time_kernel([&]{ walk_hist12_agg<<<ctas, kThreads>>>((const uint4*)buf, n_vec, out); },
+                    "F12 bf16 in-thread agg, coarse12 bins", bytes, reps);
+        time_kernel([&]{ walk_hist<8><<<ctas, kThreads>>>((const uint4*)buf8, n_vec, out); },
+                    "C  bf16 plain (8 atomics/16B, 256 bins)", bytes, reps);
+        time_kernel([&]{ walk_hist_agg<8><<<ctas, kThreads>>>((const uint4*)buf8, n_vec, out); },
+                    "F  bf16 in-thread agg (256 bins)", bytes, reps);
+        time_kernel([&]{ walk_hist<16><<<ctas, kThreads>>>((const uint4*)buf8, n_vec, out); },
+                    "B  fp8 plain (16 atomics/16B)", bytes, reps);
+        time_kernel([&]{ walk_hist_agg<16><<<ctas, kThreads>>>((const uint4*)buf8, n_vec, out); },
+                    "G  fp8 in-thread agg", bytes, reps);
+    }
     CK(cudaGetLastError());
     return 0;
 }

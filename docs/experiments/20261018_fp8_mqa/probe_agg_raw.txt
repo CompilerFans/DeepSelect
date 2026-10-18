@@ -1,0 +1,23 @@
+device MetaX C600-U, 28 APs, grid 224 x 512 threads, buffer 256 MB
+A read-only x4 in flight (the wall)          191.0 us    1405.2 GB/s
+── uniform ──
+C12 bf16 plain, coarse12 bins (live shape)     395.9 us     678.1 GB/s
+F12 bf16 in-thread agg, coarse12 bins        628.1 us     427.4 GB/s
+C  bf16 plain (8 atomics/16B, 256 bins)      393.9 us     681.5 GB/s
+F  bf16 in-thread agg (256 bins)             778.9 us     344.6 GB/s
+B  fp8 plain (16 atomics/16B)                744.5 us     360.6 GB/s
+G  fp8 in-thread agg                        3434.3 us      78.2 GB/s
+── normal~27% ──
+C12 bf16 plain, coarse12 bins (live shape)     396.3 us     677.4 GB/s
+F12 bf16 in-thread agg, coarse12 bins        627.3 us     428.0 GB/s
+C  bf16 plain (8 atomics/16B, 256 bins)     1016.2 us     264.2 GB/s
+F  bf16 in-thread agg (256 bins)             777.6 us     345.2 GB/s
+B  fp8 plain (16 atomics/16B)               2011.5 us     133.5 GB/s
+G  fp8 in-thread agg                        3434.9 us      78.1 GB/s
+── crowded87.5% ──
+C12 bf16 plain, coarse12 bins (live shape)    2308.3 us     116.3 GB/s
+F12 bf16 in-thread agg, coarse12 bins        630.9 us     425.5 GB/s
+C  bf16 plain (8 atomics/16B, 256 bins)     2306.4 us     116.4 GB/s
+F  bf16 in-thread agg (256 bins)             777.5 us     345.3 GB/s
+B  fp8 plain (16 atomics/16B)               4604.6 us      58.3 GB/s
+G  fp8 in-thread agg                        3434.3 us      78.2 GB/s
