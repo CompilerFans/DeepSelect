@@ -1,0 +1,36 @@
+# tag=new-r1
+b1-v262144-k2048:     126.0 us      4.2 GB/s  uniq=True range=True pair=True contract=True
+b6-v262144-k2048:     145.5 us     21.6 GB/s  uniq=True range=True pair=True contract=True
+b1-v1048576-k2048:     264.5 us      7.9 GB/s  uniq=True range=True pair=True contract=True
+b1-v524288-k2048:     126.2 us      8.3 GB/s  uniq=True range=True pair=True contract=True
+b1-v262144-k512:     106.3 us      4.9 GB/s  uniq=True range=True pair=True contract=True
+b6-v262144-k512:     119.8 us     26.3 GB/s  uniq=True range=True pair=True contract=True
+b1-v1048576-k512:     114.0 us     18.4 GB/s  uniq=True range=True pair=True contract=True
+b1-v131072-k2048:     132.8 us      2.0 GB/s  uniq=True range=True pair=True contract=True
+# tag=old-r1
+b1-v262144-k2048:     174.0 us      3.0 GB/s  uniq=True range=True pair=True contract=True
+b6-v262144-k2048:     192.7 us     16.3 GB/s  uniq=True range=True pair=True contract=True
+b1-v1048576-k2048:     359.4 us      5.8 GB/s  uniq=True range=True pair=True contract=True
+b1-v524288-k2048:     243.3 us      4.3 GB/s  uniq=True range=True pair=True contract=True
+b1-v262144-k512:     109.7 us      4.8 GB/s  uniq=True range=True pair=True contract=True
+b6-v262144-k512:     121.3 us     25.9 GB/s  uniq=True range=True pair=True contract=True
+b1-v1048576-k512:     120.6 us     17.4 GB/s  uniq=True range=True pair=True contract=True
+b1-v131072-k2048:     132.1 us      2.0 GB/s  uniq=True range=True pair=True contract=True
+# tag=new-r2
+b1-v262144-k2048:     120.4 us      4.4 GB/s  uniq=True range=True pair=True contract=True
+b6-v262144-k2048:     148.5 us     21.2 GB/s  uniq=True range=True pair=True contract=True
+b1-v1048576-k2048:     141.0 us     14.9 GB/s  uniq=True range=True pair=True contract=True
+b1-v524288-k2048:     121.7 us      8.6 GB/s  uniq=True range=True pair=True contract=True
+b1-v262144-k512:     106.8 us      4.9 GB/s  uniq=True range=True pair=True contract=True
+b6-v262144-k512:     126.8 us     24.8 GB/s  uniq=True range=True pair=True contract=True
+b1-v1048576-k512:     120.4 us     17.4 GB/s  uniq=True range=True pair=True contract=True
+b1-v131072-k2048:     139.0 us      1.9 GB/s  uniq=True range=True pair=True contract=True
+# tag=old-r2
+b1-v262144-k2048:     168.6 us      3.1 GB/s  uniq=True range=True pair=True contract=True
+b6-v262144-k2048:     195.5 us     16.1 GB/s  uniq=True range=True pair=True contract=True
+b1-v1048576-k2048:     351.8 us      6.0 GB/s  uniq=True range=True pair=True contract=True
+b1-v524288-k2048:     241.3 us      4.3 GB/s  uniq=True range=True pair=True contract=True
+b1-v262144-k512:     118.9 us      4.4 GB/s  uniq=True range=True pair=True contract=True
+b6-v262144-k512:     138.2 us     22.8 GB/s  uniq=True range=True pair=True contract=True
+b1-v1048576-k512:     132.8 us     15.8 GB/s  uniq=True range=True pair=True contract=True
+b1-v131072-k2048:     138.4 us      1.9 GB/s  uniq=True range=True pair=True contract=True

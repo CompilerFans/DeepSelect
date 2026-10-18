@@ -227,13 +227,22 @@ struct ChunkedWorkspace {
     int32_t *nan_flags;
 };
 
-// The split is 16-bit only, and only the two static-k arms of the merge are
-// compiled, which is the whole gate: a 16-bit caller that satisfies it can
-// always be answered by the split (the caller supplies the row table).
+// The split is 16-bit only.  `topk` 512 and 1024 are the static-k arms of the
+// merge; 2048 is carried by the runtime-k arms (`launch_topk_bf16_chunked`'s
+// default branch, already compiled) and is admitted on the 128 KiB parts only.
+// Measured on a 28-AP C600U, the DSA decode cells `b1-v{262144,524288,1048576}
+// -k2048` improve 24-60% over the row path and the k512 controls are unchanged
+// (`docs/experiments/20261018_bf16_split_k2048/`).  C500 keeps the row path
+// there: no C500 measurement stands behind the extension, and the per-chunk
+// ranking at topk=2048 costs shared memory the 64 KiB part has less of.
 inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
     if (batches == 0 || batches > kChunkedMaxBatches) return false;
     if (params.vocab_size < kChunkedMinVocab) return false;
-    if (params.topk != 512 && params.topk != 1024) return false;
+    if (params.topk == 2048) {
+        if (!is_c600u_ap_count(params.sm_count)) return false;
+    } else if (params.topk != 512 && params.topk != 1024) {
+        return false;
+    }
     // The C600U's crossing has its own shape -- see the table on
     // `kC600UChunkedVocabPerBatchSq`.  `batches` is <= 64 here, so the square
     // cannot overflow.
