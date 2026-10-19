@@ -1,0 +1,296 @@
+diff --git a/csrc/maca_kernels/common/radix_row_bf16.cuh b/csrc/maca_kernels/common/radix_row_bf16.cuh
+index d7aea6d..50fe911 100644
+--- a/csrc/maca_kernels/common/radix_row_bf16.cuh
++++ b/csrc/maca_kernels/common/radix_row_bf16.cuh
+@@ -1,6 +1,7 @@
+ #ifndef RADIX_ROW_BF16_CUH
+ #define RADIX_ROW_BF16_CUH
+ 
++#include "structs.h"   // ARCH_REGS_PER_AP -- the sampled-pass-1 gate
+ #include "radix_common.cuh"
+ 
+ namespace topk_select_radix {
+@@ -85,7 +86,7 @@ __device__ __forceinline__ void hist_add_bf16(
+ // `kNan` folds the contract's NaN scan into this very load -- the same trade
+ // `hist_add_f32` makes, and for the same reason: the bytes are read anyway, so
+ // the scan is one compare per element here instead of a whole extra row walk.
+-template <bool kNan = false>
++template <bool kNan = false, bool kHist = true>
+ __device__ __forceinline__ bool hist_add_bf16_wide(
+     uint32_t* s_wide, const maca_bfloat16* input, uint32_t idx,
+     uint32_t* max_key = nullptr)
+@@ -116,8 +117,10 @@ __device__ __forceinline__ bool hist_add_bf16_wide(
+     for (int i = 0; i < 4; i++) {
+         const uint32_t kp =
+             w[i] ^ ((((w[i] >> 15) & 0x00010001u) * 0x7FFFu) + 0x80008000u);
+-        atomicAdd(&s_wide[(kp >> kCoarse12Shift) & 0x0FFFu], 1u);
+-        atomicAdd(&s_wide[kp >> (16 + kCoarse12Shift)], 1u);
++        if (kHist) {
++            atomicAdd(&s_wide[(kp >> kCoarse12Shift) & 0x0FFFu], 1u);
++            atomicAdd(&s_wide[kp >> (16 + kCoarse12Shift)], 1u);
++        }
+         // The block-max summary (see `radix_topk_row_bf16_b`) wants the largest
+         // key in this thread's 8 elements; both halves are already in `kp`, and
+         // the key's order is the bin's, so one max over keys is one max over
+@@ -302,6 +305,37 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
+     // summary granularity can be the same number.  A row that takes the scalar
+     // walk gets no summary and is walked whole by the collect.
+     const bool summary_wanted = kSkip && block_max != nullptr && input_aligned;
++    // ── the sampled pass 1 ────────────────────────────────────────────────
++    // On the 128 KiB-regfile parts the pass-1 histogram is *sampled*: the
++    // walk votes on one iteration in eight (wave-uniform, so the atomic
++    // issue slots are really saved -- see the comment at the predicate),
++    // which on this machine moves the walk off the shared-atomic issue rate
++    // (~12.5 G/SM/s => ~780-880 GB/s ceiling at 8 atomics per uint4 --
++    // measured in `docs/experiments/20261019_c600u_pass1/`) and onto the load
++    // pipe.  The
++    // threshold the narrow derives is then deliberately LOW (a margin below
++    // the sampled k-th), the collect stages every element at or above it into
++    // the arena, and a two-round exact 8+8 refine over the staged set answers
++    // the top-k exactly: the staged set is a superset of the answer by
++    // construction.  Both failure directions are *detected* by the exact
++    // staged count (`m < topk` undershoot, `m > arena` overflow) and repaired
++    // by re-walking the complement blocks so the histogram becomes exact and
++    // the row falls through the unmodified exact path -- a rare slow path
++    // (~1e-11 per row at the margins below), never a wrong answer.
++    //
++    // The margins: sampling rate 1/8, so the narrow crosses at a sampled
++    // suffix of `r` where the expected true count is 8r with std ~ 8*sqrt(r)
++    // (negative-binomial).  r = k/2 for k <= 512 (expected staged 4k, >= 12
++    // sigma to both edges), r = 384 above it (expected 3072: 13 sigma to
++    // k=1024, 6.5 sigma to both edges at k=2048, arena 4096).
++    //
++    // Family-gated to the parts whose register file affords it and whose
++    // pass 1 is atomic-capped -- on the C500 the walk already runs at ~96% of
++    // its wall, so the machinery there is compiled out (the constant folds,
++    // the blocks below are dead code).
++    constexpr bool kSampleCapable = ARCH_REGS_PER_AP >= 131072;
++    const bool sampled_p1 = kSampleCapable && summary_wanted &&
++                            topk >= 128 && topk <= 2048 && length >= 65536;
+     bool nan_local = false;
+     if (input_aligned) {
+         if (summary_wanted) {
+@@ -318,11 +352,22 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
+             // must not read past the row, so the elements past the last whole
+             // block stay with the tail loop both walks already carry -- and
+             // with this bound the guarded load below has nothing left to guard.
+-            for (uint32_t blk = group; ((blk + 1u) << 6) <= vec_len;
+-                 blk += BLOCK_SIZE / 8) {
++            for (uint32_t blk = group, iter = 0; ((blk + 1u) << 6) <= vec_len;
++                 blk += BLOCK_SIZE / 8, ++iter) {
+                 const uint32_t idx = (blk << 6) + lane * 8u;
+                 uint32_t key = 0;
+-                nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx, &key);
++                // One iteration in eight votes, and the vote is keyed on the
++                // loop counter rather than the block id: `blk` is
++                // group-strided, so `blk & 7` is constant *per group* and the
++                // predicate would split every 64-lane wave (eight groups, one
++                // voting) -- the wave issues both arms and the atomics are not
++                // saved at all.  `iter` is identical on every lane of the
++                // wave, so the whole wave votes or skips together, which is
++                // what actually moves the atomic issue rate.
++                if (!sampled_p1 || (iter & 7u) == 0u)
++                    nan_local |= hist_add_bf16_wide<kNan, true>(s_wide, input, idx, &key);
++                else
++                    nan_local |= hist_add_bf16_wide<kNan, false>(s_wide, input, idx, &key);
+ #ifdef __MACACC__
+                 // The step-down tree through the platform's own permute: a
+                 // `__shfl_down_sync` is one shuffle plus ~5 instructions of
+@@ -392,6 +437,14 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
+     if (kNan && row_nan != nullptr)
+         *row_nan = __syncthreads_or((int)nan_local) != 0;
+ 
++    // The sampled arm crosses at `r_sampled` instead of `topk` -- a
++    // deliberately low threshold, see the comment above the walk.
++    const uint32_t r_sampled = topk <= 512 ? (topk >> 1) : 384u;
++    bool sampled_live = sampled_p1;
++    uint32_t exclusive_suffix = 0;
++    uint32_t inclusive_suffix = 0;
++
++    for (;;) {
+     // Fold 4,096 -> 256, one bin per high byte, so the scan stays the same
+     // 256-wide warp scan the 8-bit level used; thread 0 then narrows inside the
+     // byte the scan lands on.  This is the last read of the coarse histogram.
+@@ -405,23 +458,29 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
+         s_histogram[RADIX] = 0;
+         // The refine's landing state, initialized here so that a crossing the
+         // scan cannot find leaves a defined bin behind rather than whatever the
+-        // previous launch on this SM left in shared memory.
++        // previous launch on this SM left in shared memory.  On the sampled arm
++        // the crossing can legitimately be absent (a degenerate sample), which
++        // is why the high-byte id and the two collect counters zero here too.
+         s_threshold_bin_id = 0;
++        s_high_threshold_bin_id = 0;
+         s_last_remain = 0;
++        s_num_input[0] = 0;
++        s_counter = 0;
+     }
+     __syncthreads();
+ 
+-    uint32_t exclusive_suffix = 0;
+-    uint32_t inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
++    const uint32_t crossing = sampled_live ? r_sampled : remain_topk;
++    exclusive_suffix = 0;
++    inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
+ 
+-    if (tx < RADIX && inclusive_suffix > remain_topk && exclusive_suffix <= remain_topk) {
+-        s_high_threshold_bin_id = tx; s_num_input[0] = 0; s_counter = 0;
+-    }
++    if (tx < RADIX && inclusive_suffix > crossing && exclusive_suffix <= crossing)
++        s_high_threshold_bin_id = tx;
+     __syncthreads();
+ 
+-    // The scan named a high byte; the 12-bit threshold is the sub-bin inside it
+-    // where the count crosses `remain_topk`.  `above` ends as the count of keys
++    // The scan named a high byte; the threshold is the sub-bin inside it
++    // where the count crosses `crossing`.  `above` ends as the count of keys
+     // strictly above that threshold, which is what the emit owes the window.
++    // On the sampled arm both are at sample scale and go unread.
+     if (tx == 0) {
+         const uint32_t high = s_high_threshold_bin_id;
+         uint32_t above = s_histogram[high + 1];
+@@ -429,11 +488,11 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
+         for (int s = (int)kCoarse12SubBins - 1; s >= 0; --s) {
+             const uint32_t c = s_wide[(high << kCoarse12Shift) + (uint32_t)s];
+             // The bin has to carry what the window still wants, and the test is
+-            // against the window `remain_topk` itself -- not against what is
++            // against the window `crossing` itself -- not against what is
+             // left once the byte above has been counted.  Testing the remainder
+             // fires a sub-bin early whenever the byte has slack, which leaves
+             // the window short and the refine with no bin to land on.
+-            if (above + c > remain_topk) { sub = (uint32_t)s; break; }
++            if (above + c > crossing) { sub = (uint32_t)s; break; }
+             above += c;
+         }
+         s_high_threshold_bin_id = (high << kCoarse12Shift) | sub;
+@@ -475,6 +534,120 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
+         use_list = list_cap > 0 && nlist <= list_cap;
+     }
+ 
++    if (sampled_live) {
++        // ── the sampled collect: stage everything at or above T_lo ────────
++        // No emit here -- above-threshold is approximate on this arm, so every
++        // candidate is staged and the exact rank happens below.  The count is
++        // exact even past the arena, which is how the two repairs are told.
++        const auto stage_one = [&](uint32_t idx, maca_bfloat16 raw) {
++            if ((refine_bin(raw) >> kCoarse12Shift) >= coarse_threshold) {
++                const uint32_t pos = atomicAdd(&s_num_input[0], 1u);
++                if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
++            }
++        };
++        if (use_list) {
++            walk_kept_blocks<BLOCK_SIZE>(input, block_list, nlist, stage_one);
++        } else if (input_aligned) {
++            for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
++                uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
++                const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
++                #pragma unroll
++                for (int i = 0; i < 8; i++) stage_one(idx + i, h[i]);
++            }
++        } else {
++            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
++                stage_one(idx, __ldg(input + idx));
++        }
++        // The tail of the row, on the same terms as the exact collect below.
++        const uint32_t tail_start =
++            use_list ? list_end : (input_aligned ? vec_len : length);
++        for (uint32_t idx = tail_start + tx; idx < length; idx += BLOCK_SIZE)
++            stage_one(idx, __ldg(input + idx));
++        __syncthreads();
++        const uint32_t m = s_num_input[0];
++        if (m >= topk && m <= SMEM_INPUT_SIZE) {
++            // ── exact top-k of the staged set: two 8-bit rounds ───────────
++            // The staged set holds every element at or above T_lo and its
++            // count is exact, so the k-th of the row is in it.  Two rounds of
++            // the 256-bin warp-cumsum resolve the full 16-bit key with no new
++            // shared memory: the high byte first, then the low byte among its
++            // members.  Values are re-gathered from the row (L2-hot).
++            //
++            // The pick is `suffix(b) >= n && suffix(b+1) < n` -- the byte the
++            // n-th staged element lands in, which exists for every n <= m
++            // (including n == m exactly, where the strict-`>` convention used
++            // by the row's own narrow would pick nothing).
++            if (tx < RADIX + 1) s_histogram[tx] = 0;
++            __syncthreads();
++            for (uint32_t i = tx; i < m; i += BLOCK_SIZE) {
++                const uint32_t idx = s_input_flat[i];
++                atomicAdd(&s_histogram[refine_bin(__ldg(input + idx)) >> 8], 1u);
++            }
++            __syncthreads();
++            exclusive_suffix = 0;
++            inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
++            if (tx < RADIX && inclusive_suffix >= topk && exclusive_suffix < topk)
++                s_threshold_bin_id = tx;
++            __syncthreads();
++            const uint32_t hi_bin = s_threshold_bin_id;
++            const uint32_t above_hi = s_histogram[hi_bin + 1];
++            uint32_t exact_t;
++            uint32_t remain;
++            {
++                const uint32_t k_in_byte = topk - above_hi;
++                if (tx < RADIX + 1) s_histogram[tx] = 0;
++                __syncthreads();
++                for (uint32_t i = tx; i < m; i += BLOCK_SIZE) {
++                    const uint32_t idx = s_input_flat[i];
++                    const uint32_t key = refine_bin(__ldg(input + idx));
++                    if ((key >> 8) == hi_bin)
++                        atomicAdd(&s_histogram[key & 0xFFu], 1u);
++                }
++                __syncthreads();
++                exclusive_suffix = 0;
++                inclusive_suffix =
++                    run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
++                if (tx < RADIX && inclusive_suffix >= k_in_byte &&
++                    exclusive_suffix < k_in_byte)
++                    s_threshold_bin_id = tx;
++                __syncthreads();
++                exact_t = (hi_bin << 8) | s_threshold_bin_id;
++                remain = k_in_byte - s_histogram[s_threshold_bin_id + 1];
++            }
++            if (tx == 0) s_last_remain = (int32_t)remain;
++            __syncthreads();
++            for (uint32_t i = tx; i < m; i += BLOCK_SIZE) {
++                const uint32_t idx = s_input_flat[i];
++                const uint32_t key = refine_bin(__ldg(input + idx));
++                if (key > exact_t) {
++                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
++                } else if (key == exact_t && remain != 0) {
++                    auto p = atomicAdd(&s_last_remain, -1);
++                    if (p > 0) output[topk - (uint32_t)p] = static_cast<int32_t>(idx);
++                }
++            }
++            __syncthreads();
++            return;
++        }
++        // Rare repair (both directions detected by the exact count).  The
++        // staged entries sit in the arena -- which *is* `s_wide` -- so the
++        // sampled counts are already overwritten: the histogram is rebuilt
++        // from zero with a full-rate walk over every block, then the row
++        // falls through the unmodified exact path.
++        for (uint32_t b = tx; b < kCoarse12Bins; b += BLOCK_SIZE) s_wide[b] = 0;
++        __syncthreads();
++        for (uint32_t blk = tx >> 3; ((blk + 1u) << 6) <= vec_len;
++             blk += BLOCK_SIZE / 8) {
++            hist_add_bf16_wide<false, true>(s_wide, input,
++                                            (blk << 6) + (tx & 7u) * 8u, nullptr);
++        }
++        for (uint32_t idx = list_end + tx; idx < length; idx += BLOCK_SIZE)
++            atomicAdd(&s_wide[refine_bin(__ldg(input + idx)) >> kCoarse12Shift], 1u);
++        __syncthreads();
++        sampled_live = false;
++        continue;
++    }
++
+     {
+         const auto threshold_bin = coarse_threshold;
+         remain_topk -= s_wide_above;
+@@ -609,6 +782,9 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
+         }
+         __syncthreads();
+     }
++    // The exact arm above returns from every path; the loop only ever turns
++    // once, and only after the sampled collect's repair.
++    }
+ }
+ 
+ }  // namespace topk_select_radix
