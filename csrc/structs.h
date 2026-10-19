@@ -149,16 +149,19 @@ setup.py's build_for_maca."
 static constexpr uint32_t ARCH_FAMILY = 1000;
 static constexpr uint32_t ARCH_SM_COUNT = 104;              // C500
 static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 64 * 1024;
+static constexpr uint32_t ARCH_REGS_PER_AP = 65536;
 #elif DEEP_SELECT_ARCH == 1500
 static constexpr uint32_t ARCH_FAMILY = 1500;
 static constexpr uint32_t ARCH_SM_COUNT = 28;               // C600
 static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 128 * 1024;
+static constexpr uint32_t ARCH_REGS_PER_AP = 131072;        // see below
 #elif DEEP_SELECT_ARCH == 1600
 static constexpr uint32_t ARCH_FAMILY = 1600;
 static constexpr uint32_t ARCH_SM_COUNT = 28;               // C600U; the family
 // also ships at 32 -- see above, and `is_c600u_ap_count` for the
 // route that must accept both
 static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 128 * 1024;
+static constexpr uint32_t ARCH_REGS_PER_AP = 131072;
 #else
 #error "unknown xcore family in DEEP_SELECT_ARCH; add its row here (AP count \
 and per-AP shared memory) and its entry to CUCC_TARGETS in setup.py"
@@ -169,6 +172,15 @@ static_assert(ARCH_FAMILY == (uint32_t)DEEP_SELECT_ARCH,
 static_assert(ARCH_SM_COUNT > 0, "ARCH_SM_COUNT must be set per family");
 static_assert(ARCH_SMEM_PER_AP_BYTES > 0,
               "ARCH_SMEM_PER_AP_BYTES must be set per family");
+static_assert(ARCH_REGS_PER_AP > 0,
+              "ARCH_REGS_PER_AP must be set per family");
+// The register file is the budget the bf16 row's skip tables are sized
+// against.  Measured on a 28-AP C600U (family 1600) as 131072 via torch's
+// `regs_per_multiprocessor` (2026-10-19), against the C500's 65536; the 1500
+// row carries the sibling's number -- the same extrapolation
+// `radix_block_for`'s C600U arm already makes when it reasons "2 x 1024- or
+// 4 x 512-thread CTAs (128 KiB of registers)" about a part reached through
+// `is_c600u_ap_count`.
 
 // The `deep_gemm` selector's perf shapes, transcribed from
 // `deep_gemm/tests/test_indexer_topk_selector.py::SELECTOR_PERF_SHAPES`

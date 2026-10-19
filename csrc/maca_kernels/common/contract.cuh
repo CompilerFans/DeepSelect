@@ -16,6 +16,10 @@
 #include <cstdlib>
 #include <type_traits>
 
+// The family table, for `ARCH_REGS_PER_AP` -- the budget the `kSkipRow`
+// predicate below is sized against.
+#include "structs.h"
+
 // The NaN predicates and the order-preserving key encodes, shared with the
 // dataflow headers below.
 #include "primitives.cuh"
@@ -631,7 +635,19 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
         uint32_t *row_block_list =
             params.row_block_list != nullptr
                 ? params.row_block_list + (uint64_t)row * blocks_per_row : nullptr;
-        radix_select_row<ValueT, BLOCK, std::is_same<OutIdxT, int32_t>::value>(
+        // `kSkip` is `true` for the 32-bit-index row on every family, and for
+        // the 64-bit row only where the register file can afford the summary:
+        // the tables cost the body ~3 MT over the bare one, and a 1024-thread
+        // block keeps its second CTA per SM at <= 64 MT -- within reach of the
+        // 128 KiB-regfile parts (measured 131072 regs/AP on a C600U,
+        // `structs.h`'s `ARCH_REGS_PER_AP`), not of the C500's 65536.  The
+        // host allocates the tables under the same predicate
+        // (`skip_tables` in `maca_topk.cu`) -- the two sites must agree, or an
+        // allocated-but-unread table is a walk that reads a summary nothing
+        // wrote.
+        constexpr bool kSkipRow = std::is_same<OutIdxT, int32_t>::value ||
+                                  ARCH_REGS_PER_AP >= 131072;
+        radix_select_row<ValueT, BLOCK, kSkipRow>(
             input_row, length, (int32_t *)selected, topk, fold_nan, &nan_local,
             row_block_max, row_block_list);
     }

@@ -389,8 +389,16 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // on the official grid (docs/experiments/20261010_skim_rate/): `k/V = 1/128`
     // (39% kept) is a wash, `k/V = 1/64` (64% kept) costs +11..+16% -- the list
     // is traffic on top of a walk that then reads most of the row anyway.
+    // The row path's skip tables.  Allocated for the calls whose shape passes
+    // `skip_tables` and whose row instantiation carries the round.  The
+    // 32-bit-index row always carries it; the 64-bit row carries it only where
+    // the register file pays for the summary body -- `contract.cuh`'s
+    // `kSkipRow` is the device half of this predicate and must agree with it:
+    // an allocated-but-unread table is a walk that reads a summary nothing
+    // wrote, and a read-but-unallocated one is a fault.
     const bool skip_tables =
-        value_dtype == 1 && index_dtype == 0 &&
+        value_dtype == 1 &&
+        (index_dtype == 0 || ARCH_REGS_PER_AP >= 131072) &&
         p.vocab_size >= detail::kSkipMinVocab &&
         (uint64_t)p.vocab_size >=
             (uint64_t)p.topk * detail::kSkipMinRowPerSlot &&
@@ -493,10 +501,10 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     }
     // The row path's skip tables.  Allocated for the calls whose shape passes
     // `skip_tables` and whose row instantiation carries the round -- the
-    // 32-bit-index row (`kSkip` in `radix_topk_row_bf16_b`: the 64-bit row
-    // cannot afford the registers), and the routes that do not walk rows or say
-    // the same thing simply never read them.  Sized by `vocab_size`, the table's
-    // own row length, so a row with a shorter window still finds its own entry.
+    // 32-bit-index row everywhere, the 64-bit row on the 128 KiB-regfile
+    // parts (`kSkipRow` in `contract.cuh`); the routes that do not walk rows
+    // never read them.  Sized by `vocab_size`, the table's own row length, so
+    // a row with a shorter window still finds its own entry.
     if (skip_tables) {
         const size_t need_blocks = (size_t)batches * (((size_t)p.vocab_size + 63) / 64);
         if (need_blocks > scratch.block_max_count) {
