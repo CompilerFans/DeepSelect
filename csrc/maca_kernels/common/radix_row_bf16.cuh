@@ -1,7 +1,35 @@
 #ifndef RADIX_ROW_BF16_CUH
 #define RADIX_ROW_BF16_CUH
 
+#include "structs.h"   // ARCH_REGS_PER_AP -- the pair-walk's family gate
 #include "radix_common.cuh"
+
+// The block-max summary's step-down tree as a MACRO, so the text the compiler
+// sees is byte-identical to the inline form it replaced.  A function form
+// (`group_max8(key, tx)`, `__forceinline__`) was measured BROKEN IN SITU
+// 2026-10-19: instruction-identical to the inline text in an isolated kernel
+// (0/16384 blocks differ, `maxtree_bisect.cu` in
+// `docs/experiments/20261019_c600u_pass1/`), but in the full row kernel it
+// computes a low block max on ~35% of blocks -- the tree reads other lanes'
+// registers, and the function boundary shifts the compiler's schedule around
+// it.  Never extract this into a function again.
+#ifdef __MACACC__
+// No mask: only lane 0 is read and the tree chains, so the group-edge
+// contamination `(tx + delta) & 63` can introduce reaches lanes >= 5 only,
+// and lane 0's chain (0,1,2,4) never reads one.
+#define DS_GROUP_MAX8_TREE(key)                                       \
+    do {                                                              \
+        uint32_t o_ = (uint32_t)__builtin_mxc_bsm_bpermute(           \
+            (int)(((tx + 1u) & 63u) << 2), (int)(key));               \
+        key = (key) > o_ ? (key) : o_;                                \
+        o_ = (uint32_t)__builtin_mxc_bsm_bpermute(                    \
+            (int)(((tx + 2u) & 63u) << 2), (int)(key));               \
+        key = (key) > o_ ? (key) : o_;                                \
+        o_ = (uint32_t)__builtin_mxc_bsm_bpermute(                    \
+            (int)(((tx + 4u) & 63u) << 2), (int)(key));               \
+        key = (key) > o_ ? (key) : o_;                                \
+    } while (0)
+#endif
 
 namespace topk_select_radix {
 
@@ -318,30 +346,40 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             // must not read past the row, so the elements past the last whole
             // block stay with the tail loop both walks already carry -- and
             // with this bound the guarded load below has nothing left to guard.
-            for (uint32_t blk = group; ((blk + 1u) << 6) <= vec_len;
-                 blk += BLOCK_SIZE / 8) {
+            const uint32_t step = BLOCK_SIZE / 8;
+            uint32_t blk = group;
+#ifdef __MACACC__
+            // Two blocks in flight per iteration where the register file
+            // affords it: the walk keeps one outstanding uint4 per thread,
+            // which is a memory-latency cap, not a bandwidth one -- the
+            // measured read curve on a C600U is 265 -> 956 -> 1390 GB/s for
+            // 1/2/4 outstanding at one 512-thread CTA per SM (1024 -> 1616 at
+            // two).  The second block is the whole gap on under-filled grids
+            // and ~6% once the shared atomics cap.  The C500's 32 MT wall
+            // keeps the single-issue walk.
+            if constexpr (ARCH_REGS_PER_AP >= 131072) {
+                for (; ((blk + step + 1u) << 6) <= vec_len; blk += 2 * step) {
+                    uint32_t key0 = 0, key1 = 0;
+                    nan_local |= hist_add_bf16_wide<kNan>(
+                        s_wide, input, (blk << 6) + lane * 8u, &key0);
+                    nan_local |= hist_add_bf16_wide<kNan>(
+                        s_wide, input, ((blk + step) << 6) + lane * 8u, &key1);
+                    DS_GROUP_MAX8_TREE(key0);
+                    DS_GROUP_MAX8_TREE(key1);
+                    if (lane == 0u) {
+                        block_max[blk] = (uint16_t)(key0 >> kCoarse12Shift);
+                        block_max[blk + step] =
+                            (uint16_t)(key1 >> kCoarse12Shift);
+                    }
+                }
+            }
+#endif
+            for (; ((blk + 1u) << 6) <= vec_len; blk += step) {
                 const uint32_t idx = (blk << 6) + lane * 8u;
                 uint32_t key = 0;
                 nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx, &key);
 #ifdef __MACACC__
-                // The step-down tree through the platform's own permute: a
-                // `__shfl_down_sync` is one shuffle plus ~5 instructions of
-                // index math the compiler does not hoist, and that wrapper was
-                // most of the summary's cost (measured: 524 -> 645 GB/s of
-                // pass-1 walk, tree bit-identical,
-                // `docs/experiments/20261010_c600u_bperm_summary/`).  No mask:
-                // only lane 0 is read and the tree chains, so the group-edge
-                // contamination `(tx + delta) & 63` can introduce reaches
-                // lanes >= 5 only, and lane 0's chain (0,1,2,4) never reads one.
-                uint32_t other = (uint32_t)__builtin_mxc_bsm_bpermute(
-                    (int)(((tx + 1u) & 63u) << 2), (int)key);
-                key = key > other ? key : other;
-                other = (uint32_t)__builtin_mxc_bsm_bpermute(
-                    (int)(((tx + 2u) & 63u) << 2), (int)key);
-                key = key > other ? key : other;
-                other = (uint32_t)__builtin_mxc_bsm_bpermute(
-                    (int)(((tx + 4u) & 63u) << 2), (int)key);
-                key = key > other ? key : other;
+                DS_GROUP_MAX8_TREE(key);
 #else
                 const unsigned gmask = 0xFFu << (tx & 0x18u);
                 // The tree is chained -- each shuffle reads what the step before
