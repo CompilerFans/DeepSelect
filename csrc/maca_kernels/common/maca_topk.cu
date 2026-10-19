@@ -449,21 +449,27 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         value_dtype == 1 && detail::chunked_bf16_applies(p, (uint32_t)batches);
     const bool f32_split =
         value_dtype == 0 && detail::chunked_f32_applies(p, (uint32_t)batches);
-    // The routes that answer a row *without* ranking it -- the splits and the
-    // coarse12 arm -- read the per-row scan table in the contract half.  The
-    // shape gate above is not enough to know whether one of them will be taken
-    // (the splits are reached through `topk_launch`'s own predicates and its
-    // workspace check), so the table is provided for the whole `check_nan`
-    // class and only when a route really asks for it: staying inside that class
-    // costs one `cudaMemsetAsync` over `batches` ints, and it is that memset
-    // alone that makes reading a slot legal.  A plain row run under
-    // `check_nan` scans the row itself and never reads this, but the memset it
-    // pays for is 255x smaller than the row scan it replaces (see
-    // `f32_coarse12_applies`), so the class is the right place to draw the line.
+    // The routes that answer a row *without* ranking it and read the per-row
+    // scan table in the contract half are the coarse12 arm and the chunks arm
+    // (`topk_coarse12.cuh` / `topk_chunks.cuh` hand `params.scan_flags` to the
+    // contract as its `nan_flags`).  The two splits are **not** readers: each
+    // zeroes and raises a table inside its own workspace (`ws.nan_flags`,
+    // `ws.lengths`) and passes that through -- so listing them here bought a
+    // per-call memset nobody ever read (measured on a C600U: ~4 us of launch
+    // per split call, ~15% of a b1 decode cell).  The shape gate above is not
+    // enough to know whether one of the two reader routes will be taken (they
+    // are reached through `topk_launch`'s own predicates), so the table is
+    // provided for the whole class and only when a route really asks for it:
+    // staying inside that class costs one `cudaMemsetAsync` over `batches`
+    // ints, and it is that memset alone that makes reading a slot legal.  A
+    // plain row run under `check_nan` scans the row itself and never reads
+    // this, but the memset it pays for is 255x smaller than the row scan it
+    // replaces (see `f32_coarse12_applies`), so the class is the right place
+    // to draw the line.
     const bool needs_scan_table =
-        check_nan && (bf16_split || f32_split ||
-                      (value_dtype == 0 && (detail::f32_coarse12_applies(p, (uint32_t)batches) ||
-                                            detail::f32_chunks_applies(p, (uint32_t)batches))));
+        check_nan && value_dtype == 0 &&
+        (detail::f32_coarse12_applies(p, (uint32_t)batches) ||
+         detail::f32_chunks_applies(p, (uint32_t)batches));
     // The coarse12 answer buffer, allocated by the same rule: a call the route
     // can reach gets one, so `topk_launch` can stage the columns it ranks
     // whatever the caller's index width is.  Allocated up front rather than
