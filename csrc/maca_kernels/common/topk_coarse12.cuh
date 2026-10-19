@@ -46,6 +46,7 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
+#include "structs.h"   // ARCH_REGS_PER_AP -- the OUT=2 walk gate
 #include "primitives.cuh"
 
 // The contract half the answer is handed to (`launch_route` below), and through
@@ -177,7 +178,32 @@ __device__ __forceinline__ bool topk_coarse12_row(
         nan_found |= is_nan_value(value);
         atomicAdd(&wide_histogram[refine_bin(value) >> kFirstShift], 1);
     }
-    for (int vec = tid; vec < vector_length; vec += kThreads) {
+    // Two loads in flight per thread where the register file affords it --
+    // same measurement as the bf16 row's pair walk (265 -> 956 GB/s at one
+    // 512-thread CTA per SM on a C600U): the loop below keeps one float4 in
+    // flight per thread otherwise.  The body is spelled out twice inline on
+    // purpose -- no function boundary around a load + process pair, per the
+    // miscompile documented in docs/experiments/20261019_c600u_pass1/ §4.
+    int vec = tid;
+    if constexpr (ARCH_REGS_PER_AP >= 131072) {
+        for (; vec + kThreads < vector_length; vec += 2 * kThreads) {
+            const float4 va = __ldg(vector_input + vec);
+            const float4 vb = __ldg(vector_input + vec + kThreads);
+            nan_found |= is_nan_value(va.x) || is_nan_value(va.y)
+                         || is_nan_value(va.z) || is_nan_value(va.w);
+            atomicAdd(&wide_histogram[refine_bin(va.x) >> kFirstShift], 1);
+            atomicAdd(&wide_histogram[refine_bin(va.y) >> kFirstShift], 1);
+            atomicAdd(&wide_histogram[refine_bin(va.z) >> kFirstShift], 1);
+            atomicAdd(&wide_histogram[refine_bin(va.w) >> kFirstShift], 1);
+            nan_found |= is_nan_value(vb.x) || is_nan_value(vb.y)
+                         || is_nan_value(vb.z) || is_nan_value(vb.w);
+            atomicAdd(&wide_histogram[refine_bin(vb.x) >> kFirstShift], 1);
+            atomicAdd(&wide_histogram[refine_bin(vb.y) >> kFirstShift], 1);
+            atomicAdd(&wide_histogram[refine_bin(vb.z) >> kFirstShift], 1);
+            atomicAdd(&wide_histogram[refine_bin(vb.w) >> kFirstShift], 1);
+        }
+    }
+    for (; vec < vector_length; vec += kThreads) {
         const float4 values = __ldg(vector_input + vec);
         nan_found |= is_nan_value(values.x) || is_nan_value(values.y)
                      || is_nan_value(values.z) || is_nan_value(values.w);
@@ -284,7 +310,24 @@ __device__ __forceinline__ bool topk_coarse12_row(
 
     for (int index = tid; index < prefix; index += kThreads)
         DG12_COLLECT(__ldg(input + index), index);
-    for (int vec = tid; vec < vector_length; vec += kThreads) {
+    vec = tid;
+    if constexpr (ARCH_REGS_PER_AP >= 131072) {
+        for (; vec + kThreads < vector_length; vec += 2 * kThreads) {
+            const float4 va = __ldg(vector_input + vec);
+            const float4 vb = __ldg(vector_input + vec + kThreads);
+            const int ia = prefix + vec * 4;
+            const int ib = ia + kThreads * 4;
+            DG12_COLLECT(va.x, ia);
+            DG12_COLLECT(va.y, ia + 1);
+            DG12_COLLECT(va.z, ia + 2);
+            DG12_COLLECT(va.w, ia + 3);
+            DG12_COLLECT(vb.x, ib);
+            DG12_COLLECT(vb.y, ib + 1);
+            DG12_COLLECT(vb.z, ib + 2);
+            DG12_COLLECT(vb.w, ib + 3);
+        }
+    }
+    for (; vec < vector_length; vec += kThreads) {
         const float4 values = __ldg(vector_input + vec);
         const int index = prefix + vec * 4;
         DG12_COLLECT(values.x, index);
