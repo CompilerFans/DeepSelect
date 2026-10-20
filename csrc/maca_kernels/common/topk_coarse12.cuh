@@ -167,11 +167,13 @@ __device__ __forceinline__ bool topk_coarse12_row(
     // all: the contract half's preselected arm reads this row's flag instead of
     // scanning, and it has to be a slot someone wrote.
     //
-    // `nan_flag` is this row's slot in the caller's per-row table, zeroed by
-    // the caller; this only ever raises it.  It is raised before the answer is
-    // written, so the contract half -- which runs after this kernel -- sees the
-    // flag and takes its own NaN path (trap, or the `0x3F3F3F3F` guard) exactly
-    // as it would have had it scanned the row itself.
+    // `nan_flag` is this row's slot in the caller's per-row table, zero when
+    // this kernel runs (the dispatcher zeroes the table when it grows, and
+    // each call's contract half clears what it read); this only ever raises
+    // it.  It is raised before the answer is written, so the contract half --
+    // which runs after this kernel -- sees the flag and takes its own NaN path
+    // (trap, or the `0x3F3F3F3F` guard) exactly as it would have had it
+    // scanned the row itself.
     bool nan_found = false;
     for (int index = tid; index < prefix; index += kThreads) {
         const float value = __ldg(input + index);
@@ -495,9 +497,12 @@ __global__ __launch_bounds__(kThreads_) void topk_coarse12_kernel(
         lengths == nullptr ? default_length : __ldg(lengths + row);
     const float *row_input = scores + (int64_t)row * stride;
     int32_t *row_out = out + (int64_t)row * topk;
-    // One slot per row, zeroed by the caller.  Null means "the caller is not
-    // scanning at all" (`check_nan` false), which is the only case where the
-    // contract half does not read the table either.
+    // One slot per row.  Zero when this kernel runs -- the dispatcher zeroes
+    // the table once when it grows it, and each call's contract half clears
+    // the slots it read -- so this kernel only raises it (see
+    // `RowParams::nan_flags`).  Null means "the caller is not scanning at all"
+    // (`check_nan` false), which is the only case where the contract half does
+    // not read the table either.
     int32_t *row_nan = nan_flags == nullptr ? nullptr : nan_flags + row;
 
     if (length <= topk) {

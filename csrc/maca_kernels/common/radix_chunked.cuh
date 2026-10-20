@@ -599,8 +599,9 @@ inline int32_t *chunked_f32_cols(void *base, uint32_t batches, uint32_t topk,
 // stage 2 hands it to -- walks it with `__ldg(reinterpret_cast<const float4*>)`
 // and has **no** alignment guard (`hist_add_f32`, pass 2's two loops); the
 // 16-bit lane guards the same hazard (`bf16x8_is_aligned`), this one never
-// learned to.  The arena base is a `cudaMalloc`, so it is aligned; what is not
-// is the offset `cols` occupies, which is `batches * chunks * topk` int32.
+// learned to.  The arena base is a `cudaMalloc`, so it is aligned, and `cols`
+// starts there (`chunked_f32_cols`); what can move `vals` off a 16-byte
+// boundary is the size of the `cols` region, `batches * chunks * topk` int32.
 //
 // `chunks` is even by construction (`f32_chunked_chunks` returns a power of two
 // or `f32_chunk_round_even`'s result) and `topk >= 512` on every arm the split
@@ -609,11 +610,13 @@ inline int32_t *chunked_f32_cols(void *base, uint32_t batches, uint32_t topk,
 // `batches & 1u`.  Written as a round-up so it stays correct if `chunks` ever
 // becomes odd.
 //
-// Without it the base is 16-byte aligned iff `batches % 4 == 0`, and the gate's
-// `b1-*` fp32 cells (`b1-v66551-k2048`, `b1-v131072-k2048`, `b1-v107520-k2048`
-// -- all in the perf grid) take the misaligned branch on every run.  MACA
-// tolerates the load, which is exactly why this survived: it is UB that works,
-// not a visible mis-computation.
+// Without it `vals` sits at `batches * chunks * topk * 4` bytes: 8 mod 16
+// whenever `batches` is odd, which is every `b1-*` fp32 cell in the perf grid
+// (`b1-v66551-k2048`, `b1-v131072-k2048`, `b1-v107520-k2048`).  The flag table
+// that used to sit in front of the arena moved `cols` too, but that prefix is
+// the dispatcher's own allocation now; the region size alone decides the pad.
+// MACA tolerates the misaligned load, which is exactly why the old gap
+// survived: it is UB that works, not a visible mis-computation.
 inline size_t chunked_f32_vals_offset(uint32_t batches, uint32_t topk,
                                       uint32_t chunks) {
     const size_t bytes = (size_t)batches * chunks * topk * sizeof(int32_t);
@@ -731,9 +734,9 @@ inline cudaError_t launch_topk_f32_chunks_stage2(
 
 // stage 1, then stage 2.  `cols_base` is the start of the candidate arena the
 // split carved out (`chunked_f32_cols`); `out` must have room for `topk`
-// columns per row.  They are separate arguments because the caller keeps its
-// own state (the row-length table, the per-row NaN flags) in front of the
-// arena, so the arena is not at the base of the caller's workspace.
+// columns per row.  They are separate arguments because `chunked_f32_vals` may
+// pad the columns region by 8 bytes to keep `vals` 16-byte aligned, so the
+// caller composes the layout once and hands its regions over.
 //
 // This is the *engine* bound, not the policy one: `chunked_f32_applies` (in
 // `maca_topk.cu`) decides whether to split and calls this to find out whether
@@ -768,12 +771,14 @@ inline cudaError_t launch_topk_f32_chunked(
     int64_t score_stride, bool want_nan = false, int32_t *nan_flags = nullptr)
 {
     // The three arenas are **arguments, not derived here**.  The caller already
-    // owns the workspace and places the split's regions inside it alongside its
-    // own state (the row-length table, the per-row NaN flags), so it is the one
-    // that knows the layout; re-deriving it here was a second copy of the same
-    // arithmetic, and the two agreed only because they were written the same
-    // way.  `chunked_f32_cols` / `chunked_f32_vals` / `chunked_f32_out` remain
-    // as the definition of the layout, and the caller uses them.
+    // owns the workspace and places the split's regions inside it, so it is the
+    // one that knows the layout; re-deriving it here was a second copy of the
+    // same arithmetic, and the two agreed only because they were written the
+    // same way.  `chunked_f32_cols` / `chunked_f32_vals` / `chunked_f32_out`
+    // remain as the definition of the layout, and the caller uses them.  The
+    // per-row NaN table is **not** a region of this workspace -- it is the
+    // dispatcher's own `scan_flags` allocation, passed separately, because a
+    // geometry-dependent offset into shared scratch is not a flag slot.
     cudaError_t err = launch_topk_f32_chunks_stage1(
         scores, lengths, cols, vals, B, L, topk, num_chunks, stream, score_stride,
         want_nan, nan_flags);

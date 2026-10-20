@@ -224,7 +224,6 @@ struct ChunkedWorkspace {
     int32_t *candidate_indices;
     maca_bfloat16 *candidate_values;
     int32_t *merged;
-    int32_t *nan_flags;
 };
 
 // The split is 16-bit only.  `topk` 512 and 1024 are the static-k arms of the
@@ -262,8 +261,7 @@ inline size_t chunked_workspace_bytes(uint32_t batches, uint32_t topk,
     // two candidate arrays are 16-byte apart at the seam.
     const size_t indices_bytes = candidates * sizeof(int32_t);
     const size_t values_bytes = candidates * sizeof(maca_bfloat16);
-    return indices_bytes + values_bytes + (size_t)batches * topk * sizeof(int32_t) +
-           (size_t)batches * sizeof(int32_t);
+    return indices_bytes + values_bytes + (size_t)batches * topk * sizeof(int32_t);
 }
 
 inline ChunkedWorkspace chunked_workspace(void *base, uint32_t batches,
@@ -273,7 +271,6 @@ inline ChunkedWorkspace chunked_workspace(void *base, uint32_t batches,
     ws.candidate_indices = (int32_t *)base;
     ws.candidate_values = (maca_bfloat16 *)((char *)base + candidates * sizeof(int32_t));
     ws.merged = (int32_t *)((char *)ws.candidate_values + candidates * sizeof(maca_bfloat16));
-    ws.nan_flags = (int32_t *)((char *)ws.merged + (size_t)batches * topk * sizeof(int32_t));
     return ws;
 }
 
@@ -1109,21 +1106,22 @@ inline bool chunked_f32_applies(const RowParams &params, uint32_t batches) {
 
 inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
                                           int chunks) {
-    return topk_select_radix::chunked_f32_workspace_bytes(batches, topk, (uint32_t)chunks) +
-           (size_t)batches * sizeof(int32_t);
+    return topk_select_radix::chunked_f32_workspace_bytes(batches, topk, (uint32_t)chunks);
 }
 
 // The workspace's layout.  `topk_select_radix::chunked_f32_cols` / `_vals_offset` / `_out` are
 // the *definition* of it -- the split's own region order and the 16-byte pad
 // `radix_topk_row_f32`'s unguarded `float4` walkers need -- and this function
-// is the one place that composes them with the caller's own state in front
-// (the row-length table).  It used to re-derive the same arithmetic by hand
-// while `topk_select_radix::launch_topk_f32_chunked` re-derived it a second time from the
-// arena base; those two copies agreed only because they were written the same
-// way, and the pad is exactly the kind of thing one of them would have missed.
-// The launch now takes the three pointers, so there is one composition site.
+// is the one place that composes them.  The region in front used to be the
+// flag table; it lives in the dispatcher's dedicated `scan_flags` now, so the
+// arena base is the `cudaMalloc`'d workspace and `cols` is its first region,
+// which is what `chunked_f32_cols` documents.  It used to re-derive the same
+// arithmetic by hand while `topk_select_radix::launch_topk_f32_chunked`
+// re-derived it a second time from the arena base; those two copies agreed
+// only because they were written the same way, and the pad is exactly the kind
+// of thing one of them would have missed.  The launch takes the three
+// pointers, so there is one composition site.
 struct ChunkedF32Workspace {
-    int32_t *lengths;
     int32_t *cols;
     float *vals;
     int32_t *merged;
@@ -1134,8 +1132,7 @@ inline ChunkedF32Workspace chunked_f32_workspace(void *base, uint32_t batches,
     ChunkedF32Workspace ws{};
     const uint32_t b = batches, k = (uint32_t)topk, c = (uint32_t)chunks;
     const size_t candidates = (size_t)b * c * k;
-    ws.lengths = (int32_t *)base;
-    ws.cols = ws.lengths + batches;
+    ws.cols = topk_select_radix::chunked_f32_cols(base, b, k, c);
     ws.vals = topk_select_radix::chunked_f32_vals(ws.cols, b, k, c);
     ws.merged = (int32_t *)(ws.vals + candidates);
     return ws;
@@ -1156,29 +1153,25 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
                                           params.vocab_size, params.sm_count);
     const ChunkedF32Workspace ws = chunked_f32_workspace(
         workspace, batches, params.topk, chunks);
-    // `ws.lengths` is the NaN-flag table here, not the split's row table --
-    // that one is `params.end_ptr`, passed through below.  It is memset and
-    // then OR-ed per row, so the length is whichever ran.  `end_ptr` being
-    // non-null is the dispatch's precondition and the dispatcher only reaches
-    // here with the scratch's own all-`vocab_size` table, but clearing first
-    // makes the scan independent of that rather than merely consistent with
-    // it.  Both the clearing and the scan go when `check_nan` is off: the row
-    // kernel reads this table only under that same flag.
-    //
-    // With the scan fused, this table is still built the same way -- zeroed
-    // here, OR-ed per row -- and only stage 1's own pass 1 walks the row.  One
-    // row walk instead of two; the contract the flag answers is unchanged.
+    // The NaN table is the dispatcher's dedicated `scan_flags`, not a region of
+    // this workspace -- the workspace is one grow-only scratch shared across
+    // split geometries and dtypes, so a slot read at a geometry-dependent
+    // offset is whatever the previous call wrote there.  The table is zeroed
+    // once when it grows and raised per row by whichever walk found the bit
+    // pattern: stage 1's own pass 1 with the scan fused, `nan_scan_kernel`
+    // otherwise.  The contract half reads and clears each row's slot in the
+    // same breath, so there is no per-call memset here; only a failure after a
+    // partial launch can leave a raised slot behind, and that is what the
+    // clear below covers.  Both the scan and that clear go when `check_nan` is
+    // off: the row kernel reads this table only under that same flag.
+    int32_t *const flags = params.check_nan ? params.scan_flags : nullptr;
     const size_t table_bytes = (size_t)batches * sizeof(int32_t);
     const bool fuse_scan = params.check_nan && topk_select_radix::f32_stage1_fuses_scan();
-    if (params.check_nan) {
-        cudaMemsetAsync(ws.lengths, 0, table_bytes, stream);
-        if (!fuse_scan) {
-            launch_nan_scan<float>(
-                params.input, params.end_ptr,
-                (int64_t)(params.stride_input_batch / sizeof(float)),
-                params.vocab_size, (uint32_t)chunks, ws.lengths, batches,
-                stream);
-        }
+    if (params.check_nan && !fuse_scan) {
+        launch_nan_scan<float>(
+            params.input, params.end_ptr,
+            (int64_t)(params.stride_input_batch / sizeof(float)),
+            params.vocab_size, (uint32_t)chunks, flags, batches, stream);
     }
     const cudaError_t rc = topk_select_radix::launch_topk_f32_chunked(
         (const float *)params.input, params.end_ptr, ws.cols, ws.vals,
@@ -1186,11 +1179,16 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
         (int)batches, (int)params.vocab_size, (int)params.topk, chunks, stream,
         // The row stride is in bytes at this layer and in elements there.
         (int64_t)(params.stride_input_batch / sizeof(float)),
-        fuse_scan, ws.lengths);
+        fuse_scan, flags);
+    // A failed launch answers through the row path, which reads no flag table.
+    // Anything a partially launched split already raised is cleared here so
+    // the next call cannot read it.
+    if (rc != cudaSuccess && flags != nullptr)
+        cudaMemsetAsync(flags, 0, table_bytes, stream);
     RowParams merged = params;
     const bool preselected = rc == cudaSuccess;
     merged.preselected = preselected ? ws.merged : nullptr;
-    merged.nan_flags = preselected ? ws.lengths : nullptr;
+    merged.nan_flags = preselected ? flags : nullptr;
     launch_typed_radix<float, OutIdxT>(merged, batches, stream, sorted_index,
                                        sorted_value, return_value, block,
                                        preselected);
@@ -1206,26 +1204,34 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
     const int chunks = chunked_chunks(params);
     const ChunkedWorkspace ws =
         chunked_workspace(workspace, batches, params.topk, (uint32_t)chunks);
-    // The flags table is cleared rather than raised: stage 1 ORs a 1 into a
-    // row's slot when its chunk holds a NaN, so a row no chunk of which does
-    // stays clear.  The memset is `batches * 4` bytes against a walk that no
-    // longer happens.
-    if (params.check_nan)
-        cudaMemsetAsync(ws.nan_flags, 0, (size_t)batches * sizeof(int32_t), stream);
+    // The flags table is the dispatcher's dedicated `scan_flags`, not a region
+    // of this workspace: the workspace is one grow-only scratch shared by every
+    // split geometry and both dtypes, so a slot at a geometry-dependent offset
+    // holds whatever the previous call left there -- a candidate index, read as
+    // a NaN vote.  Stage 1 raises a row's slot and the contract half reads and
+    // clears it; the table is zeroed once when it grows.  Only a failure after
+    // a partial launch can leave a raised slot behind, and that clear follows
+    // the launch.
+    int32_t *const flags = params.check_nan ? params.scan_flags : nullptr;
     const cudaError_t rc = topk_select_radix::launch_topk_bf16_chunked(
         (const maca_bfloat16 *)params.input, params.end_ptr, ws.merged,
         ws.candidate_indices, ws.candidate_values, (int)batches,
         (int)params.vocab_size, (int)params.topk, chunks, stream,
         // The row stride is in bytes at this layer and in elements there.
         (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)),
-        params.check_nan, params.check_nan ? ws.nan_flags : nullptr);
+        params.check_nan, flags);
+    // The row path that answers a failed split reads no flag table, so a slot
+    // a partial launch raised is cleared here rather than left for the next
+    // call to mis-read.
+    if (rc != cudaSuccess && flags != nullptr)
+        cudaMemsetAsync(flags, 0, (size_t)batches * sizeof(int32_t), stream);
     RowParams merged = params;
     // A split that could not be launched leaves the workspace unfilled; the row
     // dataflow answers instead of the contract reading an empty slot.  The gate
     // keeps this unreachable (the split rejects only what it was gated on).
     const bool preselected = rc == cudaSuccess;
     merged.preselected = preselected ? ws.merged : nullptr;
-    merged.nan_flags = preselected ? ws.nan_flags : nullptr;
+    merged.nan_flags = preselected ? flags : nullptr;
     launch_typed_radix<maca_bfloat16, OutIdxT>(merged, batches, stream,
                                                sorted_index, sorted_value,
                                                return_value, block, preselected);

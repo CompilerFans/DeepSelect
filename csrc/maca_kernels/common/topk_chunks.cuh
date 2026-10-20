@@ -486,10 +486,12 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     const int row = blockIdx.y;
     const int tid = threadIdx.x;
     TopKChunksWorkspace<ChunkCount> &workspace = workspaces[row];
-    // This row's slot in the caller's per-row scan table, zeroed by the caller
-    // before this kernel runs.  Null means "the caller is not scanning at all"
-    // (`check_nan` false), which is the only case where the contract half does
-    // not read the table either.
+    // This row's slot in the caller's per-row scan table.  It is zero when this
+    // kernel runs -- zeroed once when the dispatcher grew the table, and
+    // cleared by the contract half of every earlier call (see
+    // `RowParams::nan_flags`) -- so this kernel only ever raises it.  Null
+    // means "the caller is not scanning at all" (`check_nan` false), which is
+    // the only case where the contract half does not read the table either.
     //
     // The flag is not decoration and it is not ours to skip: the caller hands
     // this kernel's answer to the contract half as `preselected`
@@ -497,7 +499,10 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     // **reads** the slot instead of scanning the row:
     //
     //     if constexpr (kPreSelected)
-    //         nan_local = params.check_nan && params.nan_flags[row] != 0;
+    //         nan_local = params.check_nan && nan_vote != 0;
+    //
+    // where `nan_vote` is this slot, read and cleared at the top of the
+    // contract kernel.
     //
     // So a row this arm answers without writing its slot is served a normal
     // top-k, silently, with `abort_when_nan_found` -- the default -- inert.
@@ -1059,6 +1064,17 @@ inline void launch_route(const deep_select::RowParams &params, uint32_t batches,
                 block, /*preselected=*/true);
             return;
         }
+        // This route is three launches, and the histogram one raises the scan
+        // table.  A later stage's launch failing leaves that kernel's work in
+        // flight while the row path answers this call -- and the row path
+        // reads no flag table, so anything raised would sit there until the
+        // next call that uses this table read a stale 1 as its own answer.
+        // Cleared here for the same reason the splits clear theirs after a
+        // failed launch; unreachable through the gate, and cheap enough not
+        // to depend on that.
+        if (params.check_nan && params.scan_flags != nullptr)
+            cudaMemsetAsync(params.scan_flags, 0,
+                            (size_t)batches * sizeof(int32_t), stream);
     }
     deep_select::detail::launch_typed_radix<float, OutIdxT>(
         params, batches, stream, sorted_index, sorted_value, return_value, block,

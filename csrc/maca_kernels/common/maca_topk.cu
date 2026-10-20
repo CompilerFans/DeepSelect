@@ -98,8 +98,8 @@ namespace dsf = deep_select::ffi;
 //     *geometry of this call*, not by the capacity, so a buffer larger than this
 //     call needs is correct by construction.
 //   * the split's kernels write every slot they read back -- stage 1 fills each
-//     candidate slot it is asked for, and `nan_flags` is memset per call --
-//     so nothing is inherited from the previous call.
+//     candidate slot it is asked for, and the contract half reads and clears
+//     each row's NaN vote -- so nothing is inherited from the previous call.
 //   * the lengths table is keyed by `(batches, vocab_size)` -- both arguments of
 //     this call -- and a key it has not seen gets its own buffer.  Its content
 //     is `[vocab_size] * batches`, a pure function of that pair, so the pair
@@ -177,14 +177,15 @@ struct ChunkedScratch {
         lengths_tables.push_back(LengthsEntry{batches, vocab, table});
         return table;
     }
-    // One `int32_t` per row, zeroed once per call that scans.  This is the
-    // table `topk_kernel_radix`'s preselected arm reads to decide whether the
+    // One `int32_t` per row, zeroed once when it grows (each call's contract
+    // half clears whatever it raised).  This is the table
+    // `topk_kernel_radix`'s preselected arm reads to decide whether the
     // row is poisoned -- and it is *read on every preselected path*, while
     // only the two splits used to own one (each embedded in its own workspace
     // layout).  The coarse12 route answers a row without ranking it, so it can
     // hand back a row a scan would have rejected, and it had no table to read:
     // `nan_flags` stayed null and the first `check_nan` read faulted.  This
-    // buffer is that table for every route that does not bring its own.
+    // buffer is that table for every route.
     int32_t *scan_flags = nullptr;
     size_t scan_flags_count = 0;
     // `RowParams::nan_abort_flags`, for the calls that can abort.  Grown like
@@ -457,27 +458,25 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         value_dtype == 1 && detail::chunked_bf16_applies(p, (uint32_t)batches);
     const bool f32_split =
         value_dtype == 0 && detail::chunked_f32_applies(p, (uint32_t)batches);
-    // The routes that answer a row *without* ranking it and read the per-row
-    // scan table in the contract half are the coarse12 arm and the chunks arm
-    // (`topk_coarse12.cuh` / `topk_chunks.cuh` hand `params.scan_flags` to the
-    // contract as its `nan_flags`).  The two splits are **not** readers: each
-    // zeroes and raises a table inside its own workspace (`ws.nan_flags`,
-    // `ws.lengths`) and passes that through -- so listing them here bought a
-    // per-call memset nobody ever read (measured on a C600U: ~4 us of launch
-    // per split call, ~15% of a b1 decode cell).  The shape gate above is not
-    // enough to know whether one of the two reader routes will be taken (they
-    // are reached through `topk_launch`'s own predicates), so the table is
-    // provided for the whole class and only when a route really asks for it:
-    // staying inside that class costs one `cudaMemsetAsync` over `batches`
-    // ints, and it is that memset alone that makes reading a slot legal.  A
-    // plain row run under `check_nan` scans the row itself and never reads
-    // this, but the memset it pays for is 255x smaller than the row scan it
-    // replaces (see `f32_coarse12_applies`), so the class is the right place
-    // to draw the line.
-    const bool needs_scan_table =
-        check_nan && value_dtype == 0 &&
-        (detail::f32_coarse12_applies(p, (uint32_t)batches) ||
-         detail::f32_chunks_applies(p, (uint32_t)batches));
+    // The per-row scan table.  Every route that answers a row **without**
+    // ranking it reads this table in the contract half: the coarse12 arm, the
+    // chunks arm, and both splits (they hand `params.scan_flags` to the
+    // contract as its `nan_flags`).  It is provided for the whole `check_nan`
+    // class rather than for the routes a shape predicate can predict, because
+    // the route is chosen inside `topk_launch` -- and providing it costs one
+    // allocation, not a memset: the table is zeroed once when it grows, and
+    // each call's contract half reads and clears the slots that call could
+    // have raised.  A plain row run under `check_nan` scans the row itself,
+    // never reads this, and pays nothing for the class.
+    //
+    // **The splits must not raise into their own workspace.**  That region is
+    // a geometry-dependent offset inside one grow-only scratch shared by
+    // every split shape and both dtypes, so the slot a call reads is whatever
+    // the previous call wrote at that offset -- a candidate index, not a flag
+    // (measured: a b1 v262144 bf16 cell after a b6 v1048576 call returns the
+    // NaN sentinel on a clean row).  This table is the one region that is only
+    // ever flags.
+    const bool needs_scan_table = check_nan;
     // The coarse12 answer buffer, allocated by the same rule: a call the route
     // can reach gets one, so `topk_launch` can stage the columns it ranks
     // whatever the caller's index width is.  Allocated up front rather than
@@ -606,31 +605,31 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     }
 
     // The per-row scan table, owned here rather than by the route that reads
-    // it.  Only `check_nan` calls that can reach a route answering a row
-    // without ranking it get one (`needs_scan_table` above), the table is
-    // zeroed on the current stream so the kernel that raises a flag is ordered
-    // after it, and it is *not* UNinitialized state a reader could trip over
-    // -- a slot is read on the first call that reads it at all.
+    // it.  Every `check_nan` call gets one (`needs_scan_table` above): which
+    // route answers is decided inside `topk_launch`, after this point.
     //
-    // Zeroing per call rather than tagging an epoch is deliberate: the flag
-    // lives for exactly one call (it answers "is this row poisoned" for the
-    // input as it is now), so a table reused across calls would have to be
-    // cleared in the same place anyway, and a flag left raised from a previous
-    // call is the one failure mode that is silent.
+    // **Zeroed when it is allocated, never per call.**  What makes that safe is
+    // the contract half's invariant, not this buffer's: `topk_kernel_radix`
+    // reads each row's slot and clears it in the same breath, before any arm
+    // can return, so every slot a call could have raised is zero again by the
+    // time that call's kernel completes (see `RowParams::nan_flags`).  The
+    // fresh buffer is therefore the only place a stale 1 could come from, and
+    // this one `cudaMemset` — once, when the scratch grows — replaces an
+    // allocation-bound `cudaMemsetAsync` on every call (~4 us on a C600U, ~15%
+    // of a b1 decode cell, measured).  A caller that ever supplies its own
+    // table owns zeroing it.
     if (needs_scan_table) {
         if (p.scan_flags == nullptr) {
             if ((size_t)batches > scratch.scan_flags_count) {
                 int32_t *grown = nullptr;
                 DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, (size_t)batches * sizeof(int32_t)));
+                DS_CUDA_RUNTIME_CHECK(cudaMemset(grown, 0, (size_t)batches * sizeof(int32_t)));
                 scratch_retire(scratch.retired, scratch.scan_flags);
                 scratch.scan_flags = grown;
                 scratch.scan_flags_count = (size_t)batches;
             }
             p.scan_flags = scratch.scan_flags;
         }
-        DS_CUDA_RUNTIME_CHECK(cudaMemsetAsync(p.scan_flags, 0,
-                                              (size_t)batches * sizeof(int32_t),
-                                              stream));
     }
     // The abort table: same grow-only pattern, opposite zeroing policy.  The
     // contract half writes a slot for every row before it can return, so a

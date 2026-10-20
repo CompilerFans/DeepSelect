@@ -47,19 +47,29 @@ struct RowParams {
     const int32_t *end_ptr;         // null means "whole row"
     const int32_t *idx_offset_ptr;  // null means no offset
     // Chunked path only: the merged column indices the split already ranked,
-    // `topk` per row, and one NaN flag per row raised by the split's own scan.
-    // Null everywhere else.
+    // `topk` per row.  Null everywhere else.
     const int32_t *preselected;
-    const int32_t *nan_flags;
-    // The per-row scan table the *other* routes need: unlike `nan_flags`
-    // (owned by whichever split built it, inside that split's workspace), this
-    // one is allocated and zeroed by the dispatcher for any call that can
-    // reach a route answering a row without ranking it.  There are **two** such
-    // routes and both fold the scan into their own pass 1 -- the coarse12 arm
-    // (`topk_select_coarse12`) and the chunks arm (`topk_select_chunks`); `needs_scan_table`
-    // in `maca_topk.cu` is the single place that decides, and it names both.
-    // Written by that kernel, read by the contract half.  Null when nothing
-    // scans.
+    // One entry per row, raised by whichever kernel walked the row before the
+    // contract half: the split's stage 1 or a route that answers a row without
+    // ranking it -- every one of them reaches it through the dispatcher's
+    // `scan_flags` table below.  **Read and cleared by the contract half in the
+    // same breath**, at the top of `topk_kernel_radix` -- before any arm can
+    // return -- which is what lets the writers OR a plain 1: every slot is
+    // zero again by the end of the call, so no per-call `cudaMemsetAsync` is
+    // needed on any route, and a raised slot can never carry a previous
+    // call's answer into this one.  The tables are zeroed once, when the
+    // scratch grows them, so the invariant holds on the first use as well.
+    // Null when `check_nan` is off or the row path scans inline.
+    int32_t *nan_flags;
+    // The per-row scan table: allocated and owned by the dispatcher, handed to
+    // every route that scans as its `nan_flags` (both splits included -- a
+    // split must not put flags in its own workspace, whose offset is a
+    // geometry-dependent expression into process-global scratch, so a slot can
+    // hold another shape's candidate index; measured: a b1 v262144 bf16 call
+    // returned the sentinel after a b6 v1048576 call).  `needs_scan_table` in
+    // `maca_topk.cu` decides which calls get one.  Written by the scanning
+    // kernel, read and cleared by the contract half (`nan_flags` above is the
+    // field it reaches it through).  Null when nothing scans.
     int32_t *scan_flags;
     // The table `nan_abort_kernel` reads, one entry per row: raised by the
     // contract half for a row it found a NaN in.  Distinct from `scan_flags`
@@ -368,8 +378,10 @@ static __device__ __forceinline__ bool row_has_nan(const ValueT *row,
 // The chunked path's NaN scan, on the split's own grid: one CTA per (row,
 // chunk).  The contract kernel is one CTA per row by construction, which on a
 // small batch is the whole machine parked on six CTAs reading a 12 MB row; this
-// asks the same question at the width the row needs.  `flags` is zeroed by the
-// caller and a row's flag is raised by whichever chunk read the bit pattern.
+// asks the same question at the width the row needs.  `flags` is zero when
+// this kernel runs (the table is zeroed once, when the scratch grows it) and a
+// row's flag is raised by whichever chunk read the bit pattern; the contract
+// half reads and clears it.
 //
 // **Neither split launches this any more.**  Stage 1 reads exactly these bytes
 // at exactly this width, so the scan rides its own load instead: fp32 through
@@ -522,6 +534,10 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
     const uint32_t row = blockIdx.x;
 
     __shared__ int32_t row_offset;
+    // This row's NaN vote, as the kernel that walked the row left it.  Read
+    // and cleared together at the top of the kernel -- see `nan_flags` in
+    // `RowParams`.
+    __shared__ int32_t nan_vote;
     extern __shared__ uint8_t arena_raw[];
     uint32_t *selected;
     uint64_t *sort_buf;
@@ -536,6 +552,21 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
         // the table never needs zeroing between calls (see
         // `RowParams::nan_abort_flags`).
         if (params.nan_abort_flags != nullptr) params.nan_abort_flags[row] = 0;
+        // The vote a split or selector kernel raised for this row: read, then
+        // clear.  The clear is what lets the writers OR a plain 1 -- the slot
+        // is zero again before this call's kernel completes, so no route needs
+        // a per-call `cudaMemsetAsync` and a previous call's answer can never
+        // be read as this one's.  The `length <= topk` shortcut below returns
+        // without looking, and rows that short are never NaN-checked, but the
+        // clear still has to happen here rather than at the read: this is the
+        // only point on every path, and a slot left raised would poison the
+        // next call that uses this row.
+        if (params.check_nan && params.nan_flags != nullptr) {
+            nan_vote = params.nan_flags[row];
+            params.nan_flags[row] = 0;
+        } else {
+            nan_vote = 0;
+        }
     }
     __syncthreads();
     const int32_t idx_offset = row_offset;
@@ -578,23 +609,23 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
     }
 
     // ── NaN detection ───────────────────────────────────────────────────────
-    // The chunked path has already answered this question across the whole row
-    // with the machine busy (`nan_scan_kernel`), which is the difference that
-    // matters when the batch is small: this CTA alone would be the only thing
-    // reading the row.
+    // A route that answered this row without ranking it left its vote in the
+    // per-row table -- read and cleared at the top of this kernel, into
+    // `nan_vote`.  The row path instead folds the scan into pass 1 below, so
+    // either way the input is walked exactly once.
     //
     // `params.check_nan` is uniform across the grid, so skipping the
     // `__syncthreads_or` skips it in every thread of every CTA -- no barrier is
     // left half-entered.  When it is false the flag tables are neither written
-    // (`nan_scan_kernel` is not launched) nor read (this branch), which is why
-    // the chunked arm can skip its memset as well.
+    // nor read.
     bool nan_local = false;
     // The row kernel folds the scan into pass 1 and writes the vote here; only
-    // the preselected arm has it already, from the flag table the split raised.
-    // Asking `row_has_nan` as well would walk the row a third time.
+    // the preselected arm has it already, from the flag table the earlier
+    // kernel raised.  Asking `row_has_nan` as well would walk the row a third
+    // time.
     const bool fold_nan = params.check_nan && !kPreSelected;
     if constexpr (kPreSelected) {
-        nan_local = params.check_nan && params.nan_flags[row] != 0;
+        nan_local = params.check_nan && nan_vote != 0;
         if (nan_local) {
             if (tid == 0) {
                 out_index_row[0] = (OutIdxT)0x3F3F3F3F;
