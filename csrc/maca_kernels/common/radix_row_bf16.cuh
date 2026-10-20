@@ -113,7 +113,10 @@ __device__ __forceinline__ void hist_add_bf16(
 // `kNan` folds the contract's NaN scan into this very load -- the same trade
 // `hist_add_f32` makes, and for the same reason: the bytes are read anyway, so
 // the scan is one compare per element here instead of a whole extra row walk.
-template <bool kNan = false>
+// `kHist` is what the block-summary walk turns off: the only count that walk
+// owes is one per 64-element block (its group's max), so the element atomics
+// are the whole cost it is built to avoid.
+template <bool kNan = false, bool kHist = true>
 __device__ __forceinline__ bool hist_add_bf16_wide(
     uint32_t* s_wide, const maca_bfloat16* input, uint32_t idx,
     uint32_t* max_key = nullptr)
@@ -144,8 +147,10 @@ __device__ __forceinline__ bool hist_add_bf16_wide(
     for (int i = 0; i < 4; i++) {
         const uint32_t kp =
             w[i] ^ ((((w[i] >> 15) & 0x00010001u) * 0x7FFFu) + 0x80008000u);
-        atomicAdd(&s_wide[(kp >> kCoarse12Shift) & 0x0FFFu], 1u);
-        atomicAdd(&s_wide[kp >> (16 + kCoarse12Shift)], 1u);
+        if constexpr (kHist) {
+            atomicAdd(&s_wide[(kp >> kCoarse12Shift) & 0x0FFFu], 1u);
+            atomicAdd(&s_wide[kp >> (16 + kCoarse12Shift)], 1u);
+        }
         // The block-max summary (see `radix_topk_row_bf16_b`) wants the largest
         // key in this thread's 8 elements; both halves are already in `kp`, and
         // the key's order is the bin's, so one max over keys is one max over
@@ -240,6 +245,13 @@ __device__ __forceinline__ void overflow_emit_member(
 // nothing to do with.
 constexpr uint32_t kSkipBlockElems = 64;
 
+// The density floor for the block summary's histogram: the second walk reads
+// the blocks whose max is at or above the cut, which is `1-(1-k/V)^64` of
+// them, so the route costs `1/855 + f/545` against the single element walk's
+// `1/545` and breaks even at V/k ~= 142 (measured on C600U).  The floor is
+// twice that, because below it the row is walked twice for nothing.
+constexpr uint32_t kBlockHistMinRowPerSlot = 256;
+
 // Walk the blocks a summary named, with the aligned row walk's own layout: the
 // eight lanes of a group take one `uint4` each out of the same 64-element block
 // and `body(idx, raw)` sees the same elements, in the same per-lane order, that
@@ -264,6 +276,90 @@ __device__ __forceinline__ void walk_kept_blocks(const maca_bfloat16* input,
 #pragma unroll
         for (int i = 0; i < 8; i++) body(base + lane * 8u + (uint32_t)i, h[i]);
     }
+}
+
+// ── the block-summary walk ────────────────────────────────────────────────
+// One pass over the row's whole blocks: every lane reads one `uint4`, a
+// 3-step group tree reduces the eight lanes' maxima into the block's, and
+// lane 0 records the block's 12-bit bin.  A group enters and leaves the body
+// together -- `blk` is `idx >> 6` with the bound hoisted to the group -- so
+// the group's own mask, and not the wave's, is the exact set of participating
+// lanes, including in the last partially filled block.
+//
+// `kHist` is the element histogram, and the two callers differ in exactly it:
+// the pass that wants element counts pays the 128 atomics per block, the one
+// that wants only the block summary pays the block's own.
+template <bool kHist, bool kNan, uint32_t BLOCK_SIZE>
+__device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
+                                             uint32_t vec_len,
+                                             uint16_t* block_max,
+                                             uint32_t* s_wide) {
+    const uint32_t tx = threadIdx.x;
+    const uint32_t group = tx >> 3;
+    const uint32_t lane = tx & 7u;
+    // Whole blocks only.  The list walk moves a `uint4` per lane and must not
+    // read past the row, so the elements past the last whole block stay with
+    // the tail loop both walks already carry -- and with this bound the guarded
+    // load below has nothing left to guard.
+    const uint32_t step = BLOCK_SIZE / 8;
+    bool nan_local = false;
+    uint32_t blk = group;
+#ifdef __MACACC__
+    // Two blocks in flight per iteration where the register file affords it:
+    // the walk keeps one outstanding uint4 per thread, which is a
+    // memory-latency cap, not a bandwidth one -- the measured read curve on a
+    // C600U is 265 -> 956 -> 1390 GB/s for 1/2/4 outstanding at one 512-thread
+    // CTA per SM (1024 -> 1616 at two).  The second block is the whole gap on
+    // under-filled grids and ~6% once the shared atomics cap.  The C500's 32 MT
+    // wall keeps the single-issue walk.
+    if constexpr (ARCH_REGS_PER_AP >= 131072) {
+        for (; ((blk + step + 1u) << 6) <= vec_len; blk += 2 * step) {
+            uint32_t key0 = 0, key1 = 0;
+            nan_local |= hist_add_bf16_wide<kNan, kHist>(
+                s_wide, input, (blk << 6) + lane * 8u, &key0);
+            nan_local |= hist_add_bf16_wide<kNan, kHist>(
+                s_wide, input, ((blk + step) << 6) + lane * 8u, &key1);
+            DS_GROUP_MAX8_TREE(key0);
+            DS_GROUP_MAX8_TREE(key1);
+            if (lane == 0u) {
+                block_max[blk] = (uint16_t)(key0 >> kCoarse12Shift);
+                block_max[blk + step] = (uint16_t)(key1 >> kCoarse12Shift);
+                if constexpr (!kHist) {
+                    atomicAdd(&s_wide[key0 >> kCoarse12Shift], 1u);
+                    atomicAdd(&s_wide[key1 >> kCoarse12Shift], 1u);
+                }
+            }
+        }
+    }
+#endif
+    for (; ((blk + 1u) << 6) <= vec_len; blk += step) {
+        const uint32_t idx = (blk << 6) + lane * 8u;
+        uint32_t key = 0;
+        nan_local |= hist_add_bf16_wide<kNan, kHist>(s_wide, input, idx, &key);
+#ifdef __MACACC__
+        DS_GROUP_MAX8_TREE(key);
+#else
+        const unsigned gmask = 0xFFu << (tx & 0x18u);
+        // The tree is chained -- each shuffle reads what the step before it
+        // produced.  Three shuffles taken off the *same* value would give lane
+        // 0 the max over lanes 0,1,2,4 only, and a summary that can
+        // under-estimate a block's largest key is not a skip hint: a block
+        // holding a candidate would be compacted away, so the collect would
+        // count and stage a member of the threshold bin that the walk never
+        // reaches.
+        uint32_t other = (uint32_t)__shfl_down_sync(gmask, key, 1);
+        key = key > other ? key : other;
+        other = (uint32_t)__shfl_down_sync(gmask, key, 2);
+        key = key > other ? key : other;
+        other = (uint32_t)__shfl_down_sync(gmask, key, 4);
+        key = key > other ? key : other;
+#endif
+        if (lane == 0u) {
+            block_max[blk] = (uint16_t)(key >> kCoarse12Shift);
+            if constexpr (!kHist) atomicAdd(&s_wide[key >> kCoarse12Shift], 1u);
+        }
+    }
+    return nan_local;
 }
 
 template <uint32_t BLOCK_SIZE, bool kNan = false, bool kSkip = true>
@@ -330,75 +426,31 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // summary granularity can be the same number.  A row that takes the scalar
     // walk gets no summary and is walked whole by the collect.
     const bool summary_wanted = kSkip && block_max != nullptr && input_aligned;
+    // The block histogram is the same summary spent differently: the walk
+    // counts blocks instead of elements, the cut that yields names the
+    // blocks that can hold a candidate, and the element counts are taken
+    // over those alone.  It pays while the kept fraction `1-(1-k/V)^64` is
+    // small -- its arithmetic is `1/855 + f/545` against the element walk's
+    // `1/545` measured on C600U, so it is a wash at V/k ~= 142 -- and the
+    // floor is twice that for margin.  Below it the row is walked twice for
+    // nothing, so the dense cells keep the single element walk.
+    const bool block_hist =
+        summary_wanted && topk <= length / kBlockHistMinRowPerSlot;
     bool nan_local = false;
     if (input_aligned) {
         if (summary_wanted) {
             // The same walk, the same addresses: `blk` is `idx >> 6` with the
             // bound hoisted to the 8-lane group, so a group enters and leaves
-            // the body together.  That is what makes the group's own mask (and
-            // not the full wave's) the exact set of participating lanes --
-            // including in the last, partially filled block of a row that is
-            // not 64-aligned, where some lanes of the group have no element to
-            // read.
-            const uint32_t group = tx >> 3;
-            const uint32_t lane = tx & 7u;
-            // Whole blocks only.  The list walk moves a `uint4` per lane and
-            // must not read past the row, so the elements past the last whole
-            // block stay with the tail loop both walks already carry -- and
-            // with this bound the guarded load below has nothing left to guard.
-            const uint32_t step = BLOCK_SIZE / 8;
-            uint32_t blk = group;
-#ifdef __MACACC__
-            // Two blocks in flight per iteration where the register file
-            // affords it: the walk keeps one outstanding uint4 per thread,
-            // which is a memory-latency cap, not a bandwidth one -- the
-            // measured read curve on a C600U is 265 -> 956 -> 1390 GB/s for
-            // 1/2/4 outstanding at one 512-thread CTA per SM (1024 -> 1616 at
-            // two).  The second block is the whole gap on under-filled grids
-            // and ~6% once the shared atomics cap.  The C500's 32 MT wall
-            // keeps the single-issue walk.
-            if constexpr (ARCH_REGS_PER_AP >= 131072) {
-                for (; ((blk + step + 1u) << 6) <= vec_len; blk += 2 * step) {
-                    uint32_t key0 = 0, key1 = 0;
-                    nan_local |= hist_add_bf16_wide<kNan>(
-                        s_wide, input, (blk << 6) + lane * 8u, &key0);
-                    nan_local |= hist_add_bf16_wide<kNan>(
-                        s_wide, input, ((blk + step) << 6) + lane * 8u, &key1);
-                    DS_GROUP_MAX8_TREE(key0);
-                    DS_GROUP_MAX8_TREE(key1);
-                    if (lane == 0u) {
-                        block_max[blk] = (uint16_t)(key0 >> kCoarse12Shift);
-                        block_max[blk + step] =
-                            (uint16_t)(key1 >> kCoarse12Shift);
-                    }
-                }
-            }
-#endif
-            for (; ((blk + 1u) << 6) <= vec_len; blk += step) {
-                const uint32_t idx = (blk << 6) + lane * 8u;
-                uint32_t key = 0;
-                nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx, &key);
-#ifdef __MACACC__
-                DS_GROUP_MAX8_TREE(key);
-#else
-                const unsigned gmask = 0xFFu << (tx & 0x18u);
-                // The tree is chained -- each shuffle reads what the step before
-                // it produced.  Three shuffles taken off the *same* value would
-                // give lane 0 the max over lanes 0,1,2,4 only, and a summary
-                // that can under-estimate a block's largest key is not a
-                // skip hint: a block holding a candidate would be compacted
-                // away, so the collect would count and stage a member of the
-                // threshold bin that the walk never reaches.
-                uint32_t other = (uint32_t)__shfl_down_sync(gmask, key, 1);
-                key = key > other ? key : other;
-                other = (uint32_t)__shfl_down_sync(gmask, key, 2);
-                key = key > other ? key : other;
-                other = (uint32_t)__shfl_down_sync(gmask, key, 4);
-                key = key > other ? key : other;
-#endif
-                if (lane == 0u)
-                    block_max[blk] = (uint16_t)(key >> kCoarse12Shift);
-            }
+            // the body together.  Which histogram it leaves behind is the one
+            // decision this pass makes: the block summary's, when the row is
+            // dense enough for the second walk to be short, and the elements'
+            // otherwise.
+            if (block_hist)
+                nan_local |= summary_walk<false, kNan, BLOCK_SIZE>(
+                    input, vec_len, block_max, s_wide);
+            else
+                nan_local |= summary_walk<true, kNan, BLOCK_SIZE>(
+                    input, vec_len, block_max, s_wide);
         } else {
             for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8)
                 nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx);
@@ -414,7 +466,10 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         const uint32_t hist_tail_start = summary_wanted ? list_end : vec_len;
         for (uint32_t idx = hist_tail_start + tx; idx < length; idx += BLOCK_SIZE) {
             const maca_bfloat16 raw = __ldg(input + idx);
-            atomicAdd(&s_wide[refine_bin(raw) >> kCoarse12Shift], 1u);
+            // On the block-histogram path the second walk's own tail counts
+            // these elements; counting them here as well counts them twice.
+            if (!block_hist)
+                atomicAdd(&s_wide[refine_bin(raw) >> kCoarse12Shift], 1u);
             if (kNan) nan_local |= bf16_is_nan(__bfloat16_as_ushort(raw));
         }
     } else {
@@ -433,55 +488,71 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // Fold 4,096 -> 256, one bin per high byte, so the scan stays the same
     // 256-wide warp scan the 8-bit level used; thread 0 then narrows inside the
     // byte the scan lands on.  This is the last read of the coarse histogram.
-    if (tx < RADIX) {
-        uint32_t c = 0;
-        #pragma unroll
-        for (uint32_t s = 0; s < kCoarse12SubBins; s++)
-            c += s_wide[(tx << kCoarse12Shift) + s];
-        s_histogram[tx] = c;
-    } else if (tx == RADIX) {
-        s_histogram[RADIX] = 0;
-        // The refine's landing state, initialized here so that a crossing the
-        // scan cannot find leaves a defined bin behind rather than whatever the
-        // previous launch on this SM left in shared memory.
-        s_threshold_bin_id = 0;
-        s_last_remain = 0;
-    }
-    __syncthreads();
-
+    //
+    // It runs twice on the block-histogram path -- once over the block counts,
+    // once over the element counts of the blocks that first cut keeps -- so it
+    // is a lambda.  `want` is the count its crossing is taken at; what it
+    // leaves behind is the 12-bit bin in `s_high_threshold_bin_id` and the
+    // count strictly above it in `s_wide_above`.
     uint32_t exclusive_suffix = 0;
-    uint32_t inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
-
-    if (tx < RADIX && inclusive_suffix > remain_topk && exclusive_suffix <= remain_topk) {
-        s_high_threshold_bin_id = tx; s_num_input[0] = 0; s_counter = 0;
-    }
-    __syncthreads();
-
-    // The scan named a high byte; the 12-bit threshold is the sub-bin inside it
-    // where the count crosses `remain_topk`.  `above` ends as the count of keys
-    // strictly above that threshold, which is what the emit owes the window.
-    if (tx == 0) {
-        const uint32_t high = s_high_threshold_bin_id;
-        uint32_t above = s_histogram[high + 1];
-        uint32_t sub = 0;
-        for (int s = (int)kCoarse12SubBins - 1; s >= 0; --s) {
-            const uint32_t c = s_wide[(high << kCoarse12Shift) + (uint32_t)s];
-            // The bin has to carry what the window still wants, and the test is
-            // against the window `remain_topk` itself -- not against what is
-            // left once the byte above has been counted.  Testing the remainder
-            // fires a sub-bin early whenever the byte has slack, which leaves
-            // the window short and the refine with no bin to land on.
-            if (above + c > remain_topk) { sub = (uint32_t)s; break; }
-            above += c;
+    uint32_t inclusive_suffix = 0;
+    const auto scan_threshold = [&](uint32_t want) {
+        if (tx < RADIX) {
+            uint32_t c = 0;
+            #pragma unroll
+            for (uint32_t s = 0; s < kCoarse12SubBins; s++)
+                c += s_wide[(tx << kCoarse12Shift) + s];
+            s_histogram[tx] = c;
+        } else if (tx == RADIX) {
+            s_histogram[RADIX] = 0;
+            // The refine's landing state, initialized here so that a crossing the
+            // scan cannot find leaves a defined bin behind rather than whatever the
+            // previous launch on this SM left in shared memory.  The 12-bit bin is
+            // initialized with it: the block summary's histogram need not have a
+            // crossing at all -- `k >= nb` puts every block inside the window, and
+            // then the cut it would otherwise leave is the previous row's.
+            s_threshold_bin_id = 0;
+            s_high_threshold_bin_id = 0;
+            s_last_remain = 0;
         }
-        s_high_threshold_bin_id = (high << kCoarse12Shift) | sub;
-        s_wide_above = above;
-        // The kept-block list's population, cleared here so the barrier that
-        // publishes the threshold publishes this too and the list build below
-        // needs only the one barrier it ends on.
-        s_nlist = 0;
-    }
-    __syncthreads();
+        __syncthreads();
+
+        exclusive_suffix = 0;
+        inclusive_suffix = run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
+
+        if (tx < RADIX && inclusive_suffix > want && exclusive_suffix <= want) {
+            s_high_threshold_bin_id = tx; s_num_input[0] = 0; s_counter = 0;
+        }
+        __syncthreads();
+
+        // The scan named a high byte; the 12-bit threshold is the sub-bin inside it
+        // where the count crosses `want`.  `above` ends as the count of keys
+        // strictly above that threshold, which is what the emit owes the window.
+        if (tx == 0) {
+            const uint32_t high = s_high_threshold_bin_id;
+            uint32_t above = s_histogram[high + 1];
+            uint32_t sub = 0;
+            for (int s = (int)kCoarse12SubBins - 1; s >= 0; --s) {
+                const uint32_t c = s_wide[(high << kCoarse12Shift) + (uint32_t)s];
+                // The bin has to carry what the window still wants, and the test is
+                // against the window itself -- not against what is left once the
+                // byte above has been counted.  Testing the remainder fires a
+                // sub-bin early whenever the byte has slack, which leaves the
+                // window short and the refine with no bin to land on.
+                if (above + c > want) { sub = (uint32_t)s; break; }
+                above += c;
+            }
+            s_high_threshold_bin_id = (high << kCoarse12Shift) | sub;
+            s_wide_above = above;
+            // The kept-block list's population, cleared here so the barrier that
+            // publishes the threshold publishes this too and the list build below
+            // needs only the one barrier it ends on.
+            s_nlist = 0;
+        }
+        __syncthreads();
+    };
+
+    scan_threshold(remain_topk);
 
     // ── the kept-block list ─────────────────────────────────────────────────
     // A block whose max bin is at or above the threshold is one the walks below
@@ -496,22 +567,62 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // of the row anyway and the list is traffic on top of it (measured: 0.63 at
     // half the blocks, 1.21 at all of them) -- so the count decides and the list
     // is not written past the cap.  `nlist` counts every kept block either way.
-    const uint32_t coarse_threshold = s_high_threshold_bin_id;
+    // The cut is the block summary's when the block histogram took the first
+    // scan, and the element threshold otherwise; either one names blocks that
+    // can hold a candidate.
     const uint32_t list_cap = nb - (nb >> 2);
     uint32_t nlist = 0;
     bool use_list = false;
     if (summary_wanted) {
+        const uint32_t cut = s_high_threshold_bin_id;
         for (uint32_t b = tx; b < nb; b += BLOCK_SIZE) {
-            if (block_max[b] < coarse_threshold) continue;
+            if (block_max[b] < cut) continue;
             const uint32_t pos = atomicAdd(&s_nlist, 1u);
             if (pos < list_cap) block_list[pos] = b;
         }
+        // The histogram is spent; the second walk fills it with element counts
+        // over the blocks above, on the far side of this same barrier.
+        if (block_hist)
+            for (uint32_t b = tx; b < kCoarse12Bins; b += BLOCK_SIZE) s_wide[b] = 0;
         __syncthreads();
         nlist = s_nlist;
         // `list_cap > 0` matters on a row with no whole block at all: there the
         // vector walk is the better of the two, and the list covers nothing.
         use_list = list_cap > 0 && nlist <= list_cap;
     }
+
+    // ── the element histogram, over what the block cut kept ─────────────────
+    // The block summary counts blocks, not elements, so the element threshold
+    // is still owed -- the k-th largest block max is only a lower bound on it.
+    // What the cut buys is where those counts come from: a block it dropped
+    // holds no element at or above the cut, and the k-th element is at or
+    // above it, so the blocks it keeps are the only ones that can hold one.  On
+    // the long rows that is 6% of the row at V/k = 1024 and 22% at 256, against
+    // the whole row the single element walk pays.
+    if (block_hist) {
+        const auto hist_one = [&](uint32_t idx, maca_bfloat16 raw) {
+            atomicAdd(&s_wide[refine_bin(raw) >> kCoarse12Shift], 1u);
+        };
+        if (use_list) {
+            walk_kept_blocks<BLOCK_SIZE>(input, block_list, nlist, hist_one);
+        } else {
+            for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
+                uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
+                const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
+                #pragma unroll
+                for (int i = 0; i < 8; i++) hist_one(idx + i, h[i]);
+            }
+        }
+        // The row past the last whole block, exactly where the collect's tail
+        // starts -- the same agreement the first walk's tail keeps.
+        const uint32_t hist_tail_start = use_list ? list_end : vec_len;
+        for (uint32_t idx = hist_tail_start + tx; idx < length; idx += BLOCK_SIZE)
+            hist_one(idx, __ldg(input + idx));
+        __syncthreads();
+        scan_threshold(remain_topk);
+    }
+
+    const uint32_t coarse_threshold = s_high_threshold_bin_id;
 
     {
         const auto threshold_bin = coarse_threshold;
