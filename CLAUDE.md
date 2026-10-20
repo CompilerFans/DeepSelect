@@ -10,7 +10,7 @@ This directory is **its own git repository** (`origin` = `git@github.com:Compile
 - Always address this repo explicitly: `git -C /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect <cmd>`. `cd` does not persist across Bash calls (cwd resets to the primary working directory), so absolute paths everywhere.
 - This repo is designed to be standalone: it must import and build with `deep_gemm` absent (see `topk_deep_gemm`'s lazy import in `deep_select/interface.py`). The outer package is a soft dependency, reached only when a caller asks for `backend="deep_gemm"`.
 
-`docs/C500-radix-handover.zh.md` is the current handover manual for the C500 row kernel; `docs/C500-radix-perf-ledger.zh.md` is its measured before→after ledger. Both are authoritative and current as of HEAD — read them before touching `csrc/maca_kernels/common/`.
+`docs/C500-radix-handover.zh.md` is the current handover manual for the C500 row kernel; `docs/C500-radix-perf-ledger.zh.md` is its measured before→after ledger. Both are authoritative and current as of HEAD — read them before touching `csrc/maca_kernels/common/`. `docs/C600U-algorithm-choice.zh.md` records why the upstream one-pass dataflow is not the shape a C600U runs, and what the routes actually shipped there are (with the measured evidence each claim rests on).
 
 ## What this is
 
