@@ -63,6 +63,11 @@ def get_stride_requirement() -> Tuple[int, int]:
         return _ALIGNMENT_REQUIREMENT_BYTES
 
 
+def get_alignment_requirement() -> Tuple[int, int]:
+    """DeepInfer's spelling of :func:`get_stride_requirement`."""
+    return get_stride_requirement()
+
+
 @log_call
 def topk(
     input: torch.Tensor,
