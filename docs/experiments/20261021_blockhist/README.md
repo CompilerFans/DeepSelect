@@ -233,3 +233,14 @@ PYTHONPATH=<tree>:<repo>/tests python tests/test.py --backend maca_c --sample 20
   格,门以下两格是对照。
 - 成本模型只在 C600-U 上标定;`kBlockHistMinRowPerSlot` 的 256 没有在
   xcore1500 上验证过(该族 AP 数不同,原子顶也不同)。
+- **`095224c` 之后的相位拆分还没量**:上面 §0 的表是改动前的。下一次测量的
+  探针已经准备好、**未运行**——`patch_row_phase_after.py` + `row_phase_after.py`
+  (锚点按 `43e566a` 的树校验过,本地试打过;它把 §0 的 hist 一相拆成
+  hist1a / fold1 / list / hist1b / collect / ref-cumsum / last,正好对应块
+  直方图造出来的两段)。跑它才能决定下一个杠杆落在第二趟 walk、collect 还是
+  fold/scan 上,而不是按 14.16 ms 减去 9.9 ms 的差去猜。
+- **`095224c` 的提交信息和 `C600U-algorithm-choice.zh.md` 引用的 868 GB/s
+  是反解值,不是读数**:8.59 GB ÷ 9.9 ms,而 9.9 ms 来自"walk2 的 854.6 GB/s
+  形态 + 其余相位不变"这一模型与实测 cell 总量 14.16 ms 的对齐(模型偏乐观
+  2.6%)。唯一实测的是 14.16 ms 和两个微基准(545 / 855)。`095224c` 已推送,
+  历史不改;`C600U-algorithm-choice.zh.md` 与 §8 这条是本记录对它的更正。
