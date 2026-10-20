@@ -6,7 +6,7 @@
 // The body mirrors `topk_bf16_chunk_stage1_kernel_k` in
 // `csrc/maca_kernels/common/radix_chunked.cuh`; keep it in step with that
 // function (the chunk geometry, the rank, the candidate write, the NaN flag).
-#include "../../maca_kernels/common/radix_row_bf16.cuh"
+#include <csrc/maca_kernels/common/radix_row_bf16.cuh>
 
 #ifndef STAGE1_TOPK
 #define STAGE1_TOPK 512

@@ -1381,6 +1381,33 @@ git -C $D push origin main
 
 Never a bare `git commit -a` (see repo identity, top).
 
+## Include discipline — the kernel tree spells includes DeepJIT's way
+
+**Every project include in the kernel tree (`csrc/maca_kernels/common/` and the
+generated `csrc/maca_kernels/xcore<N>/instantiations/`) is an angle-bracket,
+repo-root-prefixed path** — `#include <csrc/maca_kernels/common/radix_core.cuh>`,
+never `#include "radix_core.cuh"` or `#include "../../common/contract.cuh"`.
+DeepJIT's include parser tracks only that form (quoted includes are rejected
+outright, and its digest covers only prefixed paths), and the AOT build resolves
+them because `setup.py` puts the repo root on the include path.  New kernel
+headers must follow the same form from day one; `scripts/generate_instantiations.py`
+emits it, so regenerating the instantiation files cannot regress them.
+
+Deliberate exceptions, which must not be "fixed" into the same form:
+
+- `csrc/3rdparty/kerutils/` is a vendored upstream library whose value is
+  byte-parity with upstream for the re-merge; its includes stay upstream's.
+- `csrc/ffi/` is the host-only FFI layer and is never a JIT feed.
+- `csrc/maca_kernels/legacy/` is the reserved, unbuilt port.
+
+The one constraint this does **not** solve: DeepJIT also requires exactly one
+device kernel per compilation unit, and an instantiation TU pulls in the whole
+chunk/fp32 launcher set.  A JIT feed therefore stays a self-contained single
+kernel written against a device-inline core (`tools/jit_probe/stage1_probe.cu`
+is the pattern); the include form only removes the flattening half of that
+(`tools/jit_probe/flatten.py` still exists for the day an instantiation TU must
+be probed anyway).
+
 **Debugging mis-ranked output**: the fastest localizer is to write the kernel's threshold triple `{wide_threshold, above, fine_threshold, remain, num_staged, last_remain}` into `output[topk-8+tx]` on `blockIdx.x == 0 && tx < 8` and compare it against the same row computed with torch on CPU. That is how the `0xBFA` vs true `0xBFC`-class bug was found in one step. Clean it up afterwards — `rg RKPROBE` must be 0. (This probe is written for the radix row kernel's threshold triple (`radix_row_bf16.cuh`); `csrc/maca_kernels/legacy/` has a different dataflow and no equivalent variables.)
 
 Symptom → first look (handover §8): wrong-but-not-much (a few slots, rank off by a few) → the threshold's subtraction convention (the `above + c > remain_topk` rule); `Memory Violation(0x4)` / `ATU Fault` → first the probe's missing `set_default_device`, then an out-of-range threshold leaving a shared variable uninitialized; one cell slow while others unchanged → occupancy, check `static + dynamic` against 32,768; source changed with no behavior change → a stale `.so`; compile-time `undeclared identifier` → constant/helper ordering in the radix headers (constants live in `radix_common.cuh`, included first); **wrong indices that change run to run → a lane-width bug** (a 32-bit mask or `/ 32` on a 64-lane wave in `csrc/maca_kernels/legacy/`), not a threshold-convention one — a fixed offset is the threshold, a varying one is a race.
