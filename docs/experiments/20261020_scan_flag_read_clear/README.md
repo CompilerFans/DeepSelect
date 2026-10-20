@@ -12,7 +12,7 @@
 
 ## 症状（改前实测）
 
-`/tmp/repro_flags.py`（C600-U，改前产物）：
+`repro_flags.py`（本目录，C600-U，改前产物）：
 
 ```
 b1v262144 cold  oob 0 / 512  sentinel False ...
@@ -21,6 +21,8 @@ b1v262144 warm  oob 1 / 512  sentinel True  first [1061109567, ...]
 ```
 
 warm 调用（b1 v262144 k512 bf16，输入无 NaN）第一槽就是 `0x3F3F3F3F`。
+上面是改前脚本的原始输出；提交的 `repro_flags.py` 把同一序列改成逐项
+`OK` / `FAIL`。
 
 ## 机制
 
@@ -46,16 +48,20 @@ memset 只是把症状盖住，代价是一次发射。
 
 ## 验证
 
-- `/tmp/nan_state_test.py` 四模式：`CLEAN_OK` / `STATE_TEST_OK` /
-  `ABORT_TEST_OK` / `nan_expect_trap`（trap 在 `nan_abort_kernel<128>`）。
-- repro 的 warm 调用 `sentinel False`，`oob 0 / 512`。
+- `repro_flags.py`（本目录）：bf16/fp32 两套 cold-clean → dirty(NaN) →
+  warm-clean → `check_nan=False` → dirty-again 序列；默认扫描与
+  `DS_FUSE_NAN_OFF=1` 两种配置均 `RESULT OK`。
+- `nan_trap.py`（本目录）：b1 v262144 bf16 含 NaN、`abort_when_nan_found=True`，
+  trap 在 `nan_abort_kernel<128>`。
 - 改前 gate 报出的三个失败形状单独复跑全过：
   `b47 v682965 k512 fp32 offset`、`b4096 v225467 k1 fp32`、
   `b1 v262144 k512 bf16`。
 - `./run_test.sh --all --sample 1000 -rf`（C600-U，产物 md5
   `2651fe3d991dc54912335d9bd922abf7`，提交前工作树）：perf **147/147**，
   correctness **1131/1131**（1149 抽样中 18 个 OOM skip），`check_fail 0`、
-  `crash 0`、`unsupported 0`，`GATE_RC=0`。
+  `crash 0`、`unsupported 0`，`GATE_RC=0`。独立复跑同计数（产物 md5
+  `7008d9ebd3952d100d91977775a19f63`，收据
+  `results/deepselect_run_20261020_155618.txt`）。
 
 ## 代价与边界
 
