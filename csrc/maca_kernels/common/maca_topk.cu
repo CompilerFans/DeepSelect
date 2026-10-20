@@ -42,23 +42,23 @@
 #include <mutex>
 #include <vector>
 
-#include "structs.h"
+#include <csrc/structs.h>
 // The NaN predicates and the order-preserving key encodes, shared with the
 // dataflow headers below.
-#include "primitives.cuh"
+#include <csrc/maca_kernels/common/primitives.cuh>
 // The ported C500 dataflow (see the provenance banner in that file).  It is
 // included here so that this translation unit -- the one `setup.py` builds --
 // is what proves it compiles under the mxcc/cu-bridge toolchain, and so that
 // the bf16 selection path in `contract.cuh` is a header-only dependency.
-#include "radix_core.cuh"
+#include <csrc/maca_kernels/common/radix_core.cuh>
 // The contract half, the two ported routes -- each of which includes the
 // contract half it hands its answer to -- and the routing that picks between
 // them.  The ladder itself is `routing.cuh`'s `topk_launch`; what is left
 // below is the scratch the ladder is handed and the tvm-ffi entry.
-#include "contract.cuh"
-#include "topk_coarse12.cuh"
-#include "topk_chunks.cuh"
-#include "routing.cuh"
+#include <csrc/maca_kernels/common/contract.cuh>
+#include <csrc/maca_kernels/common/topk_coarse12.cuh>
+#include <csrc/maca_kernels/common/topk_chunks.cuh>
+#include <csrc/maca_kernels/common/routing.cuh>
 
 // ── the tvm-ffi entry points ────────────────────────────────────────────────
 //
@@ -67,8 +67,8 @@
 // entry and its behavior is not tied to the host's torch build.  The contract
 // checks that used to be `TORCH_CHECK` are `DS_HOST_CHECK`, the tensors are
 // `tvm::ffi::TensorView`, and the stream comes from the FFI environment.
-#include "ffi_error.h"
-#include "ffi_tensor.h"
+#include <csrc/ffi/ffi_error.h>
+#include <csrc/ffi/ffi_tensor.h>
 
 #include <tvm/ffi/extra/c_env_api.h>
 
@@ -684,5 +684,5 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
 
 }  // namespace deep_select
 
-#include "ffi_entries.h"
+#include <csrc/ffi/ffi_entries.h>
 

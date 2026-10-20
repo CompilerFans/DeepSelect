@@ -18,16 +18,16 @@
 
 // The family table, for `ARCH_REGS_PER_AP` -- the budget the `kSkipRow`
 // predicate below is sized against.
-#include "structs.h"
+#include <csrc/structs.h>
 
 // The NaN predicates and the order-preserving key encodes, shared with the
 // dataflow headers below.
-#include "primitives.cuh"
+#include <csrc/maca_kernels/common/primitives.cuh>
 // The ported C500 dataflow (see the provenance banner in that file).  Its row
 // entries are what `radix_select_row` dispatches to, and the launchers below
 // are how every route -- the two splits and the two ported ones -- hands its
 // answer to `topk_kernel_radix`.
-#include "radix_core.cuh"
+#include <csrc/maca_kernels/common/radix_core.cuh>
 
 namespace deep_select {
 

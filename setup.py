@@ -411,6 +411,10 @@ def build_for_maca():
     # toolkit's own `include/`, which is where `maca_bfloat16.h` and `cub/` are.
     include_dirs = [
         os.path.join(this_dir, "csrc"),
+        # The repo root itself: kernel-tree includes are spelled DeepJIT's way
+        # (`<csrc/...>` from the root, angle-bracket and prefixed), so the root
+        # has to be on the path for them to resolve in this build too.
+        this_dir,
         # `csrc/ffi/` -- the tvm-ffi edge (tensor/error/check helpers).  Every
         # kernel source includes it as `"ffi_..."`, so the directory itself is
         # on the path; nothing names it by relative depth, which is what keeps

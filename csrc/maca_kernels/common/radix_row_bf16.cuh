@@ -1,8 +1,8 @@
 #ifndef RADIX_ROW_BF16_CUH
 #define RADIX_ROW_BF16_CUH
 
-#include "structs.h"   // ARCH_REGS_PER_AP -- the pair-walk's family gate
-#include "radix_common.cuh"
+#include <csrc/structs.h>   // ARCH_REGS_PER_AP -- the pair-walk's family gate
+#include <csrc/maca_kernels/common/radix_common.cuh>
 
 // The block-max summary's step-down tree as a MACRO, so the text the compiler
 // sees is byte-identical to the inline form it replaced.  A function form

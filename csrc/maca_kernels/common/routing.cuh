@@ -9,10 +9,10 @@
 #include <cstdint>
 #include <cstdlib>
 
-#include "structs.h"
-#include "contract.cuh"
-#include "topk_coarse12.cuh"
-#include "topk_chunks.cuh"
+#include <csrc/structs.h>
+#include <csrc/maca_kernels/common/contract.cuh>
+#include <csrc/maca_kernels/common/topk_coarse12.cuh>
+#include <csrc/maca_kernels/common/topk_chunks.cuh>
 
 namespace deep_select {
 namespace detail {

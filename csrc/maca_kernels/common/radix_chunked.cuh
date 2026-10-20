@@ -3,9 +3,9 @@
 
 #include <cstdlib>           // std::getenv, for the fused scan's A/B knob
 
-#include "radix_common.cuh"
-#include "radix_row_bf16.cuh"
-#include "radix_row_fp32.cuh"
+#include <csrc/maca_kernels/common/radix_common.cuh>
+#include <csrc/maca_kernels/common/radix_row_bf16.cuh>
+#include <csrc/maca_kernels/common/radix_row_fp32.cuh>
 
 namespace topk_select_radix {
 

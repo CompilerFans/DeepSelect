@@ -3,7 +3,7 @@
 
 #include <cuda_fp16.h>       // float_to_uint8: the fp32 path's fp16 rounding
 
-#include "radix_common.cuh"
+#include <csrc/maca_kernels/common/radix_common.cuh>
 
 namespace topk_select_radix {
 

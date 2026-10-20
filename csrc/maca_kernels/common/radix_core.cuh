@@ -29,15 +29,15 @@
  * 数据集: fp32 路径原样保留；16 位路径已改为 bf16（见上）。
  * 包含 warp-level 前缀和优化。
  *
- * 使用方式: #include "radix_core.cuh"
+ * 使用方式: #include <csrc/maca_kernels/common/radix_core.cuh>
  */
 
 #ifndef RADIX_TOPK_CUH
 #define RADIX_TOPK_CUH
 
-#include "radix_common.cuh"
-#include "radix_row_bf16.cuh"
-#include "radix_row_fp32.cuh"
-#include "radix_chunked.cuh"
+#include <csrc/maca_kernels/common/radix_common.cuh>
+#include <csrc/maca_kernels/common/radix_row_bf16.cuh>
+#include <csrc/maca_kernels/common/radix_row_fp32.cuh>
+#include <csrc/maca_kernels/common/radix_chunked.cuh>
 
 #endif  // RADIX_TOPK_CUH

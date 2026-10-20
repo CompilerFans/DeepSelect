@@ -65,11 +65,11 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
-#include "primitives.cuh"
+#include <csrc/maca_kernels/common/primitives.cuh>
 
 // The contract half the answer is handed to (`launch_route` below), and through
 // it the radix row kernel every route emits through.
-#include "contract.cuh"
+#include <csrc/maca_kernels/common/contract.cuh>
 
 namespace topk_select_chunks {
 
