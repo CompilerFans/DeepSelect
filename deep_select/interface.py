@@ -150,7 +150,13 @@ def topk(
         output_stride_requirement = output_stride_requirement_bytes // dtype.itemsize
         assert output_stride_requirement > 0
         dim1_rounded = (dim1+output_stride_requirement-1) // output_stride_requirement * output_stride_requirement
-        return torch.empty((dim0, dim1_rounded), device=device, dtype=dtype)[:, :dim1]
+        out = torch.empty((dim0, dim1_rounded), device=device, dtype=dtype)
+        # The slice is a no-op view when the row is already aligned (the common
+        # case: topk * itemsize is a 32B multiple for every k this operator
+        # serves), and view creation is not free (~2-3 us on this torch).
+        if dim1_rounded == dim1:
+            return out
+        return out[:, :dim1]
     
     output_val = get_empty_and_aligned_tensor(N, topk, device=input.device, dtype=input.dtype) if return_value else None
     if output_idx is None:

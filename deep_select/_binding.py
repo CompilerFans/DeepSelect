@@ -177,8 +177,26 @@ def launching():
     Every kernel-launching call must run inside this: without it
     `TVMFFIEnvGetStream` reports the null handle, the launch lands on the
     legacy default stream, and a producer on `torch.cuda.Stream()` followed by
-    an unwrapped call races.  Entering costs a thread-local write.
+    an unwrapped call races.  This is the slim spelling of
+    `tvm_ffi.use_torch_stream()`: that full context calls
+    `torch.cuda.current_stream()` (~7.6 us), builds a tvm Device from a string
+    (~2.9), and constructs two context managers; this reads the raw stream
+    handle (~0.3) and makes the two FFI calls directly -- measured 12.9 us ->
+    1.1 us per call on this torch (2.10+metax, C600U).
     """
     import tvm_ffi
+    import torch
 
-    return tvm_ffi.use_torch_stream()
+    class _TorchStreamGuard:
+        def __enter__(self):
+            self._dev = torch.cuda.current_device()
+            stream = torch._C._cuda_getCurrentRawStream(self._dev)
+            self._prev = tvm_ffi.core._env_set_current_stream(
+                2, self._dev, stream)
+            return self
+
+        def __exit__(self, *args):
+            tvm_ffi.core._env_set_current_stream(2, self._dev, self._prev)
+            return False
+
+    return _TorchStreamGuard()
