@@ -250,9 +250,9 @@ pip install -v .
 ### MACA (MetaX)
 
 The build needs the MACA toolkit (`$MACA_PATH`, default `/opt/maca`) and a
-MACA-compatible PyTorch. The `csrc/3rdparty/cutlass` submodule is not referenced
--- `cutlass/kernel_launch.h` resolves to MACA's own `mctlass` -- while the
-vendored `csrc/3rdparty/kerutils` is. Each architecture is built as its own
+MACA-compatible PyTorch. There is no cutlass submodule: `cutlass/kernel_launch.h`
+resolves to MACA's own `mctlass`, and the vendored `csrc/3rdparty/kerutils` is
+the only third-party C++ tree this build uses. Each architecture is built as its own
 extension, since a config's staging buffers are sized against the shared memory
 of the architecture it was compiled for:
 
