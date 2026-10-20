@@ -19,27 +19,45 @@
     fprintf(stderr, "cuda: %s at %d\n", cudaGetErrorString(e_), __LINE__); \
     exit(1);} } while (0)
 
-constexpr int kB = 6;
-constexpr int kL = 1048576;
-constexpr int kTopK = 512;
-constexpr int kChunks = 18;
+int kB = 6;
+int kL = 1048576;
+int kTopK = 512;
+int kChunks = 18;
 
-int main() {
+int main(int argc, char** argv) try {
     const char* repo_env = std::getenv("DEEP_SELECT_REPO");
     const std::string repo = repo_env ? repo_env : "/root/github/DeepSelect";
     const char* maca = std::getenv("MACA_PATH");
     DJ_HOST_ASSERT(maca != nullptr, "MACA_PATH must be set");
     const std::string maca_path(maca);
+    if (argc > 4) {
+        kB = std::atoi(argv[2]);
+        kL = std::atoi(argv[3]);
+        kChunks = std::atoi(argv[4]);
+    }
+    const std::string flat =
+        argc > 1 ? argv[1] : "/tmp/stage1_probe_flat.cu";
+    // Read the flattened kernel source (tools/jit_probe/flatten.py output --
+    // DeepJIT's include parser accepts only angle-bracket prefixed includes,
+    // and our header tree is quote-form).
+    std::string source;
+    {
+        FILE* f = std::fopen(flat.c_str(), "rb");
+        DJ_HOST_ASSERT(f != nullptr, "cannot open flattened source: {}", flat);
+        std::fseek(f, 0, SEEK_END);
+        const long n = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        source.resize((size_t)n);
+        DJ_HOST_ASSERT(std::fread(source.data(), 1, (size_t)n, f) == (size_t)n,
+                       "short read on {}", flat);
+        std::fclose(f);
+    }
 
     auto jit = deep_jit::create_lazy_jit<deep_jit::MACA>(deep_jit::Config(
         repo, "DSPROBE", "",
         {repo, repo + "/csrc", repo + "/csrc/maca_kernels/common",
          maca_path + "/include", maca_path + "/tools/cu-bridge/include"},
         {}));
-
-    const std::string source =
-        "#include \"csrc/maca_kernels/xcore1600/instantiations/"
-        "bf16_stage1_k_topk512_nan1.cu\"";
 
     // device buffers
     uint16_t* scores = nullptr;
@@ -56,7 +74,11 @@ int main() {
     // host-side fill: uniform-random uint16 patterns (any key spread works for
     // the timing; the contract check below reads them back)
     std::vector<uint16_t> h((size_t)kB * kL);
-    for (size_t i = 0; i < h.size(); i++) h[i] = (uint16_t)(i * 2654435761u >> 13);
+    // NaN-free bf16 patterns in [0x2000, 0x3FFF] (positive, small exponent):
+    // arbitrary bit patterns would hit the NaN encodings and confuse the
+    // contract check.
+    for (size_t i = 0; i < h.size(); i++)
+        h[i] = (uint16_t)(0x2000u | ((i * 2654435761u >> 13) & 0x1FFFu));
     CK(cudaMemcpy(scores, h.data(), scores_bytes, cudaMemcpyHostToDevice));
     std::vector<int32_t> hl(kB, kL);
     CK(cudaMemcpy(lengths, hl.data(), kB * 4, cudaMemcpyHostToDevice));
@@ -102,7 +124,7 @@ int main() {
         CK(cudaMemcpy(cv.data(), cand_val, cv.size() * 2, cudaMemcpyDeviceToHost));
         std::vector<uint8_t> sel(kL, 0);
         int bad = 0;
-        const int chunk_len = (kL + kChunks - 1) / kChunks + 7 >> 3 << 3;
+        const int chunk_len = ((kL + kChunks - 1) / kChunks + 7) >> 3 << 3;
         for (int b = 0; b < kB && bad == 0; b++) {
             for (int c = 0; c < kChunks && bad == 0; c++) {
                 const int cs = c * chunk_len, ce = std::min(kL, cs + chunk_len);
@@ -116,7 +138,11 @@ int main() {
                     if (sel[i]) sel_min = std::min(sel_min, h[(size_t)b * kL + i]);
                     else unsel_max = std::max(unsel_max, h[(size_t)b * kL + i]);
                 }
-                if (sel_min < unsel_max) bad = 1;
+                if (sel_min < unsel_max) {
+                    printf("  FAIL b%d c%d: sel_min=%04x unsel_max=%04x\n", b, c,
+                           sel_min, unsel_max);
+                    bad = 1;
+                }
             }
         }
         printf("  contract: %s\n", bad == 0 ? "PASS" : "FAIL");
@@ -125,4 +151,7 @@ int main() {
     cudaFree(scores); cudaFree(lengths); cudaFree(cand_idx);
     cudaFree(cand_val); cudaFree(nan_flags);
     return 0;
+} catch (const std::exception& e) {
+    std::fprintf(stderr, "EXCEPTION: %s\n", e.what());
+    return 3;
 }
