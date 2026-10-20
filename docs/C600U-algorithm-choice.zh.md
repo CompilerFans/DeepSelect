@@ -200,7 +200,8 @@ rescan 路径只在 128 KiB SM 上可达，在那里它会丢掉阈值处并列�
   arena 受容量限制；溢出走整行重扫（fp32）或精确补集（bf16）。
 
 同 cell（b4096-v1048576-k512 bf16）两遍结构的逻辑带宽实测 **513 GB/s**，
-而 pass 1 单独 556–599 GB/s——pass 2 只占约 10%。
+而 pass 1 单独 556–599 GB/s——pass 2 只占约 10%。（`095224c` 之后同一格
+**674 GB/s**：pass 1 变快后 pass 2 的份额相应上升，两遍结构的结论不变。）
 
 ### 3.2 网格时间分布（C600-U，官方 95 cell + 附加形状）
 
@@ -215,6 +216,11 @@ rescan 路径只在 128 KiB SM 上可达，在那里它会丢掉阈值处并列�
 1. **共享原子发射率**：bf16 pass 1 780–880 GB/s（墙的 ~50%）。已试否决：
    采样直方图（端到端 +17–68%，见 20261019 §3）、多路副本（与不复制逐拍
    相同）、寄存器预聚合（427 vs 678 GB/s）、减桶数（拥挤分布炸）。
+   **2026-10-21 起，V ≥ 256k 的行已绕过这个顶**：先对每 64 元素块的
+   *最大值*建直方图（每块 1 次原子），再用它给出的精确块切割建列表，
+   元素直方图只走列表里的块（`095224c`；b4096 V1M k1024 17.42 → 14.16 ms，
+   pass 1a 走 868 GB/s，见 `20261021_blockhist`）。它不能给 fp32 用：
+   fp32 行已在元素级按 8 位 coarse 建直方图，本来就不在原子上封顶。
 2. **MLP**：单在途 `uint4` 把 walk 压在 47–60% 墙；OUT=2 落地后低占用
    cell 提升 2–4×，原子封顶的大 cell 只有 +6%。
 3. **解码固定成本**：split 的两张表 memset（本次改为 read-and-clear 后
@@ -241,6 +247,8 @@ fp32 coarse12 的绑定因素未定（不是原子；F1 待 phase probe）。
 | 采样直方图（L1） | 端到端 +17–68% 慢；k∈{1024,2048,4096} 挂起 | `20261019_c600u_pass1` §3 |
 | 直方图多路副本 / 波内分组 | 与单份逐拍相同；16 车道分组 smem 4→1 CTA/SM | 同文 §5 |
 | 寄存器预聚合 | 427 vs 678 GB/s | 同文 §5 |
+| 线程内/成对合并原子 | 相邻元素同桶 1.4%，8 元素 7.62 个不同桶 | `20261021_blockhist` §1 |
+| 扰动直方图的 in-kernel 消融 | 两次 `Memory Violation(0x4)`（无界 `s_counter`） | 同文 §6 |
 | 一趟式 v1 | 正确，慢 2.0–2.6×；compact gather 是主因 | `20261020_onepass` |
 | 一趟式 v3 | 同上；根因是 19K 并列 | 同文 |
 | wave intrinsic 函数抽取 | 就位形态错答（摘要偏低 1–5 bin） | `20261019_c600u_pass1` §4 |
@@ -265,6 +273,7 @@ fp32 coarse12 的绑定因素未定（不是原子；F1 待 phase probe）。
 - `docs/DeepSelect-deep-dive.zh.md` —— 上游算法与期望上界（含"元素互不相同"前提）
 - `docs/experiments/20261019_c600u_pass1/README.md` —— 读墙、原子顶、采样否决、wave 陷阱
 - `docs/experiments/20261020_onepass/README.md` —— 一趟式探针、v1/v3 原型、并列密度终审
+- `docs/experiments/20261021_blockhist/README.md` —— 相位实测、walk 微基准、块最大直方图与密度门
 - `docs/experiments/20261018_bf16_split_k2048/README.md` —— k2048 split 在 128 KiB 部件的落地
 - `docs/C500-radix-perf-ledger.zh.md` —— 两遍 radix 的逐项账本
 - `csrc/maca_kernels/common/routing.cuh` —— 各路由的 gate 与其实测阶梯（源头注释）
