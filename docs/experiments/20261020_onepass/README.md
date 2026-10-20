@@ -43,3 +43,40 @@ compact 频次减半。调好后期望 ~800-880 GB/s 端到端。
 2. 低频 worst-case:输入恰好升序时 staging 率为 100% 直到首次 compact ——
    被 compact 频次兜住,成本有界。
 3. 短行/小 batch 不入门(gate 到行长 ≥ 65536 的带表区)。
+
+## 原型 v1 的实测结局(2026-10-20,`prototype_v1.patch`)
+
+按上面设计实现了完整内核(running threshold + smem arena + 两轮 8+8 精确
+compact + 寄存器快照防改写竞争)。**正确性全过**(8 个目标 cell + 升序/常数/
+NaN 对抗组),途中修掉三个只有就位形态才暴露的 bug:
+
+1. **gather 自改写竞争**:compact 的收集把幸存者写回 arena 前面,无序原子
+   位置会覆盖未被读走的候选项 → 每行 ~39% 槽位重复。修法:arena 内容先
+   快照到寄存器(`snap[21]`)再收集。
+2. **轮间清零竞争**:首轮 pick 后各线程读 `s_hist[pick+1]` 算 prefix_keep,
+   与次轮直方图清零无 barrier —— 快线程把慢线程未读的 bin 清零,prefix_keep
+   变短、阈值算高、误删候选(printf 可掩盖的时序竞争,只在 ~1% 行上显形)。
+   修法:pick 读数后补一个 barrier。
+3. 升序对抗输入下 compact 每迭代触发、阈值不减,正确性仍成立。
+
+**性能:全部目标 cell 慢 2.0-2.6 倍,不落地。** 归因(与 §探针的对照):
+
+| 位置 | 估算成本/row(V=1M) | 说明 |
+|---|---|---|
+| walk(load+xform+比较+罕见原子) | ~80-136 µs | 与探针 930 GB/s 一致 |
+| compact ×6 次 | **~144 µs** | **hist 两轮 + gather 都要按 idx 回读 key——每次 compact 20K 次分散 2B DRAM gather** |
+
+探针的 "filter+stage 930 GB/s" 没算 compact 的真实 gather 成本;原型把它
+摊开了:**瓶颈不在 walk,在 compact 每轮按索引回 gather 键值**。
+
+## 若继续,修复方向(按预期净收益排)
+
+1. **key 随行(sidx + skey 双数组)**:staging 时顺手写 16-bit key 到旁路数组,
+   compact 的 hist 全走 smem,只对幸存者(~k/次)做一次回读。代价 arena×1.5
+   smem(k512 ≈ 55-60 KB → 2 CTA/SM),配 OUT=2 后 walk 不掉速;compact 成本
+   ~10 倍下降。预期整 cell ~560-750 GB/s(比现状 +8~45%,随 B2 调参)。
+2. B2 加大(1024):compact 频次减半,smem 再涨一档,与 1 联用。
+3. 当前 gather 是 L2-hot 的(行刚流过 L2)——实测确认 L2 命中率后可省 sidecar。
+
+记录:`check_1p.py` 对原型全绿的 8 cell + 对抗组;compacts 计数与阈值
+收敛已与模拟逐行核对。

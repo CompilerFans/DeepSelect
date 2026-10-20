@@ -1,0 +1,324 @@
+diff --git a/csrc/maca_kernels/common/contract.cuh b/csrc/maca_kernels/common/contract.cuh
+index 3ccd622..c5d11ff 100644
+--- a/csrc/maca_kernels/common/contract.cuh
++++ b/csrc/maca_kernels/common/contract.cuh
+@@ -256,14 +256,22 @@ constexpr size_t kCoarse12HistBytes =
+ 
+ static __device__ __forceinline__ void radix_layout(
+     uint8_t *base, uint32_t topk, bool sorted, bool wide, uint32_t *&selected,
+-    uint64_t *&sort_buf) {
++    uint64_t *&sort_buf, uint32_t vocab_size = 0, int block = 0) {
+     uint32_t n_pad = 1;
+     if (sorted) {
+         while (n_pad < topk) n_pad <<= 1;
+     }
+     const size_t sort_bytes =
+         sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
+-    const size_t arena_bytes = wide ? kCoarse12HistBytes : kRadixArenaBytes;
++    size_t arena_bytes = wide ? kCoarse12HistBytes : kRadixArenaBytes;
++    if (wide && block == (int)topk_select_radix::kBlockSize &&
++        topk_select_radix::onepass_shape_applies(vocab_size, topk)) {
++        // The one-pass row's arena is bigger than the histogram it replaces
++        // (k + B2 + one vote period of staging); `selected` moves behind it.
++        const size_t op = (size_t)topk_select_radix::onepass_arena_entries<
++            (uint32_t)topk_select_radix::kBlockSize>(topk) * sizeof(int32_t);
++        if (op > arena_bytes) arena_bytes = op;
++    }
+     sort_buf = reinterpret_cast<uint64_t *>(base);
+     selected = reinterpret_cast<uint32_t *>(
+         base + (sort_bytes > arena_bytes ? sort_bytes : arena_bytes));
+@@ -292,8 +300,28 @@ template <typename ValueT, int BLOCK, bool kSkip = true>
+ static __device__ __forceinline__ void radix_select_row(
+     const ValueT *input_row, uint32_t length, int32_t *out_idx, uint32_t topk,
+     bool check_nan, bool *row_nan, uint16_t *block_max = nullptr,
+-    uint32_t *block_list = nullptr) {
++    uint32_t *block_list = nullptr, int32_t *onepass_arena = nullptr,
++    uint32_t vocab_size = 0) {
+     if constexpr (std::is_same<ValueT, maca_bfloat16>::value) {
++        // The one-pass row takes over where it is legal and measured faster:
++        // the 128 KiB-smem parts, long rows, the swept k set -- its vote loop
++        // needs no histogram and reads the row from DRAM exactly once.
++        const bool onepass = onepass_arena != nullptr &&
++                             BLOCK == (int)topk_select_radix::kBlockSize &&
++                             topk_select_radix::onepass_shape_applies(
++                                 vocab_size, topk) &&
++                             length >= 65536 &&
++                             topk_select_radix::bf16x8_is_aligned(input_row) &&
++                             (length & 7u) == 0;
++        if (onepass) {
++            if (check_nan)
++                topk_select_radix::radix_topk_row_bf16_onepass<BLOCK, true>(
++                    input_row, out_idx, length, topk, row_nan, onepass_arena);
++            else
++                topk_select_radix::radix_topk_row_bf16_onepass<BLOCK, false>(
++                    input_row, out_idx, length, topk, row_nan, onepass_arena);
++            return;
++        }
+         if (check_nan)
+             topk_select_radix::radix_topk_row_bf16_b<BLOCK, true, kSkip>(input_row, out_idx,
+                                                           length, topk, row_nan,
+@@ -526,7 +554,8 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
+     uint32_t *selected;
+     uint64_t *sort_buf;
+     radix_layout(arena_raw, params.topk, SI || SV,
+-                 std::is_same<ValueT, maca_bfloat16>::value, selected, sort_buf);
++                 std::is_same<ValueT, maca_bfloat16>::value, selected, sort_buf,
++                 params.vocab_size, Cfg::BLOCK);
+ 
+     if (tid == 0) {
+         row_offset =
+@@ -649,7 +678,8 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
+                                   ARCH_REGS_PER_AP >= 131072;
+         radix_select_row<ValueT, BLOCK, kSkipRow>(
+             input_row, length, (int32_t *)selected, topk, fold_nan, &nan_local,
+-            row_block_max, row_block_list);
++            row_block_max, row_block_list, (int32_t *)arena_raw,
++            params.vocab_size);
+     }
+ 
+     // The fold's vote lands only now, after the kernel has ranked the row.  The
+@@ -705,14 +735,21 @@ constexpr size_t kSmemBudgetBytes =
+ // occupancy the launch gets: the static shared state plus the arena plus this
+ // buffer has to stay under half of `smemPerSM` for a second CTA to be resident
+ // (32 KB static+dynamic per CTA on C500's 64 KB SM).
+-inline size_t radix_smem_bytes(uint32_t topk, bool sorted, bool wide) {
++inline size_t radix_smem_bytes(uint32_t topk, bool sorted, bool wide,
++                               uint32_t vocab_size = 0, int block = 0) {
+     uint32_t n_pad = 1;
+     if (sorted) {
+         while (n_pad < topk) n_pad <<= 1;
+     }
+     const size_t sort_bytes =
+         sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
+-    const size_t arena_bytes = wide ? kCoarse12HistBytes : kRadixArenaBytes;
++    size_t arena_bytes = wide ? kCoarse12HistBytes : kRadixArenaBytes;
++    if (wide && block == (int)topk_select_radix::kBlockSize &&
++        topk_select_radix::onepass_shape_applies(vocab_size, topk)) {
++        const size_t op = (size_t)topk_select_radix::onepass_arena_entries<
++            (uint32_t)topk_select_radix::kBlockSize>(topk) * sizeof(int32_t);
++        if (op > arena_bytes) arena_bytes = op;
++    }
+     const size_t lead = sort_bytes > arena_bytes ? sort_bytes : arena_bytes;
+     return lead + sizeof(uint32_t) * topk;
+ }
+@@ -733,10 +770,13 @@ template <typename Cfg>
+ inline void launch_radix_config(const RowParams &params, uint32_t batches,
+                                 cudaStream_t stream, size_t smem) {
+     // Every mode is configured with the one ceiling; each launch then asks for
+-    // exactly what its own mode needs (`radix_smem_bytes`).
++    // exactly what its own mode needs (`radix_smem_bytes`).  The one-pass
++    // row's arena can exceed the legacy ceiling at k >= 1024 on the 128 KiB
++    // parts, so the attribute follows the request rather than the constant.
++    const size_t budget = smem > kSmemBudgetBytes ? smem : kSmemBudgetBytes;
+     const cudaError_t rc = cudaFuncSetAttribute(
+         (const void *)topk_kernel_radix<Cfg>,
+-        cudaFuncAttributeMaxDynamicSharedMemorySize, (int)kSmemBudgetBytes);
++        cudaFuncAttributeMaxDynamicSharedMemorySize, (int)budget);
+     if (rc != cudaSuccess) {
+         std::fprintf(stderr, "[deep_select] radix smem attribute: %s\n",
+                      cudaGetErrorString(rc));
+@@ -876,7 +916,7 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
+                         bool preselected = false) {
+     const size_t smem = radix_smem_bytes(
+         params.topk, sorted_index || sorted_value,
+-        std::is_same<ValueT, maca_bfloat16>::value);
++        std::is_same<ValueT, maca_bfloat16>::value, params.vocab_size, block);
+     // The fp32 row has a single width, so only the 16-bit row selects between
+     // the two blocks -- and it selects `kLongRowBlockSize` **or** the default,
+     // not "whatever `block` says": a caller that passes anything else gets
+diff --git a/csrc/maca_kernels/common/radix_row_bf16.cuh b/csrc/maca_kernels/common/radix_row_bf16.cuh
+index dd642a4..c876464 100644
+--- a/csrc/maca_kernels/common/radix_row_bf16.cuh
++++ b/csrc/maca_kernels/common/radix_row_bf16.cuh
+@@ -240,6 +240,191 @@ __device__ __forceinline__ void overflow_emit_member(
+ // nothing to do with.
+ constexpr uint32_t kSkipBlockElems = 64;
+ 
++// ── the one-pass row: a running threshold, no histogram ────────────────────
++// docs/experiments/20261020_onepass/ has the probe and the design.  Elements
++// above the running threshold stage into the arena; when the count crosses
++// `topk + kOnePassB2` the CTA compacts -- it selects the exact top-k of
++// (survivors ∪ arena), raises the threshold to their k-th, and drops the
++// rest.  The survivors live in `output` (the contract's staging buffer)
++// between compacts, the arena is scratch, and the compact's gather goes to
++// the arena front and is then copied to `output`, so no region is read and
++// written at once.  Every element is read from DRAM exactly once, and the
++// shared atomics fire only on candidates (~k·ln(L/B) per row) -- which is
++// what moves the 28/32-AP parts off the per-element atomic issue ceiling
++// that caps the two-pass row near half the wall.
++//
++// The invariant (upstream's): an element dropped at a compact is below at
++// least k elements of the same row at that moment, so it can never be in the
++// row's top-k; the threshold only rises.  A row whose count never reaches
++// `topk` (every element key == 0) is a row of negative NaNs -- the only
++// zero-key encoding -- and is answered by the NaN disposition, never by this
++// select.
++constexpr uint32_t kOnePassB2 = 512;
++
++// The arena's entries: `topk + B2` for the compact trigger, plus one vote
++// period of staging.  The vote is per outer iteration, whose work is
++// `2 * BLOCK_SIZE * 8` elements (two blocks per 8-lane group).
++template <uint32_t BLOCK_SIZE>
++constexpr uint32_t onepass_arena_entries(uint32_t topk) {
++    return topk + kOnePassB2 + 2 * BLOCK_SIZE * 8;
++}
++
++// The host-visible half of the gate (the device adds alignment and the
++// per-row window): 128 KiB-smem families, long rows, the swept k set.
++constexpr bool onepass_shape_applies(uint32_t vocab_size, uint32_t topk) {
++    return ARCH_SMEM_PER_AP_BYTES >= 128 * 1024 && vocab_size >= 65536 &&
++           (topk == 512 || topk == 1024 || topk == 2048);
++}
++
++template <uint32_t BLOCK_SIZE, bool kNan = false>
++__device__ __forceinline__ void radix_topk_row_bf16_onepass(
++    const maca_bfloat16* input, int32_t* output, uint32_t length, uint32_t topk,
++    bool* row_nan, int32_t* arena)
++{
++    constexpr uint32_t RADIX = kRadix;
++    const uint32_t cap = topk + kOnePassB2 + 2 * BLOCK_SIZE * 8;
++    __shared__ uint32_t s_count;
++    __shared__ uint32_t s_thresh;
++    __shared__ uint32_t s_new;
++    __shared__ int32_t s_tie;
++    __shared__ uint32_t s_nsurv;
++    __shared__ uint32_t s_pick;
++    __shared__ uint32_t s_histogram_buf[2][RADIX + 32];
++    auto& s_hist = s_histogram_buf[0];
++    const uint32_t tx = threadIdx.x;
++    if (tx == 0) { s_count = 0; s_thresh = 0; s_nsurv = 0; }
++    __syncthreads();
++
++    // The compact: exact top-k of output[0..s_nsurv) U arena[0..s_count),
++    // threshold to the k-th, survivors rewritten to the arena front and then
++    // copied back to output (unordered output is the contract's own form).
++    const auto compact = [&] {
++        const uint32_t ns = s_nsurv;
++        const uint32_t m = s_count;
++        uint32_t prefix = 0, prefix_keep = 0;
++        #pragma unroll
++        for (int round = 0; round < 2; round++) {
++            const uint32_t shift = round == 0 ? 8 : 0;
++            if (tx < RADIX + 1) s_hist[tx] = 0;
++            __syncthreads();
++            for (uint32_t i = tx; i < ns; i += BLOCK_SIZE) {
++                const uint32_t key = refine_bin(__ldg(input + output[i]));
++                if (round == 0 || (key >> 8) == prefix)
++                    atomicAdd(&s_hist[(key >> shift) & 0xFFu], 1u);
++            }
++            for (uint32_t i = tx; i < m; i += BLOCK_SIZE) {
++                const uint32_t key = refine_bin(__ldg(input + arena[i]));
++                if (round == 0 || (key >> 8) == prefix)
++                    atomicAdd(&s_hist[(key >> shift) & 0xFFu], 1u);
++            }
++            __syncthreads();
++            uint32_t exclusive_suffix = 0;
++            const uint32_t inclusive_suffix =
++                run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
++            const uint32_t need = topk - prefix_keep;
++            if (tx < RADIX && inclusive_suffix >= need && exclusive_suffix < need)
++                s_pick = tx;
++            __syncthreads();
++            if (round == 0) {
++                prefix = s_pick;
++                prefix_keep = s_hist[s_pick + 1];
++            } else {
++                prefix = (prefix << 8) | s_pick;
++                prefix_keep += s_hist[s_pick + 1];
++            }
++            // The pick's reads of `s_hist` are not barriered against the next
++            // round's zeroing without this -- a fast thread may zero a bin a
++            // slow one has not read yet, and `prefix_keep` then comes out
++            // short (the first draft's dropped-candidate race).
++            __syncthreads();
++        }
++        // prefix_keep is now count(key > T) exactly; ties owed the rest.
++        const uint32_t T = prefix;
++        if (tx == 0) { s_new = 0; s_tie = (int32_t)(topk - prefix_keep); }
++        __syncthreads();
++        // The gather writes survivors to the arena it also reads, so the
++        // arena's content is first snapshotted to registers -- a read-through
++        // would race with the unordered atomic positions (this was the
++        // first draft's duplicate bug, measured).
++        int32_t snap[(2048 + kOnePassB2 + 2 * BLOCK_SIZE * 8) / BLOCK_SIZE];
++        const uint32_t rounds = (m + BLOCK_SIZE - 1) / BLOCK_SIZE;
++        for (uint32_t r = 0; r < rounds; r++) {
++            const uint32_t i = tx + r * BLOCK_SIZE;
++            if (i < m) snap[r] = arena[i];
++        }
++        __syncthreads();
++        const auto keep = [&](int32_t idx) {
++            const uint32_t key = refine_bin(__ldg(input + idx));
++            if (key > T) {
++                arena[atomicAdd(&s_new, 1u)] = idx;
++            } else if (key == T) {
++                const int p = atomicAdd(&s_tie, -1);
++                if (p > 0) arena[atomicAdd(&s_new, 1u)] = idx;
++            }
++        };
++        for (uint32_t i = tx; i < ns; i += BLOCK_SIZE) keep(output[i]);
++        for (uint32_t r = 0; r < rounds; r++) {
++            const uint32_t i = tx + r * BLOCK_SIZE;
++            if (i < m) keep(snap[r]);
++        }
++        __syncthreads();
++        for (uint32_t i = tx; i < topk; i += BLOCK_SIZE) output[i] = arena[i];
++        if (tx == 0) { s_nsurv = topk; s_count = 0; s_thresh = T; }
++        __syncthreads();
++    };
++
++    bool nan_local = false;
++    const uint32_t vec_len = length / 8 * 8;
++    const uint32_t nblk = vec_len >> 6;
++    const uint32_t group = tx >> 3, lane = tx & 7u;
++    const uint32_t step = BLOCK_SIZE / 8;
++    for (uint32_t it = 0; it * step < nblk; it += 2) {
++        const uint32_t T = s_thresh;   // one smem read per iteration
++        #pragma unroll
++        for (int half = 0; half < 2; half++) {
++            const uint32_t blk = group + (it + half) * step;
++            if (((blk + 1u) << 6) > vec_len) continue;
++            const uint4 v = __ldg(
++                reinterpret_cast<const uint4*>(input + (blk << 6) + lane * 8u));
++            const uint32_t* w = reinterpret_cast<const uint32_t*>(&v);
++            uint32_t z = 0;
++            #pragma unroll
++            for (int i = 0; i < 4; i++) {
++                const uint32_t kp =
++                    w[i] ^ ((((w[i] >> 15) & 0x00010001u) * 0x7FFFu) + 0x80008000u);
++                const uint32_t lo = kp & 0xFFFFu, hi = kp >> 16;
++                if (lo > T) {
++                    const uint32_t pos = atomicAdd(&s_count, 1u);
++                    if (pos < cap) arena[pos] = (blk << 6) + lane * 8u + 2u * i;
++                }
++                if (hi > T) {
++                    const uint32_t pos = atomicAdd(&s_count, 1u);
++                    if (pos < cap) arena[pos] = (blk << 6) + lane * 8u + 2u * i + 1u;
++                }
++                if (kNan)
++                    z |= (((w[i] & 0x7FFF7FFFu) | 0x80008000u) - 0x7F817F81u)
++                         & 0x80008000u;
++            }
++            nan_local |= (z != 0u);
++        }
++        if (__syncthreads_or(s_count >= topk + kOnePassB2)) compact();
++    }
++    // The scalar tail of the row, on the same terms.
++    for (uint32_t idx = (nblk << 6) + tx; idx < length; idx += BLOCK_SIZE) {
++        const maca_bfloat16 raw = __ldg(input + idx);
++        if (refine_bin(raw) > s_thresh) {
++            const uint32_t pos = atomicAdd(&s_count, 1u);
++            if (pos < cap) arena[pos] = idx;
++        }
++        if (kNan) nan_local |= bf16_is_nan(__bfloat16_as_ushort(raw));
++    }
++    __syncthreads();
++    if (s_count > 0) compact();
++    if (kNan && row_nan != nullptr)
++        *row_nan = __syncthreads_or((int)nan_local) != 0;
++}
++
++
+ // Walk the blocks a summary named, with the aligned row walk's own layout: the
+ // eight lanes of a group take one `uint4` each out of the same 64-element block
+ // and `body(idx, raw)` sees the same elements, in the same per-lane order, that
