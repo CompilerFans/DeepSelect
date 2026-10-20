@@ -15,7 +15,9 @@
 ## 0. 为什么目标是 pass 1:相位实测
 
 在 fp32 上先用 `clock64()` 相位探针量了一遍,随后把同一套探针搬进 bf16 行内核
-(`ds_pp[]` 时间戳 + `output[topk..]` 带出;探针只读时钟,不改数据流)。b4096
+(`ds_pp[]` 时间戳 + `output[topk-16..topk)` 带出;探针只读时钟,不改数据流,
+但会覆盖这 16 个输出槽,所以只在临时树上用)。探针归档在本目录:
+`patch_row_phase.py`(插入)+ `row_phase.py`(驱动),命令见 §7。b4096
 V=1048576 k=1024(17.5 ms,网格里最大的一格):
 
 | 相位 | 占比 |
@@ -170,6 +172,18 @@ walk 走的是散落块,局部性比整行顺序读差;以及该格 collect 已�
 不碰生产数据流。
 
 ## 7. 复现
+
+```bash
+# 0) 相位探针(§0 的表)
+cp -a <e168b4e 的干净树> /tmp/ds_phase
+python patch_row_phase.py /tmp/ds_phase      # 只认 095224c 之前的锚点,数不对就退出
+(cd /tmp/ds_phase && rm -rf build && ./develop.sh)
+DS_TESTS=$PWD/tests python row_phase.py /tmp/ds_phase
+```
+
+`patch_row_phase.py` 的 11 个锚点全部按"出现次数必须等于 1"校验(原来硬编码
+`/root/ds_phase`,归档时只把树路径改成 `argv[1]`);它在今天的树上会因锚点计数
+不符直接退出——这是设计,不是坏了。探针只能量时序,那一版输出不是正确的 top-k。
 
 ```bash
 # 1) walk 微基准(设备机)
