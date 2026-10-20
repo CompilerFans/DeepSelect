@@ -7,6 +7,39 @@ there.
 
 ## Unreleased
 
+### A NaN vote dies with the call that raised it
+
+The per-row NaN flags used to live inside the process-wide, grow-only scratch,
+at an offset derived from the call's geometry (`ChunkedWorkspace::nan_flags`,
+`ChunkedF32Workspace::lengths`). A clean `b1 v262144 k512 bf16` call that
+landed on the slot a `b6 v1048576` call had filled with a candidate index read
+that index back as a vote and wrote the `0x3F3F3F3F` sentinel into a row with
+no NaN. The per-call `cudaMemsetAsync` was hiding the aliasing, at the price of
+one launch per call.
+
+The flags are now the dispatcher's own `scan_flags` table: allocated beside the
+scratch and zeroed once when it grows, never per call. The contract half
+(`topk_kernel_radix`) reads the row's slot into shared memory and clears it in
+the `tid == 0` prologue, before any return path, so every scanning route (row
+path pass 1, both splits' stage 1, coarse12, chunks) can still OR a plain 1.
+The split workspaces no longer carry flag regions, a failed split launch clears
+the table before the row path takes over, and a mid-route failure in chunks
+does the same. `check_nan=False` allocates nothing; `DS_FUSE_NAN_OFF=1` still
+selects the pre-fusion scan kernel for A/B.
+
+Measured on C600U: `run_test.sh --all --sample 1000 -rf` reports perf 147/147
+and correctness 1131/1131 (18 OOM skips), `GATE_RC=0`. The symptom, the
+read-and-clear design and the repro scripts are recorded in
+`docs/experiments/20261020_scan_flag_read_clear/README.md`.
+
+### cutlass leaves the build
+
+`csrc/3rdparty/cutlass` was a submodule the MACA build never compiled:
+`cutlass/kernel_launch.h` resolves to the toolkit's own `mctlass`, and the
+vendored `csrc/3rdparty/kerutils` is the only third-party C++ tree `setup.py`
+consumes. The gitlink and its `.gitmodules` entry are gone, so a checkout no
+longer needs that clone; `README.md` says what the include resolves to instead.
+
 ### The kernel tree's directories tell the truth (P6)
 
 The layout named two things it was not: `csrc/maca_kernels/xcore1000/` was the
