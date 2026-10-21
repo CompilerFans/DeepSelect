@@ -74,13 +74,46 @@ hist1a ADJ4 臂的独立复刻(V=1M bf16,一 CTA 一行,BLOCK 512/1024,
 - 参照点(20261021_blockhist,同形状隔离微基准):FULL2(逐元素原子)862 →
   ADJ4 1296 GB/s;带 NaN 1070.7;纯读天花板 1400-1630。
 
+### 3c. 原语本体 + 正确性/纯速率(`csrc/maca_kernels/common/warp_reduce.cuh` + `warp_reduce_test.cu`)
+
+按 CUB `WarpReduce` 的语义实现的项目原语(已提交,**未经设备编译验证**):
+
+- `warp_reduce_{max,min,sum}_u32` —— 全波归约,返回**标量**(波内一致,
+  无需广播):4 条链式行移位 + 4 条向量 op(d=8,4,2,1,bc=1)把 4 个 row 的
+  归约各落到 row leader,再 4 次 `readlane` + 3 次标量 op —— 15 条
+  ALU/SALU 指令,零 smem 通道流量。对照:`__shfl_down_sync` 包装链
+  ~71 指令(LDS 管)、手写 bpermute 蝶形 42-44(LDS 管)。
+- `group8_reduce_{max,min,sum}_u32` —— 8 车道组归约,结果在组首
+  `(tx & 7) == DS_GROUP8_LEADER_IN8` —— 即 `DS_GROUP_MAX8_TREE` 的替换
+  语义(d=4,2,1,3 条行移位)。hist1a 补丁将以行配对块映射调用它。
+- functor 形态(`ReduceMaxU32/MinU32/SumU32`)与 CUDA `#else` 臂
+  (32 车道 `__shfl_down_sync` 链)按 `radix_common.cuh` 的双编译惯例保留;
+  本树只编 MACA 臂。
+- **方向开关**:`-DDS_ROW_SHIFT_LEFT` 一处翻转所有 mode 与 leader 常量
+  (探针车道表裁决前这是假设,见 §3a)。
+
+```bash
+cucc -O3 --offload-arch=xcore1600 -I<repo-root> \
+     docs/experiments/20261021_mov_shfl_tree/warp_reduce_test.cu -o /tmp/wrt
+/tmp/wrt    # 语义(8 波 × {max,min,sum,8 组} 对 CPU 参考)+ 三形态纯速率
+```
+
+测试同时给出三形态(包装链 / bpermute 蝶形 / 本原语)的延迟链与吞吐
+ns/reduce —— 纯归约的数字,与 §3b 的 in-situ A/B 互为印证。语义检查
+失败且错位形态指向 row 另一端时,用 `-DDS_ROW_SHIFT_LEFT` 重编,不改
+调用点。
+
 ### 顺序
 
-`tree_probe` 的车道表 + SASS 先行(分钟级);SASS 过关再跑 A/B(~1 分钟)。
-内核补丁排在 A/B 指向之后,且只动 `!kHist` 臂(ADJ4 只在那里),`kHist`
-臂与 CUDA `#else` 半不动 —— 与 ADJ4 落地时的架构边界同一形状:
-`common/` 改动进所有族的 artifact,只量 C600U,其他族不量。
+`tree_probe` 的车道表 + SASS 先行(分钟级)—— 车道表定方向(错了就给
+`warp_reduce.cuh` 和 A/B 都加 `-DDS_ROW_SHIFT_LEFT` 重编),SASS 是前提证伪门;
+然后 `warp_reduce_test`(语义 + 三形态纯速率),再跑行走 A/B(~1 分钟)。
+内核补丁(hist1a 行配对映射 + `group8_reduce_max_u32` 替换
+`DS_GROUP_MAX8_TREE`)排在 A/B 指向之后,且只动 `!kHist` 臂(ADJ4 只在
+那里),`kHist` 臂与 CUDA `#else` 半不动 —— 与 ADJ4 落地时的架构边界
+同一形状:`common/` 改动进所有族的 artifact,只量 C600U,其他族不量。
 
 ## 4. 结果
 
-(待设备。要填:车道表、SASS 指令类别、A/B 12 行的 GB/s。)
+(待设备。要填:车道表、SASS 指令类别、`warp_reduce_test` 的语义判定与
+三形态 ns/reduce、A/B 12 行的 GB/s。)
