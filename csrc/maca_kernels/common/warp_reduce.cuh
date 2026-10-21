@@ -35,14 +35,20 @@
 // - Keys are compared as uint32.  mov_shfl moves bits without interpreting
 //   them; float values must arrive pre-encoded (`refine_bin`).
 //
-// **Direction assumption, pending `docs/experiments/20261021_mov_shfl_tree/
-// tree_probe`.**  The guide names modes 0x111-0x11F "Row Shift Right" without
-// defining which way the data moves.  This header assumes lane i reads lane
-// i+d (leaders at the rows'/groups' FIRST lanes).  If the probe's lane table
-// shows the reverse, build with `-DDS_ROW_SHIFT_LEFT`: every mode and leader
-// constant below flips from the one spelling.  (The CUDA `#else` arm keeps
-// first-lane leaders either way -- `__shfl_down_sync` semantics; the knob
-// exists for MACA hardware, which is the only arm this tree compiles.)
+// **Direction, MEASURED 2026-10-21** (pod 30752, `docs/experiments/
+// 20261021_mov_shfl_tree/tree_probe`'s lane table + SASS): Row Shift Left
+// (modes 0x10d) reads lane i+d into lane i, so a chained reduce lands on the
+// row's/group's FIRST lane -- this header's default.  Row Shift Right
+// (0x11d) reads lane i-d; `-DDS_ROW_SHIFT_RIGHT` flips every mode and leader
+// constant from the one spelling below.  The same table carries an edge
+// caveat: out-of-row reads do NOT honor the guide's bc promise (the rows'
+// top lanes returned a stale cross-lane value; lane 0 returned garbage
+// 0x1E00000) -- only reads that stay strictly inside the row are
+// trustworthy.  Every chain here reads in-row lanes only by construction,
+// which is also why non-leader partials must never be read.  SASS gate
+// PASSED: mov_shfl lowers to one `mov_b32 ... row_shl:N rmsk bmsk bc`
+// (ALU pipe, DPP form), readlane to `rl_b32 sD, ...` (SALU); no sm_/ds_/bsm
+// instruction anywhere in the probe kernel.
 //
 // The `#else` arm keeps the upstream-CUDA dual-build form (32-lane
 // `__shfl_down_sync` chain + broadcast), matching `radix_common.cuh`'s
@@ -55,15 +61,17 @@
 
 namespace topk_select_common {
 
-// ── the direction spelling ──────────────────────────────────────────────────
-#ifdef DS_ROW_SHIFT_LEFT
-// lane i reads lane i-d; leaders are the last lanes.
-#define DS_ROW_SH(d) (0x100 + (d))
+// ── the direction spelling (measured; see the banner) ──────────────────────
+#ifdef DS_ROW_SHIFT_RIGHT
+// the guide's Row Shift Right modes (0x11d): lane i reads lane i-d, so the
+// reduction lands on each row's/group's LAST lane.
+#define DS_ROW_SH(d) (0x110 + (d))
 constexpr int DS_ROW_LEADER_IN16 = 15;
 constexpr int DS_GROUP8_LEADER_IN8 = 7;
 #else
-// lane i reads lane i+d; leaders are the first lanes.
-#define DS_ROW_SH(d) (0x110 + (d))
+// default, the guide's Row Shift Left modes (0x10d): lane i reads lane i+d,
+// leaders are the first lanes.
+#define DS_ROW_SH(d) (0x100 + (d))
 constexpr int DS_ROW_LEADER_IN16 = 0;
 constexpr int DS_GROUP8_LEADER_IN8 = 0;
 #endif

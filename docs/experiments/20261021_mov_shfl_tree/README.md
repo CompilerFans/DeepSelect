@@ -30,10 +30,15 @@ ALU 通道混洗** vs 现行每块 3 条 LDS 通道 bpermute —— 指令数减
 写表谓词不变(`(tx&7)==0` 恰好选中 lane 0 与 lane 8);ADJ4 邻接性保留
 (row 的 8 块 = 两个半 row 各自的 4 相邻块)。
 
-**方向待探针裁决**:指南只说 0x111-0x11F = Row Shift Right,未定义方向。
-若实际是 lane i 读 lane i−d,则 leader 变成 lane 7/15,写表谓词改
-`(tx&7)==7`,链序不变 —— **速率两臂相同,与方向无关**;方向只影响内核
-补丁的正确性,不影响 A/B 的判读。
+**方向已实测(2026-10-21,pod 30752)**:`row_shl:d`(0x10d)= lane i 读
+lane i+d —— 归约落在每半 row 的**首** lane(lane 0 / lane 8),与写表谓词
+`(tx&7)==0` 天然一致;`row_shr:d`(0x11d)方向相反(leader 在 lane 7/15)。
+SASS 门同时通过:`mov_shfl` 降为**一条** `mov_b32 rD, rS row_shl:N rmsk:15
+bmsk:15 bc:1`(ALU 管,DPP 形态),`readlane` = `rl_b32 sD, rS, lane`
+(SALU),全内核无 sm_/ds_/bsm 指令。边界警告(同一张车道表):越出 row
+的读取**不**遵守指南的 bc 承诺(row 顶 lane 返回陈旧跨 lane 值,lane 0
+返回垃圾 0x1E00000)—— 只有严格行内读取可信;归约链按构造全部行内,
+非 leader 的部分值永远不可读。
 
 `readlane` 的用武之地是**波宽归约**(把 4 个 row 的 leader 收成标量):
 本热路径不需要(结果按组用),候选是冷点 `run_cumsum_warp`(每行 2 次,
@@ -51,6 +56,8 @@ mxcc -aop -S -maca-device-only tree_probe.cu -o /tmp/tree_probe.s
 车道表回答:Shift Right/Left 的方向、bc=0/1 的越界行为、bmsk 是否只门控
 目的 lane。**SASS 是第一道证伪门:`mov_shfl` 若同样降为 sm_/ds_ 类指令,
 整个前提不成立,A/B 不必跑。** 同时看 `readlane` 的指令形态。
+**(2026-10-21 已跑:见 §2 —— 方向 row_shl = i+d,SASS 为单条 DPP mov,
+无 smem 类指令;前提成立。)**
 
 ### 3b. 摘要行走 A/B(`tree_walk_ab.cu` + `tree_walk_ab_run.py`)
 

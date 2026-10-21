@@ -53,14 +53,19 @@ __device__ __forceinline__ uint32_t key8(const uint16_t *row, uint32_t idx,
         (k) = (k) > o_ ? (k) : o_;                                          \
     } while (0)
 
+// Row Shift Left (0x10d), measured 2026-10-21 (tree_probe lane table): lane
+// i reads lane i+d, so the chained d=4,2,1 lands each half-row's max on its
+// FIRST lane (0 and 8) -- matching the lane8==0 store below.  Every source
+// in the leaders' chains is in-row; the rows' top lanes' partials are
+// garbage by hardware edge semantics and are never read.
 #define TREE_MOV_SHFL(k)                                                    \
     do {                                                                    \
-        uint32_t o_ = (uint32_t)__builtin_mxc_mov_shfl((int)(k), 0x114,     \
+        uint32_t o_ = (uint32_t)__builtin_mxc_mov_shfl((int)(k), 0x104,     \
                                                        0xf, 0xf, 1);        \
         (k) = (k) > o_ ? (k) : o_;                                          \
-        o_ = (uint32_t)__builtin_mxc_mov_shfl((int)(k), 0x112, 0xf, 0xf, 1);\
+        o_ = (uint32_t)__builtin_mxc_mov_shfl((int)(k), 0x102, 0xf, 0xf, 1);\
         (k) = (k) > o_ ? (k) : o_;                                          \
-        o_ = (uint32_t)__builtin_mxc_mov_shfl((int)(k), 0x111, 0xf, 0xf, 1);\
+        o_ = (uint32_t)__builtin_mxc_mov_shfl((int)(k), 0x101, 0xf, 0xf, 1);\
         (k) = (k) > o_ ? (k) : o_;                                          \
     } while (0)
 

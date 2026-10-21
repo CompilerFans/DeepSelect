@@ -10,10 +10,10 @@
 //      the three forms' instructions between their labels.
 //
 // Exit status 0 iff every semantic check passes.  If the full-wave checks
-// fail with the leaders looking shifted to the rows' other ends, the
-// hardware's Row Shift direction is the reverse of the header's assumption:
-// rebuild with -DDS_ROW_SHIFT_LEFT (one spelling flips every mode and
-// leader), do NOT edit call sites.
+// fail with the reductions landing on the rows' LAST lanes instead, rebuild
+// with -DDS_ROW_SHIFT_RIGHT (one spelling flips every mode and leader), do
+// NOT edit call sites.  (Direction was measured 2026-10-21; the default is
+// expected to be right -- this is a guard, not an open question.)
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
