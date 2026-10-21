@@ -45,7 +45,9 @@ for b, V, k in cases:
 
     out = fn()
     torch.cuda.synchronize()
-    d = out[0, k - 16:k].tolist()
+    # `return_value=False` still returns `(None, indices)` -- the tuple shape
+    # is upstream's -- so the probe's slots are in the second element.
+    d = out[1][0, k - 16:k].tolist()
     r = kk.bench(fn, 10)
     tot = 0.0
     for n in r.get_kernel_names():
