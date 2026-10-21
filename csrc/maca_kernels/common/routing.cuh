@@ -788,9 +788,11 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // now: it cannot be talked out of at runtime by a device that reports more.
 //
 // Why it is worth having at all: on the shapes deep_gemm routes here it is
-// 2.0-2.3x faster than the row kernel (ledger §12).  The three measured
-// differences are 12 coarse bits against 8, 640 threads against 512, and one
-// 16 KB arena against 14 KB plus a ping-pong refine buffer.
+// 2.0-2.3x faster than the row kernel (ledger §12).  The two measured
+// differences are 12 coarse bits against 8 and one 16 KB arena against 14 KB
+// plus a ping-pong refine buffer; the block size is the original's 512 as well
+// (it was 640 until 2026-10-22, which left 128 of the AP's 2048 thread slots
+// unused -- see `docs/experiments/20261022_f32_occupancy/`).
 // `DEEP_SELECT_F32_COARSE12`: `1` forces the route onto every shape that is
 // otherwise *legal* for it, `0` denies it, unset takes the ladder.  In the same
 // shape as `DEEP_SELECT_F32_CHUNKS` below, and for the same reason: the ladder

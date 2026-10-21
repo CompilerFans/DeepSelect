@@ -12,10 +12,13 @@
 // difference; the differences that are measurable are:
 //
 //   * 12 coarse bits against 8, so the bin the refine ranks is 2-3x smaller.
-//   * 640 threads against 512 -- and the block size is the one knob that
-//     moved our own row kernel by 24% (`-DKBLOCK_SIZE=1024`).
 //   * one 16 KB arena doing double duty (coarse histogram, then candidates)
 //     against a 14 KB arena plus a ping-pong refine buffer.
+//
+// The block size is the original's 512 as well.  It was 640 until 2026-10-22,
+// and 640 x 3 CTAs is 1920 threads -- under the 2048-thread/AP ceiling, so the
+// AP ran 3 CTA/SM where 512 fills four, worth 3.7-6.2% on the fp32 cells with
+// the bf16 controls flat (`docs/experiments/20261022_f32_occupancy/`).
 //
 // The port is deliberately an *extraction*, not a rewrite: the arithmetic,
 // the round structure and the overflow handler below are deep_gemm's, so the
@@ -64,7 +67,7 @@ namespace topk_select_coarse12 {
 // the boundary is the original's rather than a new one.  Callers gate on it
 // (`f32_coarse12_applies`), and this header asserts it rather than trusting
 // the call site.
-constexpr int kThreads = 640;
+constexpr int kThreads = 512;
 constexpr int kMaxTopK = 2048;
 constexpr int kRadix = 256;
 constexpr int kHistogramPadding = 1;
@@ -467,10 +470,11 @@ __device__ __forceinline__ bool topk_coarse12_row(
     return true;
 }
 
-// One CTA per row.  `__launch_bounds__` is 640 for the same reason the
-// original chose it: the kernel's widest cooperative step is the 4096-bin
-// histogram clear and the candidate walk, and 640 is where deep_gemm measured
-// the balance between those and register pressure on this device.
+// One CTA per row.  `__launch_bounds__` is `kThreads` (512, the original's
+// width): the widest cooperative step is the 4096-bin histogram clear and the
+// candidate walk, and 512 is what fills the AP -- 640 x 3 CTAs is 1920 threads,
+// under the 2048-thread/AP ceiling, so it left 128 of the AP's 2048 thread
+// slots unused (measured, `docs/experiments/20261022_f32_occupancy/`).
 //
 // The width is a template parameter because the kernel is instantiated
 // explicitly in the generated TU that owns its launch; the row body below is

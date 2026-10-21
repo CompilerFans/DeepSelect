@@ -1,0 +1,12 @@
+# ab_targeted.py output, pod 32741 (C600-U, 28 AP, MACA 20261017), device 1
+# arms: t640 = /tmp/t640/deep_select/deep_select_maca_xcore1600.so  md5 ccf5631faf747afee7626a671d3a6ecc
+#       t512 = /tmp/t512/deep_select/deep_select_maca_xcore1600.so  md5 5958dcea8c7cfca46426599da019a6a3
+# 3 alternating rounds, each arm 9 calls per cell, median taken within a round;
+# the value below is the median of the 3 round medians.
+f32  b4096  V131072  k2048 : t640    5743.1  t512    5425.4 us  0.9447x   rounds ['5731', '5771', '5743'] vs ['5415', '5427', '5425']
+f32  b4096  V129280  k512  : t640    4662.7  t512    4464.1 us  0.9574x   rounds ['4657', '4705', '4663'] vs ['4458', '4477', '4464']
+f32  b4096  V107520  k2048 : t640    4829.6  t512    4528.7 us  0.9377x   rounds ['4830', '4858', '4820'] vs ['4525', '4553', '4529']
+f32  b256   V131072  k2048 : t640     538.9  t512     518.8 us  0.9626x   rounds ['532', '540', '539'] vs ['518', '519', '525']
+f32  b512   V66551   k2048 : t640     560.6  t512     530.1 us  0.9457x   rounds ['548', '561', '561'] vs ['531', '527', '530']
+bf16 b4096  V1048576 k512  : t640   11480.8  t512   11467.8 us  0.9989x   rounds ['11481', '11514', '11469'] vs ['11468', '11468', '11470']
+bf16 b4096  V262144  k1024 : t640    5571.2  t512    5559.1 us  0.9978x   rounds ['5571', '5609', '5566'] vs ['5565', '5559', '5557']
