@@ -486,6 +486,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // answer (row columns), same contract half, and the two gates are disjoint.
     const bool needs_coarse12_cols =
         value_dtype == 0 && (detail::f32_coarse12_applies(p, (uint32_t)batches) ||
+                             detail::f32_sample_applies(p, (uint32_t)batches) ||
                              detail::f32_chunks_applies(p, (uint32_t)batches));
     if (needs_coarse12_cols) {
         const size_t need_cols = (size_t)batches * (size_t)p.topk;

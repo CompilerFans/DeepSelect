@@ -12,6 +12,7 @@
 #include <csrc/structs.h>
 #include <csrc/maca_kernels/common/contract.cuh>
 #include <csrc/maca_kernels/common/topk_coarse12.cuh>
+#include <csrc/maca_kernels/common/topk_sample.cuh>
 #include <csrc/maca_kernels/common/topk_chunks.cuh>
 
 namespace deep_select {
@@ -812,6 +813,55 @@ inline int f32_coarse12_override() {
     return v;
 }
 
+// `DEEP_SELECT_F32_SAMPLE`: the sample route's A/B knob, read once per
+// process, in the same shape as `DEEP_SELECT_F32_COARSE12` (`1` force, `0`
+// deny, unset = the ladder).  Read AFTER the AP-count test, so a force on an
+// unmeasured part cannot light the route there.
+inline int f32_sample_override() {
+    static const int v = [] {
+        const char *s = std::getenv("DEEP_SELECT_F32_SAMPLE");
+        if (s == nullptr || s[0] == '\0') return -1;
+        return std::atoi(s) != 0 ? 1 : 0;
+    }();
+    return v;
+}
+
+// The sampled-threshold one-pass fp32 row (`topk_sample.cuh`), gated.  It
+// replaces coarse12 on exactly coarse12's C600U cells -- the phase probe of
+// 2026-10-21 showed both of coarse12's walks sit at ~600-670 GB/s in situ
+// with the atomics not binding, so deleting one walk is the fp32 lever, and
+// the prototype measured 1.40-1.60x on the three big cells with the contract
+// exact.  The fallback is total: a row the route cannot answer (underflow,
+// or overflow past the 20-bit retry -- both measured ~0 on the official
+// distribution) is served by `topk_coarse12_row` inline in the same launch,
+// so a mis-gated cell is slower, never wrong.
+//
+// C600U-only today for the same reason `f32_coarse12_applies`'s tuning half
+// is a runtime test: the ladder was measured on that family and nowhere else
+// (C500's `sm_count == 104` arm of coarse12 has no sample-route measurement
+// behind it -- the route could run there, and that has to be earned).
+inline bool f32_sample_applies(const RowParams &params, uint32_t batches) {
+    // Budget half, compile-time for the same reason coarse12's is: the 32 KB
+    // arena+scratch against this family's own budget and the split's.
+    constexpr uint32_t kNeeded =
+        topk_select_sample::kSmemBytes > topk_select_radix::kF32RowSmemBytes
+            ? (uint32_t)topk_select_sample::kSmemBytes
+            : (uint32_t)topk_select_radix::kF32RowSmemBytes;
+    if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) {
+        return false;
+    } else {
+        if (!is_c600u_ap_count(params.sm_count)) return false;
+        if (params.topk > (uint32_t)topk_select_sample::kMaxTopK) return false;
+        if (batches == 0) return false;
+        if (params.vocab_size < kF32Coarse12MinVocab) return false;
+        if (f32_sample_override() >= 0) return f32_sample_override() != 0;
+        const uint64_t product = (uint64_t)batches * params.topk;
+        if (params.vocab_size <= kF32Coarse12NarrowVocab)
+            return product >= kF32Coarse12C600UNarrowProduct;
+        return product >= kF32Coarse12C600UWideProduct;
+    }
+}
+
 inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
     // ── the budget half: this family's compile-time budget, and the request ──
     // `kSmemBytes` is the route's whole request (histogram over candidates);
@@ -1298,6 +1348,20 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block);
         } else {
             topk_select_chunks::launch_route<int64_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
+        }
+        return;
+    }
+    // The sample route is tried first on its own ladder: it serves exactly
+    // the cells coarse12 serves on this family, and a row it declines falls
+    // to `topk_coarse12_row` inline, so the order is safe rather than just
+    // preferred.
+    if (value_dtype == 0 && detail::f32_sample_applies(params, n)) {
+        if (index_dtype == 0) {
+            topk_select_sample::launch_route<int32_t>(
+                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
+        } else {
+            topk_select_sample::launch_route<int64_t>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block);
         }
         return;
