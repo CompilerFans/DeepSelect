@@ -119,9 +119,15 @@ NaN 计数、16 位分裂索引(候选内低 16 位、块内高 16 位)、内容
 `BlockHistogramAtomic` 与我们的 pass-1 **逐字节同构**(就是它);
 `BlockHistogramSort`(默认)4096 桶要 ≥32 KB;`DeviceHistogram` 私有化上限 256 桶、
 之后退到**全局**计数器;`cub::BlockSelect` 不存在;`BlockRadixRank` 要 36,864 B 计数器;
-`BlockScan/WarpScan/WarpReduce` 都是 `__shfl_*_sync` 包装(71 指令 vs 手写
-`__builtin_mxc_bsm_bpermute` 蝶形 44)。唯一想法(相邻同桶 RLE,`IS_RLE_COMPRESS`)
-在词表低 4 位近似不相关的输入上收益 ~1/16,边际。
+`BlockScan/WarpScan/WarpReduce` 都是 `__shfl_*_sync` 包装(**71 指令** vs 手写
+`__builtin_mxc_bsm_bpermute` 蝶形 **44**,同一条 `sm_bperm_b32`,差值全是包装层的
+`__lane_id()` + 边界算术 —— 我们的热路径已经是原生形态,采用 CUB 版是回退)。
+唯一的机制想法是 RLE(`IS_RLE_COMPRESS`),但它的前提是输入有序/成簇
+(CUB 内部是先排序再压缩,4096 桶 ≥32 KB);官方分布相邻两元素同 12 位桶实测
+**1.4%**、8 元素组 **7.62 个不同桶**(`20261021_blockhist` §1,含同族的寄存器
+预聚合 427 vs 678 GB/s 否决),可合并的原子 ≤5% 而每元素先付一次比较+分支 ——
+且 block-hist 之后原子已不在元素路径上,fp32 侧本就非原子受限(6.9 vs ~14 G/s/AP)。
+**没有目标可作用。**
 
 ## 6. 勘误:k-th 值的并列组是 29–110,不是 ~19,000
 
