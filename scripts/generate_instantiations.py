@@ -233,7 +233,6 @@ FP32_ROW_HEADER = "<csrc/maca_kernels/common/radix_row_fp32.cuh>"
 CHUNKED_HEADER = "<csrc/maca_kernels/common/radix_chunked.cuh>"
 COARSE12_HEADER = "<csrc/maca_kernels/common/topk_coarse12.cuh>"
 CHUNKS_HEADER = "<csrc/maca_kernels/common/topk_chunks.cuh>"
-SAMPLE_HEADER = "<csrc/maca_kernels/common/topk_sample.cuh>"
 
 # ── row: `topk_kernel_radix<Cfg>` ───────────────────────────────────────────
 #
@@ -354,18 +353,6 @@ def coarse12_instantiations() -> List[Instantiation]:
         "    int default_length, cudaStream_t stream);")]
 
 
-# ── sample: the sampled-threshold one-pass fp32 selector ────────────────────
-
-
-def sample_instantiations() -> List[Instantiation]:
-    return [_inst(
-        "sample", "sample_kernel", "topk_select_sample", SAMPLE_HEADER,
-        "template cudaError_t launch_sample_kernel<kThreads>(\n"
-        "    const float *scores, const int32_t *lengths, int32_t *out,\n"
-        "    int32_t *nan_flags, int B, int topk, int64_t stride,\n"
-        "    int default_length, cudaStream_t stream);")]
-
-
 # ── chunks: the ported `topk_chunks` selector ───────────────────────────────
 #
 # Three kernels per `ChunkCount`, and `ChunkCount` is what
@@ -448,8 +435,7 @@ def family_instantiations(family: int) -> List[Instantiation]:
     if family not in FAMILIES:
         raise ValueError(f"unknown family {family!r}; known: {FAMILIES}")
     return (row_instantiations() + chunked_instantiations()
-            + coarse12_instantiations() + sample_instantiations()
-            + chunks_instantiations()
+            + coarse12_instantiations() + chunks_instantiations()
             + fp32_static_k_instantiations() + contract_instantiations())
 
 
