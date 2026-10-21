@@ -1,0 +1,54 @@
+diff --git a/csrc/maca_kernels/common/radix_row_bf16.cuh b/csrc/maca_kernels/common/radix_row_bf16.cuh
+index f6eab98..06024df 100644
+--- a/csrc/maca_kernels/common/radix_row_bf16.cuh
++++ b/csrc/maca_kernels/common/radix_row_bf16.cuh
+@@ -645,10 +645,45 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
+     bool use_list = false;
+     if (summary_wanted) {
+         const uint32_t cut = s_high_threshold_bin_id;
+-        for (uint32_t b = tx; b < nb; b += BLOCK_SIZE) {
+-            if (block_max[b] < cut) continue;
+-            const uint32_t pos = atomicAdd(&s_nlist, 1u);
+-            if (pos < list_cap) block_list[pos] = b;
++        // Eight block maxima per load.  The scalar loop pays one uint16 load
++        // per lane per sweep -- 16,384 of them on a V=1M row -- and that phase
++        // measures 7% of the cell (docs/experiments/20261021_blockhist/ §9).
++        // A uint4 carries eight maxima and reserves the vector's kept count in
++        // one atomic: measured 1.67x the scalar loop at BLOCK 1024 and 1.75x
++        // at 512, while ballot compaction measured *slower* than the per-block
++        // atomics (docs/experiments/20261021_list_build/).  The vector arm
++        // needs whole vectors and a 16-B-aligned row table (the row stride is
++        // `blocks_per_row * 2` bytes, odd when the stride is odd); anything
++        // else keeps the scalar loop unchanged.
++        const bool list_vec =
++            (nb & 7u) == 0 &&
++            (reinterpret_cast<uintptr_t>(block_max) & (sizeof(uint4) - 1u)) == 0;
++        if (list_vec) {
++            const uint4* bm4 = reinterpret_cast<const uint4*>(block_max);
++            const uint32_t n4 = nb >> 3;
++            for (uint32_t q = tx; q < n4; q += BLOCK_SIZE) {
++                const uint4 v = __ldg(bm4 + q);
++                const uint16_t* h = reinterpret_cast<const uint16_t*>(&v);
++                uint32_t mask = 0;
++                #pragma unroll
++                for (int i = 0; i < 8; i++)
++                    mask |= (h[i] >= cut ? 1u : 0u) << i;
++                const uint32_t cnt = (uint32_t)__popc(mask);
++                if (cnt == 0) continue;
++                uint32_t at = atomicAdd(&s_nlist, cnt);
++                #pragma unroll
++                for (int i = 0; i < 8; i++) {
++                    if ((mask & (1u << i)) == 0) continue;
++                    if (at < list_cap) block_list[at] = (q << 3) | (uint32_t)i;
++                    at++;
++                }
++            }
++        } else {
++            for (uint32_t b = tx; b < nb; b += BLOCK_SIZE) {
++                if (block_max[b] < cut) continue;
++                const uint32_t pos = atomicAdd(&s_nlist, 1u);
++                if (pos < list_cap) block_list[pos] = b;
++            }
+         }
+         // The histogram is spent; the second walk fills it with element counts
+         // over the blocks above, on the far side of this same barrier.
