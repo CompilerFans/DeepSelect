@@ -69,9 +69,22 @@ CUDA_VISIBLE_DEVICES=1 PYTHONPATH=/tmp/probe_tree:/tmp/probe_tree/tests \
 ```
 
 产物 `develop.sh` 会写回 `/tmp/probe_tree/deep_select/*.so`;探针树与被测树分离,
-主树不受影响。要复测线程数(640 → 512/1024),在探针树里改
-`topk_coarse12.cuh` 的 `kThreads` 并重编 —— 注意 `extern template` 那一行与
-生成 TU 的实例化必须同宽。
+主树不受影响。
+
+**线程数是单点改动,已验证**:`topk_coarse12.cuh` 里的 `extern template
+launch_coarse12_kernel<kThreads>` 和生成 TU(`xcore<N>/instantiations/coarse12_kernel.cu`)
+的显式实例化都写**符号** `kThreads` 而不是数字,所以改 `constexpr int kThreads`
+一处,声明、实例化、`__launch_bounds__`、`<<<B, kThreads>>>` 全部同步,**不需要重跑
+`generate_instantiations.py`**。代价是 `topk_coarse12.cuh` 被 `routing.cuh` /
+`radix_common.cuh` / `topk_chunks.cuh` 传递包含,几乎每个 TU 都要重编 —— 一个宽度一次
+完整 90-TU 构建,所以这一轮只值得在探针给出相位拆分之后跑。
+
+**同一次 pod 会话里的顺序**(基线目前停在 `20261021_032150`,ADJ4 的
+`20261021_063653` 随 pod 30717 丢失且从未提交,见记忆):先干净树 `./develop.sh`
+→ `CUDA_VISIBLE_DEVICES=1 ./run_bench.sh --set-baseline`(带 gate,~10 分钟;它同时
+产出 `run_header.txt`,没有这个文件的基线目录 `run_bench.sh` 看不见)→ 提交
+`perf_data/` 目录并重绘 PNG;然后再复制、打补丁、第二次完整构建、跑探针。构建期间
+设备 0 上开 CUDA-graph 回放保活(编译是纯 CPU,util 读 0 会被回收)。
 
 ## 4. 结果
 
