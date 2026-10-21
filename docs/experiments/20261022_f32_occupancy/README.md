@@ -6,22 +6,33 @@
 
 ## 1. doctor + 驱动回答的占用(已测)
 
-`maca_kernel_doctor`(--timeout 300,编译 TU)读数
-`topk_coarse12_kernel<640>`:**51 MT / 76 ST / 1308 B 静态 smem,0 栈帧**。
+`maca_kernel_doctor`(编译 TU,`--resource-usage`)读数:
 
-驱动回答(`cudaOccupancyMaxActiveBlocksPerMultiprocessor`,本仓纪律:占用
-只问驱动,不手算):
+| 构建 | 寄存器 | 栈帧 | 静态 smem |
+| --- | ---: | ---: | ---: |
+| `topk_coarse12_kernel<640>` | 51 MT / 76 ST | 0 | 1308 B |
+| `topk_coarse12_kernel<512>`(落地构建) | **32 MT / 46 ST** | 0 | 1308 B |
 
-| 动态 smem | CTA/SM |
-| ---: | ---: |
-| 16 KB(生产) | **3** |
-| 0(对照) | **3** |
+512 的寄存器反而更低(32 < 51)。注意 doctor 的纯 Python 占用模型
+(`lib/occupancy.py`)按 **64 KiB/AP** 算,对 512 × 17,692 B 给出 75%(= 3 CTA)
+—— 那是 C500 的答案;本 pod 的 C600U 每 AP 是 128 KiB(torch
+`shared_memory_per_multiprocessor = 131072`,`max_threads_per_multi_processor =
+2048`,`regs_per_multiprocessor = 131072`),所以占用**只认驱动**。
+
+驱动回答(`cudaOccupancyMaxActiveBlocksPerMultiprocessor`,直接问真核 —
+`/tmp/occ512b.cu` include `topk_coarse12.cuh` 实例化 `<512>`,与先前的
+`/tmp/occ_c12.cu`(`<640>`)同一仪器):
+
+| 构建 | 动态 smem = 16 KB(生产) | 动态 smem = 0(对照) |
+| --- | ---: | ---: |
+| `coarse12<640>` | **3 CTA/SM**(1920 线程) | **3 CTA/SM** |
+| `coarse12<512>` | **4 CTA/SM**(2048 线程) | **4 CTA/SM** |
 
 **上限是 2048 线程/AP 的天花板,不是 smem,也不是寄存器**:640×3 = 1920,
 4 个 CTA 需要 2560 > 2048;寄存器 51 MT × 640 × 4 = 130,560 ≤ 131,072 本来够
 4 个。smem(1308 + 16384)× 7 ≈ 124 KB 也够 7 个 —— 线程数是唯一瓶颈。
-**512 线程 = 4 CTA = 2048 线程满填**,且在飞字节 30 → 32 KB(+7%),复基准
-同形状 512 vs 640:纯读 +10.6%、逐元素原子 +6.4%、过滤+暂存 +6.5%。
+**512 线程 = 4 CTA = 2048 线程满填**(驱动读数),且在飞字节 30 → 32 KB(+7%),
+复基准同形状 512 vs 640:纯读 +10.6%、逐元素原子 +6.4%、过滤+暂存 +6.5%。
 
 在核 walk 已带 OUT=2(`topk_coarse12.cuh` 的 `ARCH_REGS_PER_AP >= 131072`
 门,xcore1600 满足),所以差距不在在飞 float4 数。
@@ -68,7 +79,7 @@ GB/s 是算子自身的逻辑流量(`B·V·4` 或 `B·V·2`,单次读),与 `perf
 时 3 CTA/SM = 1920 线程,离 2048 差 128;4 个 CTA 需要 2560。smem
 (1308 + 16384 = 17692 B)能放 7 个,寄存器(51 MT)按 4 个 CTA 算
 51×640×4 = 130,560 ≤ 131,072 也够 —— 驱动读数(§1)两个对照都停在 3。
-512 线程 = 4 CTA = 2048 整,在飞字节 30 → 32 KB(+7%),复基准同形状
+512 线程 = 4 CTA = 2048 整(驱动对真核 `<512>` 直接答 4),在飞字节 30 → 32 KB(+7%),复基准同形状
 纯读 +10.6%、逐元素原子 +6.4%、过滤+暂存 +6.5%;在算子里是 3.7-6.2%
 (五个 fp32 格),差值被算子的其余相位稀释。
 
@@ -91,3 +102,23 @@ unsupported 0 / skip 5**,5 个 skip 全是 `b4096` × `V≈0.4-1.0M` 的
 更新;`csrc/maca_kernels/common/routing.cuh` 里"640 threads against 512"的
 差异描述改为"块宽同为 512"。改动在 `common/`,编进三个 family 的产物;
 测量只在 C600U(device 1)上做,C500/C600 未测。
+
+## 4. 官方网格记录与 PNG(落地产物)
+
+`perf_data/MetaX_C600-U/20261021_175631/`:commit `6b01951`、artifact md5
+`5958dcea`、device 1、28 AP、MACA 20261017。同一轮里的门禁:official
+**147/147**、official_fp32 **30/30**、correctness 抽 549 例 **537 pass /
+0 check_fail / 0 crash / 12 skip**(skip 全是 `b4096` × `V≈0.4-1.0M` 的
+OOM,与 §3 同因)。`assets/perf_{bf16,fp32}_maca_MetaX_C600-U.png` 由这份 CSV
+重绘(峰值 bf16 758 GB/s、fp32 418 GB/s)。
+
+对上一份记录(`20261021_110409`,640 构建)的逐格比值:fp32 17 格中位
+**0.977**(12 格改善 / 1 格 1.06 的 `b16 V66551`,是 53→57 µs 的会话噪声);
+四个 `b4096` fp32 格 **0.934/0.962/0.934/0.962**,与 §3 的受控 A/B
+(0.9377/0.9574/0.9377/0.9626)一致 —— 这是同一结论在官方网格上的复现。
+bf16 117 格中位 0.997(不动,bf16 不走 coarse12)。
+
+**没有移动 baseline。** `run_header.txt` 的 `pgrep` 里有平台侧 `/root/ab`
+的作业(它 pin 在 device 0);device 1 在 header 快照时是 0%。按本仓纪律,
+header 里出现另一个 torch 进程就只作记录、不作 baseline,所以 `baseline`
+仍指向 `20261021_110409`,下一次干净跑再 repoint。

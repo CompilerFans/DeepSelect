@@ -1,0 +1,46 @@
+# run_bench.sh    device_dir=MetaX_C600-U
+# timestamp_utc   2026-10-21T17:56:31Z
+# host            mx-cjxu-ws-cr-2026102122192700003d0b
+# extension       /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# extension_md5   5958dcea8c7cfca46426599da019a6a3
+# cuda_visible_devices 1
+# backends        maca_c,torch,deep_gemm
+# STALE           no
+# ---
+# mx-smi
+mx-smi  version: 2.3.4
+
+=================== MetaX System Management Interface Log ===================
+Timestamp                                         : Wed Oct 21 17:56:31 2026
+
+Attached GPUs                                     : 2
++---------------------------------------------------------------------------------+
+| MX-SMI 2.3.4                       Kernel Mode Driver Version: 3.10.11          |
+| MACA Version: 3.0.1436.20261017    BIOS Version: 1.1.7.0                        |
+|------------------+-----------------+---------------------+----------------------|
+| Board       Name | GPU   Persist-M | Bus-id              | GPU-Util      sGPU-M |
+| Pwr:Usage/Cap    | Temp       Perf | Memory-Usage        | GPU-State            |
+|==================+=================+=====================+======================|
+| 0   MetaX C600-U | 0           Off | 0000:aa:00.0        | 0%          Disabled |
+| 124W / 520W      | 31C          P0 | 524/73728 MiB       | Available            |
+|                  |-----------------|---------------------|----------------------|
+|                  | 1           Off | 0000:ab:00.0        | 0%          Disabled |
+|                  | 34C          P0 | 524/73728 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+
++---------------------------------------------------------------------------------+
+| Process:                                                                        |
+|  GPU                    PID         Process Name                 GPU Memory     |
+|                                                                  Usage(MiB)     |
+|=================================================================================|
+|  no process found                                                               |
++---------------------------------------------------------------------------------+
+
+End of Log
+# pgrep -af python
+#   74188 bash -c export PATH=/opt/conda/bin:$PATH; cd /root/ab && python -c " import torch for pair in [(\"base1\",\"new1\"),(\"base2\",\"new2\"),(\"base1\",\"base2\")]:     a=torch.load(f\"/root/ab/{pair[0]}.pt\"); b=torch.load(f\"/root/ab/{pair[1]}.pt\")     for k in a[\"outs\"]:         x,y=a[\"outs\"][k],b[\"outs\"][k]         same=torch.equal(x,y); md=(x-y).abs().max().item()         print(pair,k,\"equal\" if same else f\"DIFF max={md:.3e}\") "
+#   74192 python -c  import torch for pair in [("base1","new1"),("base2","new2"),("base1","base2")]:     a=torch.load(f"/root/ab/{pair[0]}.pt"); b=torch.load(f"/root/ab/{pair[1]}.pt")     for k in a["outs"]:         x,y=a["outs"][k],b["outs"][k]         same=torch.equal(x,y); md=(x-y).abs().max().item()         print(pair,k,"equal" if same else f"DIFF max={md:.3e}") 
+
+# ---
+# run_bench.sh: finished rc=0
+# out             perf_data/MetaX_C600-U/20261021_175631
