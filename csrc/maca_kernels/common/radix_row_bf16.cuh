@@ -302,37 +302,103 @@ __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
     // the tail loop both walks already carry -- and with this bound the guarded
     // load below has nothing left to guard.
     const uint32_t step = BLOCK_SIZE / 8;
+    const uint32_t nblk = vec_len >> 6;
     bool nan_local = false;
     uint32_t blk = group;
 #ifdef __MACACC__
-    // Two blocks in flight per iteration where the register file affords it:
-    // the walk keeps one outstanding uint4 per thread, which is a
-    // memory-latency cap, not a bandwidth one -- the measured read curve on a
-    // C600U is 265 -> 956 -> 1390 GB/s for 1/2/4 outstanding at one 512-thread
-    // CTA per SM (1024 -> 1616 at two).  The second block is the whole gap on
-    // under-filled grids and ~6% once the shared atomics cap.  The C500's 32 MT
-    // wall keeps the single-issue walk.
+    // The block-histogram arm visits four ADJACENT blocks per group iteration;
+    // the dense arm keeps its step-strided pair.  Adjacency is worth 1.5x on
+    // the walk that has no per-element atomics and nothing on the one that has
+    // them: measured at the real shape (4096 x 1M bf16, BLOCK 1024, 2 CTAs/SM,
+    // walk4-6 in `docs/experiments/20261021_adjacent_walk/`) 861.7 GB/s for
+    // the step-strided pair, 1295.6 for four adjacent blocks, 859.7 for eight
+    // (register/schedule blowup), and 559.2 -> 535.6 for the dense arm -- so the
+    // change is confined to this arm.  What moves is only the order blocks are
+    // visited in: the summary, the list, every bin and every count are the same.
+    constexpr bool kAdjacent4 = (ARCH_REGS_PER_AP >= 131072) && !kHist;
     if constexpr (ARCH_REGS_PER_AP >= 131072) {
-        for (; ((blk + step + 1u) << 6) <= vec_len; blk += 2 * step) {
-            uint32_t key0 = 0, key1 = 0;
-            nan_local |= hist_add_bf16_wide<kNan, kHist>(
-                s_wide, input, (blk << 6) + lane * 8u, &key0);
-            nan_local |= hist_add_bf16_wide<kNan, kHist>(
-                s_wide, input, ((blk + step) << 6) + lane * 8u, &key1);
-            DS_GROUP_MAX8_TREE(key0);
-            DS_GROUP_MAX8_TREE(key1);
-            if (lane == 0u) {
-                block_max[blk] = (uint16_t)(key0 >> kCoarse12Shift);
-                block_max[blk + step] = (uint16_t)(key1 >> kCoarse12Shift);
-                if constexpr (!kHist) {
+        if constexpr (!kHist) {
+            // Group `g` owns blocks `[4g, 4g+4)` and strides by `4*step`, which
+            // tiles: `4*step` consecutive blocks are the CTA's next sweep of the
+            // row.  Starting at `g` instead would have four groups summarize
+            // overlapping chunks -- a 4x histogram, i.e. a wrong threshold.
+            blk = 4u * group;
+            for (; ((blk + 4u) << 6) <= vec_len; blk += 4u * step) {
+                uint32_t key0 = 0, key1 = 0, key2 = 0, key3 = 0;
+                nan_local |= hist_add_bf16_wide<kNan, kHist>(
+                    s_wide, input, (blk << 6) + lane * 8u, &key0);
+                nan_local |= hist_add_bf16_wide<kNan, kHist>(
+                    s_wide, input, ((blk + 1u) << 6) + lane * 8u, &key1);
+                nan_local |= hist_add_bf16_wide<kNan, kHist>(
+                    s_wide, input, ((blk + 2u) << 6) + lane * 8u, &key2);
+                nan_local |= hist_add_bf16_wide<kNan, kHist>(
+                    s_wide, input, ((blk + 3u) << 6) + lane * 8u, &key3);
+                DS_GROUP_MAX8_TREE(key0);
+                DS_GROUP_MAX8_TREE(key1);
+                DS_GROUP_MAX8_TREE(key2);
+                DS_GROUP_MAX8_TREE(key3);
+                if (lane == 0u) {
+                    block_max[blk] = (uint16_t)(key0 >> kCoarse12Shift);
+                    block_max[blk + 1u] = (uint16_t)(key1 >> kCoarse12Shift);
+                    block_max[blk + 2u] = (uint16_t)(key2 >> kCoarse12Shift);
+                    block_max[blk + 3u] = (uint16_t)(key3 >> kCoarse12Shift);
                     atomicAdd(&s_wide[key0 >> kCoarse12Shift], 1u);
                     atomicAdd(&s_wide[key1 >> kCoarse12Shift], 1u);
+                    atomicAdd(&s_wide[key2 >> kCoarse12Shift], 1u);
+                    atomicAdd(&s_wide[key3 >> kCoarse12Shift], 1u);
+                }
+            }
+            // The four-block loop consumes whole multiples of four, so it
+            // covers `[0, nblk - (nblk % 4))` exactly: a group takes its
+            // chunk only when all four blocks are inside the row, and the
+            // groups that do are the first `nblk/4` of them in each sweep.
+            // What is left is the last `nblk % 4` (at most three) blocks, and
+            // they are what groups 0..s-1 walk next -- one each, since `s` is
+            // below `step`.  Assigning them any other way double-counts: the
+            // boundary is shared by two adjacent groups, and a second summary
+            // of the same block is a second histogram count.
+            const uint32_t tail = nblk % 4u;
+            for (uint32_t t = nblk - tail + group; t < nblk; t += step) {
+                uint32_t key = 0;
+                nan_local |= hist_add_bf16_wide<kNan, kHist>(
+                    s_wide, input, (t << 6) + lane * 8u, &key);
+                DS_GROUP_MAX8_TREE(key);
+                if (lane == 0u) {
+                    block_max[t] = (uint16_t)(key >> kCoarse12Shift);
+                    atomicAdd(&s_wide[key >> kCoarse12Shift], 1u);
+                }
+            }
+        } else {
+            // Two blocks in flight per iteration where the register file
+            // affords it: the walk keeps one outstanding uint4 per thread,
+            // which is a memory-latency cap, not a bandwidth one -- the
+            // measured read curve on a C600U is 265 -> 956 -> 1390 GB/s for
+            // 1/2/4 outstanding at one 512-thread CTA per SM (1024 -> 1616 at
+            // two).  The second block is the whole gap on under-filled grids
+            // and ~6% once the shared atomics cap.  The C500's 32 MT wall keeps
+            // the single-issue walk.
+            for (; ((blk + step + 1u) << 6) <= vec_len; blk += 2 * step) {
+                uint32_t key0 = 0, key1 = 0;
+                nan_local |= hist_add_bf16_wide<kNan, kHist>(
+                    s_wide, input, (blk << 6) + lane * 8u, &key0);
+                nan_local |= hist_add_bf16_wide<kNan, kHist>(
+                    s_wide, input, ((blk + step) << 6) + lane * 8u, &key1);
+                DS_GROUP_MAX8_TREE(key0);
+                DS_GROUP_MAX8_TREE(key1);
+                if (lane == 0u) {
+                    block_max[blk] = (uint16_t)(key0 >> kCoarse12Shift);
+                    block_max[blk + step] = (uint16_t)(key1 >> kCoarse12Shift);
                 }
             }
         }
     }
+#else
+    constexpr bool kAdjacent4 = false;
 #endif
-    for (; ((blk + 1u) << 6) <= vec_len; blk += step) {
+    // The step-strided single-block walk covers whatever the pair loop left
+    // behind; on the adjacent-four arm every block is already accounted for,
+    // and a stride of `step` here would cover blocks a second time.
+    for (; !kAdjacent4 && ((blk + 1u) << 6) <= vec_len; blk += step) {
         const uint32_t idx = (blk << 6) + lane * 8u;
         uint32_t key = 0;
         nan_local |= hist_add_bf16_wide<kNan, kHist>(s_wide, input, idx, &key);
