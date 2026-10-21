@@ -120,7 +120,41 @@ ns/reduce —— 纯归约的数字,与 §3b 的 in-situ A/B 互为印证。语�
 那里),`kHist` 臂与 CUDA `#else` 半不动 —— 与 ADJ4 落地时的架构边界
 同一形状:`common/` 改动进所有族的 artifact,只量 C600U,其他族不量。
 
-## 4. 结果
+## 4. 结果(2026-10-21,pod 30752,C600-U 28 AP,MACA 20261017 工具链,设备 1)
 
-(待设备。要填:车道表、SASS 指令类别、`warp_reduce_test` 的语义判定与
-三形态 ns/reduce、A/B 12 行的 GB/s。)
+**车道表**:Shift Right(0x11d)= lane i 读 lane i−d;**Shift Left(0x10d)=
+lane i 读 lane i+d**(归约落首 lane,即默认臂)。越出 row 的读取不遵守指南的
+bc 承诺:row 顶 lane(lane 15/63)返回一个固定的陈旧跨 lane 值(row_top−4),
+wave 底 lane 0 返回垃圾 0x1E00000;bc=0 的零填充只在部分边界成立。结论:
+**只有严格行内读取可信**,归约链按构造全部行内,非 leader 部分值不可读。
+`readlane(v,7)` 与 `readfirstlane` 全 lane 一致,干净。
+
+**SASS 门(通过)**:`mov_shfl` → 一条 `mov_b32 r2, r1 row_shl:1 rmsk:15
+bmsk:15 bc:1`(DPP 形态,ALU 管);`readlane` → `rl_b32 s0, r1, 7`(SALU);
+`readfirstlane` → `rfl_b32 s0, r1`。全内核 **0 条 sm_/ds_/bsm 指令**。
+
+**纯归约速率**(`warp_reduce_test`,一波,ns/reduce;语义 8 波 ×
+{max,min,sum,8 组} 全过):
+
+| 形态 | 延迟链 | 吞吐 |
+| --- | ---: | ---: |
+| `__shfl_down_sync` 包装链(6 步) | 918.94 | 358.17 |
+| `bsm_bpermute` 蝶形(6 步) | 747.50 | 79.67 |
+| **mov_shfl+readlane(本原语)** | **62.03** | **39.70** |
+
+延迟 12.1×(对蝶形)/ 14.8×(对包装),吞吐 2.0× / 9.0×。链式 LDS permute
+每步 ~125 ns —— smem 管延迟的直接读数。
+
+**行走 A/B**(hist1a ADJ4 复刻,V=1M bf16,1024 行一 CTA 一行;NaN 有/无
+在此基准无差异 —— 与在核 16.45% 税不同,谓词替身更便宜):
+
+| 臂 | BLOCK 1024 | BLOCK 512 |
+| --- | ---: | ---: |
+| bpermute 树(现航) | 1061.2 GB/s | 1037.0 |
+| **mov_shfl 行配对树** | **1117.0(+5.3%)** | **1110.6(+7.1%)** |
+| 无树上界 | 1110.0 | 992.8 |
+
+行配对臂达到/超过无树上界 —— 树移出 LDS 管之外,每 row 8 相邻块的映射
+比组映射(4 块)的局部性更好(无树臂保留组映射,故低于行配对臂)。
+**注意**:本 pod 是 MACA 20261017 新工具链,绝对值与旧 3.8.1.3 的记录
+(同形状隔离 1070.7 带 NaN / 1295.6 无 NaN)不可直接比,以臂间比值为据。
