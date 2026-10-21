@@ -14,19 +14,34 @@
 // registers, and the function boundary shifts the compiler's schedule around
 // it.  Never extract this into a function again.
 #ifdef __MACACC__
-// No mask: only lane 0 is read and the tree chains, so the group-edge
-// contamination `(tx + delta) & 63` can introduce reaches lanes >= 5 only,
-// and lane 0's chain (0,1,2,4) never reads one.
+// Row shuffle (`mov_shfl`), NOT `bsm_bpermute` -- measured 2026-10-21 on a
+// C600-U (pod 30752, `docs/experiments/20261021_mov_shfl_tree/`).  SASS:
+// `mov_shfl` lowers to ONE `mov_b32 ... row_shl:N rmsk bmsk bc` (ALU pipe,
+// DPP form) while `sm_bperm_b32` travels the shared-memory pipe, so the old
+// tree competed with this walk's own block-max atomics for the one pipe.
+// Pure reduce (one wave, chained): 62.0 ns here vs 747.5 ns for the
+// bpermute butterfly and 918.9 for the `__shfl_down_sync` wrapper;
+// throughput 39.7 vs 79.7 / 358.2 ns.  This walk, isolated at V=1M bf16:
+// 1061 -> 1117 GB/s at BLOCK 1024, 1037 -> 1111 at BLOCK 512 -- at or above
+// the no-tree ceiling, because the tree leaves the pipe AND the row-paired
+// mapping below reads 8 adjacent blocks per row.
+//
+// Direction, measured: `row_shl:d` reads lane i+d into lane i, so the
+// chained d=4,2,1 lands each half-row's max on its FIRST lane -- the same
+// `(tx & 7) == 0` leaders as before.  Every source in a leader's chain is
+// in-row; out-of-row reads return hardware garbage (the guide's bc promise
+// does not hold at the rows' edges), so non-leader partials must never be
+// read -- the same contract the bpermute form carried.
 #define DS_GROUP_MAX8_TREE(key)                                       \
     do {                                                              \
-        uint32_t o_ = (uint32_t)__builtin_mxc_bsm_bpermute(           \
-            (int)(((tx + 1u) & 63u) << 2), (int)(key));               \
+        uint32_t o_ = (uint32_t)__builtin_mxc_mov_shfl(               \
+            (int)(key), 0x104, 0xf, 0xf, 1);                          \
         key = (key) > o_ ? (key) : o_;                                \
-        o_ = (uint32_t)__builtin_mxc_bsm_bpermute(                    \
-            (int)(((tx + 2u) & 63u) << 2), (int)(key));               \
+        o_ = (uint32_t)__builtin_mxc_mov_shfl(                        \
+            (int)(key), 0x102, 0xf, 0xf, 1);                          \
         key = (key) > o_ ? (key) : o_;                                \
-        o_ = (uint32_t)__builtin_mxc_bsm_bpermute(                    \
-            (int)(((tx + 4u) & 63u) << 2), (int)(key));               \
+        o_ = (uint32_t)__builtin_mxc_mov_shfl(                        \
+            (int)(key), 0x101, 0xf, 0xf, 1);                          \
         key = (key) > o_ ? (key) : o_;                                \
     } while (0)
 #endif
@@ -318,11 +333,14 @@ __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
     constexpr bool kAdjacent4 = (ARCH_REGS_PER_AP >= 131072) && !kHist;
     if constexpr (ARCH_REGS_PER_AP >= 131072) {
         if constexpr (!kHist) {
-            // Group `g` owns blocks `[4g, 4g+4)` and strides by `4*step`, which
-            // tiles: `4*step` consecutive blocks are the CTA's next sweep of the
-            // row.  Starting at `g` instead would have four groups summarize
-            // overlapping chunks -- a 4x histogram, i.e. a wrong threshold.
-            blk = 4u * group;
+            // Row `r` (16 lanes) owns blocks `[8r, 8r+8)`, each half-row its
+            // four adjacent ones, and strides by `4*step` (= 8 blocks x the
+            // CTA's row count), which tiles exactly as `4*group` did.  The
+            // `4*group` mapping would still be CORRECT with the row-shuffle
+            // tree (each 8-lane group gets its own max on its own leader);
+            // pairing the halves is the locality half of the measured win --
+            // the row's 16 lanes read 8 consecutive blocks between them.
+            blk = 8u * (tx >> 4) + (((tx >> 3) & 1u) << 2);
             for (; ((blk + 4u) << 6) <= vec_len; blk += 4u * step) {
                 uint32_t key0 = 0, key1 = 0, key2 = 0, key3 = 0;
                 nan_local |= hist_add_bf16_wide<kNan, kHist>(
