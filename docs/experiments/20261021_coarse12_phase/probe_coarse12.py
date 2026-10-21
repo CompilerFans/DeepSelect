@@ -52,7 +52,7 @@ def one(b, v, k, seed):
         ts.append((time.perf_counter() - t0) * 1e3)
     wall = st.median(ts)
 
-    rec = out[:, k - 16:k].to(torch.int64).cpu()
+    rec = out[1][:, k - 16:k].to(torch.int64).cpu()
     total = rec[:, 6]                                    # end - start
     ok = total > 0
     rec, total = rec[ok], total[ok]
