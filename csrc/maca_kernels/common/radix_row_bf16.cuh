@@ -445,6 +445,10 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             // decision this pass makes: the block summary's, when the row is
             // dense enough for the second walk to be short, and the elements'
             // otherwise.
+            //
+            // Both arms keep the NaN vote, and on the block-histogram arm it is
+            // the only vote an unlisted block's elements ever get: the second
+            // walk visits the listed blocks alone.
             if (block_hist)
                 nan_local |= summary_walk<false, kNan, BLOCK_SIZE>(
                     input, vec_len, block_max, s_wide);
