@@ -1,0 +1,47 @@
+diff --git a/csrc/maca_kernels/common/radix_row_bf16.cuh b/csrc/maca_kernels/common/radix_row_bf16.cuh
+index f6eab98..f75a73f 100644
+--- a/csrc/maca_kernels/common/radix_row_bf16.cuh
++++ b/csrc/maca_kernels/common/radix_row_bf16.cuh
+@@ -262,14 +262,41 @@ constexpr uint32_t kBlockHistMinRowPerSlot = 256;
+ // leaves the decision and the line on one latency chain and measures at 0.45 of
+ // the full walk even when 96% of the blocks are skipped, while this decoupled
+ // form reaches 0.14 (docs/experiments/20261010_skim_rate/).
++// Four list entries in flight per iteration.  The chain here is
++// list-entry -> block load -> body, and one entry at a time keeps a single
++// uint4 outstanding per thread, which is the same memory-latency cap the
++// block-hist walk buys out of with its four-adjacent-block loop: the measured
++// read curve is 265 -> 956 -> 1,390 GB/s for 1/2/4 outstanding at one
++// 512-thread CTA per SM (`docs/experiments/20261021_adjacent_walk/`).  These
++// walks read 6% of the row at V/k = 1024 yet are 8-11% of the cell in time,
++// i.e. latency, not traffic.  Coverage is unchanged: each group visits
++// `j, j+stride, j+2*stride, j+3*stride` and strides by `4*stride`, and the
++// scalar tail picks up where that leaves off.
+ template <uint32_t BLOCK_SIZE, typename F>
+ __device__ __forceinline__ void walk_kept_blocks(const maca_bfloat16* input,
+                                                  const uint32_t* list,
+                                                  uint32_t n, F&& body) {
+     const uint32_t lane = threadIdx.x & 7u;
+     const uint32_t group = threadIdx.x >> 3;
++    const uint32_t stride = BLOCK_SIZE / 8u;
++    uint32_t j = group;
++    for (; j + 3u * stride < n; j += 4u * stride) {
++        uint4 v[4];
++        uint32_t base[4];
++#pragma unroll
++        for (int t = 0; t < 4; t++) {
++            base[t] = list[j + (uint32_t)t * stride] << 6;
++            v[t] = __ldg(reinterpret_cast<const uint4*>(input + base[t]) + lane);
++        }
++#pragma unroll
++        for (int t = 0; t < 4; t++) {
++            const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v[t]);
++#pragma unroll
++            for (int i = 0; i < 8; i++) body(base[t] + lane * 8u + (uint32_t)i, h[i]);
++        }
++    }
+ #pragma unroll 2
+-    for (uint32_t j = group; j < n; j += BLOCK_SIZE / 8u) {
++    for (; j < n; j += stride) {
+         const uint32_t base = list[j] << 6;
+         const uint4 v = __ldg(reinterpret_cast<const uint4*>(input + base) + lane);
+         const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
