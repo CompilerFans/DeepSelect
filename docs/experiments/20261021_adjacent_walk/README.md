@@ -110,18 +110,33 @@ group g 的第 i 次迭代:块 [4g + 4*step*i, +4)
 
 ## 5. 寄存器与占用
 
-单 TU 实测(`value_bf16_outidx_i32_block_1024_si0_rv0_sv0_pre0.cu`,cucc
-`--resource-usage`,xcore1600):
+单 TU 实测(cucc `--resource-usage`,xcore1600;数值是该 TU 里 bf16 行实例
+`topk_kernel_radix<...>` 的最大值,静态 smem 两档都是 4936 B):
 
-| | MT | ST | 静态 smem |
+| TU | HEAD | 本改动 |
+| --- | ---: | ---: |
+| `value_bf16_outidx_i32_block_1024_si0_rv0_sv0_pre0.cu` | 50 MT / 64 ST | 66 MT / 64 ST |
+| `value_bf16_outidx_i32_block_512_si0_rv0_sv0_pre0.cu` | 50 MT / 64 ST | 66 MT / 64 ST |
+
++16 MT 是三个额外 uint4(12 个寄存器)加簿记。(本文早先记的"48 → 62"是
+block_1024 TU 里 `pre0`/k512 那一个符号的读数;TU 的最大值两档都是 50 → 66。)
+
+**占用没有掉,而且这是问驱动问出来的,不是手算的。** 同一支探针
+(`cudaOccupancyMaxActiveBlocksPerMultiprocessor`,动态 smem 由
+`radix_smem_bytes(topk, false, true)` 给出)在两棵树上各跑一遍,pre0/pre1
+两支都在内:
+
+| 配置 | 动态 smem | HEAD | 本改动 |
 | --- | ---: | ---: | ---: |
-| HEAD | 48 | 60 | 4936 B |
-| 本改动 | 62 | 60 | 4936 B |
+| BLOCK 512, k512 | 18432 B | 4 | **4** |
+| BLOCK 512, k1024 | 20480 B | 4 | **4** |
+| BLOCK 1024, k512 | 18432 B | 2 | **2** |
+| BLOCK 1024, k1024 | 20480 B | 2 | **2** |
 
-+14 MT 是三个额外 uint4(12 个寄存器)加簿记。**占用没有掉**:驱动对真实核
-(`topk_kernel_radix<TopkRadixConfig<maca_bfloat16,int32_t,1024,false,false,false,{false,true}>>`,
-动态 smem 18432 B)答 `cudaOccupancyMaxActiveBlocksPerMultiprocessor = 2`,
-pre0/pre1 两支都是 2——128 KiB 寄存器堆正好装下 2 × 1024 × 64。
+旗舰格(b4096 的长行)按 `radix_block_for` 走 BLOCK 512,常驻仍是
+4 CTA/SM;BLOCK 1024 那档也没动。注意 66 MT 按
+`66 × 512 = 33792 > 131072 / 4 = 32768` 手算会得出 3,而驱动答 4——所以这里
+记的是驱动的答案,不是除法的答案。
 
 ## 6. 核内 A/B
 
@@ -184,3 +199,25 @@ python3 tools/ab_snapshot.py \
 因此这个改动的 roofline 判词是**地址局部性**:它不是浮点、不是树、不是原子、
 也不是 MLP——相邻四块在行内是连续 512 B,BH 格子的整格速率从 673 GB/s 抬到
 786 GB/s(1545 GB/s 读墙的 44% → 51%,其余是 pass 2 与 collect)。
+
+### 快照级复核(2026-10-21 06:39,干净 session)
+
+`./run_bench.sh --skip-gate --set-baseline --device 1`(pod 的剩余寿命不够
+跑完它那条 549 例的 correctness 阶段。本树的正确性门是 `tests/test.py
+--backend maca_c` 的一次抽样:**`All 342 cases passed!`**,0 `check_fail` /
+0 `crash`,其余是 OOM `skip`。)snapshot 阶段把新树与旧基线
+`20261021_032150`(HEAD 的产物)对起来:
+
+| 后端 | 回退 / 改善 / 噪声 | 总量 |
+| --- | --- | ---: |
+| `maca_c` | **0 / 49 / 85** | 121154.0 → 112043.3 us(**−7.52%**) |
+| `torch`(对照) | 25 / 0 / 99(+10 不可比) | 1572415.2 → 1573489.9 us(**+0.07%**) |
+
+最大单格 −16.0%(b256-v1048576-k512)、−15.4%(b128-v1048576-k2048)、
+−14.5%(旗舰 b4096-v1048576-k512)。对照后端总量 +0.07%,但小格有 25 个
+3–8% 的漂移——这是"小格是 session"的已知现象(见 `CLAUDE.md` 的两个比较器),
+`maca_c` 侧没有一个格回退超过 3%。
+
+新基线 = `perf_data/MetaX_C600-U/20261021_063653`,
+`assets/perf_bf16_maca_MetaX_C600-U.png` 与 fp32 那张都从它重画(bf16 峰值
+787.6 GB/s,与 §6 的 786 一致)。
