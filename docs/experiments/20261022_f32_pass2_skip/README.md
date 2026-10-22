@@ -139,6 +139,50 @@ walks the sub-block remainder densely (`kBlockVecs`-granular and scalar). The
 shipping kernel's own grid check covers the shape (30/30 fp32 perf cells, and
 the 343/343 full gate recorded under "What shipped").
 
+## On the official grid (the recording, 2026-10-22)
+
+The shipped artifact was recorded by `./run_bench.sh` on the same pod, device 1, as
+`perf_data/MetaX_C600-U/20261022_175424/` (commit `6b5928c`, artifact `6379e1cb`). All
+the stages ran and passed in one session: snapshot 147/147 `maca_c` and 147/147 `torch`
+(plus 25 `deep_gemm` selector rows), official 147/147, official_fp32 30/30, the
+`--seed 20260911 --sample 400` correctness draw at 0 `check_fail` / 0 `crash` /
+13 OOM `skip` over 549 cases, and the chunks/graph arms with both scratch probes.
+
+Against the previous recording (`20261021_175631`, the 512-thread tree before the
+list, same board and toolkit), kernel time, both currencies:
+
+| cell (official shape) | before | after | ratio |
+| --- | ---: | ---: | ---: |
+| fp32 b4096 V131072 k2048 int32 | 5234.4 us / 416.7 GB/s | 4745.5 us / 459.6 GB/s | 0.907x |
+| fp32 b4096 V107520 k2048 int32 | 4394.0 us / 408.6 GB/s | 3988.9 us / 450.0 GB/s | 0.908x |
+| fp32 b4096 V129280 k512 sorted int64 | 5127.3 us / 418.0 GB/s | 4380.5 us / 489.3 GB/s | 0.854x |
+| fp32 b256 V129280 k512 | 396.5 us / 337.8 GB/s | 332.4 us / 403.0 GB/s | 0.838x |
+
+The fp32 column (17 cells) sums **18,999.4 -> 16,917.0 us (-10.96%)**, median ratio
+0.907; 12 cells improved, ten of them by 9-19%. The four that moved the other way are
+under 1.4% -- three b1/b16 cells where the kernel is launch-bound, and `b132 V66551`
+(+1.4%), the densest cell and the density trade above. bf16 is the control (117 cells,
+median 0.993): the change cannot route a bf16 call.
+
+It reproduces the paired A/B on a second instrument and a second session, cell for cell
+-- 0.854 here against 0.867 there at `b4096 V129280 k512`, 0.907 against 0.924 at
+`b4096 V131072 k2048`. The column total is larger than the A/B's -8.35% because the
+snapshot's 17 distinct shapes are mostly the `V >= 107520` rows that gain, while the
+A/B's 30 cases also carry the b1/b16 draws that cannot.
+
+Kernel to kernel, the fp32 selector path is now ahead of `deep_gemm`'s `topk_coarse12`
+at every batch >= 132: **0.880x** at `b4096 V131072 k2048` (4745.5 against 5393.5 us)
+and **0.879x** at `b4096 V107520` (3988.9 against 4538.0), against 0.946x / 0.940x in
+the previous recording; `deep_gemm` itself moved only -2.1..-3.6% between the sessions,
+so the ratio moving is this change. The b1 cells stay behind (1.37x at V66551,
+2.1-2.4x at the two longer rows): 45-111 us, launch-latency bound. Both sides' `time(us)`
+is the official "name contains topk" rule, so `deep_gemm`'s torch-level NaN check sits
+in its `wall_us` (17.1 ms against our 4.76 ms at `b4096 V131072`), not in its kernel.
+
+The baseline was not moved: `run_header.txt` lists the pod's `/root/busy.py`
+device-0 keep-alive (the measurement ran on device 1), and the pod's checkout carries
+no `baseline` symlink -- the run was not given `--set-baseline` and lands as a directory.
+
 ## The boundary the first version got wrong (caught by the gate, not by the grid)
 
 The first build passed all 30 fp32 **performance** cells and still had a
