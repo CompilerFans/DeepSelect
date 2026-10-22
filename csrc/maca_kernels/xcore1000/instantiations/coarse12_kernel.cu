@@ -8,6 +8,7 @@ namespace topk_select_coarse12 {
 template cudaError_t launch_coarse12_kernel<kThreads>(
     const float *scores, const int32_t *lengths, int32_t *out,
     int32_t *nan_flags, int B, int topk, int64_t stride,
-    int default_length, cudaStream_t stream);
+    int default_length, uint16_t *block_max, uint32_t *block_list,
+    cudaStream_t stream);
 
 }  // namespace topk_select_coarse12

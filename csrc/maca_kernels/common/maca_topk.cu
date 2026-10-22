@@ -210,6 +210,15 @@ struct ChunkedScratch {
     size_t block_max_count = 0;
     uint32_t *block_list = nullptr;
     size_t block_list_count = 0;
+    // The coarse12 route's own skip tables, one uint16 (the block's max bin)
+    // and one uint32 (its index in the compacted list) per 16-element block of
+    // every row.  Separate from the pair above because the block is 16 elements
+    // here against 64 there -- see `RowParams::coarse12_block_max`.  Grown like
+    // the rest and never shrunk.
+    uint16_t *coarse12_bmax = nullptr;
+    size_t coarse12_bmax_count = 0;
+    uint32_t *coarse12_blist = nullptr;
+    size_t coarse12_blist_count = 0;
     // The chunks route's per-row workspaces.  Separate from `coarse12_cols`
     // because the two have different shapes and different lifetimes: this one
     // is `n_rows * sizeof(TopKChunksWorkspace<NChunks>)` of opaque bytes, that
@@ -497,6 +506,31 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             scratch.coarse12_cols = grown;
             scratch.coarse12_cols_count = need_cols;
         }
+        // The block tables ride on the same gate as the answer buffer: the
+        // route that reads them is a subset of the calls this branch already
+        // serves, and a call whose allocation fails still gets a correct answer
+        // (the kernel walks densely when they are null), so there is nothing to
+        // fall back to and nothing to check here.
+        const size_t blocks_per_row =
+            ((size_t)p.vocab_size + (size_t)topk_select_coarse12::kBlockElems - 1)
+            / (size_t)topk_select_coarse12::kBlockElems;
+        const size_t need_bmax = (size_t)batches * blocks_per_row;
+        if (need_bmax > scratch.coarse12_bmax_count) {
+            uint16_t *grown = nullptr;
+            DS_CUDA_RUNTIME_CHECK(
+                cudaMalloc(&grown, need_bmax * sizeof(uint16_t)));
+            scratch_retire(scratch.retired, scratch.coarse12_bmax);
+            scratch.coarse12_bmax = grown;
+            scratch.coarse12_bmax_count = need_bmax;
+        }
+        if (need_bmax > scratch.coarse12_blist_count) {
+            uint32_t *grown = nullptr;
+            DS_CUDA_RUNTIME_CHECK(
+                cudaMalloc(&grown, need_bmax * sizeof(uint32_t)));
+            scratch_retire(scratch.retired, scratch.coarse12_blist);
+            scratch.coarse12_blist = grown;
+            scratch.coarse12_blist_count = need_bmax;
+        }
     }
     // The row path's skip tables.  Allocated for the calls whose shape passes
     // `skip_tables` and whose row instantiation carries the round -- the
@@ -649,7 +683,11 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         }
         p.nan_abort_flags = scratch.nan_abort_flags;
     }
-    if (needs_coarse12_cols) p.coarse12_cols = scratch.coarse12_cols;
+    if (needs_coarse12_cols) {
+        p.coarse12_cols = scratch.coarse12_cols;
+        p.coarse12_block_max = scratch.coarse12_bmax;
+        p.coarse12_block_list = scratch.coarse12_blist;
+    }
     if (skip_tables) {
         p.row_block_max = scratch.block_max;
         p.row_block_list = scratch.block_list;

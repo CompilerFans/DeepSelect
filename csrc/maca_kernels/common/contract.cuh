@@ -114,6 +114,16 @@ struct RowParams {
     // gate below leaves out, and on every route that does not walk rows.
     uint16_t *row_block_max;
     uint32_t *row_block_list;
+    // The fp32 coarse12 route's own skip tables, `n_rows * ceil(vocab_size/16)`
+    // entries each.  Separate from the pair above rather than shared with it:
+    // the block is 16 elements here and 64 there, and the stride is recomputed
+    // from `vocab_size` on both sides, so one buffer serving two granularities
+    // would be two rules for one address.  Same contract otherwise -- pass 1
+    // leaves one max bin per block, the collect walks the blocks at or above
+    // the threshold (compacted into a list, see `topk_coarse12.cuh`) -- and
+    // null on every call the route is not reached from.
+    uint16_t *coarse12_block_max;
+    uint32_t *coarse12_block_list;
     uint64_t stride_input_batch;
     uint64_t stride_output_value_batch;
     uint64_t stride_output_index_batch;

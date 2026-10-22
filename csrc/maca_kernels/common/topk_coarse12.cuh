@@ -96,6 +96,64 @@ static_assert((size_t)kCoarseBins * sizeof(int32_t) <= kSmemBytes,
 
 constexpr float kNegativeInfinity = -__builtin_huge_valf();
 
+// The second pass reads a list, not the row.
+//
+// Pass 2 acts only on the elements whose 12-bit bin is at or above the
+// threshold -- 2.6% of them at `b4096 V131072 k2048`, so >95% of that pass is
+// lines it fetches and does nothing with.  Pass 1 therefore leaves each
+// 4-float4 block's max bin in a per-row table, the threshold is compared
+// against that table, and the blocks that survive are compacted into a list the
+// walk strides over.  All of it mirrors the 16-bit row (`radix_row_bf16.cuh`),
+// and the compaction is not optional: a test in front of the walk costs what
+// the walk costs, because one kept block in a 64-lane warp puts every lane of
+// that warp through the block body (measured on this part:
+// `docs/experiments/20261022_f32_pass2_skip/` -- a table-gated walk 2.811 ms
+// against the dense walk's 2.782, the same walk over a compacted list 1.489).
+constexpr int kBlockElems = 16;                 // = 4 float4, the whole block
+constexpr int kBlockVecs = kBlockElems / 4;     // one lane per float4
+constexpr int kBlockLanes = 4;                  // lanes per block in the walk
+// Past three quarters of the blocks the walk reads most of the row anyway and
+// the list is traffic on top of it (the 16-bit row measured 0.63 of the dense
+// walk at half the blocks and 1.21 at all of them); the count decides.
+constexpr int kListMaxNumerator = 3;
+constexpr int kListMaxDenominator = 4;
+
+// The block's max bin from its four lanes' bins.  Two xor steps: a chained
+// tree, not three shuffles off the same value (`radix_row_bf16.cuh`'s group max
+// paid for that once -- a shuffle of the original gives the max over a subset).
+//
+// **Two spellings, and the split is what makes the mask honest.**  Pass 1's
+// vector loop is per-lane, so its last iteration can run a *prefix* of the
+// lanes and a four-lane group can straddle that edge; a full-mask shuffle there
+// names lanes that are not executing it -- undefined, and measured: it dropped
+// one block per row and mis-selected 5 slots of `b512 V998123 k2048`
+// (docs/experiments/20261022_f32_pass2_skip/).  So the loop is split at
+// `vector_length / kThreads`, the iteration count every lane runs: in that bulk
+// the whole block is live and `block_max_bin` may use the constant mask, while
+// the tail -- at most one iteration, a prefix of the lanes -- takes
+// `block_max_bin_edge`, which shuffles on `__activemask()` and has a group that
+// is not whole claim the maximum bin, so its block is always kept: it walks up
+// to one block per row twice and can never drop one.  Guarding *every*
+// iteration instead cost 1.4% of the fp32 grid (same note).
+// The 16-bit row has no such boundary -- its loops are block-granular and enter
+// a whole group or none of it.
+__device__ __forceinline__ int block_max_bin(int b0, int b1, int b2, int b3) {
+    int m = max(max(b0, b1), max(b2, b3));
+    m = max(m, __shfl_xor_sync(~0ULL, m, 1));
+    m = max(m, __shfl_xor_sync(~0ULL, m, 2));
+    return m;
+}
+
+__device__ __forceinline__ int block_max_bin_edge(int b0, int b1, int b2, int b3) {
+    int m = max(max(b0, b1), max(b2, b3));
+    const unsigned long long live = __activemask();
+    m = max(m, __shfl_xor_sync(live, m, 1));
+    m = max(m, __shfl_xor_sync(live, m, 2));
+    const int lane = static_cast<int>(threadIdx.x) & 63;
+    const bool whole = ((live >> (lane & ~(kBlockLanes - 1))) & 0xfULL) == 0xfULL;
+    return whole ? m : (kCoarseBins - 1);
+}
+
 // The NaN predicate, the key encode and the warp histogram suffix sum come from
 // `../common/primitives.cuh`; unqualified here because every call site below
 // is spelled that way.
@@ -121,7 +179,8 @@ using topk_select_common::warp_cumsum_histogram;
 // (its dispatch never picks coarse12 there).
 __device__ __forceinline__ bool topk_coarse12_row(
     const float *__restrict__ input, int32_t *__restrict__ output,
-    int length, int requested_topk, int32_t *__restrict__ nan_flag)
+    int length, int requested_topk, int32_t *__restrict__ nan_flag,
+    uint16_t *__restrict__ block_max, uint32_t *__restrict__ block_list)
 {
     const int tid = threadIdx.x;
     const unsigned int u_length = static_cast<unsigned int>(length);
@@ -141,6 +200,7 @@ __device__ __forceinline__ bool topk_coarse12_row(
 
     __shared__ int histogram[kRadix + kHistogramPadding];
     __shared__ int counter;
+    __shared__ int kept_block_count;
     __shared__ int threshold_bin_id;
     __shared__ int threshold_exclusive_count;
     __shared__ int num_input[2];
@@ -157,6 +217,14 @@ __device__ __forceinline__ bool topk_coarse12_row(
     const int vector_length = (length - prefix) / 4;
     const int tail = prefix + vector_length * 4;
     const float4 *vector_input = reinterpret_cast<const float4 *>(input + prefix);
+
+    // The kept-block tables, already offset to this row by the caller (null on
+    // the calls whose allocation failed, which take the dense walk).  The
+    // summary covers the *vector* region only: the up-to-3 prefix floats, the
+    // up-to-3 tail floats and the up-to-3 float4s past the last whole block are
+    // outside any block, and pass 2 walks those densely on both arms.
+    const bool summarize = block_max != nullptr;
+    const int nblk = vector_length / kBlockVecs;
 
     for (int bin = tid; bin < kCoarseBins; bin += kThreads) wide_histogram[bin] = 0;
     __syncthreads();
@@ -189,33 +257,82 @@ __device__ __forceinline__ bool topk_coarse12_row(
     // flight per thread otherwise.  The body is spelled out twice inline on
     // purpose -- no function boundary around a load + process pair, per the
     // miscompile documented in docs/experiments/20261019_c600u_pass1/ §4.
+    // `bulk_iters` is the iteration count every lane runs (`tid + m * kThreads`
+    // stays under `vector_length` for all of them), and it is where the loop
+    // splits so the summary's shuffle mask can be the constant one -- see
+    // `block_max_bin`.  Everything past it is the tail: at most one iteration.
     int vec = tid;
+    int it = 0;
+    const int bulk_iters = vector_length / kThreads;
     if constexpr (ARCH_REGS_PER_AP >= 131072) {
-        for (; vec + kThreads < vector_length; vec += 2 * kThreads) {
+        for (; it + 1 < bulk_iters; it += 2, vec += 2 * kThreads) {
             const float4 va = __ldg(vector_input + vec);
             const float4 vb = __ldg(vector_input + vec + kThreads);
             nan_found |= is_nan_value(va.x) || is_nan_value(va.y)
                          || is_nan_value(va.z) || is_nan_value(va.w);
-            atomicAdd(&wide_histogram[refine_bin(va.x) >> kFirstShift], 1);
-            atomicAdd(&wide_histogram[refine_bin(va.y) >> kFirstShift], 1);
-            atomicAdd(&wide_histogram[refine_bin(va.z) >> kFirstShift], 1);
-            atomicAdd(&wide_histogram[refine_bin(va.w) >> kFirstShift], 1);
+            const int a0 = (int)(refine_bin(va.x) >> kFirstShift);
+            const int a1 = (int)(refine_bin(va.y) >> kFirstShift);
+            const int a2 = (int)(refine_bin(va.z) >> kFirstShift);
+            const int a3 = (int)(refine_bin(va.w) >> kFirstShift);
+            atomicAdd(&wide_histogram[a0], 1);
+            atomicAdd(&wide_histogram[a1], 1);
+            atomicAdd(&wide_histogram[a2], 1);
+            atomicAdd(&wide_histogram[a3], 1);
             nan_found |= is_nan_value(vb.x) || is_nan_value(vb.y)
                          || is_nan_value(vb.z) || is_nan_value(vb.w);
-            atomicAdd(&wide_histogram[refine_bin(vb.x) >> kFirstShift], 1);
-            atomicAdd(&wide_histogram[refine_bin(vb.y) >> kFirstShift], 1);
-            atomicAdd(&wide_histogram[refine_bin(vb.z) >> kFirstShift], 1);
-            atomicAdd(&wide_histogram[refine_bin(vb.w) >> kFirstShift], 1);
+            const int b0 = (int)(refine_bin(vb.x) >> kFirstShift);
+            const int b1 = (int)(refine_bin(vb.y) >> kFirstShift);
+            const int b2 = (int)(refine_bin(vb.z) >> kFirstShift);
+            const int b3 = (int)(refine_bin(vb.w) >> kFirstShift);
+            atomicAdd(&wide_histogram[b0], 1);
+            atomicAdd(&wide_histogram[b1], 1);
+            atomicAdd(&wide_histogram[b2], 1);
+            atomicAdd(&wide_histogram[b3], 1);
+            if (summarize) {
+                const int ma = block_max_bin(a0, a1, a2, a3);
+                const int mb = block_max_bin(b0, b1, b2, b3);
+                if ((tid & (kBlockLanes - 1)) == 0) {
+                    block_max[vec >> 2] = (uint16_t)ma;
+                    block_max[(vec + kThreads) >> 2] = (uint16_t)mb;
+                }
+            }
         }
     }
+    for (; it < bulk_iters; ++it, vec += kThreads) {
+        const float4 values = __ldg(vector_input + vec);
+        nan_found |= is_nan_value(values.x) || is_nan_value(values.y)
+                     || is_nan_value(values.z) || is_nan_value(values.w);
+        const int c0 = (int)(refine_bin(values.x) >> kFirstShift);
+        const int c1 = (int)(refine_bin(values.y) >> kFirstShift);
+        const int c2 = (int)(refine_bin(values.z) >> kFirstShift);
+        const int c3 = (int)(refine_bin(values.w) >> kFirstShift);
+        atomicAdd(&wide_histogram[c0], 1);
+        atomicAdd(&wide_histogram[c1], 1);
+        atomicAdd(&wide_histogram[c2], 1);
+        atomicAdd(&wide_histogram[c3], 1);
+        if (summarize) {
+            const int mc = block_max_bin(c0, c1, c2, c3);
+            if ((tid & (kBlockLanes - 1)) == 0) block_max[vec >> 2] = (uint16_t)mc;
+        }
+    }
+    // The tail: a prefix of the lanes, so its groups can straddle -- the
+    // guarded spelling, and only here.
     for (; vec < vector_length; vec += kThreads) {
         const float4 values = __ldg(vector_input + vec);
         nan_found |= is_nan_value(values.x) || is_nan_value(values.y)
                      || is_nan_value(values.z) || is_nan_value(values.w);
-        atomicAdd(&wide_histogram[refine_bin(values.x) >> kFirstShift], 1);
-        atomicAdd(&wide_histogram[refine_bin(values.y) >> kFirstShift], 1);
-        atomicAdd(&wide_histogram[refine_bin(values.z) >> kFirstShift], 1);
-        atomicAdd(&wide_histogram[refine_bin(values.w) >> kFirstShift], 1);
+        const int c0 = (int)(refine_bin(values.x) >> kFirstShift);
+        const int c1 = (int)(refine_bin(values.y) >> kFirstShift);
+        const int c2 = (int)(refine_bin(values.z) >> kFirstShift);
+        const int c3 = (int)(refine_bin(values.w) >> kFirstShift);
+        atomicAdd(&wide_histogram[c0], 1);
+        atomicAdd(&wide_histogram[c1], 1);
+        atomicAdd(&wide_histogram[c2], 1);
+        atomicAdd(&wide_histogram[c3], 1);
+        if (summarize) {
+            const int mc = block_max_bin_edge(c0, c1, c2, c3);
+            if ((tid & (kBlockLanes - 1)) == 0) block_max[vec >> 2] = (uint16_t)mc;
+        }
     }
     for (int index = tail + tid; index < length; index += kThreads) {
         const float value = __ldg(input + index);
@@ -289,6 +406,28 @@ __device__ __forceinline__ bool topk_coarse12_row(
         return true;
     }
 
+    // ── the kept-block list ─────────────────────────────────────────────────
+    // One shared atomic per kept block (the 16-bit row's compaction, same
+    // shape).  A block whose max bin is under the threshold holds no element
+    // pass 2 would act on, so the list is answer-preserving by construction --
+    // and the compaction is its own step rather than a test in front of the
+    // walk, because a test in front of the walk leaves the decision and the
+    // fetch on one chain and every lane of a warp pays for the one member that
+    // survived (measured; see `kBlockElems`).
+    int nlist = 0;
+    bool use_list = false;
+    if (summarize && nblk > 0) {
+        kept_block_count = 0;
+        __syncthreads();
+        for (int b = tid; b < nblk; b += kThreads) {
+            if (static_cast<int>(block_max[b]) < wide_threshold) continue;
+            block_list[atomicAdd(&kept_block_count, 1)] = static_cast<uint32_t>(b);
+        }
+        __syncthreads();
+        nlist = kept_block_count;
+        use_list = nlist * kListMaxDenominator <= nblk * kListMaxNumerator;
+    }
+
     if (tid < kRadix + 1) histogram[tid] = 0;
     __syncthreads();
 
@@ -315,6 +454,34 @@ __device__ __forceinline__ bool topk_coarse12_row(
 
     for (int index = tid; index < prefix; index += kThreads)
         DG12_COLLECT(__ldg(input + index), index);
+    if (use_list) {
+        // One group of four lanes per kept block, one float4 each: the block is
+        // a single 64-byte line, so the group's four loads are that line and
+        // nothing else.  Four lanes per block also means a 64-lane wave covers
+        // 16 blocks per iteration with no lane left out -- the property the
+        // table-gated walk does not have.
+        const int group = tid / kBlockLanes;
+        const int lane_in_block = tid % kBlockLanes;
+        for (int j = group; j < nlist; j += kThreads / kBlockLanes) {
+            const int block = static_cast<int>(block_list[j]);
+            const float4 values = __ldg(vector_input + block * kBlockVecs + lane_in_block);
+            const int index = prefix + block * kBlockElems + lane_in_block * 4;
+            DG12_COLLECT(values.x, index);
+            DG12_COLLECT(values.y, index + 1);
+            DG12_COLLECT(values.z, index + 2);
+            DG12_COLLECT(values.w, index + 3);
+        }
+        // The up-to-3 float4s past the last whole block are outside every table
+        // entry, so they are walked here rather than listed.
+        for (int j = nblk * kBlockVecs + tid; j < vector_length; j += kThreads) {
+            const float4 values = __ldg(vector_input + j);
+            const int index = prefix + j * 4;
+            DG12_COLLECT(values.x, index);
+            DG12_COLLECT(values.y, index + 1);
+            DG12_COLLECT(values.z, index + 2);
+            DG12_COLLECT(values.w, index + 3);
+        }
+    } else {
     vec = tid;
     if constexpr (ARCH_REGS_PER_AP >= 131072) {
         for (; vec + kThreads < vector_length; vec += 2 * kThreads) {
@@ -339,6 +506,7 @@ __device__ __forceinline__ bool topk_coarse12_row(
         DG12_COLLECT(values.y, index + 1);
         DG12_COLLECT(values.z, index + 2);
         DG12_COLLECT(values.w, index + 3);
+    }
     }
     for (int index = tail + tid; index < length; index += kThreads)
         DG12_COLLECT(__ldg(input + index), index);
@@ -483,7 +651,8 @@ template <int kThreads_>
 __global__ __launch_bounds__(kThreads_) void topk_coarse12_kernel(
     const float *__restrict__ scores, const int32_t *__restrict__ lengths,
     int32_t *__restrict__ out, int32_t *__restrict__ nan_flags, int topk, int B,
-    int64_t stride, int default_length)
+    int64_t stride, int default_length, uint16_t *__restrict__ block_max,
+    uint32_t *__restrict__ block_list)
 {
     static_assert(kThreads_ == kThreads,
                   "`topk_coarse12_row` walks the row at the namespace's kThreads");
@@ -508,6 +677,19 @@ __global__ __launch_bounds__(kThreads_) void topk_coarse12_kernel(
     // (`check_nan` false), which is the only case where the contract half does
     // not read the table either.
     int32_t *row_nan = nan_flags == nullptr ? nullptr : nan_flags + row;
+    // The row's slice of the skip tables.  Both are indexed by *blocks of the
+    // row as the tensor lays it out* (`vocab_size` wide), not by this row's
+    // window, so a shorter row still lands on its own slice -- the same rule
+    // the 16-bit row's tables follow.  Null means the dispatcher could not
+    // allocate them, which the row takes as "walk densely".
+    uint16_t *row_bmax = nullptr;
+    uint32_t *row_blist = nullptr;
+    if (block_max != nullptr && block_list != nullptr) {
+        const int64_t blocks_per_row =
+            (int64_t)((default_length + kBlockElems - 1) / kBlockElems);
+        row_bmax = block_max + (int64_t)row * blocks_per_row;
+        row_blist = block_list + (int64_t)row * blocks_per_row;
+    }
 
     if (length <= topk) {
         // Same padding contract the row kernel uses: the visible prefix is the
@@ -524,7 +706,8 @@ __global__ __launch_bounds__(kThreads_) void topk_coarse12_kernel(
     // `-1` fill below is dead code kept as the seam for the day the arena bound
     // moves back inside the row function.  Named rather than inlined so that
     // seam stays visible.
-    const bool served = topk_coarse12_row(row_input, row_out, length, topk, row_nan);
+    const bool served = topk_coarse12_row(row_input, row_out, length, topk,
+                                         row_nan, row_bmax, row_blist);
     if (!served) {
         for (int i = threadIdx.x; i < topk; i += kThreads) row_out[i] = -1;
     }
@@ -534,7 +717,8 @@ __global__ __launch_bounds__(kThreads_) void topk_coarse12_kernel(
 template <int kThreads_>
 inline cudaError_t launch_coarse12_kernel(
     const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
-    int B, int topk, int64_t stride, int default_length, cudaStream_t stream)
+    int B, int topk, int64_t stride, int default_length,
+    uint16_t *block_max, uint32_t *block_list, cudaStream_t stream)
 {
     if (topk > kMaxTopK) return cudaErrorInvalidValue;
     static bool init = false;
@@ -546,20 +730,23 @@ inline cudaError_t launch_coarse12_kernel(
         init = true;
     }
     topk_coarse12_kernel<kThreads_><<<B, (int)kThreads_, kSmemBytes, stream>>>(
-        scores, lengths, out, nan_flags, topk, B, stride, default_length);
+        scores, lengths, out, nan_flags, topk, B, stride, default_length,
+        block_max, block_list);
     return cudaGetLastError();
 }
 
 extern template cudaError_t launch_coarse12_kernel<kThreads>(
     const float *, const int32_t *, int32_t *, int32_t *, int, int, int64_t, int,
-    cudaStream_t);
+    uint16_t *, uint32_t *, cudaStream_t);
 
 inline cudaError_t launch_topk_coarse12(
     const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
-    int B, int topk, int64_t stride, int default_length, cudaStream_t stream)
+    int B, int topk, int64_t stride, int default_length,
+    uint16_t *block_max, uint32_t *block_list, cudaStream_t stream)
 {
     return launch_coarse12_kernel<kThreads>(scores, lengths, out, nan_flags, B,
-                                            topk, stride, default_length, stream);
+                                            topk, stride, default_length,
+                                            block_max, block_list, stream);
 }
 
 
@@ -593,7 +780,8 @@ inline void launch_route(const deep_select::RowParams &params, uint32_t batches,
             (const float *)params.input, params.end_ptr, staging,
             params.scan_flags, (int)batches, (int)params.topk,
             (int64_t)(params.stride_input_batch / sizeof(float)),
-            (int)params.vocab_size, stream);
+            (int)params.vocab_size, params.coarse12_block_max,
+            params.coarse12_block_list, stream);
         if (rc == cudaSuccess) {
             // Hand the answer to the contract half the way the split does,
             // so its per-row `-1` check decides row by row: a row this

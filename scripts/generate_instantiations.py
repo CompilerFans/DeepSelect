@@ -350,7 +350,8 @@ def coarse12_instantiations() -> List[Instantiation]:
         "template cudaError_t launch_coarse12_kernel<kThreads>(\n"
         "    const float *scores, const int32_t *lengths, int32_t *out,\n"
         "    int32_t *nan_flags, int B, int topk, int64_t stride,\n"
-        "    int default_length, cudaStream_t stream);")]
+        "    int default_length, uint16_t *block_max, uint32_t *block_list,\n"
+        "    cudaStream_t stream);")]
 
 
 # ── chunks: the ported `topk_chunks` selector ───────────────────────────────
