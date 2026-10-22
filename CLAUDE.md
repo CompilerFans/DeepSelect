@@ -499,7 +499,22 @@ at small batch, measured with both sides' NaN checks removed. The *operator*
 comparison goes the other way only because `deep_gemm` implements its NaN check
 as a torch expression over the whole input (11.8 ms on `b4096-v131072` against
 this row's fused 1.6 ms). So "we are faster than `deep_gemm`" is true of the
-operator and false of the kernel, and the fp32 row is where the gap is. This row
+operator and false of the kernel, and the fp32 row is where the gap is.
+**That last sentence is C500's, and on a C600U it is no longer true** (measured
+2026-10-23): after the 512-thread landing (`6b01951`) and the pass-2 kept-block
+list (`6b5928c`), the kernel comparison reverses on the two long-row selector
+shapes at every batch >= 132 -- 0.880x at `b4096 V131072 k2048` (4745.5 against
+5393.5 us), 0.879x at V107520, 0.91-0.97x at b132/b256 -- and `deep_gemm`'s own
+numbers moved only -2.1..-3.6% between the two recordings, so the movement is
+this tree's. The b1 cells stay behind (1.37x at V66551, 2.1-2.4x at the two
+long rows): 45-111 us, launch-latency bound; and so does the densest shape,
+`V66551` at b132/b512 (1.13x / 1.01x), the same density trade the landing
+records. (Our `time(us)` carries the fused NaN scan -- the official shape is
+`abort_when_nan_found=False`, which launches no separate kernel -- while
+deep_gemm's selector column carries none of its check, so the comparison
+favours deep_gemm on that axis and the lead survives it.) Record:
+`perf_data/MetaX_C600-U/20261022_175424` and
+`docs/experiments/20261022_f32_pass2_skip/` ("On the official grid"). This row
 is the **Sampler** path; deep_gemm cannot run on the bf16 grid at all, so there
 is no equivalent statement for the production Lightning-Indexer path.
 

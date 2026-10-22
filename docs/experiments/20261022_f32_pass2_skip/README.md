@@ -171,11 +171,14 @@ snapshot's 17 distinct shapes are mostly the `V >= 107520` rows that gain, while
 A/B's 30 cases also carry the b1/b16 draws that cannot.
 
 Kernel to kernel, the fp32 selector path is now ahead of `deep_gemm`'s `topk_coarse12`
-at every batch >= 132: **0.880x** at `b4096 V131072 k2048` (4745.5 against 5393.5 us)
-and **0.879x** at `b4096 V107520` (3988.9 against 4538.0), against 0.946x / 0.940x in
-the previous recording; `deep_gemm` itself moved only -2.1..-3.6% between the sessions,
-so the ratio moving is this change. The b1 cells stay behind (1.37x at V66551,
-2.1-2.4x at the two longer rows): 45-111 us, launch-latency bound. Both sides' `time(us)`
+on the two long-row shapes at every batch >= 132: **0.880x** at `b4096 V131072 k2048`
+(4745.5 against 5393.5 us) and **0.879x** at `b4096 V107520` (3988.9 against 4538.0),
+0.91-0.97x at b132/b256, against 0.946x / 0.940x at b4096 in the previous recording;
+`deep_gemm` itself moved only -2.1..-3.6% between the sessions, so the ratio moving is
+this change. The b1 cells stay behind (1.37x at V66551, 2.1-2.4x at the two longer
+rows): 45-111 us, launch-latency bound. The densest shape stays behind too --
+`V66551 k2048` at b132/b512 is 1.13x / 1.01x, the same density trade that makes that
+cell the one regression above. Both sides' `time(us)`
 is the official "name contains topk" rule, so `deep_gemm`'s torch-level NaN check sits
 in its `wall_us` (17.1 ms against our 4.76 ms at `b4096 V131072`), not in its kernel.
 
