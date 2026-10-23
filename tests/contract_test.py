@@ -10,9 +10,15 @@ CLAUDE.md ("Not covered by either suite, recorded rather than papered over").
 This file is that coverage, as a standalone runner rather than a pytest suite
 (this tree has none):
 
-    PYTHONPATH=. python tests/contract_test.py                 # maca_c, device 0
-    PYTHONPATH=. python tests/contract_test.py --backend torch # the reference
-    CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python tests/contract_test.py
+    python tests/contract_test.py                              # maca_c, device 0
+    python tests/contract_test.py --backend torch              # the reference
+    CUDA_VISIBLE_DEVICES=1 python tests/contract_test.py
+
+Which package is tested follows the rule `run_bench.sh` and
+`tools/sample_gate.py` use: the checkout answers when it has a built extension,
+the installed wheel otherwise -- so `python <repo>/tests/contract_test.py` from
+anywhere is an acceptance test for a delivered wheel, not just for a develop
+tree.
 
 Sections:
 
@@ -39,11 +45,18 @@ Sections:
 Exit status is the verdict: 0 only when every case passes.
 """
 import argparse
+import glob
+import hashlib
 import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The path rule `run_bench.sh` and `tools/sample_gate.py` use: the checkout
+# answers only when it has an extension to answer with, so a tree with none
+# tests the installed wheel -- the package a deployment would actually import.
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if glob.glob(os.path.join(_REPO, "deep_select", "deep_select_maca*.so")):
+    sys.path.insert(0, _REPO)
 
 import torch
 
@@ -407,6 +420,13 @@ def main():
     done = set(args.sections.split(","))
     print(f"torch {torch.__version__}, device {torch.cuda.get_device_name(0)}, "
           f"backend {args.backend}")
+    # Which package answered and which artifact it resolves -- the receipt a
+    # passing count is worthless without (same as `tools/sample_gate.py`).
+    from deep_select import _binding
+    so = _binding.extension_path("deep_select_maca")
+    md5 = hashlib.md5(open(so, "rb").read()).hexdigest()[:12] if so else "none"
+    print(f"package  {os.path.dirname(os.path.abspath(deep_select.__file__))}")
+    print(f"artifact {so or '(none resolves)'} md5 {md5}")
     if "1" in done:
         refusals(args.backend)
     if "2" in done:
