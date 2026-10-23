@@ -240,6 +240,23 @@ the unpacked directory, `backend="maca_c"` run from `/tmp` — correct. That
 proves the package is self-contained apart from torch/MACA/tvm_ffi; it was taken
 on the build machine, so it is **not** a second-machine test.
 
+**The artifact's size is a property of the header layout, and one header cost
+every TU its whole device image.**  Measured 2026-10-23: the P6 wheel was
+526,830,133 B (the xcore1500/xcore1600 artifacts 590,263,768 B each) because
+`contract.cuh` carried `kRadixTable`, whose entries take
+`&launch_radix_config<Cfg>` — and the **device** pass instantiates every row of
+it, `extern template` notwithstanding (that declaration is honored by the host
+pass only).  So each of the 89 `instantiations/*.cu` — whose host object holds
+exactly one `__device_stub__` — still carried all 180 `topk_kernel_radix`
+kernels in its device bitcode: 7,626,616 B per TU, 2.4 MB of it `-bc` and 5.2 MB
+device ELF.  With the table moved into `maca_topk.cu`, the same TU compiles to
+680,720 B and its bitcode names one kernel; the three artifacts are
+67,524,144 / 71,542,320 / 71,542,320 B and the wheel 62,998,174 B.  The kernel
+count is unchanged (60 defined `topk_kernel_radix`, 89 `__device_stub__`, 2
+`__tvm_ffi_*`).  **The table belongs in `maca_topk.cu`** — moving it back into a
+header reintroduces the duplication, and a build that takes ~25 minutes longer
+and a wheel ~460 MB larger is only the visible symptom.
+
 **The stale `.so` must be deleted before rebuilding** — `develop.sh` does this
 for you, but a bare `setup.py build_ext --inplace` does not (see the handover
 §4):
@@ -1115,7 +1132,8 @@ DS_TOPK_BACKEND=maca_c PYTHONPATH=. python tests/test.py         # the unpinned 
 - **Every case reports a status and the run reaches its summary.** Upstream stops at the first wrong answer (`if not is_correct: sys.exit(1)`), which tells you nothing about the other 105,137 cases. The statuses are `pass` / `check_fail` (selected wrong) / `crash` (raised) / `skip` (`torch.cuda.OutOfMemoryError`, then `empty_cache()`) / `unsupported` (`UnsupportedByBackend` — a coverage gap, not a defect). `check_fail` and `crash` stop the run unless `-rf`, which keeps the flag's upstream meaning (`if not args.run_to_finish: sys.exit(1)` — continue rather than stop). A lost CUDA context **always** stops it: a device-side fault does not raise once, it poisons the context, so a naive loop would print 105k identical crashes and call that a result — `context_alive()` (`torch.cuda.synchronize()`) is how "this case was bad" is told from "there is no device any more". A real SIGSEGV is still uncatchable in-process; see the full-table gate below.
 - **`test.py`'s delta is an extraction, not a rewrite.** The inline checks of `run_testcase` became `check_result` and `check_call_contract`, so `scripts/perf_snapshot.py` runs *that* code instead of a copy of it — the docstring says so where they are defined. The evidence that this is a refactor and not a behaviour change is mechanical: the `check_is_bitwise_equal` label set and call-site count are identical to upstream's (7 and 7, **in the same order**), so no correctness assertion was added, dropped or reworded. One thing to know before running that diff, because it looks alarming and is not: a whitespace-normalised comparison of the `check_is_bitwise_equal` and `assert` lines reports **DIFFERS**, and the entire difference is one variable rename — `assert batch_topk_value is not None` → `assert ans_topk_value is not None`. `run_testcase` still builds the clones as `batch_topk_*` and passes them in; inside the extracted `check_result` they arrive as the parameters `ans_topk_*`, so it is the same check on the same value. Everything else is the same lines at a different indentation. A `perf_snapshot` that checked a copy would be free to drift from the gate it claims to mirror.
 - One edit under `tests/kernelkit/` is for MACA portability: `platform.py` asks torch whether it can see a device instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA controller). A second, `kernelkit/build.py` (+118), is *ours*: `check_maca_stack_frame`, the `--resource-usage` stand-in for upstream's `cuobjdump` spill gate (see the resource-audit section). `kernelkit`'s `stress.py` and `README.md` are absent — deleted, matching upstream, which dropped the Ray harness in `bfa4507`; this tree had carried them with one PEP 701 f-string (`stress.py:292`) worked around for Python 3.10. `tests/lib.py` carries two more of the same kind, about this torch's missing UInt kernels: `torch.randint(...).to(torch.uint16)` and `result.view(uint).copy_(...)` both raise `NotImplementedError: "copy_" not implemented for 'UInt16'` under `torch.set_default_device("cuda")`, which with the default device set is *every* `randint` in the distributions — the harness could not generate a case at all. `Distribution.as_uint` casts on the CPU and moves the result; `Distribution.put_uint_bits` writes through the equal-width **signed** view. Both are bit-exact; neither changes what a case contains.
-- Not covered by either suite, recorded rather than papered over: the contract rejections (strided row, wrong dtype, `topk` out of range, undersized output buffer) — the official table asserts on values and has no exception cases — and `begin` / `hint` / caller-allocated `output_idx`, which the official call site always passes as `None`.
+- Not covered by either suite, recorded rather than papered over: the contract rejections (strided row, wrong dtype, `topk` out of range, undersized output buffer) — the official table asserts on values and has no exception cases — and `begin` / `hint` / caller-allocated `output_idx`, which the official call site always passes as `None`. **`tests/contract_test.py` is that coverage** (2026-10-23): the refusals, the `end` / `output_idx_offset` / ordering / NaN surface, and the coarse12 route's shape edges, run against a named backend. It is a standalone runner, not pytest, like everything else here; `--backend maca_c` is 73 checks and `--backend torch` 70, both 0-failed on C600U. Two facts it had to pin, both now encoded there: `sorted_index` is *ascending index order* (the official suite's own assertion is `ans_topk_index[:, 1:] >= ans_topk_index[:, :-1]`), and the two backends word the same rejection differently — `torch` checks in Python (`topk must be positive`, `output_idx`), `maca_c` in `DS_HOST_CHECK` (`topk must > 0`, `output_index`) — while the 1024-byte row-stride rule is the kernel's alone (`torch` serves the padded row).
+- **`scripts/wheel_smoke.py` is the delivered-artifact gate**, and it is a different question from either suite: run it from *outside* the repository against an installed wheel (`cd /tmp && python /path/to/scripts/wheel_smoke.py`) and it refuses if the package that answers is the checkout, then prints `_binding.extension_path` + its md5 (the family-suffixed artifact the deployment will load) and runs the three production cells against the contract, with the fp32 ones compared elementwise to `backend="torch"`. It is what `install.sh`'s `cd /tmp && import deep_select` check grew into.
 
 ### Full-table correctness gate (C500, hours — see the spread below)
 
@@ -1127,6 +1145,25 @@ PYTHONPATH=$PWD python tests/test.py --backend maca_c --sample 1000000 -rf
 was the four-shard-era figure (4 × 20,543). `--sample 1000000` exceeds the
 table, so `min()` draws all of it; `-rf` is what keeps the run going to its
 summary.
+
+**The delivery-sized gate is `tools/sample_gate.py`** (2026-10-23), and it is a
+different draw from the one above, not a shorter run of it: `--sample N` draws
+from the cases at or below `--max-elems` (default 2^26), so it is ~13 minutes
+rather than ~16 hours, and the cases above the cap are **counted and reported,
+not silently dropped** (38,016 of the 105,138 sit above it under seed
+`20261024`). It is `tests/test.py`'s own table and `run_testcase` — the same
+five statuses, the same checks — with one thing added: each drawn case's
+`p.seed` is pinned, so the same command re-runs the same data (the official
+loop leaves `seed=-1` cases to a process counter, which is fine for a sweep and
+wrong for a release record). It follows the same path rule as `run_bench.sh` —
+`$REPO` on `sys.path` only when the checkout has a built extension, so a tree
+with none tests the installed wheel — and its header prints the package and the
+artifact md5, so the record names the binary that passed. Measured 2026-10-23,
+C600U, installed wheel `d24396d18f44`: **8000/8000, 0 `check_fail`, 0 `crash`,
+0 `skip`, 0 `unsupported`**, 606 s (13.20 cases/s; a first taking on the
+checkout's artifact ran the same draw in 753 s and the size-fixed delivery
+wheel in 701 s — one draw, three readings, spread by machine state; budget
+~10–13 min). The full table above remains the pre-release gate.
 
 **Budget the wall clock from a measurement on the day, not from this file, and
 expect it to be long.** Measured 2026-10-09 on a quiet C500 (device 2, artifact

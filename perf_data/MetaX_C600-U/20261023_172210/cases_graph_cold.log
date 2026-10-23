@@ -1,0 +1,18 @@
+torch 2.10.0+metax20261017.1120  device=MetaX C600-U  sms=28
+artifact=/opt/conda/lib/python3.10/site-packages/deep_select/deep_select_maca_xcore1600.so
+
+  row/radix                          b=8   V=32768   k=2048  end=0 si=1  eager=PASS
+  row/radix                          b=8   V=32768   k=2048  end=0 si=1  capture=OK  replay=MATCH  (official predicate on replay: PASS)
+  row/radix                          b=8   V=32768   k=2048  end=0 si=1  replay(new input)=MATCH  (eager on new data: PASS; official predicate on replay: PASS)
+  coarse12                           b=16  V=66551   k=2048  end=0 si=1  eager=PASS
+  coarse12                           b=16  V=66551   k=2048  end=0 si=1  capture=OK  replay=MATCH  (official predicate on replay: PASS)
+  coarse12                           b=16  V=66551   k=2048  end=0 si=1  replay(new input)=MATCH  (eager on new data: PASS; official predicate on replay: PASS)
+  chunks                             b=2   V=66551   k=2048  end=0 si=1  eager=PASS
+  chunks                             b=2   V=66551   k=2048  end=0 si=1  capture=OK  replay=MATCH  (official predicate on replay: PASS)
+  chunks                             b=2   V=66551   k=2048  end=0 si=1  replay(new input)=MATCH  (eager on new data: PASS; official predicate on replay: PASS)
+  chunks+end                         b=1   V=107520  k=2048  end=1 si=1  eager=PASS
+  chunks+end                         b=1   V=107520  k=2048  end=1 si=1  capture=OK  replay=MATCH  (official predicate on replay: PASS)
+  chunks+end                         b=1   V=107520  k=2048  end=1 si=1  replay(new input)=MATCH  (eager on new data: PASS; official predicate on replay: PASS)
+probe: cold scratch, first chunks call in the process is inside capture
+  cold-scratch  capture=OK
+# exit 0

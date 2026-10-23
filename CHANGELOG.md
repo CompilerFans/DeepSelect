@@ -7,6 +7,105 @@ there.
 
 ## Unreleased
 
+### One dispatch table in one TU: the wheel drops from 527 MB to 63 MB
+
+`kRadixTable` moved from `contract.cuh` -- included by all 90 translation units
+per family -- into `maca_topk.cu`, the one TU that dispatches.  Every table
+entry takes `&launch_radix_config<Cfg>`, and a TU that merely *sees* the table
+instantiates all of its rows in the **device** pass: `extern template` is
+honored by the host pass and ignored there, so each of the 89 instantiation TUs
+carried all 180 `topk_kernel_radix` kernels in its device bitcode even though
+its host object held exactly one `__device_stub__`.
+
+Measured on the pod (xcore1600, MACA 20261017.1436): one instantiation TU's
+object **7,626,616 -> 680,720 B** (device bitcode 2,396,272 -> 198,608 B,
+device ELF 5,213,480 -> 467,136 B) and the `topk_kernel_radix` symbols in that
+bitcode **180 -> 1**.  Artifacts: xcore1000 **458,450,392 -> 67,524,144 B**;
+xcore1500 and xcore1600 **590,263,768 -> 71,542,320 B**.  Wheel
+**526,830,133 -> 62,998,174 B** (sha256
+`ec4b180526c1bf81b1e968d252d8ecacb32b6ad7c3598ad57635de23b2369e61`).  The
+three-family build drops from ~25 min to ~6 min at the same time, because the
+TUs it compiles are smaller.
+
+Not a kernel change: the artifact still defines 60 `topk_kernel_radix`
+kernels, 89 `__device_stub__` and 2 `__tvm_ffi_*` exports, and the wheel passes
+the delivery gates recorded in `docs/release-validation.zh.md` §3.
+
+### The delivery gate is sized for a delivery, and its record names the binary
+
+Three pieces of release machinery land together, and `docs/release-validation.zh.md`
+is the record they produced: three family artifacts, the wheel's sha256, every
+gate's command and result, and the one open engineering issue.
+
+`tools/sample_gate.py` runs the official correctness table under a size cap
+(`--max-elems`, 2^26 by default): the cases at or below it are the pool,
+`--sample N` draws from that pool, the ones above are **counted, not dropped**,
+and each drawn case's `p.seed` is pinned so the command re-runs the same data.
+It drives `tests/test.py`'s own `correctness_cases_()` and `run_testcase` -- a
+copy would be free to drift -- and it follows `run_bench.sh`'s path rule, so a
+checkout with no built extension tests the installed wheel and its header prints
+the package and artifact md5. Measured on C600U against the shipped wheel
+`d24396d18f44`: **8000/8000, 0 check_fail, 0 crash, 0 skip, 0 unsupported**,
+606 s (13.2 cases/s); the first taking, on the checkout's artifact, ran the same
+draw in 753 s, and the size-fixed wheel re-ran it in 701 s (11.4 cases/s) --
+three readings of one draw, spread by machine state, not by the kernel. The
+full 105,138-case table remains the pre-release gate.
+
+`scripts/wheel_smoke.py` is the delivered-artifact acceptance. Run from outside
+the repository, it refuses if the answering package is the checkout, prints
+`_binding.extension_path` and its md5 (the family-suffixed file the deployment
+loads, `d24396d18f44` here), and checks the three production cells -- bf16
+Lightning Indexer, fp32 Sampler, an fp32 ragged row -- against the contract,
+with the fp32 ones elementwise against `backend="torch"`. 12/12 on the installed
+wheel.
+
+`tests/contract_test.py` is the targeted half of the gate (73 checks on
+`maca_c`, 70 on `torch`): the `DS_HOST_CHECK` refusals, the `end` /
+`output_idx_offset` / ordering / NaN surface, the coarse12 route's shape edges,
+and the default backend's resolution -- none of which the official table
+constructs.
+
+**The wheel was 527 MB when this entry was written** -- P6 compiles 90 translation
+units per family and each pays a ~6-7 MB device include tree (a TU including only
+`contract.cuh` is 7.6 MB with zero device stubs; the pre-P6 single-TU object is
+4.2 MB for 105 kernels). The diagnosis, the measurements that rule out the
+toolchain and kernel duplication, and the candidate fixes are in
+`docs/release-validation.zh.md` §5.1; the fix that landed is the entry above.
+
+### The fp32 row's second pass stops reading what it will not use
+
+`topk_coarse12_row` read every element a second time to act on the ~2.6% at or
+above the threshold.  Pass 1 now leaves each 16-element block's max bin in a
+per-row `uint16` table, the blocks at or above the threshold are compacted into
+a per-row `uint32` list, and pass 2 strides the list with four lanes per block
+-- 6 B per 16 elements, ~9% of the fp32 input.  The list is used only while it
+holds at most three quarters of the blocks (past that the walk reads most of
+the row anyway) and a call whose allocation failed keeps the dense walk.
+
+Whole fp32 grid, two alternating rounds: **36,340.1 -> 33,304.0 us (-8.35%)**,
+led by `b4096 V129280 k512` (the Sampler cell) 5070.4 -> 4395.3 us
+(-13.3%, 418 -> 482 GB/s) and `b4096 V131072 k2048` 5176.8 -> 4784.0 us
+(-7.6%, 415 -> 449 GB/s).  The one regression is the densest cell on the grid
+(`V66551 k2048`, 45.5% of blocks kept) at +1.9%; the sign follows the density
+and the gate cannot remove it, because falling back to the dense walk would pay
+the summary *and* the walk.
+
+The first version of this change passed all 30 fp32 perf cells and was still
+wrong: a full-mask `__shfl_xor_sync` in the summary's tail iteration named
+lanes that were not executing it, dropping one block per row on
+`b512 V998123 k2048 sorted_value`.  The loop now splits at the iteration count
+every lane runs -- the bulk shuffles on a constant mask, the tail on
+`__activemask()` -- which is also 1.4% of the fp32 grid cheaper than guarding
+every iteration.  Recorded in `docs/experiments/20261022_f32_pass2_skip/`.
+
+The same row's thread width went 640 -> 512 in the same window: the driver
+answers 3 CTA/SM at 640 (1920 threads against the 2048-thread/AP ceiling), and
+512 x 4 fills the AP for **3.7-6.2%** on the five fp32 cells the change was
+measured on (`docs/experiments/20261022_f32_occupancy/`).  A finer block grain
+(G=4, one float4 per block) wins both probe halves and loses +3.0..+4.5% on the
+Sampler route in the kernel, so G=16 stays ("The grain, revisited",
+`docs/experiments/20261022_f32_pass2_skip/README.md`, `0c89f5d`).
+
 ### A NaN vote dies with the call that raised it
 
 The per-row NaN flags used to live inside the process-wide, grow-only scratch,

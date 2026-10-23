@@ -1,0 +1,45 @@
+# run_bench.sh    device_dir=MetaX_C600-U
+# timestamp_utc   2026-10-23T18:12:16Z
+# host            mx-cjxu-ws-cr-2026102323332800003e9b
+# extension       /opt/conda/lib/python3.10/site-packages/deep_select/deep_select_maca_xcore1600.so
+# extension_md5   14801f45326e2efab3399cf4e97944ae
+# cuda_visible_devices 1
+# backends        maca_c,torch,deep_gemm
+# STALE           n/a (installed package; no csrc/ to compare against)
+# ---
+# mx-smi
+mx-smi  version: 2.3.4
+
+=================== MetaX System Management Interface Log ===================
+Timestamp                                         : Fri Oct 23 18:12:16 2026
+
+Attached GPUs                                     : 2
++---------------------------------------------------------------------------------+
+| MX-SMI 2.3.4                       Kernel Mode Driver Version: 3.10.11          |
+| MACA Version: 3.0.1436.20261017    BIOS Version: 1.1.7.0                        |
+|------------------+-----------------+---------------------+----------------------|
+| Board       Name | GPU   Persist-M | Bus-id              | GPU-Util      sGPU-M |
+| Pwr:Usage/Cap    | Temp       Perf | Memory-Usage        | GPU-State            |
+|==================+=================+=====================+======================|
+| 0   MetaX C600-U | 0           Off | 0000:2a:00.0        | 0%          Disabled |
+| 125W / 520W      | 28C          P0 | 524/73728 MiB       | Available            |
+|                  |-----------------|---------------------|----------------------|
+|                  | 1           Off | 0000:2b:00.0        | 0%          Disabled |
+|                  | 35C          P0 | 524/73728 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+
++---------------------------------------------------------------------------------+
+| Process:                                                                        |
+|  GPU                    PID         Process Name                 GPU Memory     |
+|                                                                  Usage(MiB)     |
+|=================================================================================|
+|  no process found                                                               |
++---------------------------------------------------------------------------------+
+
+End of Log
+# pgrep -af python
+#   (none)
+
+# ---
+# run_bench.sh: finished rc=0
+# out             perf_data/MetaX_C600-U/20261023_181216

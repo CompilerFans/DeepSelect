@@ -62,7 +62,7 @@ E[W] <= (1 + k/B2) * L * H_m = (1 + k/B2) * L * (ln m + O(1))
 | --- | --- | --- |
 | bf16 行内核 | 两遍 radix：12 位 coarse 直方图 → 阈值精确 → 只收集阈值桶 → 4 位 fine refine（V/k ≥ 256 时先对块最大值建直方图，元素直方图只走保留下来的块） | 默认；带跳表时 pass 2 只走摘要命中的块 |
 | bf16 split | 每行切成 `chunks` 个 CTA，stage 1 各自建直方图，stage 2 合并；**每元素全局只读一次** | `vocab >= 262144`、`batches <= 64` 且 `batches^2 * 6400 <= vocab`（C600U 实测交叉）；`topk=2048` 另加 128 KiB 族门控 |
-| fp32 coarse12 | 抽出 deep_gemm 的 `topk_coarse12`：12 位 coarse + 16 KB arena（直方图与候选别名） | 实测阶梯：窄行 `batches*topk >= 9216`，宽行 `>= 49152`；`vocab >= 2048` |
+| fp32 coarse12 | 抽出 deep_gemm 的 `topk_coarse12`：12 位 coarse + 16 KB arena（直方图与候选别名）；pass 1 顺带写 16 元素块的 max-bin 表，pass 2 只走 kept-block 列表（列表 ≤ 3/4 块时；`6b5928c`） | 实测阶梯：窄行 `batches*topk >= 9216`，宽行 `>= 49152`；`vocab >= 2048` |
 | fp32 chunks | 一 CTA 一行，沿行走（deep_gemm 的 chunks 内核） | `batches <= 2`（深解码带） |
 | fp32 split | 分块 + 合并 | 长行、行数不足以填机；work target = `sm_count * 5 / 2` |
 | fp32 行内核 | 8 位 coarse 直方图；阈值桶超过 arena 时整行重扫（多轮） | 其余形状 |
