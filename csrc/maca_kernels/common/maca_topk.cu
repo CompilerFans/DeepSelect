@@ -79,6 +79,144 @@ namespace deep_select {
 
 namespace dsf = deep_select::ffi;
 
+namespace detail {
+
+// ── the instantiation list, and the table the ladder reads ──────────────────
+//
+// One line per tuple, spelled once and expanded twice: as the `extern
+// template` declaration that says "this tuple's launcher is defined in its own
+// `instantiations/*.cu`", and as the dispatch entry that points at it.  The
+// generator writes the matching list of files, so the two are two copies of
+// one table -- and a tuple they disagree about does **not** fail loudly: this
+// list's entry would name a symbol no TU defines, and a shared library links
+// with that symbol undefined.  What checks the agreement is the artifact
+// itself: `ls instantiations/*.cu | wc -l` against the kernel count, and the
+// device-kernel set against the previous build's.
+//
+// **The table lives here, in this one TU, and not in `contract.cuh`.**  Every
+// entry takes `&launch_radix_config<Cfg>`, and a TU that merely sees the table
+// instantiates every row in the *device* pass -- the `extern template` below is
+// honored by the host pass and ignored there.  Measured 2026-10-23: an
+// instantiation TU defining one launcher was a 7.6 MB object whose device
+// bitcode held all 180 `topk_kernel_radix` kernels.  With the table confined to
+// this file, each `instantiations/*.cu` carries only its own kernel.
+
+#define DEEP_SELECT_RADIX_CONFIGS(X)                                        \
+    X(maca_bfloat16, int32_t, 512, false, false, false, false)              \
+    X(maca_bfloat16, int32_t, 512, false, false, false, true)               \
+    X(maca_bfloat16, int32_t, 512, false, true, false, false)               \
+    X(maca_bfloat16, int32_t, 512, false, true, false, true)                \
+    X(maca_bfloat16, int32_t, 512, true, false, false, false)               \
+    X(maca_bfloat16, int32_t, 512, true, false, false, true)                \
+    X(maca_bfloat16, int32_t, 512, true, true, false, false)                \
+    X(maca_bfloat16, int32_t, 512, true, true, false, true)                 \
+    X(maca_bfloat16, int32_t, 512, true, true, true, false)                 \
+    X(maca_bfloat16, int32_t, 512, true, true, true, true)                  \
+    X(maca_bfloat16, int32_t, 1024, false, false, false, false)             \
+    X(maca_bfloat16, int32_t, 1024, false, false, false, true)              \
+    X(maca_bfloat16, int32_t, 1024, false, true, false, false)              \
+    X(maca_bfloat16, int32_t, 1024, false, true, false, true)               \
+    X(maca_bfloat16, int32_t, 1024, true, false, false, false)              \
+    X(maca_bfloat16, int32_t, 1024, true, false, false, true)               \
+    X(maca_bfloat16, int32_t, 1024, true, true, false, false)               \
+    X(maca_bfloat16, int32_t, 1024, true, true, false, true)                \
+    X(maca_bfloat16, int32_t, 1024, true, true, true, false)                \
+    X(maca_bfloat16, int32_t, 1024, true, true, true, true)                 \
+    X(maca_bfloat16, int64_t, 512, false, false, false, false)              \
+    X(maca_bfloat16, int64_t, 512, false, false, false, true)               \
+    X(maca_bfloat16, int64_t, 512, false, true, false, false)               \
+    X(maca_bfloat16, int64_t, 512, false, true, false, true)                \
+    X(maca_bfloat16, int64_t, 512, true, false, false, false)               \
+    X(maca_bfloat16, int64_t, 512, true, false, false, true)                \
+    X(maca_bfloat16, int64_t, 512, true, true, false, false)                \
+    X(maca_bfloat16, int64_t, 512, true, true, false, true)                 \
+    X(maca_bfloat16, int64_t, 512, true, true, true, false)                 \
+    X(maca_bfloat16, int64_t, 512, true, true, true, true)                  \
+    X(maca_bfloat16, int64_t, 1024, false, false, false, false)             \
+    X(maca_bfloat16, int64_t, 1024, false, false, false, true)              \
+    X(maca_bfloat16, int64_t, 1024, false, true, false, false)              \
+    X(maca_bfloat16, int64_t, 1024, false, true, false, true)               \
+    X(maca_bfloat16, int64_t, 1024, true, false, false, false)              \
+    X(maca_bfloat16, int64_t, 1024, true, false, false, true)               \
+    X(maca_bfloat16, int64_t, 1024, true, true, false, false)               \
+    X(maca_bfloat16, int64_t, 1024, true, true, false, true)                \
+    X(maca_bfloat16, int64_t, 1024, true, true, true, false)                \
+    X(maca_bfloat16, int64_t, 1024, true, true, true, true)                 \
+    X(float, int32_t, 512, false, false, false, false)                      \
+    X(float, int32_t, 512, false, false, false, true)                       \
+    X(float, int32_t, 512, false, true, false, false)                       \
+    X(float, int32_t, 512, false, true, false, true)                        \
+    X(float, int32_t, 512, true, false, false, false)                       \
+    X(float, int32_t, 512, true, false, false, true)                        \
+    X(float, int32_t, 512, true, true, false, false)                        \
+    X(float, int32_t, 512, true, true, false, true)                         \
+    X(float, int32_t, 512, true, true, true, false)                         \
+    X(float, int32_t, 512, true, true, true, true)                          \
+    X(float, int64_t, 512, false, false, false, false)                      \
+    X(float, int64_t, 512, false, false, false, true)                       \
+    X(float, int64_t, 512, false, true, false, false)                       \
+    X(float, int64_t, 512, false, true, false, true)                        \
+    X(float, int64_t, 512, true, false, false, false)                       \
+    X(float, int64_t, 512, true, false, false, true)                        \
+    X(float, int64_t, 512, true, true, false, false)                        \
+    X(float, int64_t, 512, true, true, false, true)                         \
+    X(float, int64_t, 512, true, true, true, false)                         \
+    X(float, int64_t, 512, true, true, true, true)                          \
+
+#define DEEP_SELECT_RADIX_EXTERN(VD, ID, BLK, SI, RV, SV, PRE)                \
+    extern template void launch_radix_config<                                 \
+        TopkRadixConfig<VD, ID, BLK, SI, RV, SV, PRE>>(                       \
+        const RowParams &, uint32_t, cudaStream_t, size_t);
+
+DEEP_SELECT_RADIX_CONFIGS(DEEP_SELECT_RADIX_EXTERN)
+#undef DEEP_SELECT_RADIX_EXTERN
+
+using radix_launcher_fn = void (*)(const RowParams &, uint32_t, cudaStream_t,
+                                   size_t);
+
+// `{value_dtype, index_dtype, block, SI, RV, SV, PRE} -> launcher`, in exactly
+// the key the entry point builds: `value_dtype` is `float32 ? 0 : 1` on the
+// input and `index_dtype` the output index width (see `maca_topk.cu`).
+struct RadixEntry {
+    int value_dtype;
+    int index_dtype;
+    int block;
+    bool si;
+    bool rv;
+    bool sv;
+    bool pre;
+    radix_launcher_fn launch;
+};
+
+#define DEEP_SELECT_RADIX_ENTRY(VD, ID, BLK, SI, RV, SV, PRE)                 \
+    {radix_value_dtype<VD>::value, radix_index_dtype<ID>::value, BLK, SI, RV, \
+     SV, PRE,                                                                 \
+     &launch_radix_config<TopkRadixConfig<VD, ID, BLK, SI, RV, SV, PRE>>},
+
+const RadixEntry kRadixTable[] = {
+    DEEP_SELECT_RADIX_CONFIGS(DEEP_SELECT_RADIX_ENTRY)
+};
+#undef DEEP_SELECT_RADIX_ENTRY
+#undef DEEP_SELECT_RADIX_CONFIGS
+
+// The two spellings of the key are the same number by construction: the table's
+// `value_dtype` / `index_dtype` come from the trait above, and the entry point
+// derives its pair from the tensor dtypes the same way.
+radix_launcher_fn radix_launcher_for(int value_dtype, int index_dtype,
+                                     int block, bool si, bool rv, bool sv,
+                                     bool pre) {
+    for (const RadixEntry &e : kRadixTable) {
+        if (e.value_dtype == value_dtype && e.index_dtype == index_dtype &&
+            e.block == block && e.si == si && e.rv == rv && e.sv == sv &&
+            e.pre == pre) {
+            return e.launch;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace detail
+
 // ── the chunked path's scratch, held across calls ───────────────────────────
 //
 // `cudaMalloc`/`cudaFree` on this runtime cost ~70-100 us per *pair* at this

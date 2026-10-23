@@ -238,7 +238,7 @@ CHUNKS_HEADER = "<csrc/maca_kernels/common/topk_chunks.cuh>"
 #
 # The axes are `docs/code-architecture.zh.md` §5b's, in the config's own
 # spelling `TopkRadixConfig<ValueT, OutIdxT, BLOCK, SI, RV, SV, PRE>`, which is
-# also the spelling the table in `contract.cuh` uses.  The two lists must agree;
+# also the spelling the table in `maca_topk.cu` uses.  The two lists must agree;
 # a tuple here that the table does not carry is an unused instantiation, and one
 # the table wants that this list does not carry is an undefined symbol.
 ROW_VALUE_TYPES = (("bf16", "maca_bfloat16"), ("fp32", "float"))
