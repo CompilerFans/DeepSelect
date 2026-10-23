@@ -50,11 +50,11 @@ def bin_of_bits(bits):
     return (key_of_bits(bits) >> 20) & 0xFFF
 
 
-def build_bmax(x):
-    """The block-max table pass 1 would write: max 12-bit bin per 16 elements."""
+def build_bmax(x, G=16):
+    """The block-max table pass 1 would write: max 12-bit bin per G elements."""
     B, V = x.shape
-    nblk = V // 16                     # whole blocks; a ragged tail is not tabled
-    bb = x[:, :nblk * 16].view(B, nblk, 16).amax(dim=2).view(torch.int32)
+    nblk = V // G                      # whole blocks; a ragged tail is not tabled
+    bb = x[:, :nblk * G].view(B, nblk, G).amax(dim=2).view(torch.int32)
     return bin_of_bits(bb).to(torch.int16).contiguous()
 
 
@@ -107,6 +107,11 @@ for B, V, K in SHAPES:
                      ITERS, 1)
     lib_.probe_pass1(x.data_ptr(), B, V, bmax.data_ptr(), hist.data_ptr(),
                      ITERS, 2)
+    for G, mode in ((4, 3), (8, 4)):
+        bg = build_bmax(x, G)
+        lib_.probe_pass1(x.data_ptr(), B, V, bg.data_ptr(), hist.data_ptr(),
+                         ITERS, mode)
+        del bg
     chk = bmax.view(torch.int16)
     lib_.probe_table(x.data_ptr(), thr.data_ptr(), chk.data_ptr(), B, V, K,
                      out.data_ptr(), above.data_ptr(), inbin.data_ptr(), ITERS)
@@ -119,12 +124,13 @@ for B, V, K in SHAPES:
     del bmax, chk, hist
     torch.cuda.empty_cache()
 
-    for G in (16, 32, 64):
-        cols, off, lens = build_list(x, thr, G)
+    for G in (4, 44, 8, 16, 32, 64):
+        grain = 4 if G == 44 else G    # 44 is G=4 with two entries in flight
+        cols, off, lens = build_list(x, thr, grain)
         lib_.probe_listed(x.data_ptr(), thr.data_ptr(), cols.data_ptr(),
                           off.data_ptr(), lens.data_ptr(), B, V, K,
                           out.data_ptr(), above.data_ptr(), inbin.data_ptr(),
-                          ITERS, G, int(cols.numel()), B * (V // G))
+                          ITERS, G, int(cols.numel()), B * (V // grain))
         a = above.cpu()
         b = inbin.cpu()
         same = bool((a == ref_above).all() and (b == ref_inbin).all())

@@ -16,6 +16,14 @@
 //   3 listed, G=64
 //   4 listed G=16, load-only (the listed walk's ceiling: no collect work)
 //
+// 2026-10-23: G=4 and G=8 added.  G=16 was chosen against G=32/G=64 before the
+// finer direction had been measured; the finer it is, the less of the row is
+// kept, and the summary that feeds it gets cheaper to compute (G=4 needs no
+// shuffle at all).  So the trade is a bigger table and more list entries
+// against a smaller pass-2 walk.
+//   5 listed, G=4       -- one lane per float4
+//   6 listed, G=8       -- two lanes per block
+//
 // The kept-block lists are built by the driver (torch) with the *true* 12-bit
 // threshold bin, so this measures the walk, not the summary.  Production also
 // has to build the summary in pass 1 and compact the list; the bf16 row pays
@@ -185,6 +193,64 @@ extern "C" void probe_dense(const float *in, const int *thr, const int *list,
            gb / (ms / 1e3));
 }
 
+// The listed walk at G=4 with two entries in flight per lane.  The walk is a
+// dependent pair of loads -- `list[j]`, then `data[list[j]]` -- and at one
+// entry per lane it measured 0.812 ms for 189 MB, i.e. latency, not bandwidth.
+// Two independent entries per iteration give the scheduler two chains.
+template <bool kLoadOnly>
+__global__ __launch_bounds__(kThreads) void listed_collect_ilp2(
+    const float *__restrict__ in, const int *__restrict__ thr_bin,
+    const int *__restrict__ list, const int *__restrict__ list_off,
+    const int *__restrict__ list_len, int len, int out_stride,
+    int *__restrict__ out, int *__restrict__ above, int *__restrict__ inbin) {
+    extern __shared__ int smem[];
+    int *arena = smem;
+    int *hist = smem + kArenaCap;
+    __shared__ int counter;
+    __shared__ int num_input;
+    const int row = blockIdx.x;
+    const float4 *row4 = reinterpret_cast<const float4 *>(in + (int64_t)row * len);
+    if (threadIdx.x == 0) { counter = 0; num_input = 0; }
+    if (threadIdx.x < 256) hist[threadIdx.x] = 0;
+    __syncthreads();
+
+    const Collect c{&counter, &num_input, arena, hist,
+                    out + (int64_t)row * out_stride, thr_bin[row]};
+    const int n = list_len[row];
+    const int *row_list = list + list_off[row];
+    uint32_t acc = 0;
+    int j = threadIdx.x;
+    for (; j + kThreads < n; j += 2 * kThreads) {
+        const int b0 = row_list[j];
+        const int b1 = row_list[j + kThreads];
+        const float4 v0 = __ldg(row4 + b0);
+        const float4 v1 = __ldg(row4 + b1);
+        if (kLoadOnly) {
+            acc ^= key_of(v0.x) ^ key_of(v1.y) ^ key_of(v0.z) ^ key_of(v1.w);
+        } else {
+            const int i0 = b0 * 4;
+            const int i1 = b1 * 4;
+            c(v0.x, i0); c(v0.y, i0 + 1); c(v0.z, i0 + 2); c(v0.w, i0 + 3);
+            c(v1.x, i1); c(v1.y, i1 + 1); c(v1.z, i1 + 2); c(v1.w, i1 + 3);
+        }
+    }
+    for (; j < n; j += kThreads) {
+        const int b0 = row_list[j];
+        const float4 v0 = __ldg(row4 + b0);
+        if (kLoadOnly) {
+            acc ^= key_of(v0.x) ^ key_of(v0.y) ^ key_of(v0.z) ^ key_of(v0.w);
+        } else {
+            const int i0 = b0 * 4;
+            c(v0.x, i0); c(v0.y, i0 + 1); c(v0.z, i0 + 2); c(v0.w, i0 + 3);
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        if (!kLoadOnly) { above[row] = counter; inbin[row] = num_input; }
+        else if (acc == 0xDEADBEEFu) above[row] = -1;
+    }
+}
+
 // One call per granularity: each G has its own kept-block list, so the
 // dispatch has to be C-side (a template cannot be chosen from Python).
 extern "C" void probe_listed(const float *in, const int *thr, const int *list,
@@ -197,6 +263,36 @@ extern "C" void probe_listed(const float *in, const int *thr, const int *list,
     const double kept_gb = gb * frac;
     float ms_collect = -1.f, ms_load = -1.f;
     switch (g) {
+    case 4:
+        ms_collect = bench(listed_collect<4, false>, [&] {
+            listed_collect<4, false><<<rows, kThreads, smem>>>(
+                in, thr, list, off, llen, len, out_stride, out, above, inbin); },
+            smem, iters);
+        ms_load = bench(listed_collect<4, true>, [&] {
+            listed_collect<4, true><<<rows, kThreads, smem>>>(
+                in, thr, list, off, llen, len, out_stride, out, above, inbin); },
+            smem, iters);
+        break;
+    case 44:  // G=4, two entries in flight
+        ms_collect = bench(listed_collect_ilp2<false>, [&] {
+            listed_collect_ilp2<false><<<rows, kThreads, smem>>>(
+                in, thr, list, off, llen, len, out_stride, out, above, inbin); },
+            smem, iters);
+        ms_load = bench(listed_collect_ilp2<true>, [&] {
+            listed_collect_ilp2<true><<<rows, kThreads, smem>>>(
+                in, thr, list, off, llen, len, out_stride, out, above, inbin); },
+            smem, iters);
+        break;
+    case 8:
+        ms_collect = bench(listed_collect<8, false>, [&] {
+            listed_collect<8, false><<<rows, kThreads, smem>>>(
+                in, thr, list, off, llen, len, out_stride, out, above, inbin); },
+            smem, iters);
+        ms_load = bench(listed_collect<8, true>, [&] {
+            listed_collect<8, true><<<rows, kThreads, smem>>>(
+                in, thr, list, off, llen, len, out_stride, out, above, inbin); },
+            smem, iters);
+        break;
     case 16:
         ms_collect = bench(listed_collect<16, false>, [&] {
             listed_collect<16, false><<<rows, kThreads, smem>>>(
@@ -234,13 +330,16 @@ extern "C" void probe_listed(const float *in, const int *thr, const int *list,
     // GB/s is quoted two ways: against the whole row (comparable to the dense
     // walk, which is what the decision is about) and against the bytes the
     // listed walk actually touches (its own efficiency).
-    printf("  listed G=%-2d collect  %8.3f ms  %7.1f GB/s row  %7.1f GB/s kept"
+    const char *label = g == 44 ? "4x2" : nullptr;
+    char gbuf[8];
+    if (!label) { snprintf(gbuf, sizeof(gbuf), "%d", g); label = gbuf; }
+    printf("  listed G=%-3s collect  %8.3f ms  %7.1f GB/s row  %7.1f GB/s kept"
            "  (kept %ld/%ld = %.1f%%)\n",
-           g, ms_collect, gb / (ms_collect / 1e3), kept_gb / (ms_collect / 1e3),
+           label, ms_collect, gb / (ms_collect / 1e3), kept_gb / (ms_collect / 1e3),
            kept, total_blocks, 100.0 * frac);
-    printf("  listed G=%-2d load-only %7.3f ms  %7.1f GB/s row  %7.1f GB/s kept"
+    printf("  listed G=%-3s load-only %7.3f ms  %7.1f GB/s row  %7.1f GB/s kept"
            "  (walk ceiling)\n",
-           g, ms_load, gb / (ms_load / 1e3), kept_gb / (ms_load / 1e3));
+           label, ms_load, gb / (ms_load / 1e3), kept_gb / (ms_load / 1e3));
 }
 
 // ── the shipping design: a block-max table, no compaction ──────────────────
@@ -277,7 +376,8 @@ __device__ __forceinline__ int block_bin_max_bp(int b0, int b1, int b2, int b3) 
 __device__ __forceinline__ int bin_of(float v) { return (int)(key_of(v) >> 20); }
 
 // Mode: pass 1 as the kernel writes it today (histogram only).
-template <int kSummary>   // 0 none, 1 shfl_xor, 2 bsm_bpermute
+template <int kSummary>   // 0 none, 1 shfl_xor G=16, 2 bsm_bpermute G=16,
+                          // 3 G=4 (no shuffle), 4 G=8 (one xor step)
 __global__ __launch_bounds__(kThreads) void pass1_hist(
     const float *__restrict__ in, int len, int *__restrict__ hist_out,
     unsigned short *__restrict__ bmax) {
@@ -286,7 +386,10 @@ __global__ __launch_bounds__(kThreads) void pass1_hist(
     const int tid = threadIdx.x;
     const float4 *row4 = reinterpret_cast<const float4 *>(in + (int64_t)row * len);
     const int vec_len = len >> 2;
-    const int nblk = vec_len >> 2;
+    // One table entry per 16/8/4 elements, so the row stride follows the grain.
+    const int nblk = kSummary == 4 ? (vec_len >> 1)
+                   : kSummary == 3 ? vec_len
+                                   : (vec_len >> 2);
     unsigned short *row_bmax = kSummary ? bmax + (int64_t)row * nblk : nullptr;
     for (int b = tid; b < kCoarseBins; b += kThreads) wide[b] = 0;
     __syncthreads();
@@ -319,6 +422,24 @@ __global__ __launch_bounds__(kThreads) void pass1_hist(
                 row_bmax[((vec + kThreads) >> 2)] = (unsigned short)mb;
             }
         }
+        if constexpr (kSummary == 3) {
+            // G=4: the lane's own float4 is the block -- no shuffle, 4x the stores.
+            row_bmax[vec] = (unsigned short)max(max(bin_of(va.x), bin_of(va.y)),
+                                                max(bin_of(va.z), bin_of(va.w)));
+            row_bmax[vec + kThreads] = (unsigned short)max(max(bin_of(vb.x), bin_of(vb.y)),
+                                                           max(bin_of(vb.z), bin_of(vb.w)));
+        }
+        if constexpr (kSummary == 4) {
+            // G=8: two lanes per block, one xor step, even lanes store.
+            int ma = max(max(bin_of(va.x), bin_of(va.y)), max(bin_of(va.z), bin_of(va.w)));
+            int mb = max(max(bin_of(vb.x), bin_of(vb.y)), max(bin_of(vb.z), bin_of(vb.w)));
+            ma = max(ma, __shfl_xor_sync(kFullMask, ma, 1));
+            mb = max(mb, __shfl_xor_sync(kFullMask, mb, 1));
+            if ((tid & 1) == 0) {
+                row_bmax[vec >> 1] = (unsigned short)ma;
+                row_bmax[(vec + kThreads) >> 1] = (unsigned short)mb;
+            }
+        }
     }
     for (; vec < vec_len; vec += kThreads) {
         const float4 va = __ldg(row4 + vec);
@@ -333,6 +454,15 @@ __global__ __launch_bounds__(kThreads) void pass1_hist(
         if constexpr (kSummary == 2) {
             const int ma = block_bin_max_bp(bin_of(va.x), bin_of(va.y), bin_of(va.z), bin_of(va.w));
             if ((tid & 3) == 0) row_bmax[(vec >> 2)] = (unsigned short)ma;
+        }
+        if constexpr (kSummary == 3) {
+            row_bmax[vec] = (unsigned short)max(max(bin_of(va.x), bin_of(va.y)),
+                                                max(bin_of(va.z), bin_of(va.w)));
+        }
+        if constexpr (kSummary == 4) {
+            int ma = max(max(bin_of(va.x), bin_of(va.y)), max(bin_of(va.z), bin_of(va.w)));
+            ma = max(ma, __shfl_xor_sync(kFullMask, ma, 1));
+            if ((tid & 1) == 0) row_bmax[vec >> 1] = (unsigned short)ma;
         }
     }
     __syncthreads();
@@ -418,6 +548,16 @@ extern "C" void probe_pass1(const float *in, int rows, int len,
         name = "+summary bperm";
         ms = bench(pass1_hist<2>, [&] {
             pass1_hist<2><<<rows, kThreads, smem>>>(in, len, hist_out, bmax); },
+            smem, iters);
+    } else if (with_summary == 3) {
+        name = "+summary G=4";
+        ms = bench(pass1_hist<3>, [&] {
+            pass1_hist<3><<<rows, kThreads, smem>>>(in, len, hist_out, bmax); },
+            smem, iters);
+    } else if (with_summary == 4) {
+        name = "+summary G=8";
+        ms = bench(pass1_hist<4>, [&] {
+            pass1_hist<4><<<rows, kThreads, smem>>>(in, len, hist_out, bmax); },
             smem, iters);
     } else {
         ms = bench(pass1_hist<0>, [&] {

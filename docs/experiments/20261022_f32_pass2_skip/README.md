@@ -260,3 +260,81 @@ passed** (6 skipped on `torch.cuda.OutOfMemoryError`), plus the repro case
 (`repro_case63.py`) at 0 bad slots, three runs. The perf grid is checked case by
 case before it is timed, so the 30 fp32 cells in the A/B above are correctness
 passes too.
+
+## The grain, revisited: G=4 wins both halves in isolation and loses in the kernel (2026-10-23)
+
+The block grain was chosen at 16 elements (four float4s, four lanes per block). A finer
+grain is attractive on paper, and the probe says so twice over:
+
+* **A 4-element block keeps far less of the row.** At `b4096 V131072 k2048` the kept
+  fraction is 8.8% at G=4 against 30.8% at G=16; at `b4096 V129280 k512`, 2.5% against
+  9.5%.
+* **The summary stops needing a cross-lane step.** One float4 per lane means the block max
+  is three `max` on registers the lane already holds, so there is no shuffle, no bulk/tail
+  split and no `block_max_bin_edge`. Measured (same probe, five iterations after three
+  warm-ups, counts checked against the dense walk on every arm):
+
+| arm (ms) | b4096 V131072 k2048 | b4096 V129280 k512 |
+| --- | --- | --- |
+| dense collect (pass 2, whole row) | 2.851 | 2.228 |
+| pass 1, histogram only | 1.616 | 1.551 |
+| pass 1 + summary, shuffle, G=16 | 2.433 | 2.432 |
+| pass 1 + summary, bperm, G=16 | 2.451 | 2.439 |
+| **pass 1 + summary, G=4** | **1.824** | **1.762** |
+| pass 1 + summary, G=8 | 1.947 | 1.886 |
+| listed collect, G=4 | 1.026 (8.8% kept) | 0.388 (2.5%) |
+| listed collect, G=8 | 1.082 (16.8%) | 0.428 (4.9%) |
+| listed collect, G=16 | 1.596 (30.8%) | 0.557 (9.5%) |
+| listed collect, G=32 | 2.285 (52.1%) | 0.831 (18.1%) |
+| listed collect, G=64 | 3.201 (77.1%) | 1.338 (32.9%) |
+
+**Two entries in flight per lane does not help.** The listed walk is a dependent pair of
+loads (`list[j]`, then `data[list[j]]`), so a second independent entry per iteration was
+the obvious next lever — and it measures *slower* on both cells (1.058 against 1.026;
+0.431 against 0.388), while its load-only arm is identical (0.721 against 0.724). At 4096
+CTAs of 512 threads the walk is not short of parallelism, so it is not latency-bound: the
+collect's per-element work is what it costs, and per-thread ILP is not the lever. The arm
+stays in the probe as `G=4x2` so the negative result is re-runnable.
+
+**In the kernel, the same change is a net loss where it matters.** The G=4 kernel was
+built and run against the shipped G=16 artifact in one session, three alternating rounds
+over the whole fp32 perf grid (medians of three; nothing above 1% spread within an arm):
+
+| cell | G=16 (shipped) | G=4 | delta |
+| --- | --- | --- | --- |
+| b4096 V131072 k2048 (selector) | 4888.8 us | 4635.7 us | **-5.2%** |
+| b4096 V107520 k2048 (selector) | 4082.4 | 3877.8 | -5.0% |
+| b256 V131072 k2048 (selector) | 377.4 | 360.4 | -4.5% |
+| b4096 V129280 k512 sv+rv (official) | 4467.0 | 4602.7 | **+3.0%** |
+| b768 V129280 k512 sv+rv (official) | 889.2 | 920.1 | +3.5% |
+| b512 V129280 k512 sv+rv (official) | 616.7 | 638.3 | +3.5% |
+| b256 V129280 k512 sv+rv (official) | 341.2 | 356.5 | +4.5% |
+| b512 V66551 k2048 | 416.9 | 437.3 | +4.9% |
+| grid total (30 fp32 cells) | 34121.6 | 33058.4 | -3.1% |
+
+The selector shapes are the deep_gemm comparison shapes; the `k512 sv+rv` cells are the
+shipping Sampler shape, and those regress 3.0-4.5%. Three checks were run before calling
+it:
+
+* **Not occupancy.** `--resource-usage` on the coarse12 TU: 60 MT registers with either
+  header (120 registers/thread at 512 threads, two CTAs per SM), 1312 B static shared
+  memory, 0 stack frame.
+* **Not routing.** Both cells launch `topk_coarse12_kernel<512>` (torch profiler), so the
+  artifact that changed is the one both cells run.
+* **Not a shape-fit rule waiting to be found.** The kernel's in-situ split does not
+  follow the probe's: the probe has both passes faster at G=4 on `V129280 k512` (1.762
+  against 2.432, 0.388 against 0.557) and the kernel is 3% slower there, while on the
+  `V131072 k2048` cell the kernel gains 0.25 ms where the probe predicts ~1.0 ms. The
+  missing cost is the compaction scan and the 4x table traffic inside the fused kernel,
+  which the probe does not pay — exactly the "a controlled microbench does not transfer
+  to the kernel" trap this repository has already recorded twice (C500 ledger section
+  2.5). No gate over `topk`, `V/k` or `V` separates the winning cells from the losing
+  ones (`V66551 k2048` loses at b512 and wins at b16), so a shape gate here would be a
+  fit, not a mechanism.
+
+**Decision: G=16 stays.** The kernel is reverted to the shipped form; the probe keeps the
+G=4 and G=8 arms and the `G=4x2` arm, so the grain can be re-examined with a full-kernel
+ablation rather than a microbench if it is ever picked up again. What that ablation would
+need is the fused kernel's own phase split (pass 1 with and without the summary, pass 2
+listed against dense, with the compaction in place) — the probe cannot price the
+compaction, and the compaction is 4x the work at G=4.
