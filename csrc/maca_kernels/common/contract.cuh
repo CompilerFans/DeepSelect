@@ -142,11 +142,15 @@ struct RowParams {
     uint32_t sm_count;
     int32_t idx_fill;
     float value_fill;
-    // `check_nan` is whether the row is scanned at all.  The scan is a whole
-    // extra pass over the row and a caller that has already established its
-    // input is NaN-free pays it for nothing: measured on C500, 22-32% of the
-    // five official fp32 cells (7243.7 -> 5618.1 us at b4096-v129280) -- while
-    // a caller that has not still gets the full contract by default.
+    // `check_nan` is whether the row is scanned at all.  Every production
+    // route folds the scan into a pass that already reads the row -- the row
+    // path's pass 1, both splits' stage 1, the coarse12 and chunks arms -- so
+    // a caller that has established its input is NaN-free saves only the
+    // fused predicate's marginal cost (~3% of the fp32 split's stage 1,
+    // `docs/C500-radix-perf-ledger.zh.md` §10.7), while a caller that has not
+    // still gets the full contract by default.  The 22-32% the pre-fusion
+    // build measured was a separate grid-wide `nan_scan_kernel`; that kernel
+    // now survives only as the A/B arm behind `DS_FUSE_NAN_OFF=1`.
     //
     // What happens to a row that *is* found poisoned is not the kernel's
     // decision: the contract half raises the row's flag, and `nan_abort_kernel`
