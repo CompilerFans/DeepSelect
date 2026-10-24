@@ -117,12 +117,15 @@ def topk(
                 row holding a NaN is ranked like any other value -- the
                 caller is asserting its input is NaN-free, and the operator
                 takes it at its word.  It is not a faster way to get
-                `abort_when_nan_found=False`.
-                The scan is a full extra pass over the row, so this is a real
-                cost on a known-clean input: measured on C500, 22-32% of the
-                five official fp32 cells (7243.7 -> 5618.1 us at
-                b4096-v129280).  The default is the contract: check, and
-                answer as `abort_when_nan_found` says.
+                `abort_when_nan_found=False`.  A row whose visible length is
+                <= topk is never scanned either way: its whole window is the
+                answer, so a NaN in it is ranked like any other value.
+                On every production route the scan is folded into a pass that
+                already reads the row, so turning it off saves only the fused
+                predicate's marginal cost -- measured at ~3% of the fp32
+                split's stage 1 (`docs/C500-radix-perf-ledger.zh.md` §10.7).
+                The default is the contract: check, and answer as
+                `abort_when_nan_found` says.
 
     Return:
         output_val: (b, topk), dtype=input.dtype.

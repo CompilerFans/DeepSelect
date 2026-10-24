@@ -341,6 +341,22 @@ def semantics(backend):
                                   end=short_end, abort_when_nan_found=False)
     check("a row whose visible length <= topk is never NaN-checked",
           int(idx8[1, 0]) != 0x3F3F3F3F, f"{int(idx8[1, 0])}")
+    # The same rule holds for a NaN *inside* such a row's window: with the row
+    # no longer than `topk`, the whole window is the answer, so nothing is
+    # scanned -- the kernel's `length <= topk` shortcut returns before its
+    # scan, and both reference backends used to scan here as soon as another
+    # row in the batch turned the scan on.
+    nanx2 = x.clone()
+    nanx2[1, 5] = float("nan")
+    try:
+        _, idx9 = deep_select.topk(nanx2, k, backend=backend,
+                                   indices_type=torch.int32, end=short_end,
+                                   abort_when_nan_found=True)
+        check("a short row's in-window NaN is ranked, not flagged",
+              int(idx9[1, 0]) != 0x3F3F3F3F, f"{int(idx9[1, 0])}")
+    except BaseException as exc:  # noqa: BLE001
+        check("a short row's in-window NaN is ranked, not flagged", False,
+              f"raised {type(exc).__name__}: {str(exc)[:160]}")
 
     # -- the default backend is the process default, resolved per call.
     # `_default_backend` is the resolution the signature documents; it lives

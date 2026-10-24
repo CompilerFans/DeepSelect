@@ -76,6 +76,47 @@ def _check_common_contract(input: torch.Tensor, topk: int,
             f"indices_type must be int32 or int64, got {indices_type}")
 
 
+def _row_lengths(end: Optional[torch.Tensor], n_rows: int, vocab_size: int,
+                 device: torch.device) -> torch.Tensor:
+    """The per-row visible length `end` names, or a full row each.
+
+    `end` is an exclusive upper bound, clamped into the row.  One body for
+    both reference backends: they spelled this identically, and a difference
+    here would be a difference in what "the row" means.
+    """
+    if end is None:
+        return torch.full((n_rows,), vocab_size, dtype=torch.int64,
+                          device=device)
+    return end.to(torch.int64).clamp(min=0, max=vocab_size)
+
+
+def _nan_rows(input: torch.Tensor, lengths: torch.Tensor,
+              topk: int) -> Optional[torch.Tensor]:
+    """Per-row NaN flags for the rows the contract scans, or `None`.
+
+    Only a row whose visible length is longer than `topk` is scanned: one
+    that short is answered by returning its whole window, so a NaN in it is
+    ranked like any other value and never raises the flag.  That is the
+    kernel's rule -- `contract.cuh`'s `length <= topk` shortcut returns before
+    its scan -- and both reference backends keep it.  They used to scan every
+    row whose window held a NaN as soon as one long row in the batch turned
+    the scan on, so a batch mixing the two could abort where the kernel
+    answered.
+
+    `None` means nothing was scanned (no row is long enough), which is
+    distinct from flags that are all False.  The `any()` probes are device
+    syncs, so the caller runs this only when `check_nan` is on.
+    """
+    checked = lengths > topk
+    if not bool(checked.any().item()):
+        return None
+    cols = torch.arange(input.shape[1], device=input.device)
+    visible = (torch.isnan(input.float())
+               & (cols.unsqueeze(0) < lengths.unsqueeze(1))
+               & checked.unsqueeze(1))
+    return visible.any(dim=1)
+
+
 @log_call
 def topk_deep_gemm(
     input: torch.Tensor,
@@ -150,31 +191,17 @@ def topk_deep_gemm(
         # the wrong elements.  Padding is legal in this contract, so normalize
         # instead of refusing.
         input = input.contiguous()
-    lengths = (torch.full((n_rows,), vocab_size, dtype=torch.int64,
-                          device=device)
-               if end is None
-               else end.to(torch.int64).clamp(min=0, max=vocab_size))
+    lengths = _row_lengths(end, n_rows, vocab_size, device)
 
     # The NaN contract, checked as `topk_torch` checks it: on unless the caller
-    # turned it off, and skipped for a row whose window is not longer than
-    # `topk`.  The `any()` probe is itself a device sync on a per-row predicate,
-    # so it goes inside the flag rather than being saved by it.
-    if check_nan and bool((lengths > topk).any().item()):
-        cols = torch.arange(vocab_size, device=device)
-        nan_rows = (torch.isnan(input)
-                    & (cols.unsqueeze(0) < lengths.unsqueeze(1))).any(dim=1)
-        if bool(nan_rows.any().item()):
-            if abort_when_nan_found:
-                raise RuntimeError("NaN detected in the input")
-            if output_idx is None:
-                output_idx = torch.empty((n_rows, topk), dtype=indices_type,
-                                         device=device)
-            output_idx[nan_rows, 0] = 0x3F3F3F3F
-            values = None
-            if return_value:
-                values = torch.full((n_rows, topk), value_oob_fill_value,
-                                    dtype=input.dtype, device=device)
-            return values, output_idx
+    # turned it off, and only for the rows the contract scans.  A NaN row is
+    # answered in its first index slot at the end of this function; the clean
+    # rows of the same batch are answered by the selector like any other call
+    # (an early return here used to leave them holding uninitialized memory).
+    nan_rows = _nan_rows(input, lengths, topk) if check_nan else None
+    if (abort_when_nan_found and nan_rows is not None
+            and bool(nan_rows.any().item())):
+        raise RuntimeError("NaN detected in the input")
 
     selected = module.fp32_indexer_topk_selector(
         input, lengths.to(torch.int32), topk, return_val=False,
@@ -199,6 +226,11 @@ def topk_deep_gemm(
     if output_idx is not None:
         output_idx.copy_(out_idx)
         out_idx = output_idx
+
+    # Stamped on the tensor that goes back to the caller, whichever it is.
+    if nan_rows is not None and bool(nan_rows.any().item()):
+        out_idx[nan_rows, 0] = 0x3F3F3F3F
+
     return out_val, out_idx
 
 
@@ -254,21 +286,13 @@ def topk_torch(
     n_rows, vocab_size = input.shape
     device = input.device
 
-    # `end` is an exclusive per-row upper bound.  The kernel never NaN-checks
-    # a row whose visible length is <= topk; the check is on unless
+    # `end` is an exclusive per-row upper bound; a row whose visible length is
+    # <= topk is never NaN-checked (see `_nan_rows`).  The check is on unless
     # `check_nan` says otherwise.
-    if end is not None:
-        lengths = end.to(torch.int64).clamp(min=0, max=vocab_size)
-    else:
-        lengths = torch.full((n_rows,), vocab_size, dtype=torch.int64, device=device)
-
-    nan_rows = torch.zeros(n_rows, dtype=torch.bool, device=device)
-    checked = (lengths > topk) if check_nan else torch.zeros_like(lengths, dtype=torch.bool)
-    if bool(checked.any().item()):
-        cols = torch.arange(vocab_size, device=device)
-        visible = torch.isnan(input.float()) & (cols.unsqueeze(0) < lengths.unsqueeze(1))
-        nan_rows = visible.any(dim=1)
-    if abort_when_nan_found and bool(nan_rows.any().item()):
+    lengths = _row_lengths(end, n_rows, vocab_size, device)
+    nan_rows = _nan_rows(input, lengths, topk) if check_nan else None
+    if (abort_when_nan_found and nan_rows is not None
+            and bool(nan_rows.any().item())):
         raise RuntimeError("NaN detected in the input")
     # A NaN row is answered in its first index slot and left otherwise
     # unspecified -- that row only.  Returning for the whole batch would leave
@@ -345,7 +369,7 @@ def topk_torch(
         out_idx = output_idx
 
     # Stamped on the tensor that goes back to the caller, whichever it is.
-    if bool(nan_rows.any().item()):
+    if nan_rows is not None and bool(nan_rows.any().item()):
         out_idx[nan_rows, 0] = 0x3F3F3F3F
 
     return out_val, out_idx
