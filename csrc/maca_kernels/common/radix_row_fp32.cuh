@@ -113,23 +113,12 @@ __device__ __forceinline__ void run_cumsum(
 // FP32 radix topk row
 // ============================================================
 
-// The fp32 row's dynamic shared-memory requirement, as seen from a launch
-// site.  `radix_topk_row_f32` derives the same number from `kSMEM`, and both
-// callers (the row entry and the chunked split's stage kernels) must request
-// exactly it -- so it lives here rather than being re-spelled at each launch.
-//
-// The static half is `s_histogram_buf[2][256+32]` plus the six words
-// `s_counter`, `s_threshold_bin_id`, `s_high_threshold_bin_id`,
-// `s_num_input[2]` and `s_last_remain`.
-constexpr uint32_t kF32StaticBytes =
-    2 * (kRadix + 32) * sizeof(uint32_t) + 6 * sizeof(uint32_t);
-// Two of these tiles the dynamic region, one for the arena and one for the
-// refine's ping-pong staging; `radix_topk_row_f32` names the halves by
-// multiplying this.
-constexpr uint32_t kF32SmemInputSize =
-    (kSMEM - kF32StaticBytes) / (2 * sizeof(uint32_t));
-constexpr size_t kF32RowSmemBytes =
-    2 * (size_t)kF32SmemInputSize * sizeof(uint32_t);
+// The fp32 row's dynamic shared-memory footprint, as seen from a launch site,
+// is `radix_common.cuh`'s `kF32RowSmemBytes`: the generic arena cut into two
+// ping-pong tiles (`kF32SmemInputSize` each, one for the arena and one for the
+// refine's staging).  Every caller -- the row entry and the chunked split's
+// stages -- requests it through `radix_smem_plan` / `radix_arena_bytes` there,
+// so it is spelled once.
 
 // Overflow resolution for the fp32 row below.  Do not remove this path.
 //
@@ -239,7 +228,6 @@ __device__ __forceinline__ void radix_topk_row_f32(
     // 静态变量: s_histogram_buf(2304) + s_counter/s_threshold_bin_id/
     //           s_high_threshold_bin_id (12) + s_num_input(8) + s_last_remain(4)
     // 动态区: arena 与 refine 的 ping-pong 暂存，各一半
-    constexpr uint32_t STATIC_BYTES = kF32StaticBytes;
     constexpr uint32_t SMEM_INPUT_SIZE = kF32SmemInputSize;
 
     __shared__ uint32_t s_histogram_buf[2][RADIX + 32];
@@ -249,9 +237,10 @@ __device__ __forceinline__ void radix_topk_row_f32(
     // never read in `radix_topk_row_f32`, its rescan or `stage_f32_lane` --
     // the fp32 path narrows with `s_histogram` directly.  The readers are the
     // 16-bit row entries, which declare their own copy in
-    // `radix_row_bf16.cuh`.  Kept because the static-smem accounting above is
-    // written against this declaration list: deleting it would move
-    // `kF32StaticBytes` and with it `kF32SmemInputSize`.
+    // `radix_row_bf16.cuh`.  Kept because `kSmemStaticBytes` (`radix_common.cuh`)
+    // is hand-written against this declaration list, and `kF32SmemInputSize`
+    // is derived from it: deleting this word without moving the constant
+    // would overstate the static share and shrink the arena the row may use.
     __shared__ uint32_t s_high_threshold_bin_id;
     __shared__ uint32_t s_num_input[2];
     __shared__ int32_t s_last_remain;

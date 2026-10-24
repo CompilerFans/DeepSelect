@@ -153,10 +153,11 @@ inline cudaError_t launch_bf16_chunk_stage1_k(
     int32_t* nan_flags)
 {
     if (TOPK > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    // Both stages run the coarse12 row, whose arena *is* the 16 KB coarse
-    // histogram it aliases, followed by the `topk` staging the core writes.
-    constexpr size_t kChunkSmem =
-        kCoarse12HistBytes + sizeof(uint32_t) * (size_t)TOPK;
+    // Both stages rank a chunk and answer into the caller's global arrays --
+    // the contract half does not follow them in this kernel -- so they request
+    // the row dataflow's arena alone (`radix_arena_bytes`), not the row
+    // kernel's arena + `topk` staging.
+    constexpr size_t kChunkSmem = radix_arena_bytes(true);
     static bool smem_adopted = false;
     const cudaError_t smem_err = adopt_dynamic_smem(
         topk_bf16_chunk_stage1_kernel<TOPK, kNan>, kChunkSmem, smem_adopted);
@@ -195,8 +196,9 @@ inline cudaError_t launch_bf16_chunk_stage2_k(
     int32_t* indices, int B, int num_chunks, cudaStream_t stream)
 {
     if (TOPK > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    constexpr size_t kChunkSmem =
-        kCoarse12HistBytes + sizeof(uint32_t) * (size_t)TOPK;
+    // The arena alone, for the reason stage 1 records: the merge's answer
+    // goes to global memory too.
+    constexpr size_t kChunkSmem = radix_arena_bytes(true);
     static bool smem_adopted = false;
     const cudaError_t smem_err = adopt_dynamic_smem(
         topk_bf16_chunk_stage2_kernel<kChunkBlockSize, TOPK>, kChunkSmem,
@@ -251,15 +253,16 @@ inline cudaError_t launch_bf16_chunk_stage1_runtime(
     int64_t score_stride, int32_t* nan_flags)
 {
     if (topk > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    constexpr size_t kChunkSmem = radix_arena_bytes(true);
     static bool smem_adopted = false;
     const cudaError_t smem_err = adopt_dynamic_smem(
-        topk_bf16_chunk_stage1_kernel<0u, kNan>, kSMEM, smem_adopted);
+        topk_bf16_chunk_stage1_kernel<0u, kNan>, kChunkSmem, smem_adopted);
     if (smem_err != cudaSuccess) return smem_err;
 
     const int chunk_size = chunk_size_for(L, num_chunks);
     const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
     topk_bf16_chunk_stage1_kernel<0u, kNan>
-        <<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
+        <<<B * num_chunks, kChunkBlockSize, kChunkSmem, stream>>>(
             scores, lengths, candidate_indices, candidate_values, stride,
             topk, B, num_chunks, chunk_size, kNan ? nan_flags : nullptr);
     return cudaGetLastError();
@@ -278,11 +281,12 @@ inline cudaError_t launch_bf16_chunk_stage2_runtime(
     int32_t* indices, int B, int num_chunks, int topk, cudaStream_t stream)
 {
     if (topk > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    constexpr size_t kChunkSmem = radix_arena_bytes(true);
     static bool smem_adopted = false;
     const cudaError_t smem_err = adopt_dynamic_smem(
-        topk_bf16_chunk_stage2_kernel<kBlock>, kSMEM, smem_adopted);
+        topk_bf16_chunk_stage2_kernel<kBlock>, kChunkSmem, smem_adopted);
     if (smem_err != cudaSuccess) return smem_err;
-    topk_bf16_chunk_stage2_kernel<kBlock><<<B, kBlock, kSMEM, stream>>>(
+    topk_bf16_chunk_stage2_kernel<kBlock><<<B, kBlock, kChunkSmem, stream>>>(
         candidate_values, candidate_indices, indices, num_chunks * topk, topk, B);
     return cudaGetLastError();
 }
@@ -300,9 +304,10 @@ extern template cudaError_t launch_bf16_chunk_stage2_runtime<kChunkBlockSize>(
 // ============================================================
 //
 // `TopKConfig` is the triple that decision reads, and `needs_long_row_bf16`
-// is the regime test itself; the block widths, the launch's dynamic smem and
-// the chunked split's workspace are `maca_topk.cu`'s (`radix_smem_bytes`,
-// `chunked_workspace_bytes`).
+// is the regime test itself.  `maca_topk.cu` is its only consumer; the block
+// widths and each stage's dynamic smem are this header's and
+// `radix_common.cuh`'s (`radix_arena_bytes`), and the split's workspace is
+// `routing.cuh`'s (`chunked_workspace_bytes`).
 //
 struct TopKConfig {
     int B;
@@ -544,14 +549,17 @@ inline cudaError_t launch_f32_chunk_stage1(
     int64_t score_stride, int32_t *nan_flags)
 {
     if (topk > (int)kF32MaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    // The fp32 row's arena alone: stage 1 writes the chunk's answer into the
+    // caller's `cols` / `vals`, so no contract staging follows it here.
+    constexpr size_t kChunkSmem = radix_arena_bytes(false);
     static bool smem_adopted = false;
     const cudaError_t smem_err = adopt_dynamic_smem(
-        topk_f32_chunk_stage1_kernel<kNan>, kSMEM, smem_adopted);
+        topk_f32_chunk_stage1_kernel<kNan>, kChunkSmem, smem_adopted);
     if (smem_err != cudaSuccess) return smem_err;
     const int chunk_size = chunk_size_for(L, num_chunks);
     const int candidate_stride = num_chunks * topk;
     topk_f32_chunk_stage1_kernel<kNan>
-        <<<B * num_chunks, (int)kF32ChunkBlocks, kSMEM, stream>>>(
+        <<<B * num_chunks, (int)kF32ChunkBlocks, kChunkSmem, stream>>>(
             scores, lengths, cols, vals, score_stride, topk, B, num_chunks,
             chunk_size, candidate_stride, kNan ? nan_flags : nullptr);
     return cudaGetLastError();
@@ -570,12 +578,15 @@ inline cudaError_t launch_f32_chunk_stage2(
     int B, int topk, int num_chunks, cudaStream_t stream)
 {
     if (topk > (int)kF32MaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
+    // The arena alone, for the reason stage 1 records: the merge's answer goes
+    // to the caller's `out` too.
+    constexpr size_t kChunkSmem = radix_arena_bytes(false);
     static bool smem_adopted = false;
     const cudaError_t smem_err = adopt_dynamic_smem(
-        topk_f32_chunk_stage2_kernel<kBlock>, kSMEM, smem_adopted);
+        topk_f32_chunk_stage2_kernel<kBlock>, kChunkSmem, smem_adopted);
     if (smem_err != cudaSuccess) return smem_err;
     const int candidate_stride = num_chunks * topk;
-    topk_f32_chunk_stage2_kernel<kBlock><<<B, (int)kBlock, kSMEM, stream>>>(
+    topk_f32_chunk_stage2_kernel<kBlock><<<B, (int)kBlock, kChunkSmem, stream>>>(
         vals, cols, out, topk, B, candidate_stride);
     return cudaGetLastError();
 }

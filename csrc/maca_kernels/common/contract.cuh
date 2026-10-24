@@ -264,47 +264,20 @@ static __device__ __forceinline__ void emit_ordered(
 // The contract layer over the ported radix selection: two passes over the row,
 // whatever the key width.
 //
-// Dynamic shared memory starts with the core's arena -- `s_input_flat` is an
-// `extern __shared__` array in the header, so it can only sit at the base --
-// followed by the staging buffer the emit reads.  The ordered emit's scratch is
-// only live after the arena is dead, so it aliases it; the worst case
-// (topk = kMaxTopK, sorted) is 48 KB, what `kSmemBudgetBytes` reserves.
-constexpr size_t kRadixArenaBytes =
-    (size_t)topk_select_radix::kSmemInputSize * sizeof(uint32_t);
-
-// The 16-bit row's 12-bit level lays its histogram over the arena, so its lead
-// region is the histogram's 16 KB rather than the arena's 14,056 B.  At k=512
-// the request goes 16,104 -> 18,432 B and static+dynamic 18,432 -> 20,760,
-// still under the 32 KB a second CTA needs; at topk >= 4096 both regimes are
-// past it already, so no k loses occupancy to this.
-constexpr size_t kCoarse12HistBytes =
-    (size_t)topk_select_radix::kCoarse12ArenaEntries * sizeof(uint32_t);
-
-// The lead region every launch of the row kernel reserves, and where `selected`
-// begins: the ordered emit's scratch when it is larger, else the arena -- and
-// on the 16-bit row the histogram laid over that arena.  The host
-// (`radix_smem_bytes`) and the device (`radix_layout`) both read this, so the
-// bytes a launch asks for and the offset it carves cannot disagree; `wide`
-// must be the same flag at both sites (`is_same<ValueT, maca_bfloat16>`), for
-// the reason `kCoarse12HistBytes` records.
-static __host__ __device__ __forceinline__ size_t radix_lead_bytes(
-    uint32_t topk, bool sorted, bool wide) {
-    uint32_t n_pad = 1;
-    if (sorted) {
-        while (n_pad < topk) n_pad <<= 1;
-    }
-    const size_t sort_bytes =
-        sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
-    const size_t arena_bytes = wide ? kCoarse12HistBytes : kRadixArenaBytes;
-    return sort_bytes > arena_bytes ? sort_bytes : arena_bytes;
-}
-
+// Dynamic shared memory is one region: the core's arena at the base --
+// `s_input_flat` is an `extern __shared__` array in the header, so it can only
+// sit there -- followed by the staging buffer the emit reads.  The ordered
+// emit's scratch is only live after the arena is dead, so it aliases it, and
+// the 16-bit row lays its 12-bit histogram over the same bytes.  The budget is
+// `topk_select_radix::radix_smem_plan` (`radix_common.cuh`), which the host
+// launcher and this layout both read; `wide` must be the same flag at both
+// sites (`is_same<ValueT, maca_bfloat16>`), or the arena overwrites `selected`.
 static __device__ __forceinline__ void radix_layout(
     uint8_t *base, uint32_t topk, bool sorted, bool wide, uint32_t *&selected,
     uint64_t *&sort_buf) {
     sort_buf = reinterpret_cast<uint64_t *>(base);
     selected = reinterpret_cast<uint32_t *>(
-        base + radix_lead_bytes(topk, sorted, wide));
+        base + topk_select_radix::radix_lead_bytes(topk, sorted, wide));
 }
 
 // Both row entries cover every key length and every k **up to the public
@@ -769,20 +742,6 @@ namespace detail {
 constexpr size_t kSmemBudgetBytes =
     (size_t)kMaxTopK * (sizeof(uint32_t) + sizeof(uint64_t));
 
-// Bytes the radix path reserves: the core arena (or the ordered scratch, which
-// aliases it and can be larger) followed by the staging buffer.
-//
-// The staging buffer holds the `topk` selected indices the core writes (the
-// shortcut path, the merge hand-off and the row selector all fill exactly
-// `topk` entries), so it is sized by `topk` and not by the `kMaxTopK` ceiling.
-// At k=512 that is 2 KB instead of 16 KB, and the difference decides the
-// occupancy the launch gets: the static shared state plus the arena plus this
-// buffer has to stay under half of `smemPerSM` for a second CTA to be resident
-// (32 KB static+dynamic per CTA on C500's 64 KB SM).
-inline size_t radix_smem_bytes(uint32_t topk, bool sorted, bool wide) {
-    return radix_lead_bytes(topk, sorted, wide) + sizeof(uint32_t) * topk;
-}
-
 // One launch site for one configuration tuple: the row path selects, the
 // chunked path picks up the indices the split left in `params.preselected`.
 // Both dtypes have a split (16-bit above, fp32 below) and the preselected arm
@@ -799,8 +758,8 @@ template <typename Cfg>
 inline void launch_radix_config(const RowParams &params, uint32_t batches,
                                 cudaStream_t stream, size_t smem) {
     // Every mode is configured with the one ceiling; each launch then asks for
-    // exactly what its own mode needs (`radix_smem_bytes`).  Adopted once per
-    // tuple, not per launch: this was the one site calling
+    // exactly what its own mode needs (`radix_smem_plan`'s `total_bytes`).
+    // Adopted once per tuple, not per launch: this was the one site calling
     // `cudaFuncSetAttribute` on every call.
     static bool smem_adopted = false;
     const cudaError_t rc = topk_select_common::adopt_dynamic_smem(
@@ -840,9 +799,12 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
                         cudaStream_t stream, bool sorted_index,
                         bool sorted_value, bool return_value, int block,
                         bool preselected = false) {
-    const size_t smem = radix_smem_bytes(
-        params.topk, sorted_index || sorted_value,
-        std::is_same<ValueT, maca_bfloat16>::value);
+    // The contract half follows the dataflow in this kernel, so the request is
+    // the plan's total (arena or scratch, then the `topk` staging slots).
+    const size_t smem = topk_select_radix::radix_smem_plan(
+                            params.topk, sorted_index || sorted_value,
+                            std::is_same<ValueT, maca_bfloat16>::value)
+                            .total_bytes;
     // The fp32 row has a single width, so only the 16-bit row selects between
     // the two blocks -- and it selects `kLongRowBlockSize` **or** the default,
     // not "whatever `block` says": a caller that passes anything else gets

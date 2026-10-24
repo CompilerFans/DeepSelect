@@ -125,7 +125,7 @@ refine  细直方图再做一次 256 宽扫描（只前 16 桶非零），得到
 
 1. **直方图与 arena 共用同一段 smem**（`s_wide = s_input_flat`）。直方图在折半
    + 收窄之后已死，arena 才开始写；中间有 `__syncthreads()` 隔开。所以
-   `radix_smem_bytes(topk, sorted, wide=true)` 的 lead 是**直方图的 16 KB**，
+   `radix_smem_plan(topk, sorted, wide=true).lead_bytes` 是**直方图的 16 KB**，
    不是 arena 的 14,056 B。`contract.cuh` 的 `radix_layout` 必须和它用同一个
    flag 算 `selected` 的偏移，否则 arena 会盖住 `selected`。
 2. **计数是"桶"的属性，不是"装得下多少"的属性**。趟 2 里细直方图对阈值桶的
@@ -356,7 +356,8 @@ git -C $D push origin main
 - **粗层 / coarse level**：直方图保留的 key 高位位数。现在是 12（`kCoarse12Bits`）。
 - **细层 / fine**：剩下的低位，现在 4 位（`kCoarse12SubBins = 16`）。
 - **arena**：`s_input_flat`，存阈值桶成员下标的地方；容量 `kCoarse12ArenaEntries`
-  = 4,096（16 位行）/ `topk_select_radix::kSmemInputSize` = 3,514（fp32 行）。
+  = 4,096（16 位行）/ `topk_select_radix::kF32SmemInputSize` = 1,757（fp32 行，
+  它的两块 ping-pong 瓦片之一；两块合起来才是 `kSmemInputSize` = 3,514 项）。
 - **overflow**：阈值桶成员数超过 arena 容量，回退整行重扫。
 - **occupancy（occ）**：每 AP 常驻 CTA 数。C500 是 104 AP、64 KB smem/AP、
   2,048 线程/AP；`静态 2328 B + 动态请求 < 32,768 B` 才有 2 个 CTA/AP。上限 2 是

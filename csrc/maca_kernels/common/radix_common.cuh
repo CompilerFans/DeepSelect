@@ -67,8 +67,7 @@ constexpr int kChunkBlockSize = KCHUNK_BLOCK_SIZE;
 // `'16384 >= 46824'`, 32 KB with `'16384 >= 30440'` -- which is why they are
 // unbuilt rather than merely untaken.)
 //
-// Read `kF32SmemInputSize` (`radix_row_fp32.cuh`) for what 16 KB actually
-// buys.
+// Read `kF32SmemInputSize` (below) for what 16 KB actually buys.
 //
 // `maca_topk.cu`'s `#ifdef KSMEM_BYTES` assert has the same shape of problem
 // from the other side -- see the note there.
@@ -111,16 +110,31 @@ static_assert(kLongRowBlockSize >= 256 && kLongRowBlockSize <= 1024 &&
 
 constexpr uint32_t kRadix = 256;
 // Static smem, as the floor the dynamic arena is sized against:
-// histogram_buf[2][256+32] + s_counter + s_threshold_bin_id +
-// s_high_threshold_bin_id + s_num_input[2] + s_last_remain.  A kernel that
-// carries more (the 16-bit row adds s_wide_above and s_nlist) carries it in
-// *its* static share, which is why this is a floor and not the row kernel's
-// footprint.
-constexpr uint32_t kSmemStaticBytes = 2 * (kRadix + 32) * sizeof(uint32_t)
-                                    + sizeof(uint32_t) + sizeof(uint32_t)
-                                    + sizeof(uint32_t) + 2 * sizeof(uint32_t) + sizeof(int32_t);
+// `s_histogram_buf[2][256+32]` plus the six words `s_counter`,
+// `s_threshold_bin_id`, `s_high_threshold_bin_id`, `s_num_input[2]` and
+// `s_last_remain`.  It is a floor, not the row kernel's footprint: the 16-bit
+// row adds `s_wide_above` and `s_nlist`, and `topk_kernel_radix` adds its own
+// `row_offset` / `nan_vote` -- each carries those in *its* static share.  The
+// number sizes the dynamic region, which is what the two constants below need
+// it for.
+constexpr uint32_t kSmemStaticBytes =
+    2 * (kRadix + 32) * sizeof(uint32_t) + 6 * sizeof(uint32_t);
 static_assert(kSMEM >= kSmemStaticBytes, "KSMEM_BYTES is smaller than static shared state");
 constexpr uint32_t kSmemInputSize = (kSMEM - kSmemStaticBytes) / sizeof(int32_t);
+
+// The fp32 row's dynamic footprint: the generic arena, cut into two
+// ping-pong tiles (the staging half and the refine's half).  The fp32 row's
+// static block *is* the floor above, so the generic arena is exactly the
+// space the floor leaves; the 16-bit row instead sizes its own arena from
+// `kCoarse12ArenaEntries` (below) and adds two words of static.
+constexpr uint32_t kF32SmemInputSize = kSmemInputSize / 2;
+constexpr size_t kF32RowSmemBytes =
+    2 * (size_t)kF32SmemInputSize * sizeof(uint32_t);
+// The two tiles *are* the whole generic arena, so the fp32 row's request is the
+// same 14,056 B asked for either way; an odd entry count would silently drop
+// one and shrink the arena the row has always been given.
+static_assert(kF32RowSmemBytes == (size_t)kSmemInputSize * sizeof(uint32_t),
+              "the fp32 row's two tiles must cover the whole generic arena");
 
 // The 16-bit row resolves its coarse level at 12 bits, not 8, over the same
 // 16 KB the 8-bit level used for its candidate arena -- the histogram is dead
@@ -140,6 +154,85 @@ constexpr uint32_t kCoarse12HistBytes = kCoarse12Bins * sizeof(uint32_t);
 constexpr uint32_t kCoarse12ArenaEntries = kCoarse12HistBytes / sizeof(uint32_t);
 static_assert(kCoarse12ArenaEntries * sizeof(uint32_t) >= (size_t)kSmemInputSize * sizeof(uint32_t),
               "the 16-bit arena must not be smaller than the region it aliases");
+
+// ── the dynamic region: one description, read by both sides ─────────────────
+//
+// A launch of the row kernel gets one `extern __shared__` region and the
+// kernel carves it itself.  Two live shapes share that region, and the
+// sharing is a schedule rather than a layout trick -- a `__syncthreads()`
+// separates each pair of uses:
+//
+//   [ sort scratch ][ selected[topk] ]   ordered emit; the arena is dead
+//   [ arena        ][ selected[topk] ]   unordered emit
+//
+// and the 16-bit row lays its 12-bit histogram over the arena's own bytes
+// (`radix_row_bf16.cuh`'s `s_wide = s_input_flat`), once the histogram has
+// been folded and narrowed and before the staging writes begin.
+//
+// **A `union` cannot state that.**  It is sized where it is declared, so it
+// cannot be sized per call: it would have to hold `kSmemBudgetBytes` -- the
+// `cudaFuncSetAttribute` ceiling, the ordered emit at `topk = 4096`, 48 KB --
+// where the same call at `k = 512` asks for 18,432 B.  With the row kernel's
+// 2,596 B of static beside it that is 51,748 B, one resident CTA per AP on a
+// 64 KiB AP, against three for the 21,028 B the call actually asks for.  A
+// static `__shared__` union cannot reach the region at all: `s_input_flat` is
+// `extern __shared__`, so the arena sits at the region's base by construction
+// (`contract.cuh`'s `radix_layout`).  Nor is the offset a kernel argument --
+// an argument can disagree with what was allocated, and the disagreement is a
+// silent overlap, where a `__host__ __device__` function read by both sides
+// cannot.  So:
+//
+//   `radix_arena_bytes`  the dtype's row dataflow, on its own
+//   `radix_lead_bytes`   where `selected` begins: the sort scratch or the
+//                        arena, whichever is larger
+//   `radix_smem_plan`    the composed budget: arena, sort, lead, total
+//
+// **A launcher requests `arena_bytes` when the dataflow answers to global
+// memory and `total_bytes` when the contract half follows in the same
+// kernel.**  The slots after the lead belong to the contract (`selected` is
+// its staging), so the split's stages -- whose candidates live in the
+// caller's arrays -- ask for the arena alone, and `topk_kernel_radix` asks for
+// the total.  The two selectors keep their own regions: `topk_coarse12.cuh`
+// and `topk_chunks.cuh` are separate kernels, each asserting its own
+// histogram/arena pair.
+__host__ __device__ constexpr size_t radix_arena_bytes(bool wide) {
+    return wide ? kCoarse12HistBytes : kF32RowSmemBytes;
+}
+
+// The ordered emit's scratch: one 64-bit slot per `topk`, rounded up to the
+// bitonic network's power of two.  Zero when nothing is sorted.
+__host__ __device__ constexpr size_t radix_sort_bytes(uint32_t topk,
+                                                      bool sorted) {
+    uint32_t n_pad = 1;
+    if (sorted) {
+        while (n_pad < topk) n_pad <<= 1;
+    }
+    return sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
+}
+
+static __host__ __device__ constexpr __forceinline__ size_t radix_lead_bytes(
+    uint32_t topk, bool sorted, bool wide) {
+    const size_t sort_bytes = radix_sort_bytes(topk, sorted);
+    const size_t arena_bytes = radix_arena_bytes(wide);
+    return sort_bytes > arena_bytes ? sort_bytes : arena_bytes;
+}
+
+struct SmemPlan {
+    size_t arena_bytes;  // the row dataflow, alone
+    size_t sort_bytes;   // ordered-emit scratch; 0 unless the emit sorts
+    size_t lead_bytes;   // max of the two: `selected` starts here
+    size_t total_bytes;  // lead + the `topk` index slots after it
+};
+
+// The staging is sized by `topk`, not by the `kMaxTopK` ceiling: at k=512 that
+// is 2 KB instead of 16 KB, and the difference decides the occupancy the
+// launch gets.
+__host__ __device__ constexpr SmemPlan radix_smem_plan(uint32_t topk,
+                                                       bool sorted, bool wide) {
+    const size_t lead = radix_lead_bytes(topk, sorted, wide);
+    return SmemPlan{radix_arena_bytes(wide), radix_sort_bytes(topk, sorted), lead,
+                    lead + sizeof(uint32_t) * (size_t)topk};
+}
 
 // The split's chunk geometry: `ceil(length / chunks)` rounded up to 8 elements.
 // One definition because a chunk is one window to everything that reads it --

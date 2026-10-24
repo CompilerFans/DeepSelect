@@ -473,11 +473,11 @@ The contract layer and launch layer. Every mode shares one contract half — the
 
 The current 16-bit dataflow is **coarse12** (see handover §3, ledger §2.3). Understand these three things before changing it:
 
-1. **The coarse histogram and the candidate arena alias the same shared memory** (`s_wide = s_input_flat`). Stage 0 uses the arena region as a 4096-bin histogram; the histogram is dead after the halve/narrow steps, and a `__syncthreads()` separates the two uses. So the lead of `radix_smem_bytes(topk, sorted, wide=true)` is the histogram's 16 KB, not the arena's ~14 KB — and `contract.cuh`'s `radix_layout` must compute `selected`'s offset with the same flag, or the arena overwrites it.
+1. **The coarse histogram and the candidate arena alias the same shared memory** (`s_wide = s_input_flat`). Stage 0 uses the arena region as a 4096-bin histogram; the histogram is dead after the halve/narrow steps, and a `__syncthreads()` separates the two uses. So `radix_smem_plan(topk, sorted, wide=true).lead_bytes` is the histogram's 16 KB, not the arena's ~14 KB — and `contract.cuh`'s `radix_layout` must compute `selected`'s offset with the same flag, or the arena overwrites it.
 2. **Counts are a property of the bin, not of what fits.** In pass 2 the fine histogram counts *every* member of the threshold bin; only the write into the arena is capacity-limited. History: clamping both together under `pos < SMEM_INPUT_SIZE` forced a full-row rescan to repair overflow — deleted in `4cd740a`.
 3. **The narrow step's crossing test is `above + c > remain_topk`, i.e. the window itself**, not "how much is left after subtracting the byte above". The latter stops one sub-bin early when the byte has slack, leaving the window short; refine then finds no landing point and reads an uninitialized shared variable. This cost a memory violation and 379/512 wrong slots once. It does not raise — it silently mis-ranks.
 
-Coarse is 12 bits (`kCoarse12Bits`) leaving 4 fine bits, which is all of a bf16 key — so refine never has to rank past the fine ties. Arena capacity is `kCoarse12ArenaEntries` (4096) on the 16-bit row, `topk_select_radix::kSmemInputSize` (3514) on the fp32 row. **Overflow** (threshold bin wider than the arena) falls back to a full-row rescan; the fp32 row adds that rescan rule itself, where upstream silently mis-answers by ranking the truncated subset.
+Coarse is 12 bits (`kCoarse12Bits`) leaving 4 fine bits, which is all of a bf16 key — so refine never has to rank past the fine ties. Arena capacity is `kCoarse12ArenaEntries` (4096) on the 16-bit row, `topk_select_radix::kF32SmemInputSize` (1757 — one of the fp32 row's two tiles) on the fp32 row. **Overflow** (threshold bin wider than the arena) falls back to a full-row rescan; the fp32 row adds that rescan rule itself, where upstream silently mis-answers by ranking the truncated subset.
 
 Porting conventions: portable primitives only — `__shfl_down_sync`, `atomicAdd`, `__ldg`, `__syncthreads`, `__syncthreads_or`. No inline asm, no TMA, no mbarrier, no cluster. **The wave width is MACA's 64 lanes, not 32** — the CUDA-era code in this tree assumed 32 and does not hold here.
 
@@ -934,14 +934,15 @@ not). Without the first the compile dies on `'tvm/ffi/error.h' file not found`,
 which reads like a doctor bug and is not one.
 
 **The trap that matters: `--resource-usage` reports *static* shared memory
-only.** The row kernel's arena comes from `radix_smem_bytes()` and is attached
-with `cudaFuncSetAttribute`, so the compiler prints **2596 bytes** where the
-kernel actually holds far more. Passing 2596 to the occupancy model returns
-"100%, limiter=waves" — a wrong answer that looks like a clean bill of health.
-Compute the real figure and add it by hand:
+only.** The row kernel's arena comes from `radix_smem_plan(...).total_bytes`
+(`radix_common.cuh`) and is attached with `cudaFuncSetAttribute`, so the
+compiler prints **2596 bytes** where the kernel actually holds far more.
+Passing 2596 to the occupancy model returns "100%, limiter=waves" — a wrong
+answer that looks like a clean bill of health. Compute the real figure and add
+it by hand:
 
 ```
-smem = radix_smem_bytes(topk, sorted, wide) + <static 2596>
+smem = radix_smem_plan(topk, sorted, wide).total_bytes + <static 2596>
 bf16 wide path, topk=512 : 16384 + 2048 + 2596 = 21028 B
 bf16 wide path, topk=1024: 16384 + 4096 + 2596 = 23076 B
 ```
