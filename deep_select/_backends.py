@@ -117,6 +117,31 @@ def _nan_rows(input: torch.Tensor, lengths: torch.Tensor,
     return visible.any(dim=1)
 
 
+def _abort_on_nan_rows(nan_rows: Optional[torch.Tensor]) -> None:
+    """The abort arm of the NaN contract, for either reference backend.
+
+    One definition of the raise, so the two cannot answer the same input
+    differently.  It fires only for the rows `_nan_rows` scanned -- a short
+    row's NaN is ranked like any other value.
+    """
+    if nan_rows is not None and bool(nan_rows.any().item()):
+        raise RuntimeError("NaN detected in the input")
+
+
+def _stamp_nan_rows(out_idx: torch.Tensor,
+                    nan_rows: Optional[torch.Tensor]) -> None:
+    """The sentinel `abort_when_nan_found=False` leaves, for either backend.
+
+    Slot 0 of the NaN row only, on the tensor that goes back to the caller
+    whichever buffer that is; the rest of the row stays undefined, so a NaN row
+    must be excluded from any value comparison.  The kernel writes the same
+    constant to the same slot -- `dispose_nan_row` in `contract.cuh`; this is
+    the reference's copy of that contract, not a second contract.
+    """
+    if nan_rows is not None and bool(nan_rows.any().item()):
+        out_idx[nan_rows, 0] = 0x3F3F3F3F
+
+
 @log_call
 def topk_deep_gemm(
     input: torch.Tensor,
@@ -199,9 +224,8 @@ def topk_deep_gemm(
     # rows of the same batch are answered by the selector like any other call
     # (an early return here used to leave them holding uninitialized memory).
     nan_rows = _nan_rows(input, lengths, topk) if check_nan else None
-    if (abort_when_nan_found and nan_rows is not None
-            and bool(nan_rows.any().item())):
-        raise RuntimeError("NaN detected in the input")
+    if abort_when_nan_found:
+        _abort_on_nan_rows(nan_rows)
 
     selected = module.fp32_indexer_topk_selector(
         input, lengths.to(torch.int32), topk, return_val=False,
@@ -228,8 +252,7 @@ def topk_deep_gemm(
         out_idx = output_idx
 
     # Stamped on the tensor that goes back to the caller, whichever it is.
-    if nan_rows is not None and bool(nan_rows.any().item()):
-        out_idx[nan_rows, 0] = 0x3F3F3F3F
+    _stamp_nan_rows(out_idx, nan_rows)
 
     return out_val, out_idx
 
@@ -291,9 +314,8 @@ def topk_torch(
     # `check_nan` says otherwise.
     lengths = _row_lengths(end, n_rows, vocab_size, device)
     nan_rows = _nan_rows(input, lengths, topk) if check_nan else None
-    if (abort_when_nan_found and nan_rows is not None
-            and bool(nan_rows.any().item())):
-        raise RuntimeError("NaN detected in the input")
+    if abort_when_nan_found:
+        _abort_on_nan_rows(nan_rows)
     # A NaN row is answered in its first index slot and left otherwise
     # unspecified -- that row only.  Returning for the whole batch would leave
     # every clean row of it defined by whatever the buffer happened to hold.
@@ -369,7 +391,6 @@ def topk_torch(
         out_idx = output_idx
 
     # Stamped on the tensor that goes back to the caller, whichever it is.
-    if nan_rows is not None and bool(nan_rows.any().item()):
-        out_idx[nan_rows, 0] = 0x3F3F3F3F
+    _stamp_nan_rows(out_idx, nan_rows)
 
     return out_val, out_idx
