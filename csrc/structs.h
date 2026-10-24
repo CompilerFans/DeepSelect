@@ -170,56 +170,6 @@ static_assert(ARCH_REGS_PER_AP > 0,
 // 4 x 512-thread CTAs (128 KiB of registers)" about a part reached through
 // `is_c600u_ap_count`.
 
-// The `deep_gemm` selector's perf shapes, transcribed from
-// `deep_gemm/tests/test_indexer_topk_selector.py::SELECTOR_PERF_SHAPES`
-// (test-topk + sglang + dsa), all fp32 and `top_k = 2048`.
-//
-// This is a *mirror*, kept by hand: `tests/test.py` carries the Python list
-// that the perf grid, the perf recorder and the correctness sample actually
-// run, and this copy is the compile-time record of the same shapes.  Edit the
-// two together.  Nothing in `csrc/` reads it.
-//
-// Each entry is (n_rows, n_cols, seq_len).  `seq_len` is the window the
-// `deep_gemm` grid declares, which this repository does not synthesize -- it
-// ranks the whole row -- so the two are not comparable at the same shape.
-//
-// `top_k` is 2048 because that is what the `deep_gemm` grid measures and what
-// its backend serves; a larger `top_k` would leave its column empty.
-struct DeepGemmSelectorShape {
-    uint32_t n_rows;
-    uint32_t n_cols;
-    uint32_t seq_len;
-};
-inline constexpr DeepGemmSelectorShape kDeepGemmSelectorPerfShapes[] = {
-    {   1,  66551,  66551},   // test-topk-bs1
-    {  16,  66551,  66551},   // test-topk-bs16
-    { 132,  66551,  66551},   // test-topk-bs132
-    { 512,  66551,  66551},   // test-topk-bs512
-    {   1, 131072,   2048},   // sglang-bs1-seq2048
-    {   1, 131072,   4096},   // sglang-bs1-seq4096
-    {   1, 131072,  16384},   // sglang-bs1-seq16384
-    {   1, 131072,  65536},   // sglang-bs1-seq65536
-    { 132, 131072,   2048},   // sglang-bs132-seq2048
-    { 132, 131072,   4096},   // sglang-bs132-seq4096
-    { 132, 131072,  16384},   // sglang-bs132-seq16384
-    { 132, 131072,  65536},   // sglang-bs132-seq65536
-    { 256, 131072,   2048},   // sglang-bs256-seq2048
-    { 256, 131072,   4096},   // sglang-bs256-seq4096
-    { 256, 131072,  16384},   // sglang-bs256-seq16384
-    { 256, 131072,  65536},   // sglang-bs256-seq65536
-    {4096, 131072,   2048},   // sglang-bs4096-seq2048
-    {4096, 131072,   4096},   // sglang-bs4096-seq4096
-    {4096, 131072,  16384},   // sglang-bs4096-seq16384
-    {4096, 131072,  65536},   // sglang-bs4096-seq65536
-    {   1, 107520, 107520},   // dsa-bs1-seq107520
-    {  16,  66551,  66551},   // dsa-bs16-seq66551
-    { 132, 107520, 107520},   // dsa-bs132-seq107520
-    { 256, 107520, 107520},   // dsa-bs256-seq107520
-    {4096, 107520, 107520},   // dsa-bs4096-seq107520
-};
-inline constexpr uint32_t kDeepGemmSelectorPerfTopK = 2048;
-
-
 static constexpr uint32_t MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION = 1u << 23;
 static constexpr uint32_t MAX_VOCAB_SIZE = 1u << 23;
 static_assert(MAX_VOCAB_SIZE <= MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION);

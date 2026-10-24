@@ -4122,14 +4122,14 @@ grep 过符号之后：**全部只改注释，零代码改动**（`git diff` 过
 **三条死代码，处置是"记录"而不是"删除"：**
 
 - **`kF32K2048` 全族（~380 行）**：`launch_topk_f32_k2048_b1024_c500` 没有任何
-  调用者，两个 kernel 编进去但从不 dispatch。注释里写明了这件事、写明了
-  删除是**故意的**（"intentionally narrow ... without changing the generic
-  dispatch paths"）、并指向 `ref/ds/README.md`——那份 README 自己列了这两个
-  kernel 的寄存器/smem 资源数，并说它们 "unreachable from `ds_topk`"。
-  **不删**：这个族存在的意义是"SGLang 那个形状和通用行比，是不是退化"，
-  答案活在资源数里，不在调用图里；删掉 380 行省不下任何可测的东西，却把
-  那个答案一起删了。另外 `kBlockSize` 改动时要知道这两处
-  `__launch_bounds__(kF32K2048BlockSize)` 会跟着动。
+  调用者，两个 kernel 编进去但从不 dispatch。当时**不删**的理由是："SGLang 那个
+  形状和通用行比，是不是退化"的答案活在资源数里，不在调用图里。那两个数
+  （C500/xcore1000，2026-09-19）是：`topk_f32_kernel_k2048_b1024` 16 MT / 62 ST /
+  3336 B 静态 smem，`..._warp_scan` 22 MT / 52 ST / 2328 B——这就是答案，记在
+  这里之后代码本身已无信息量。
+  > 2026-10-24 更新：按 `CLAUDE.md` 的死代码策略，两个 kernel、`launch_topk_*_c500`
+  > 与每族两个实例化 TU 已删除（89 → 87）。资源数在此保留；原
+  > `ref/ds/README.md` 的引用随 `ref/` 一起进了 git 历史。
 - **`hist_add_bf16`**：无调用者。活的 bf16 walker 自己测
   `bf16x8_is_aligned` 然后直接调 `hist_add_bf16_aligned`（:1367 等），
   这个 wrapper 是那次检查的非内联形式。**不删**：它是"对齐快路径 + 标量
@@ -4140,6 +4140,8 @@ grep 过符号之后：**全部只改注释，零代码改动**（`git diff` 过
   `docs/C500-radix-handover.zh.md` §9 量到 1.5%）。**不删**，但注释补了一句
   "grep the names before assuming otherwise"——这是全文件唯一一处**既死又已知
   是坏的**代码。
+  > 2026-10-24 更新：按 `CLAUDE.md` 的死代码策略已删除（连同 `kBinsPerThread`）；
+  > 上面的测量结论仍有效，见 handover §9。
 
 **验证。** 门七段全过（correctness OK、cases_chunks / graph 三段 ALL PASS、
 official 30/30）。性能 **1 regressed / 3 improved / 103 noise，总量 +0.05%**；

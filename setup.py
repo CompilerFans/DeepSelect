@@ -29,8 +29,8 @@ exec(open("deep_select/__version__.py").read())
 #   - **the per-family half** -- `generated_sources(family)`, the tuple table
 #     read from `scripts/generate_instantiations.py`.
 #
-# All three families share the six instantiation tables today, so the three
-# directories hold the same 89 files; a family-specific tuple set is a branch
+# All three families share the five instantiation tables today, so the three
+# directories hold the same 87 files; a family-specific tuple set is a branch
 # in the generator's `family_instantiations()`, and a family-specific
 # hand-written TU is a row added to `sources_for_family` -- both land with the
 # measurement that earns them.
@@ -53,7 +53,7 @@ def generated_sources(family):
     Every configuration tuple is its own translation unit holding one explicit
     instantiation, so the source list is a *table* -- `scripts/
     generate_instantiations.py`'s -- and this reads it rather than repeating it.
-    89 file names transcribed here would be a second copy of a list that already
+    87 file names transcribed here would be a second copy of a list that already
     exists, and the two would drift in the direction nobody notices: a file the
     build does not compile is a kernel the artifact silently loses.
     """
@@ -333,12 +333,12 @@ def build_for_maca():
     no family's source list points at it and its `kerutils` include is off
     `include_dirs` below.  Re-adding both is what building it would take.
 
-    **Run `ref/kerutils_platform_arms/run_probe.sh` first.**  The two edits above
-    are the whole mechanical change, so they are what a reader looks at -- and a
-    build that makes them does not thereby exercise the vendored library's MACA
-    arm, which nothing else in the tree compiles.  The arm is where this tree's
-    platform selection lives, and it is the one thing that cannot be checked by
-    the act of adding the consumer back.
+    **Adding that consumer back does not exercise the vendored library's MACA
+    arm.**  The two edits above are the whole mechanical change, so they are
+    what a reader looks at -- and nothing in this tree compiles the arm today:
+    it is where this tree's platform selection lives, and it is the one thing
+    that cannot be checked by the act of adding the consumer back.  Check it
+    with a standalone compilation whose flags are read out of this file.
 
     Every source is a `.cu`, so the device compiler is the only compiler this
     build invokes (torch would route a `.cpp` to `$cxx`, meaning a second flag
@@ -552,7 +552,7 @@ def build_for_maca():
     # One clause per *distinct* source set, read off the lists rather than a
     # second copy of them: families that compile the same sources share a
     # clause.  The generated instantiations are counted rather than listed --
-    # there are 89 of them per family and the list is the family's own
+    # there are 87 of them per family and the list is the family's own
     # `xcore<N>/instantiations/` directory.
     def summarise(sources):
         hand = [s for s in sources if "/instantiations/" not in s]

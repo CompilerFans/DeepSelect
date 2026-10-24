@@ -61,9 +61,9 @@ constexpr int kChunkBlockSize = KCHUNK_BLOCK_SIZE;
 // `(kSMEM - kSmemStaticBytes) / 4`, i.e. 14,056 B / 30,440 B / 46,824 B for
 // the three values above.  So the 16 KB arm is not a conservative choice that
 // a bigger part could raise: on this source it is the only buildable one.
-// (`ref/ds/README.md` §5 recorded the 32 KB failure; the 48 KB `#else` fails
-// the same way -- `'16384 >= 46824'` against 32 KB's `'16384 >= 30440'` --
-// which is why it is unbuilt rather than merely untaken.)
+// (Both larger builds fail on the same assert -- the 48 KB `#else` with
+// `'16384 >= 46824'`, 32 KB with `'16384 >= 30440'` -- which is why they are
+// unbuilt rather than merely untaken.)
 //
 // Read `kF32SmemInputSize` at :521 for what 16 KB actually buys.
 //
@@ -96,7 +96,6 @@ constexpr int kWarpSize = 64;
 #else
 constexpr int kWarpSize = 32;
 #endif
-constexpr int kBinsPerThread = 256 / kWarpSize;  // 8 (warp=32) or 4 (warp=64)
 static_assert(kBlockSize >= 256 && kBlockSize % kWarpSize == 0,
               "kBlockSize must cover the 256-bin scan and whole wavefronts");
 static_assert(kChunkBlockSize >= 256 && kChunkBlockSize % kWarpSize == 0,

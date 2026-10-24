@@ -22,7 +22,7 @@ Two kernel trees, two shapes of table:
     unit.  The headers it instantiates are the shared implementation in
     `csrc/maca_kernels/common/`.  `setup.py` takes the list from
     `family_sources()` rather than from the printed output, so the two cannot
-    drift.  All three families share the six tables today; a family-specific
+    drift.  All three families share the five tables today; a family-specific
     tuple set is a branch on `family` in `family_instantiations()`, and it
     lands with the measurement that earns it.
 
@@ -229,7 +229,6 @@ def _inst(group, name, namespace, header, instantiation) -> Instantiation:
 # The headers are the shared implementation in `common/`; an instantiation
 # directory sits two levels below it.
 ROW_HEADER = "<csrc/maca_kernels/common/contract.cuh>"
-FP32_ROW_HEADER = "<csrc/maca_kernels/common/radix_row_fp32.cuh>"
 CHUNKED_HEADER = "<csrc/maca_kernels/common/radix_chunked.cuh>"
 COARSE12_HEADER = "<csrc/maca_kernels/common/topk_coarse12.cuh>"
 CHUNKS_HEADER = "<csrc/maca_kernels/common/topk_chunks.cuh>"
@@ -386,30 +385,12 @@ def chunks_instantiations() -> List[Instantiation]:
     return out
 
 
-# ── the two groups that are carried but not routed to ───────────────────────
+# ── the contract group ──────────────────────────────────────────────────────
 #
-# Neither is reached by a shape predicate: the fp32 static-k2048 pair has no
-# caller outside `radix_row_fp32.cuh`'s own launchers, and the contract layer's
-# two kernels are launched from the ladder and the entry point rather than
-# selected.  They are in the tables because the artifact carries them -- a
-# `__global__` is emitted whether or not anything launches it -- and the file
-# count is what says so.
-
-
-def fp32_static_k_instantiations() -> List[Instantiation]:
-    signature = ("    const float* scores, const int32_t* lengths,\n"
-                 "    const int32_t* row_starts, int32_t* indices, int B, int L,\n"
-                 "    cudaStream_t stream);")
-    return [
-        _inst("fp32_static_k", "fp32_k2048_b1024", "topk_select_radix",
-              FP32_ROW_HEADER,
-              "template cudaError_t launch_f32_k2048_b1024<kF32K2048BlockSize>(\n"
-              + signature),
-        _inst("fp32_static_k", "fp32_k2048_b1024_warp_scan", "topk_select_radix",
-              FP32_ROW_HEADER,
-              "template cudaError_t launch_f32_k2048_b1024_warp_scan<"
-              "kF32K2048BlockSize>(\n" + signature),
-    ]
+# It is not shape-selected: its two kernels are launched from the ladder and the
+# entry point rather than chosen by a predicate.  They are in the table because
+# the artifact carries them -- a `__global__` is emitted whether or not anything
+# launches it -- and the file count is what says so.
 
 
 def contract_instantiations() -> List[Instantiation]:
@@ -428,7 +409,7 @@ def contract_instantiations() -> List[Instantiation]:
 def family_instantiations(family: int) -> List[Instantiation]:
     """Every device kernel family `family`'s artifact carries, one per kernel.
 
-    All three families share the six tables today.  A family-specific tuple
+    All three families share the five tables today.  A family-specific tuple
     set is a branch on `family` here, and it lands with the measurement that
     earns it -- a tuple only one family's artifact carries is that family's
     kernel, which is what the per-family directory is for.
@@ -437,7 +418,7 @@ def family_instantiations(family: int) -> List[Instantiation]:
         raise ValueError(f"unknown family {family!r}; known: {FAMILIES}")
     return (row_instantiations() + chunked_instantiations()
             + coarse12_instantiations() + chunks_instantiations()
-            + fp32_static_k_instantiations() + contract_instantiations())
+            + contract_instantiations())
 
 
 def family_sources(family: int) -> List[str]:

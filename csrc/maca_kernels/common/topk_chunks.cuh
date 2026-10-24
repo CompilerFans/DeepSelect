@@ -35,7 +35,7 @@
 //
 //   * the `Transform` page-table half, which needs the `page_table` /
 //     `cu_seqlens_row` / `q_positions` plumbing this repository does not
-//     synthesize (the same subtraction `ref/` and `topk_coarse12.cuh` make);
+//     synthesize (the same subtraction `topk_coarse12.cuh` makes);
 //   * the `rescanned` branch, where deep_gemm re-walks the row when the
 //     threshold bin is wider than `kCandidateCapacity`.  This port **declines**
 //     the row instead: the coarse merge sets `workspace.declined`, the refine
@@ -87,10 +87,9 @@ constexpr int kHistogramPadding = 1;
 // workspace rather than a shared buffer, and all three launches pass `0`
 // dynamic shared memory.  Nothing else reads it either -- the three
 // `static_assert`s beneath it are about `kCandidateCapacity` and the block
-// width, not about this.  Kept rather than deleted only because it is
-// deep_gemm's own constant and a reader comparing the two files should find it
-// where the original has it; see `radix_core.cuh`'s `kF32K2048` block for the
-// same treatment of a dead constant.
+// width, not about this.  Kept rather than deleted because it is deep_gemm's
+// own constant and a reader comparing the two files should find it where the
+// original has it.
 constexpr size_t kSmemBytes = 2 * (size_t)kCandidateCapacity * sizeof(int32_t);
 
 static_assert(kFineBins + kHistogramPadding <= kThreads,

@@ -80,11 +80,11 @@ csrc/
     │   ├── radix_core.cuh                  数据流入口（伞头：只 include 下面四个；TU 只 include 它）
     │   ├── radix_common.cuh                行族共享件：常数 / smem 尺寸 / 直方图与后缀和
     │   ├── radix_row_bf16.cuh              bf16 行：radix 两趟 + skip 表 + overflow
-    │   ├── radix_row_fp32.cuh              fp32 行：+ 溢出重扫 + k2048 变体
+    │   ├── radix_row_fp32.cuh              fp32 行：+ 溢出重扫
     │   ├── radix_chunked.cuh               两条 dtype 的分块 split/merge（阶段核 + 发射）
     │   ├── topk_coarse12.cuh               deep_gemm 路线一（官方核名）
     │   └── topk_chunks.cuh                 deep_gemm 路线二（官方核名）
-    ├── xcore<N>/instantiations/*.cu        族层：每族自己的生成物（一个配置元组一个文件；今日三族同表，89 × 3）
+    ├── xcore<N>/instantiations/*.cu        族层：每族自己的生成物（一个配置元组一个文件；今日三族同表，87 × 3）
     └── legacy/                             移植版上游内核：不编译，仅史料/审计留存（见其 README.md）
 ```
 
@@ -194,10 +194,10 @@ P5 的另一半是**把模板改成配置结构**（`template <typename Cfg> __g
 所以每个生成文件实例化的是一个 host 函数 `launch_radix_config<Cfg>`，**函数体持有该核唯一的
 `<<<>>>`**——设备码与唯一发射点同 TU。同一枚硬币的另一面：头文件里的**非模板** `__global__` 被
 两个 TU include 就是 `__device_stub__` 重复定义（链接错误），因此树里每个核都是模板——含原本不是的
-六个（chunked 两个 stage 2、coarse12、两个 fp32 static-k、`nan_abort_kernel`），各自以自己既有的
-块宽/线程数为模板参数（1024 / 512 / 640 / 1024 / 1024 / 128）。其余三族（chunked 两阶段 /
-coarse12 / chunks）的元组轴同一步里从各自发射点枚举，逐族一张表、逐元组一个文件：**89**
-（行核 60 / chunked 12 / chunks 12 / fp32 static-k 2 / coarse12 1 / contract 2）。
+五个（chunked 两个 stage 2、coarse12、`nan_abort_kernel`），各自以自己既有的
+块宽/线程数为模板参数（1024 / 512 / 640 / 128）。其余三族（chunked 两阶段 /
+coarse12 / chunks）的元组轴同一步里从各自发射点枚举，逐族一张表、逐元组一个文件：**87**
+（行核 60 / chunked 12 / chunks 12 / coarse12 1 / contract 2）。
 
 表的两份副本（`contract.cuh` 的 X-macro 清单、生成器的文件表）由**收据**对齐，不由约定：
 第一版 X-macro 把可达的 `(SI,RV,SV)=(1,1,0)` 抄成了不可达的 `(0,0,1)`，产物**照常链接**

@@ -19,9 +19,3 @@ compile_commands.json
 # which *are* committed -- the pointer is machine-local state, and tracking it
 # would dirty the tree on every re-baseline.
 perf_data/*/baseline
-
-# `ref/`'s drivers are built from the sources next to them (`ref/build_all.sh`);
-# committing the binaries would let the tree disagree with its own README.
-ref/*/main
-ref/*/ds_topk_ref
-ref/*/*.o

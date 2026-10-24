@@ -107,5 +107,5 @@ uint32_t canonical_warp_idx_sync() {
 //
 // So it is the include list, not a macro test, that keeps them out, and
 // re-adding a `cuda/sm*` header to this arm silently re-enables the block.
-// `ref/kerutils_platform_arms/probe.cu` measures both compilation passes and
-// prints this table; do not re-derive it from the toolchain's documentation.
+// Both compilation passes were measured on the toolchain rather than read
+// off its documentation; do not re-derive the above from the latter.

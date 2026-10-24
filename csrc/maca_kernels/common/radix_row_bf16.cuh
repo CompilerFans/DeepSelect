@@ -70,13 +70,12 @@ __device__ __forceinline__ void hist_add_bf16_aligned(
 // Public standalone helper: retain vector loads for aligned offsets and avoid
 // an illegal uint4 access when a caller supplies an odd row stride.
 //
-// **No call sites in this tree.**  The live bf16 walkers test
-// `bf16x8_is_aligned` themselves and call `hist_add_bf16_aligned` directly
-// (:1367, :1140, :1547 and the bf16 row entries), so this wrapper is the
-// un-inlined form of a check they already make.  Kept because it is the one
-// place the "aligned fast path, scalar fallback" pair is stated as a unit, and
-// because the fp32 lane's missing guard is the bug this shape would have
-// prevented (ledger §12.20.6).
+// **No call sites in this tree**, and it is kept on purpose: a generic
+// device-side primitive is not a route, and this pair is the one place the
+// "aligned fast path, scalar fallback" shape is stated as a unit.  The live
+// bf16 walk is `hist_add_bf16_wide` below; it carries its own 8-wide load and
+// does not call this.  (The fp32 lane's missing guard is the bug this shape
+// would have prevented -- ledger §12.20.6.)
 __device__ __forceinline__ void hist_add_bf16(
     uint32_t* s_histogram, const maca_bfloat16* input, uint32_t idx)
 {
@@ -88,25 +87,6 @@ __device__ __forceinline__ void hist_add_bf16(
     for (int i = 0; i < 8; i++)
         atomicAdd(&s_histogram[bf16_to_uint8(__ldg(input + idx + i))], 1u);
 }
-
-// ============================================================
-// 寄存器直方图 + Warp shuffle 合并
-// ============================================================
-
-/*
- * Intended design: one register histogram per warp (256 bins), 256/kWarpSize
- * bins per thread, each element's bin shuffled to its owner thread, reduced
- * within the warp and written to smem once -- no shared atomicAdd at all.
- *
- * NOT IMPLEMENTED, AND NOT CALLED.  The bodies below move one element per
- * shuffle, so each warp records about 1/64 of what it reads.  They are kept as
- * the shape of the idea, not as a working histogram; see
- * `docs/C500-radix-handover.zh.md` §9 for the measurement (1.5%) that killed it.
- * `hist_add_bf16_reg` and `hist_reg_to_smem` have **no call sites anywhere in
- * this tree** -- grep the names before assuming otherwise.  They are the only
- * block in this file that is both dead and known-broken, which is why the
- * warning is here and not on the k2048 kernels below.
- */
 
 // 12 位粗层：一次 uint4 搬 8 个元素，每个元素一个原子加。
 //
@@ -181,51 +161,6 @@ __device__ __forceinline__ bool hist_add_bf16_wide(
         }
     }
     return z != 0u;
-}
-
-// FP16: 寄存器直方图 + warp shuffle
-__device__ __forceinline__ void hist_add_bf16_reg(
-    uint32_t* r_hist,  // 每线程持有 kBinsPerThread 个 bin
-    const maca_bfloat16* input, uint32_t idx, uint32_t lane)
-{
-    uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
-    const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
-
-    #pragma unroll
-    for (int i = 0; i < 8; i++) {
-        uint8_t bin = bf16_to_uint8(h[i]);
-        uint32_t owner = bin / kBinsPerThread;  // 哪个线程拥有这个 bin
-        uint32_t local = bin % kBinsPerThread;   // 在 owner 的哪个位置
-
-        // 用 shuffle 将 bin 值发送给 owner
-        // 所有线程同时执行 shuffle, owner 收到 bin 值后累加
-#ifdef __MACACC__
-        uint32_t recv_bin = __shfl_sync(0xFFFFFFFFFFFFFFFFULL, bin, owner);
-#else
-        uint32_t recv_bin = __shfl_sync(0xFFFFFFFF, bin, owner);
-#endif
-        if (lane == owner) {
-            // owner 线程累加对应的寄存器
-            // 注意: 这里需要一个映射 recv_bin -> r_hist 索引
-            // 由于 recv_bin 可能来自任意线程, 需要按 bin 值累加
-            r_hist[recv_bin % kBinsPerThread] += 1;
-        }
-    }
-}
-
-// 将寄存器直方图写入 smem
-__device__ __forceinline__ void hist_reg_to_smem(
-    uint32_t* r_hist,
-    uint32_t* s_histogram,
-    uint32_t lane)
-{
-    #pragma unroll
-    for (int i = 0; i < kBinsPerThread; i++) {
-        uint32_t bin = lane * kBinsPerThread + i;
-        if (bin < 256 && r_hist[i] > 0) {
-            atomicAdd(&s_histogram[bin], r_hist[i]);
-        }
-    }
 }
 
 // ============================================================

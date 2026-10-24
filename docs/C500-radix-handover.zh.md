@@ -75,12 +75,12 @@ C500（xcore1000）上走的是**行式 radix 选择**：一行一个 CTA，两�
 | `csrc/maca_kernels/common/maca_topk.cu` | **唯一手写 TU + 对外入口**：include 清单 + tvm-ffi 入口（契约检查、scratch、`topk` 绑定） |
 | `csrc/maca_kernels/common/contract.cuh` | **契约半**：`RowParams` / 常量 / 键与 NaN / emit / smem 布局 / 行核 `topk_kernel_radix<Cfg>` 与发射 `launch_radix_config<Cfg>`（派发表 `kRadixTable` 在 `maca_topk.cu`，见该文件） |
 | `csrc/maca_kernels/common/routing.cuh` | **选路**：形状 → 数据流（纯函数）＋梯子 `topk_launch` |
-| `csrc/maca_kernels/xcore<N>/instantiations/*.cu` | **生成物**（每族 89 个，今日三族同表）：一个配置元组一个文件，每个显式实例化一个发射器；`setup.py` 的源清单与文件名都来自生成器 |
+| `csrc/maca_kernels/xcore<N>/instantiations/*.cu` | **生成物**（每族 87 个，今日三族同表）：一个配置元组一个文件，每个显式实例化一个发射器；`setup.py` 的源清单与文件名都来自生成器 |
 | `scripts/generate_instantiations.py` | 元组表 → `xcore<N>/instantiations/*.cu` + `setup.py` 读的源清单（`family_sources(family)`）；同时仍管 legacy 移植树的表 |
 | `csrc/maca_kernels/common/radix_core.cuh` | **选择数据流伞头**（header-only）：只 include 下面四个；TU 只 include 它 |
 | `csrc/maca_kernels/common/radix_common.cuh` | 行族共享件：常数（四个 `kMaxTopK` 之一等）/ smem 尺寸 / 直方图与前缀和 helper |
 | `csrc/maca_kernels/common/radix_row_bf16.cuh` | `radix_topk_row_bf16_b`（16 位行，生产路径）+ skip 表 + overflow |
-| `csrc/maca_kernels/common/radix_row_fp32.cuh` | `radix_topk_row_f32*`（32 位行）+ 溢出重扫 + k2048 变体 |
+| `csrc/maca_kernels/common/radix_row_fp32.cuh` | `radix_topk_row_f32*`（32 位行）+ 溢出重扫 |
 | `csrc/maca_kernels/common/radix_chunked.cuh` | bf16 / fp32 chunked split 的两级 stage 核与发射器 |
 | `csrc/structs.h` | `TopkSelectArgs` / `RowParams` |
 | `scripts/official_slice.py` | 官方大表的切片驱动（正确性门）——**2026-09-16 已删除，能力并入 `tests/test.py`**（见 §4 正确性门） |
@@ -322,7 +322,8 @@ git -C $D push origin main
    `topk` 不同源）——所以这条路要先回答"阈值从哪来"，不是照搬。
 2. **pass 1 的每元素共享原子（95–110 µs，§12.23）**：仍是内核里最大的已识别
    单项。原设想的"现成寄存器直方图"是假的（`radix_row_bf16.cuh` 的
-   `hist_add_bf16_reg` 只记到 1.5% 的元素），要做得**新写**一个
+   `hist_add_bf16_reg` 只记到 1.5% 的元素；该函数已于 2026-10-24 按死代码策略删除，
+   记录见 git 历史与本节），要做得**新写**一个
    register-then-flush 直方图：每线程 `r_hist[16]`、索引 `(key >> 4) & 15`、
    结尾一次性 flush。风险从"冲突"变成"**依赖链**"（见"别做"第 1 条），先量。
 3. **行趟展开 / 加大每 CTA 的 MLP**（原第 3 条）：pass 1 的可见上限只有约

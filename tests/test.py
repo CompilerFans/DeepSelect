@@ -1,6 +1,4 @@
 import argparse
-import dataclasses
-import os
 import time
 from typing import Optional, List
 import copy
@@ -276,7 +274,7 @@ def correctness_cases_() -> List[TestParam]:
 # `deep_gemm/tests/test_indexer_topk_selector.py`'s `SELECTOR_PERF_SHAPES`
 # (= test-topk + sglang + dsa), all `top_k = 2048`, fp32.  Without them the
 # `deep_gemm` backend is `unsupported` on every row, so nothing is compared.
-# `csrc/structs.h`'s `kDeepGemmSelectorPerfShapes` is the C++ mirror -- edit together.
+# This list is the only copy: no C++ mirror exists.
 #
 # (n_rows, n_cols, seq_len): `seq_len` is the `deep_gemm` grid's window, this
 # repo ranks the whole row, so the two are NOT numerically comparable.

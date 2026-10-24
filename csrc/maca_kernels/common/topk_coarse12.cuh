@@ -3,13 +3,12 @@
 // Why this file exists
 // -------------------
 // `radix_topk_row_f32` (radix_core.cuh) and `topk_coarse12`
-// (`mcDeepGEMM/csrc/kernels/fp32_topk.cu`, extracted at
-// `ref/deep_gemm/xcore1000_fp32_topk.cu`) answer the same question with the
+// (`mcDeepGEMM/csrc/kernels/fp32_topk.cu`) answer the same question with the
 // same class of algorithm -- histogram the high bits, pick the bin holding
 // rank `topk`, rank that bin -- and the ported one is **2.0-2.3x faster** on
-// the shapes where deep_gemm routes to it (`ref/README.md`, and the ledger's
-// §12 table).  Both are two row walks, so the walk count is not the
-// difference; the differences that are measurable are:
+// the shapes where deep_gemm routes to it (the ledger's §12 table).  Both are
+// two row walks, so the walk count is not the difference; the differences
+// that are measurable are:
 //
 //   * 12 coarse bits against 8, so the bin the refine ranks is 2-3x smaller.
 //   * one 16 KB arena doing double duty (coarse histogram, then candidates)
@@ -25,7 +24,8 @@
 // two can be compared without asking which of them is better written.  What
 // is dropped is the page-table transform (`Transform = true`), which needs
 // the `page_table` / `cu_seqlens_row` / `q_positions` plumbing this
-// repository does not synthesize -- the same subtraction `ref/` already made.
+// repository does not synthesize -- the same subtraction the ported
+// extraction made.
 // What is added is the one thing deep_gemm keeps outside the kernel: this
 // runs over `[0, length)` of the row, which on this path is the whole row,
 // and it returns *positions in that window*, so the caller's contract half

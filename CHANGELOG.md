@@ -7,6 +7,59 @@ there.
 
 ## Unreleased
 
+### Dead paths leave the production tree
+
+Under the policy now written into `CLAUDE.md` — a generic primitive stays even
+with no caller, an unused *business* path is deleted rather than recorded —
+three unreachable blocks are removed, and nothing on a live route changes:
+
+- The fp32 `k2048` comparison kernels: `radix_topk_row_f32_k2048_b1024` and
+  its warp-scan twin, both `__global__` wrappers, both launchers and
+  `launch_topk_f32_k2048_b1024_c500`.  No dispatcher arm ever reached them;
+  their six instantiation TUs (2 per family) go with them, 89 → 87 per family,
+  and `scripts/generate_instantiations.py`'s `fp32_static_k_instantiations()`
+  table and `FP32_ROW_HEADER` go with those.  The C500 resource measurement the
+  old comment carried (16 MT / 62 ST / 3336 B static smem, and 22/52/2328 for
+  the warp-scan arm) is preserved in `docs/C500-radix-perf-ledger.zh.md`.
+- `hist_add_bf16_reg` / `hist_reg_to_smem` and `kBinsPerThread`: the
+  register-histogram transport that recorded 1.5% of elements (one element per
+  shuffle, one lane accounting; the measurement stays in the ledger and
+  handover §9).  It was never called, and it did not work.
+- `csrc/structs.h`'s `kDeepGemmSelectorPerfShapes` and
+  `struct DeepGemmSelectorShape`: a hand-maintained C++ mirror with no C++
+  reader.  `tests/test.py`'s `DEEP_GEMM_SELECTOR_PERF_SHAPES` is the only copy,
+  and there is no second one to keep in step.
+
+Kept on purpose, and now named in the policy: `warp_reduce.cuh` (the 64-lane
+`bsm_bpermute` reduction tree), `hist_add_bf16` / `hist_add_bf16_aligned`, and
+`topk_chunks.cuh`'s source-parity `kSmemBytes`.
+
+Receipts, C600-U (family 1600, MACA 20261017), clean rebuild: `BUILD_RC=0`;
+artifact **65,655,232 B**, md5 `b98579f65469` (was 71,542,320 B — each deleted
+TU was its own ~2.9 MB device image); `topk_kernel_radix` 60,
+`__device_stub__` **87**, `__tvm_ffi_*` 2, `k2048` symbols 0,
+`instantiations/*.cu` 87.  Gates: `scripts/wheel_smoke.py --allow-checkout`
+12/12, `tests/contract_test.py` 73/0 (`maca_c`) and 70/0 (`torch`),
+`tools/sample_gate.py --sample 8000 --seed 20261024 --backend maca_c`
+8000/8000 as `SAMPLE_RC=0`.  The xcore1000/xcore1500 artifacts were not rebuilt
+this round; the deleted code was family-independent, and the xcore1600 build is
+what the gates above ran against.
+
+### `ref/` leaves the public tree
+
+`ref/` -- the reference-implementation harnesses: the three-way deep_gemm / ds
+/ mcoplib comparison, the c500 gate probe, the coarse12 direct driver and the
+kerutils platform-arm probe -- is removed. No build, test or runtime path ever
+referenced it; the reason is licensing: `ref/deep_gemm/` carried an explicit
+"All rights reserved" notice and `ref/mcoplib/` was an extract with no license
+header at all. The evidence it produced stays where it was cited (the ledger
+and `docs/experiments/`), and every live pointer in the code and docs was
+rewritten to state the fact instead of the path. The removed tree is
+recoverable with `git log --all -- ref/`. What it cost: the vendored kerutils
+MACA device arm has no in-tree compilation any more, and the three-way
+comparison can no longer be re-run -- both recorded in `CLAUDE.md` where they
+are cited.
+
 ### The same commit, built and measured on both C600 boards
 
 `ef57dcc` was built and validated on two machines rather than one: MetaX
@@ -254,12 +307,13 @@ alias. Nothing here used them.
 
 **Nothing in the build compiles the MACA device arm** -- its only consumer,
 `csrc/maca_kernels/xcore1600/`, is off `SOURCES` and `include_dirs` -- so
-`ref/kerutils_platform_arms/` is what compiles it, with flags read out of
-`setup.py` rather than copied from it. It checks that the arm is the one
+`ref/kerutils_platform_arms/` is what compiled it (that probe was removed with
+`ref/`; see the entry above), with flags read out of `setup.py` rather than
+copied from it. It checked that the arm is the one
 selected and the only one, that the constexpr pair folds in the host pass and
 evaluates in a kernel, that the three device primitives round-trip 256/256
 slots, and that `launch_kernel` launches both on a default config and on one
-requesting cluster / PDL / cooperative. It does **not** claim
+requesting cluster / PDL / cooperative. It did **not** claim
 `csrc/maca_kernels/xcore1600/` compiles; that tree is still unbuilt, as
 recorded under Known holes in `CLAUDE.md`.
 
