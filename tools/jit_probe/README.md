@@ -54,10 +54,13 @@ AOT 产物与其收据纪律(md5、nm 符号闸、实例化计数)完全不动;�
 
 格式化**只用 fmt,不用 `std::format`**:DeepJIT 的 `utils/format.hpp` 定义
 `FMT_HEADER_ONLY` 并 `#include <fmt/format.h>`,因为 mxcc 驱动的是 GCC 11 的
-libstdc++,没有 `<format>`。DeepJIT 头文件里 `std::format` 出现 0 次;全树唯一
-使用它的是 `tests/test_maca_proj/main.cpp`,那套 harness 需要 clang++-22 +
-GCC-15 sysroot,本机不构建也不使用。DeepSelect 自己的源码同样 0 处使用
-(`legacy/api.cu` 只有两行注释解释为何用 `snprintf` 而不是 `std::format`)。
+libstdc++,没有 `<format>`。DeepJIT 头文件里 `std::format` 出现 0 次;全树最后
+一个使用者是 `tests/test_maca_proj/main.cpp` 那套 harness,2026-10-24 也已改走
+同一个 `utils/format.hpp`。两者对 `{:a}` 并不可互换:fmt 打 printf 的 `0x`
+前缀,`std::format` 跟 `to_chars`、不带前缀 —— harness 生成十六进制浮点字面量
+的模板原先自己写了 `0x`,换成 fmt 后前缀重复、mxcc 拒收,已改为由格式符给出。
+DeepSelect 自己的源码同样 0 处使用(`legacy/api.cu` 只有两行注释解释为何用
+`snprintf` 而不是 `std::format`)。
 
 vendored fmt 的重跑收据(两机各自 `build.sh` 重编 + 全新 JIT 缓存,shape
 b6 v1048576 k512 chunks18):
@@ -69,3 +72,11 @@ b6 v1048576 k512 chunks18):
 
 两台均 `contract: PASS`、RC=0。`jit_probe.cc` 固定 `-DDEEP_SELECT_ARCH=1600`
 (探针用的 stage1 几何在两族都是 128 KiB/AP,该宏只影响编译期容量闸)。
+
+同一轮的两机还各自构建并跑通了 DeepJIT 自带的 `tests/test_maca_proj` harness
+(DeepJIT `4109b07`,`build.sh` 的宿主机 `g++` 回退,无 conda toolchain):
+两台均 **52 passed / 1 skipped / 0 failed**,末行 `All MACA DeepJIT tests
+passed.`。skip 的是 `cooperative launch`:这一代 MACA 驱动接受 2^20 块的
+cooperative 网格并分波执行而不是拒绝,harness 现在按能力跳过而不是判失败。
+root 下还有一条 NOTE —— `/proc` 条目的 mtime 改得动,只读 secondary cache
+那一半前提不成立,lookup 那半照常跑。
