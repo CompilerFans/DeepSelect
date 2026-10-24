@@ -153,7 +153,6 @@ def cell(tag, b, V, k, end=False, si=True, rv=False, idx_dtype=torch.int32,
     # ── (b) capture ────────────────────────────────────────────────────────
     try:
         g, val_c, idx_c = capture(p, t, k, si, rv, idx_dtype)
-        cap = "OK"
     except Exception as exc:
         first, ours, allf = describe(exc)
         print(f"  {head}  capture=RAISED  {first}")

@@ -15,7 +15,7 @@
 // it.  Never extract this into a function again.
 #ifdef __MACACC__
 // Row shuffle (`mov_shfl`), NOT `bsm_bpermute` -- measured 2026-10-21 on a
-// C600-U (pod 30752, `docs/experiments/20261021_mov_shfl_tree/`).  SASS:
+// MetaX C600-U (see `docs/experiments/20261021_mov_shfl_tree/`).  SASS:
 // `mov_shfl` lowers to ONE `mov_b32 ... row_shl:N rmsk bmsk bc` (ALU pipe,
 // DPP form) while `sm_bperm_b32` travels the shared-memory pipe, so the old
 // tree competed with this walk's own block-max atomics for the one pipe.
@@ -258,7 +258,6 @@ __device__ __forceinline__ void overflow_emit_member(
 // 128-byte line.  It is the granularity the collect walk already moves in, so
 // a skipped entry is exactly a line the walk would have fetched and found
 // nothing to do with.
-constexpr uint32_t kSkipBlockElems = 64;
 
 // The density floor for the block summary's histogram: the second walk reads
 // the blocks whose max is at or above the cut, which is `1-(1-k/V)^64` of

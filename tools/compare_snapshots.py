@@ -28,8 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 # How many cells the report prints per backend, by |delta|.  A constant, not a
 # flag: its only caller passed one value, so the default was dead config.

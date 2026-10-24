@@ -97,10 +97,10 @@ def topk_deep_gemm(
         module = _deep_gemm()
     except ImportError as exc:
         raise RuntimeError(
-            "backend 'deep_gemm' needs the mcDeepGEMM package importable "
-            "(install it, or put its repository root on PYTHONPATH); this "
-            "repository runs standalone too, and that is the only case where "
-            "the import is missing"
+            "backend 'deep_gemm' needs the `deep_gemm` package importable "
+            "(install it, or put the repository that provides it on "
+            "PYTHONPATH); this repository runs standalone too, and that is "
+            "the only case where the import is missing"
         ) from exc
 
     # The operator's own contract rejections, as `topk_torch` enforces them:

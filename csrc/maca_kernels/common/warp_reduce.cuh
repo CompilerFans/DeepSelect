@@ -35,7 +35,7 @@
 // - Keys are compared as uint32.  mov_shfl moves bits without interpreting
 //   them; float values must arrive pre-encoded (`refine_bin`).
 //
-// **Direction, MEASURED 2026-10-21** (pod 30752, `docs/experiments/
+// **Direction, MEASURED 2026-10-21** (MetaX C600-U; `docs/experiments/
 // 20261021_mov_shfl_tree/tree_probe`'s lane table + SASS): Row Shift Left
 // (modes 0x10d) reads lane i+d into lane i, so a chained reduce lands on the
 // row's/group's FIRST lane -- this header's default.  Row Shift Right
