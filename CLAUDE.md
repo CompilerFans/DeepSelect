@@ -310,6 +310,8 @@ rm -f deep_select/deep_select_maca*.so \
 - `nm -S --defined-only <so> | sort` on both, diffed — **if every symbol keeps the same address and size, no function moved**, which is the strongest cheap statement that the build is the same one;
 - if the delta is large or the offsets straddle more than a couple of instructions, the binary genuinely differs — then the falsifying test is a fixed `arange` input run several times (below), never a random one and never one run.
 
+**`tools/artifact_receipt.py` mechanizes this, including the device-image half.** One path prints the identity block a commit message quotes — size, md5, `.text`, `.mc_fatbin` (size, md5, per-bundle md5), the defined-symbol digest, and the counts (`topk_kernel_radix` / `__device_stub__` over `.symtab` as `nm -S` counts them, `__tvm_ffi_*` over `.dynsym` as `nm -D` does). Two paths split `.mc_fatbin` into its offload bundles and compare them bundle by bundle, then diff the defined symbols by name and size, then count the raw differing bytes; `--verdict` exits non-zero iff a device-ELF bundle is not byte-identical, which is the "did the code move" question. It parses the ELF itself, so the reading does not depend on which binutils a host has, and it skips `STT_FILE`/`STT_SECTION` exactly as `nm` does — mxcc's random `maca_topk-<hex>.cpp` name is an `STT_FILE` entry, and keeping it would report a symbol difference on **every** two-build comparison. `--self-test` builds its own artifacts and cross-checks the builder with `readelf` where one is installed.
+
 Build plumbing worth knowing before editing `setup.py`:
 
 - Device code is compiled by **mxcc, reached through cu-bridge's `cucc`** (`--offload-arch=xcore<N>`). `setup.py` does

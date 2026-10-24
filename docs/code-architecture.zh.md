@@ -239,6 +239,13 @@ git status --porcelain                                          # 干净（不�
 CUDA_VISIBLE_DEVICES=<独占的一张卡> ./run_test.sh --test       # 339 pass / 0 check_fail / 0 crash
 ```
 
+- **身份收据已工具化**：`tools/artifact_receipt.py` 一个路径打印身份块（size / md5 / `.text` /
+  `.mc_fatbin` 及逐 bundle md5 / 符号摘要 / 计数），两个路径做 `.mc_fatbin` 逐 bundle 比对、
+  定义符号 (name, size) 差和原始字节差；`--verdict` 只在设备 ELF bundle 非逐字节相同时返回非零。
+  `STT_FILE` / `STT_SECTION` 按 binutils 口径跳过——mxcc 的随机 `maca_topk-<hex>.cpp` 名在 FILE
+  符号里，不跳过则任意两次构建都报一条符号差异。工具自带 ELF 解析，不依赖 binutils；`--self-test`
+  自建产物，装有 `readelf` 时交叉校验。
+
 - **测试节奏：全量套件按"轮"跑，不按阶段跑**（用户 2026-10-12：「不需要每次修改都全量测试，
   效率太低」）。阶段自身的收据 = 构建 rc=0 + nm 判据 + 该阶段特有的**便宜**检查（python 层：
   `inspect.signature` 与导出表不变；冒烟用 `tests/test.py --sample 50`）。整轮收尾在 main 上跑
