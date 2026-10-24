@@ -43,7 +43,7 @@ from typing import List
 # MACA part can perform -- this lets the generator refuse one at generation time
 # with the arithmetic, instead of failing at compile time on whichever
 # architecture happens to be building.  The same number `structs.h` gets through
-# `-DDEEP_SELECT_NATIVE_ARCH`.
+# `-DDEEP_SELECT_ARCH`.
 MACA_SMEM_CAPACITY_BYTES = 128 * 1024
 
 # Where the repo root is, from this file rather than from the caller's cwd: this

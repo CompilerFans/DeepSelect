@@ -204,13 +204,15 @@ def _family_of_target(target, this_dir):
     families**, and that is a decision rather than a shortcut: mxcc's target-ID
     space is wider than these three (it also takes `xcore1002`, `xcore1502`,
     `xcore1520` and others), and this file has nothing to resolve one of those
-    to a row.  A row carries the family's AP count and per-AP shared memory, so
-    an artifact built from the wrong row sizes its grids for the wrong machine,
-    and it does that silently.  Device code does not settle it either: on this
-    toolchain `xcore1500` and `xcore1600` compile the same kernel to identical
-    instructions, so "same codegen" is not "same family".  A part that needs a
-    family of its own gets a row -- the two constants in `csrc/structs.h` --
-    rather than a guess from its name.  Measured survey, including which
+    to a row.  A row carries the family's AP count, per-AP shared memory and
+    register budget; the last two have compile-time consumers, so building an
+    artifact from the wrong row can silently give it the wrong geometry.
+    Runtime grids still use the device's reported `sm_count`.  Device code does
+    not settle it either: on this toolchain `xcore1500` and `xcore1600` compile
+    the same kernel to identical instructions, so "same codegen" is not "same
+    family".  A part that needs a family of its own gets a row in
+    `csrc/structs.h` rather than a guess from its name.  Measured survey,
+    including which
     spellings mxcc accepts at all:
     `docs/experiments/20261012_setup_family_detection/`.
 
@@ -298,9 +300,10 @@ def _maca_root() -> str:
 def build_for_maca():
     """Build one extension per family: that family's sources, one compile each.
 
-    **This is a csrc compile and nothing else.**  One `.cu`, one `.so` per
-    target; everything under `deep_select/` is Python and reaches an artifact
-    through `tvm_ffi.load_module`.
+    **This is a csrc compile and nothing else.**  The shared `.cu` plus the
+    family's generated instantiation `.cu` files produce one `.so` per target;
+    everything under `deep_select/` is Python and reaches an artifact through
+    `tvm_ffi.load_module`.
 
     `CUCC_TARGETS` is a list of `xcore<N>` spellings, and **each one is its own
     `-offload-arch` compile** carrying `-DDEEP_SELECT_ARCH=<N>` beside it.  That
@@ -318,13 +321,14 @@ def build_for_maca():
     `CUCC_TARGETS=xcore1000` is still allowed, and produces a wheel that serves
     one family and names it in the error on any other.
 
-    The two numbers the kernel sizes its grids against are compile-time
-    constants again (`ARCH_SM_COUNT`, `ARCH_SMEM_PER_AP_BYTES`), which is the
-    reason for one artifact per family.  The form this replaced -- one file,
-    one comma-separated `-offload-arch`, three device images -- cannot carry
-    them: `__MACA_ARCH__` is defined in the device pass only, so a host `#if` on
-    it takes the `#else` branch on every architecture, and host code exists once
-    in a fat binary regardless.
+    The family's shared-memory and register budgets are compile-time constants
+    (`ARCH_SMEM_PER_AP_BYTES`, `ARCH_REGS_PER_AP`), which is the reason for one
+    artifact per family.  `ARCH_SM_COUNT` is only a nominal record; runtime
+    grids use the calling device's `sm_count`.  The form this replaced -- one
+    file, one comma-separated `-offload-arch`, three device images -- cannot
+    carry the compile-time constants: `__MACA_ARCH__` is defined in the device
+    pass only, so a host `#if` on it takes the `#else` branch on every
+    architecture, and host code exists once in a fat binary regardless.
 
     `csrc/maca_kernels/legacy/` -- the ported upstream kernels -- is not built:
     no family's source list points at it and its `kerutils` include is off

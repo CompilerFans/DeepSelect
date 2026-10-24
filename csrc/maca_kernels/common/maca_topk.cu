@@ -3,13 +3,12 @@
 // Implements the `topk` contract (`deep_select.interface.topk`) on primitives
 // that exist on MACA.  One contract layer is shared by every mode: the
 // `length <= topk` shortcut, the NaN bit-pattern check, the index offsets, the
-// out-of-band fills, and the optional ordered emit.  One selection dataflow
-// feeds it for both dtypes -- the ported radix core in `radix_core.cuh` (see
-// its provenance banner): one histogram pass over the high key byte plus one
-// vectorized collect pass that refines the threshold bin in shared memory, so
-// two passes over the row whatever the key width.  The 16-bit row walks a bf16
-// key, the 32-bit row an fp32 one; the dtype picks the row entry, not the
-// dataflow.
+// out-of-band fills, and the optional ordered emit.  Row kernels and the
+// fp32 split/coarse12/chunks routes feed it; routing chooses among them from
+// dtype and shape.  The radix row kernels use a histogram pass and a collect
+// pass that refines the threshold bin in shared memory, while the other routes
+// have their own staged dataflows.  The 16-bit row walks a bf16 key, the 32-bit
+// routes an fp32 one.
 //
 // Two things to know before editing:
 //
@@ -23,8 +22,8 @@
 // The upstream `v3` (bf16) and `v3_fp32` trees are ported under `csrc/maca_kernels/legacy/`
 // and are NOT built; `v3_cluster` is deleted (MACA has no cluster launch), so
 // the shapes it served fall through to this kernel -- the same path every other
-// shape takes, with `topk <= 1024 <= 4096` and no vocabulary bound, so they are
-// served, only without the cluster-specific scheduling.
+// shape takes, with `topk <= 4096` and no vocabulary bound, so they are served,
+// only without the cluster-specific scheduling.
 //
 // This file is the shared half of every family's artifact: family <N> compiles
 // `common/` plus its own tuple set in `csrc/maca_kernels/xcore<N>/instantiations/`.
@@ -287,9 +286,9 @@ struct ChunkedScratch {
     // Retiring the old buffer does not help -- nothing was freed, the content
     // was overwritten -- so the fix is to stop reusing the address at all.
     //
-    // The footprint is `batches * 4` bytes per distinct shape and the split's
-    // own gate bounds `batches` at 64, so this is a few hundred bytes for every
-    // shape a process visits, held for its life.
+    // The footprint is `batches * 4` bytes per distinct shape.  The bf16
+    // split's gate bounds `batches` at 64, while the fp32 split can reach
+    // `kF32ChunkedMaxBatches` (4096).
     struct LengthsEntry {
         int64_t batches;
         int64_t vocab;
@@ -628,8 +627,9 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // can reach gets one, so `topk_launch` can stage the columns it ranks
     // whatever the caller's index width is.  Allocated up front rather than
     // inside the dispatch because the dispatch is the kernel layer and this is
-    // a host allocation, and because a failure here has to fall back to the row
-    // path rather than fault.  The `b <= 2` chunks arm shares it -- same kind of
+    // a host allocation.  Allocation failures are reported by
+    // `DS_CUDA_RUNTIME_CHECK`; there is no allocation-failure fallback here.
+    // The `b <= 2` chunks arm shares it -- same kind of
     // answer (row columns), same contract half, and the two gates are disjoint.
     const bool needs_coarse12_cols =
         value_dtype == 0 && (detail::f32_coarse12_applies(p, (uint32_t)batches) ||
@@ -646,9 +646,9 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         }
         // The block tables ride on the same gate as the answer buffer: the
         // route that reads them is a subset of the calls this branch already
-        // serves, and a call whose allocation fails still gets a correct answer
-        // (the kernel walks densely when they are null), so there is nothing to
-        // fall back to and nothing to check here.
+        // serves.  Their allocations use the same checked failure policy; a
+        // null table at launch selects the dense walk, but allocation failure
+        // itself raises rather than falling back.
         const size_t blocks_per_row =
             ((size_t)p.vocab_size + (size_t)topk_select_coarse12::kBlockElems - 1)
             / (size_t)topk_select_coarse12::kBlockElems;
@@ -695,9 +695,9 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             scratch.block_list_count = need_blocks;
         }
     }
-    // The chunks route's workspace, on the same rule: sized for the row count
-    // this call has, allocated once and grown, and its absence is a fallback to
-    // the row path rather than a fault.  The count itself comes from
+    // The chunks route's workspace, on the same grow-only allocation rule.
+    // Allocation failure is reported by `DS_CUDA_RUNTIME_CHECK`, not converted
+    // into a row-path fallback.  The count itself comes from
     // `select_chunk_count`, which needs the device's SM count -- read here
     // rather than passed in, because this is the sizing half and the launch
     // half has to agree with it exactly.
@@ -765,9 +765,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
                 // freed, the content was overwritten.
                 //
                 // So the table is per-key and never reused across keys.  The
-                // footprint is `batches * 4` bytes per distinct shape, and the
-                // gate that admits the split bounds `batches` at 64 -- a few
-                // hundred bytes for every shape a process visits.
+                // footprint is `batches * 4` bytes per distinct shape, with the
+                // bf16 and fp32 split gates supplying their respective bounds.
                 p.end_ptr = scratch.lengths_table(batches, (int64_t)vocab_size, stream);
             }
             workspace = scratch.workspace;

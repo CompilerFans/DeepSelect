@@ -338,7 +338,7 @@ def _deep_gemm_package() -> Dict[str, str]:
 def provenance(sm_count: int) -> Dict[str, Any]:
     here = REPO
     # The extension the *device* loads, asked of the loader itself: it is the
-    # same glob and the same newest-wins rule `_binding.load()` uses, so this
+    # same glob and the same sorted-path-last rule `_binding.load()` uses, so this
     # cannot name a different file than the one that answers a call.  A record
     # whose md5 is not the loaded artifact's is not a record.
     #

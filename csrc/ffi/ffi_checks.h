@@ -2,10 +2,11 @@
 // `KU_CHECK_*` family the ported kernel's host layer used
 // (`kerutils/supplemental/torch_tensors.h`, which is torch-only).
 //
-// Each macro keeps its old name and its old message spelling, so the call
-// sites in `api.cu` read the same and a rejected call still says which tensor
-// and what was wrong.  The `_opt` forms accept a `tvm::ffi::Optional` and are
-// a no-op when it holds nothing -- that is what `_check_optional_tensor` meant.
+// These are the DeepSelect spellings of the corresponding legacy `KU_CHECK_*`
+// checks.  The validation semantics and messages are unchanged, so a rejected
+// call still says which tensor and what was wrong.  The `_opt` forms accept a
+// `tvm::ffi::Optional` and are a no-op when it holds nothing -- that is what
+// `_check_optional_tensor` meant.
 
 #pragma once
 

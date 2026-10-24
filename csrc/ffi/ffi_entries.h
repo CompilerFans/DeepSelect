@@ -7,7 +7,7 @@
 // cannot return new tensors.
 //
 // Contract, exactly as the pybind11 entry enforced it (`TORCH_CHECK`, now
-// `DS_HOST_ASSERT`):
+// `DS_HOST_CHECK`):
 //
 //   input              (b, v)        float32 or bfloat16, stride(1) == 1,
 //                                    stride(0) * element_size % 1024 == 0
@@ -45,10 +45,11 @@ tvm::ffi::Array<int64_t> get_alignment_requirement();
 // `0x3F3F3F3F` guard in `output_index[row, 0]`) -- the second is inert when
 // the first is false.  `sm_count` is the device's, from the caller's
 // `get_device_properties`.  It is the one device-derived input left as an
-// argument: the *family* constants (`ARCH_SM_COUNT`, `ARCH_SMEM_PER_AP_BYTES`)
-// are compile-time now that there is one artifact per family, but the AP count
-// has to be the count of the part in front of the call rather than of the part
-// the image was built for, or a grid gets sized for the wrong machine.
+// argument: the *family* constants (`ARCH_SM_COUNT`, `ARCH_SMEM_PER_AP_BYTES`,
+// `ARCH_REGS_PER_AP`) are compile-time now that there is one artifact per
+// family.  Only the latter two have behavioral consumers; `ARCH_SM_COUNT` is a
+// nominal family record.  Runtime grids instead use the AP count of the part
+// in front of the call rather than of the part the image was built for.
 //
 // Keep this in step with the definition in `csrc/maca_kernels/common/maca_topk.cu`,
 // parameter for parameter.  It had drifted: `sm_count` was added to the
@@ -72,7 +73,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
 
 // ── the exported symbols ───────────────────────────────────────────────────
 // Each architecture extension compiles this header, so the same two names
-// exist in every `deep_select_xcore<N>` artifact -- which is the point: the
+// exist in every `deep_select_maca_xcore<N>` artifact -- which is the point: the
 // runtime resolves a backend by extension name, and a caller cannot tell
 // which kernel tree backed it.
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(topk, deep_select::topk)

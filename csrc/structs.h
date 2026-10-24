@@ -69,16 +69,14 @@ setup.py's build_for_maca."
 #endif
 
 // **Every row here is a claim about a part, and the AP counts are claims a
-// family can have more than one of.**  `ARCH_SMEM_PER_AP_BYTES` is the budget
-// `f32_coarse12_applies` tests the 16 KB arena against, and it is the one
-// constant in this table with a behavioral consumer.  `ARCH_SM_COUNT` is
-// **not** consumed by any rule: `wave_filled_chunks` and
-// `f32_chunk_work_target` take the *runtime* `params.sm_count`, deliberately,
-// so that a caller handing this entry a tensor on another part gets a grid
-// sized for the part in front of it (see the note above `f32_chunk_work_target`
-// in `routing.cuh`).  The macro is a number for the record and for a reader;
-// the grids do not read it.  **That is what lets a two-SKU family have a row
-// at all** -- see the C600U note below.
+// family can have more than one of.**  `ARCH_SMEM_PER_AP_BYTES` and
+// `ARCH_REGS_PER_AP` both have behavioral consumers in the shipping kernels;
+// `ARCH_SM_COUNT` does not: `wave_filled_chunks` and `f32_chunk_work_target`
+// take the *runtime* `params.sm_count`, deliberately, so a grid is sized for
+// the device in front of the call rather than for this table (see the note
+// above `f32_chunk_work_target` in `routing.cuh`).  The AP count is therefore
+// a nominal family record, not a promise that every SKU reports that number.
+// That distinction is what lets a two-SKU family have one row.
 //
 // The 1500 and 1600 rows carry the AP counts those families report and the
 // 128 KiB every 128 KiB family has.  The 1600 row is the one that cannot be a
@@ -123,22 +121,12 @@ setup.py's build_for_maca."
 // discover:**
 //
 //   - The two `perf_data/MetaX_C600-U/20260915_*` snapshots carry `sm_count
-//     32` in their manifests and were taken on another host
-//     (`mx-cjxu-ws-cr-20260915131045`; `...-2026092013092900002848` next, with
-//     the GPU PCI buses moving `a4/a5` -> `a8/a9`; today's is
-//     `...-2026100816195500003270`, buses `63:`), so it is not knowable from
-//     the record whether that 32 was the other SKU or another board -- which
-//     is the point: the directory named for the device cannot separate them,
-//     and that is the failure mode the `device_dir` naming rule exists to
-//     prevent (see the note in `scripts/perf_snapshot.py`).  Re-measuring the
-//     C600U baseline on this host would write `sm_count 28` into the same
-//     directory, and a comparison across it has to read the manifests rather
-//     than the path.
+//     32`; later records on a 28-AP part use the same device directory.  The
+//     manifests, not the path, distinguish those measurements.
 //   - `f32_chunks_large_batch` and `f32_chunk_work_target` read the *runtime*
 //     `sm_count`, so they already adapt; but the chunk *band* was fitted on
-//     104 APs, and `MetaX_C500/baseline` is where the numbers for a re-fit
-//     would have to come from.  A C500 baseline's own manifest says
-//     `sm_count 104`, so that one is self-consistent.
+//     104 APs.  A re-fit needs measurements from the target part, not an AP
+//     count copied into this table.
 //
 // `ARCH_FAMILY` is what the artifact is *named*, and the loader matches on it:
 // `deep_select_maca_xcore<N>.so` is the file, `_binding.family_suffix()` is

@@ -40,7 +40,7 @@ def _library_pattern(name: str, suffix: str) -> str:
     could not be read, which is precisely the guess the loader exists to
     refuse.  So the no-suffix case matches only an artifact that carries no
     family either -- the unsuffixed `deep_select_maca.so` an ad-hoc build
-    (`/tmp/dsv3/mkvar.sh`) produces, which makes no per-family claim at all.
+    produces, which makes no per-family claim at all.
     """
     return f"{name}{suffix}*.so" if suffix else f"{name}.so"
 
@@ -77,9 +77,11 @@ def device_family_suffix() -> str:
     """`_xcore<N>` for **this** device's xcore family, or `""` when there is none.
 
     **The device names the artifact, not the build.**  Each artifact's *host*
-    half holds its family's constants (`csrc/structs.h`'s `ARCH_SM_COUNT` and
-    `ARCH_SMEM_PER_AP_BYTES`), so loading the wrong one is not a slower kernel,
-    it is a kernel sized for another machine.  The build's `CUCC_TARGETS` cannot
+    half holds its family's constants (`csrc/structs.h`'s
+    `ARCH_SMEM_PER_AP_BYTES` and `ARCH_REGS_PER_AP`), so loading the wrong one
+    can give host-side routing the wrong geometry.  Runtime grids separately
+    use the device's `sm_count`, passed by the caller.  The build's
+    `CUCC_TARGETS` cannot
     answer which one is in front of us -- that is the same defect
     `perf_snapshot.provenance()` had once -- and neither can a driver query for
     the family, because MACA reports the family as an sm spelling rather than a
@@ -136,8 +138,8 @@ def extension_path(name: str) -> Optional[str]:
     for a package exactly as it does for a checkout.
 
     One rule, one place: `load()` calls this, so the two cannot drift into
-    naming different files.  Newest wins, so a stale artifact cannot shadow a
-    fresh one.
+    naming different files.  Matching paths are sorted lexicographically and
+    the last one wins; this is path ordering, not an mtime freshness check.
     """
     hits = sorted(glob.glob(os.path.join(
         _PACKAGE_DIR, _library_pattern(name, family_suffix()))))
@@ -151,7 +153,7 @@ def load(name: str) -> Any:
     Cached: the module holds a device binary, and a process that never calls
     `topk` should not load one.
 
-    **The `import tvm_ffi` above is load-bearing beyond `load_module`.**  The
+    **The `import tvm_ffi` below is load-bearing beyond `load_module`.**  The
     extension carries `DT_NEEDED: libtvm_ffi.so`, which ships inside the
     `tvm_ffi` package, and importing that package maps the library into the
     process -- which is how the loader satisfies the `DT_NEEDED` by soname.  An

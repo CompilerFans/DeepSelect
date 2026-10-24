@@ -31,8 +31,8 @@
 // and it returns *positions in that window*, so the caller's contract half
 // (`topk_kernel_radix`) can treat them exactly like the split's answer.
 //
-// The gate that keeps it off C600U is in `routing.cuh` (`f32_coarse12_applies`),
-// and it has two halves.  The *budget* half -- does this part's shared memory
+// Route selection lives in `routing.cuh` (`f32_coarse12_applies`) and has two
+// halves.  The *budget* half -- does this part's shared memory
 // hold the arena -- is a compile-time constant of the artifact's family
 // (`ARCH_SMEM_PER_AP_BYTES`, `csrc/structs.h`), which is possible because
 // `setup.py` builds one artifact per family.  The *tuning* half -- is the
@@ -218,8 +218,8 @@ __device__ __forceinline__ bool topk_coarse12_row(
     const int tail = prefix + vector_length * 4;
     const float4 *vector_input = reinterpret_cast<const float4 *>(input + prefix);
 
-    // The kept-block tables, already offset to this row by the caller (null on
-    // the calls whose allocation failed, which take the dense walk).  The
+    // The kept-block tables, already offset to this row by the caller (null
+    // selects the dense walk).  The
     // summary covers the *vector* region only: the up-to-3 prefix floats, the
     // up-to-3 tail floats and the up-to-3 float4s past the last whole block are
     // outside any block, and pass 2 walks those densely on both arms.
