@@ -104,21 +104,14 @@ done
 # ── the extension, and the device the record belongs to ─────────────────────
 # Same resolution as `run_test.sh`, for the same reason: the package that will
 # answer names its own artifact, so an installed wheel is measured as itself and
-# the md5 in the manifest is the one the process loads.  See that file for why
-# the cwd is taken off `sys.path` first.
-so=$(python -W "ignore:Could not find flash_attn:UserWarning" - <<'PY'
-import glob, os, sys
-here = os.getcwd()
-sys.path[:] = [p for p in sys.path if p not in ("", here)]
-if glob.glob(os.path.join(here, "deep_select", "deep_select_maca*.so")):
-    sys.path.insert(0, here)
-try:
-    from deep_select.interface import _KERNEL_NAME, _binding
-    print(_binding.extension_path(_KERNEL_NAME) or "")
-except Exception:
-    print("")
-PY
-)
+# the md5 in the manifest is the one the process loads.  The rule has one
+# definition, `tools/provenance.py` -- including why the cwd comes off
+# `sys.path` -- and this script and `run_test.sh` both call it.
+so=$(python -W "ignore:Could not find flash_attn:UserWarning" -c '
+import sys; sys.path.insert(0, "tools")
+import provenance
+provenance.use_checkout_if_built()
+print(provenance.answering_extension() or "")')
 if [[ -z "$so" ]]; then
     echo "run_bench.sh: no extension found, in the checkout or installed." >&2
     echo "              build one (./develop.sh) or install one (./install.sh)." >&2

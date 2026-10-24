@@ -66,7 +66,10 @@ from deep_select._binding import extension_path
 assert os.path.dirname(deep_select.__file__) == os.path.join("__ARM__", "deep_select"), \
     "arm __ARM__ loaded " + deep_select.__file__
 _p = extension_path("deep_select_maca")
-LIB = hashlib.md5(open(_p, "rb").read()).hexdigest()[:8]
+# 12 characters, the length every other receipt here prints -- the child stays
+# self-contained (it measures an arm that may be another checkout entirely), so
+# this is the one md5 this file computes for itself.
+LIB = hashlib.md5(open(_p, "rb").read()).hexdigest()[:12]
 
 IX = {"int32": torch.int32, "int64": torch.int64}
 DT = {"bfloat16": torch.bfloat16, "float32": torch.float32}

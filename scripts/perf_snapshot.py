@@ -53,8 +53,6 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as _dt
-import glob
-import hashlib
 import json
 import os
 import platform
@@ -64,19 +62,16 @@ import time
 from typing import Any, Dict, List, Optional
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# `$REPO/tests` always goes on the path -- the grid lives there and is not in
-# the wheel (`setup.py`: `find_packages(include=["deep_select"])`).  `$REPO`
-# itself goes on **only if the checkout has a built extension**, and the cwd
-# comes off first: invoking this file as `python scripts/perf_snapshot.py` from
-# the repo root puts `''` (= the cwd = `$REPO`) on `sys.path` before any of
-# this runs, and that entry alone is enough to make `import deep_select` land on
-# the tree -- which imports fine and then fails inside `_binding.load`, since
-# the extension is resolved lazily at call time.  Without one of these, a
-# `pip install`ed wheel could never answer.
-sys.path[:] = [p for p in sys.path if p not in ("", os.getcwd())]
-sys.path.insert(0, os.path.join(REPO, "tests"))
-if glob.glob(os.path.join(REPO, "deep_select", "deep_select_maca*.so")):
-    sys.path.insert(0, REPO)
+# Which package answers is `tools/provenance.py`'s question, and it has one
+# definition there: `$REPO` goes on the path only when the checkout has a built
+# extension to answer with, and `$REPO/tests` always does, because the grid
+# lives in the repository and is not in the wheel (`setup.py`:
+# `find_packages(include=["deep_select"])`).  This runs at import time, before
+# `torch`, exactly as the inline version it replaces did.
+sys.path.insert(0, os.path.join(REPO, "tools"))
+from provenance import (answering_extension, md5_of,  # noqa: E402
+                        use_checkout_if_built)
+use_checkout_if_built(with_tests=True)
 import torch  # noqa: E402
 import kernelkit as kk  # noqa: E402
 import lib  # noqa: E402
@@ -337,20 +332,13 @@ def _deep_gemm_package() -> Dict[str, str]:
 
 def provenance(sm_count: int) -> Dict[str, Any]:
     here = REPO
-    # The extension the *device* loads, asked of the loader itself: it is the
-    # same glob and the same sorted-path-last rule `_binding.load()` uses, so this
-    # cannot name a different file than the one that answers a call.  A record
-    # whose md5 is not the loaded artifact's is not a record.
-    #
-    # Asked through the package rather than from a path under `here`, so it
-    # answers for an installed wheel (`--package`) exactly as for a checkout --
-    # the deployed package carries its `.so` beside `_binding.py`.
-    from deep_select.interface import _KERNEL_NAME, _binding
-
-    so = _binding.extension_path(_KERNEL_NAME)
-    md5 = ""
-    if so is not None:
-        md5 = hashlib.md5(open(so, "rb").read()).hexdigest()
+    # The extension the *device* loads, asked of the loader itself
+    # (`answering_extension`, which is `_binding.extension_path`): it answers
+    # for an installed wheel exactly as for a checkout, because the deployed
+    # package carries its `.so` beside `_binding.py`.  The manifest's column is
+    # a data field, so it keeps the full digest rather than a receipt's 12.
+    so = answering_extension()
+    md5 = "" if so is None else md5_of(so, None)
     return {
         **_deep_gemm_package(),
         # The device itself, not an arch derivation of it: the same string the

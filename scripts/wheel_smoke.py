@@ -30,12 +30,18 @@ smoke test for a delivered wheel, and a record is a different act with its own
 rules (`run_bench.sh`).
 """
 import argparse
-import hashlib
 import os
 import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The receipt's md5 length is `tools/provenance.py`'s question (12 for a
+# human-facing line).  Only the helper is taken from there: the *path* rule is
+# deliberately not applied here -- this gate's job is to refuse when the
+# checkout answers, so it must not put the checkout on the path.
+sys.path.insert(0, os.path.join(REPO, "tools"))
+from provenance import md5_of  # noqa: E402
 FAIL = []
 PASS = [0]
 
@@ -122,8 +128,7 @@ def main():
     check("an extension artifact resolves", so is not None,
           "no deep_select_maca*.so beside the installed package")
     if so is not None:
-        md5 = hashlib.md5(open(so, "rb").read()).hexdigest()[:12]
-        print(f"artifact {so} md5 {md5}")
+        print(f"artifact {so} md5 {md5_of(so)}")
         suffix = _binding.device_family_suffix()
         check("the artifact is this device's family",
               suffix in os.path.basename(so) if suffix else True,

@@ -76,7 +76,11 @@ read its md5 as the "which artifact did I measure" receipt.
 **But they do not require the checkout's.** The extension is resolved by asking
 the package that will answer — `_binding.extension_path`, the same glob and
 last-path-wins rule `load()` uses (path ordering, not mtime) — and `$REPO`
-goes on the path only when the checkout has a built extension. With one, the
+goes on the path only when the checkout has a built extension. That rule has
+one definition, `tools/provenance.py` (`use_checkout_if_built` +
+`answering_extension`), which both shell runners, `perf_snapshot`, `sample_gate`,
+`overflow_exactfit` and `wheel_smoke` call; it cannot live inside `deep_select`,
+because it decides which `deep_select` to import. With one, the
 tree answers (every existing receipt keeps naming the same file); without one,
 an **installed wheel answers**,
 so `./install.sh` + `./run_bench.sh` works with no build step. That is the

@@ -59,12 +59,12 @@ exactly like the defect this tool asks about and is not one (`CLAUDE.md`'s
 environment trap 1).
 """
 import argparse
-import glob
-import hashlib
 import os
 import sys
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import provenance
+
+REPO = provenance.REPO
 
 TOPK = 512
 
@@ -85,29 +85,6 @@ CASES = [
 ]
 
 
-def import_path():
-    """`$REPO` only when the checkout has a built extension to answer with --
-    the rule the other runners keep: a tree with none must let the installed
-    wheel answer, because a path entry is a claim about which package ran."""
-    repo = os.path.abspath(REPO)
-    sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.getcwd()) != repo]
-    if glob.glob(os.path.join(repo, "deep_select", "deep_select_maca*.so")):
-        sys.path.insert(0, repo)
-
-
-def receipt(deep_select):
-    from deep_select import _binding
-    where = os.path.dirname(os.path.abspath(deep_select.__file__))
-    so = _binding.extension_path("deep_select_maca")
-    line = f"deep_select {deep_select.__version__} from {where}"
-    if so:
-        md5 = hashlib.md5(open(so, "rb").read()).hexdigest()[:12]
-        line += f"\nartifact {so}\n         md5 {md5}"
-    else:
-        line += "\nartifact: none resolves (a torch-only run)"
-    return line
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--backend", default="maca_c",
@@ -122,7 +99,7 @@ def main():
     if args.device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
 
-    import_path()
+    provenance.use_checkout_if_built()
     import torch
     import deep_select
 
@@ -130,7 +107,7 @@ def main():
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     print(f"device {torch.cuda.current_device()}: {props.name}, "
           f"{props.multi_processor_count} AP")
-    print(receipt(deep_select))
+    print(provenance.package_receipt(deep_select))
     print(f"backend={args.backend}  topk={TOPK}  rounds={args.rounds}")
 
     def bf16(bits):

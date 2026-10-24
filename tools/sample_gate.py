@@ -28,7 +28,8 @@ data.  (The official loop leaves `seed=-1` cases to a process counter, which
 makes a re-run different data for the same case -- fine for a sweep, wrong for
 a release record.)
 
-**Which package is under test** follows `run_bench.sh`'s rule: `$REPO` goes on
+**Which package is under test** follows the rule every runner here keeps, and
+that rule has one definition (`tools/provenance.py`): `$REPO` goes on
 `sys.path` only when the checkout has a built extension, so a develop tree
 tests itself and a tree with none tests the installed wheel -- the same
 `deep_select` a caller would import.  The header line names the package and the
@@ -36,60 +37,26 @@ artifact md5, so the run is a record of *which binary* passed, not just of a
 count.
 """
 import argparse
-import glob
-import hashlib
 import importlib.util
 import os
 import random
 import sys
 import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import provenance
 
-
-def import_path():
-    """`$REPO` only when the checkout has an extension to answer with, and
-    `$REPO/tests` always (the grid is not in the wheel).  The same rule and the
-    same reason as `scripts/perf_snapshot.py` and `run_bench.sh`: a path entry
-    is a claim about which package answers, and a checkout that cannot load an
-    extension must not make that claim."""
-    here = os.getcwd()
-    repo = os.path.abspath(REPO)
-    drop = {here, repo, os.path.join(repo, "tests")}
-    sys.path[:] = [p for p in sys.path if os.path.abspath(p or here) not in drop]
-    sys.path.insert(0, os.path.join(repo, "tests"))
-    if glob.glob(os.path.join(repo, "deep_select", "deep_select_maca*.so")):
-        sys.path.insert(0, repo)
+REPO = provenance.REPO
 
 
 def load_official():
     """`tests/test.py` under its own name, so the stdlib `test` package cannot
     shadow it and nothing here re-implements its table or its checks."""
-    import_path()
+    provenance.use_checkout_if_built(with_tests=True)
     path = os.path.join(REPO, "tests", "test.py")
     spec = importlib.util.spec_from_file_location("ds_official_test", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def package_receipt(deep_select):
-    """Where the package came from and which artifact it resolves -- the two
-    facts a correctness record is worthless without (`CLAUDE.md`: the `.so` md5
-    is the "which binary answered" receipt)."""
-    where = os.path.dirname(os.path.abspath(deep_select.__file__))
-    line = f"deep_select {deep_select.__version__} from {where}"
-    try:
-        from deep_select import _binding
-        so = _binding.extension_path("deep_select_maca")
-    except Exception:  # noqa: BLE001 - a receipt, not a gate
-        so = None
-    if so:
-        md5 = hashlib.md5(open(so, "rb").read()).hexdigest()[:12]
-        line += f"\nartifact {so}\n         md5 {md5}"
-    else:
-        line += "\nartifact: none resolves (a torch-only run)"
-    return line
 
 
 def main():
@@ -111,7 +78,8 @@ def main():
     if args.device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device)
 
-    import_path()  # before the import: the path decides which package answers
+    # Before the import: the path decides which package answers.
+    provenance.use_checkout_if_built(with_tests=True)
     import torch
     import deep_select
     official = load_official()
@@ -129,7 +97,7 @@ def main():
     print(f"table {len(table)} cases, {len(under)} at <= {args.max_elems} elements "
           f"({len(table) - len(under)} above the cap, not run); "
           f"drew {len(drawn)} under seed {args.seed}, backend {args.backend}")
-    print(package_receipt(deep_select))
+    print(provenance.package_receipt(deep_select))
     print(f"device {torch.cuda.get_device_name(0)}")
 
     status = {"pass": [], "check_fail": [], "crash": [], "skip": [],

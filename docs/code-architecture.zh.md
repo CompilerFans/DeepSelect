@@ -246,6 +246,14 @@ CUDA_VISIBLE_DEVICES=<独占的一张卡> ./run_test.sh --test       # 339 pass 
   符号里，不跳过则任意两次构建都报一条符号差异。工具自带 ELF 解析，不依赖 binutils；`--self-test`
   自建产物，装有 `readelf` 时交叉校验。
 
+- **"哪个包在答、加载的是哪个产物"也只有一处定义**：`tools/provenance.py` 的
+  `use_checkout_if_built()` / `answering_extension()`。`$REPO` 只在 checkout 有已构建扩展时才
+  进 `sys.path`，扩展一律向 `_binding.extension_path` 问（同一 glob、同一 path 序规则）。它不能
+  放进 `deep_select`：它决定的正是该 import 哪个 `deep_select`。两个 shell runner、
+  `scripts/perf_snapshot.py`、`tools/sample_gate.py`、`tools/overflow_exactfit.py`、
+  `scripts/wheel_smoke.py` 都调用它；人读收据的 md5 统一 12 位，数据列（manifest 的
+  `extension_md5`）保留完整 32 位。
+
 - **测试节奏：全量套件按"轮"跑，不按阶段跑**（用户 2026-10-12：「不需要每次修改都全量测试，
   效率太低」）。阶段自身的收据 = 构建 rc=0 + nm 判据 + 该阶段特有的**便宜**检查（python 层：
   `inspect.signature` 与导出表不变；冒烟用 `tests/test.py --sample 50`）。整轮收尾在 main 上跑

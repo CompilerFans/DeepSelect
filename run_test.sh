@@ -100,22 +100,14 @@ declare -a test_args=(--seed 20260911 --sample 200 -rf)
 # without one, an installed `deep_select` answers, so a wheel `./install.sh`
 # put in site-packages is testable with no build step.
 #
-# The cwd comes off `sys.path` first: `python -` starts with it there, and with
-# the tree reachable the import lands on its `deep_select/`, which imports fine
-# and then fails at call time (the extension loads lazily).
-so=$(python -W "ignore:Could not find flash_attn:UserWarning" - <<'PY'
-import glob, os, sys
-here = os.getcwd()
-sys.path[:] = [p for p in sys.path if p not in ("", here)]
-if glob.glob(os.path.join(here, "deep_select", "deep_select_maca*.so")):
-    sys.path.insert(0, here)
-try:
-    from deep_select.interface import _KERNEL_NAME, _binding
-    print(_binding.extension_path(_KERNEL_NAME) or "")
-except Exception:
-    print("")
-PY
-)
+# The rule that decides which of those two answers has one definition,
+# `tools/provenance.py` -- this script and `run_bench.sh` both call it rather
+# than each keeping a copy of the probe.
+so=$(python -W "ignore:Could not find flash_attn:UserWarning" -c '
+import sys; sys.path.insert(0, "tools")
+import provenance
+provenance.use_checkout_if_built()
+print(provenance.answering_extension() or "")')
 
 if [[ -z "$so" ]]; then
     echo "run_test.sh: no extension found, in the checkout or installed." >&2
