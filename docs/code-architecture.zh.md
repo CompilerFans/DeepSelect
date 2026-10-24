@@ -76,7 +76,7 @@ csrc/
     │   ├── primitives.cuh                  跨族原语（已落地）
     │   ├── maca_topk.cu                    唯一手写 TU：include + host 入口 + 按表派发
     │   ├── contract.cuh                    契约半：RowParams / 常量 / 键与 NaN / emit / 布局 / 行核与发射
-    │   ├── routing.cuh                     选路：形状 → 数据流（纯函数，一处可读）＋梯子 `topk_launch`
+    │   ├── routing.cuh                     选路：形状 → 数据流（纯函数，一处可读）＋梯子 `select_route`（`topk_launch` 只分派）
     │   ├── radix_core.cuh                  数据流入口（伞头：只 include 下面四个；TU 只 include 它）
     │   ├── radix_common.cuh                行族共享件：常数 / smem 尺寸 / 直方图与后缀和
     │   ├── radix_row_bf16.cuh              bf16 行：radix 两趟 + skip 表 + overflow

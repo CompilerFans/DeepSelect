@@ -1,8 +1,10 @@
 // Routing: every shape decision in one place -- which dataflow answers a call,
 // how many chunks a split gets, and which block width the row kernel runs at.
 // The predicates here are pure functions of the shape and the device's AP
-// count; the ladder that reads them is `topk_launch` at the bottom, and each
-// route it dispatches to owns its own launch and emit (`launch_route`).
+// count; the ladder that reads them is `select_route` below, whose answer is
+// one `Route` value, and each route owns its own launch and emit
+// (`launch_route`).  `topk_launch` switches on that value and does nothing
+// else -- in particular it does not re-decide.
 #ifndef ROUTING_CUH
 #define ROUTING_CUH
 
@@ -985,8 +987,8 @@ inline bool f32_chunks_applies(const RowParams &params, uint32_t batches) {
 // `topk` and `vocab_size` are parameters here, not read off `params`, because
 // every caller that sizes the workspace must get the same answer as the one
 // that launches: a workspace sized for one chunk count and a grid launched with
-// another is a write past the arena, and the gate at `topk_launch` compares the
-// two.
+// another is a write past the arena, and the gate at `select_route` compares
+// the two.
 int f32_chunked_chunks(uint32_t batches, uint32_t topk, uint32_t vocab_size,
                        uint32_t sm_count) {
     const uint32_t work_target = f32_chunk_work_target(sm_count);
@@ -1240,35 +1242,66 @@ inline void dispatch_index_width(int index_dtype, RouteFn &&route) {
     }
 }
 
-}  // namespace detail
+// ── the decision: which route answers a call ────────────────────────────────
+//
+// The predicates above are pure functions of the shape and the device; this is
+// the one place that reads them, in order, and its answer is a value rather
+// than six booleans re-tested at the launch.  The dispatcher (`maca_topk.cu`)
+// sizes its scratch from the same `RouteGates`, so the route and the buffers it
+// may read are one decision: a buffer cannot be sized for a route the launch
+// does not take, which is the class of bug the grow-only scratch makes quiet
+// rather than loud.
+enum class Route {
+    kRowBf16,
+    kSplitBf16,
+    kF32Chunks,
+    kF32Coarse12,
+    kSplitF32,
+    kRowF32,
+};
 
-void topk_launch(const RowParams &params, int64_t batches, void *stream,
-                 int value_dtype, int index_dtype, bool sorted_index,
-                 bool sorted_value, bool return_value,
-                 void *chunked_workspace, size_t chunked_bytes) {
-    auto *cuda_stream = reinterpret_cast<cudaStream_t>(stream);
-    const uint32_t n = (uint32_t)batches;
-    const bool rv = return_value || sorted_value;
-    // Both dtypes run the ported radix dataflow; only the block width differs,
-    // and the fp32 row has a single width.
-    const int block = (value_dtype == 0)
-                          ? (int)topk_select_radix::kBlockSize
-                          : detail::radix_block_for(n, params.vocab_size,
-                                                    params.topk,
-                                                    params.sm_count);
-    // Long rows at a small batch go through the split; the caller sized the
-    // workspace for exactly this gate, and the split reads 16-bit input.
-    if (value_dtype == 1 && chunked_workspace != nullptr &&
-        params.end_ptr != nullptr &&
-        chunked_bytes >= detail::chunked_workspace_bytes(
-                             n, params.topk, (uint32_t)detail::chunked_chunks(params)) &&
-        detail::chunked_bf16_applies(params, n)) {
-        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
-            detail::launch_typed_chunked<OutIdxT>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
-                chunked_workspace);
-        });
-        return;
+// The four shape gates, evaluated once per call, by the dispatcher, before it
+// allocates.  Each is the *policy* half only: whether this call can supply the
+// workspace a split needs is `select_route`'s question, because it depends on
+// what the dispatcher was able to allocate.
+struct RouteGates {
+    bool bf16_split;
+    bool f32_split;
+    bool f32_chunks;
+    bool f32_coarse12;
+};
+
+inline RouteGates route_gates(const RowParams &params, uint32_t batches,
+                              int value_dtype) {
+    return RouteGates{
+        value_dtype == 1 && chunked_bf16_applies(params, batches),
+        value_dtype == 0 && chunked_f32_applies(params, batches),
+        value_dtype == 0 && f32_chunks_applies(params, batches),
+        value_dtype == 0 && f32_coarse12_applies(params, batches),
+    };
+}
+
+// What answers this call.  `workspace`/`bytes` are the split's scratch as this
+// call has it; the guards are re-tested rather than assumed from the gate,
+// because a null or undersized workspace must answer through the row path
+// rather than launch a split that would write past it.
+//
+// The order of the returns is the decision, not an accident of where the arms
+// landed -- see the `b <= 2` note below for the one pair that could otherwise
+// both claim a cell.
+inline Route select_route(const RouteGates &gates, const RowParams &params,
+                          uint32_t batches, int value_dtype,
+                          const void *workspace, size_t bytes) {
+    // The host entry admits exactly float32 (0) and bfloat16 (1).
+    if (value_dtype != 0) {
+        // Long rows at a small batch go through the split; the caller sized the
+        // workspace for exactly this gate, and the split reads 16-bit input.
+        if (gates.bf16_split && workspace != nullptr &&
+            params.end_ptr != nullptr &&
+            bytes >= chunked_workspace_bytes(batches, params.topk,
+                                             (uint32_t)chunked_chunks(params)))
+            return Route::kSplitBf16;
+        return Route::kRowBf16;
     }
     // ── the `b <= 2` arm: deep_gemm's chunks kernel ────────────────────────
     // Same handoff as the coarse12 arm below it -- answer in row columns, staged
@@ -1278,13 +1311,7 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     // disjoint by construction (`<= 2` here, `>= 16` or a 114688 product there),
     // but the order makes that a fact about the code rather than about two
     // constants that have to keep agreeing.
-    if (value_dtype == 0 && detail::f32_chunks_applies(params, n)) {
-        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
-            topk_select_chunks::launch_route<OutIdxT>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        });
-        return;
-    }
+    if (gates.f32_chunks) return Route::kF32Chunks;
     // ── the coarse12 arm: fp32, answered in row columns ─────────────────────
     // Both index widths are served, and that is what makes it reachable at
     // all: `deep_select.topk`'s default `indices_type` is `torch.int64`.  The
@@ -1294,43 +1321,77 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     // into `output_index` would be wrong for int64 (`int32_t*` arithmetic over
     // an int64 buffer), so the scratch is not an optimization here, it is what
     // makes the arm legal.
-    if (value_dtype == 0 && detail::f32_coarse12_applies(params, n)) {
-        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
-            topk_select_coarse12::launch_route<OutIdxT>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        });
-        return;
-    }
-    if (value_dtype == 0 && chunked_workspace != nullptr &&
-        params.end_ptr != nullptr &&
-        chunked_bytes >= detail::chunked_f32_workspace_bytes(
-                             n, params.topk,
-                             detail::f32_chunked_chunks(n, params.topk,
-                                                        params.vocab_size,
-                                                        params.sm_count)) &&
-        detail::chunked_f32_applies(params, n) &&
-        // The engine's own bound, kept separate from the policy predicate so
-        // the two cannot be confused (they were one expression until §21.2).
-        // The row path serves anything the engine cannot.
-        topk_select_radix::f32_chunk_engine_supports((int)params.topk)) {
-        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
-            detail::launch_typed_f32_chunked<OutIdxT>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
-                chunked_workspace);
-        });
-        return;
-    }
-    if (value_dtype == 0) {  // float32
-        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
-            detail::launch_typed_radix<float, OutIdxT>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        });
-    } else {  // bfloat16
-        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
-            detail::launch_typed_radix<maca_bfloat16, OutIdxT>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        });
-    }
+    if (gates.f32_coarse12) return Route::kF32Coarse12;
+    // The fp32 split, for rows too long for one CTA at a batch too small for
+    // the row path.  The engine's own bound is kept separate from the policy
+    // predicate so the two cannot be confused (they were one expression until
+    // §21.2); the row path serves anything the engine cannot.
+    if (gates.f32_split && workspace != nullptr && params.end_ptr != nullptr &&
+        bytes >= chunked_f32_workspace_bytes(
+                     batches, params.topk,
+                     f32_chunked_chunks(batches, params.topk,
+                                        params.vocab_size,
+                                        params.sm_count)) &&
+        topk_select_radix::f32_chunk_engine_supports((int)params.topk))
+        return Route::kSplitF32;
+    return Route::kRowF32;
+}
+
+}  // namespace detail
+
+// The one launch entry.  `route` is `select_route`'s answer, computed by the
+// dispatcher from the gates it sized the scratch with -- so this function does
+// not re-decide anything, it only resolves the last axis that is still a value:
+// the output index width, which is a template argument on every route and is
+// therefore turned into a type once, below.
+void topk_launch(const RowParams &params, int64_t batches, void *stream,
+                 detail::Route route, int index_dtype, bool sorted_index,
+                 bool sorted_value, bool return_value, void *chunked_workspace) {
+    auto *cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+    const uint32_t n = (uint32_t)batches;
+    const bool rv = return_value || sorted_value;
+    // Both dtypes run the ported radix dataflow; only the block width differs,
+    // and the fp32 row has a single width.
+    const bool bf16 = route == detail::Route::kRowBf16 ||
+                      route == detail::Route::kSplitBf16;
+    const int block =
+        bf16 ? detail::radix_block_for(n, params.vocab_size, params.topk,
+                                       params.sm_count)
+             : (int)topk_select_radix::kBlockSize;
+    detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
+        switch (route) {
+            case detail::Route::kSplitBf16:
+                detail::launch_typed_chunked<OutIdxT>(
+                    params, n, cuda_stream, sorted_index, sorted_value, rv,
+                    block, chunked_workspace);
+                break;
+            case detail::Route::kF32Chunks:
+                topk_select_chunks::launch_route<OutIdxT>(
+                    params, n, cuda_stream, sorted_index, sorted_value, rv,
+                    block);
+                break;
+            case detail::Route::kF32Coarse12:
+                topk_select_coarse12::launch_route<OutIdxT>(
+                    params, n, cuda_stream, sorted_index, sorted_value, rv,
+                    block);
+                break;
+            case detail::Route::kSplitF32:
+                detail::launch_typed_f32_chunked<OutIdxT>(
+                    params, n, cuda_stream, sorted_index, sorted_value, rv,
+                    block, chunked_workspace);
+                break;
+            case detail::Route::kRowF32:
+                detail::launch_typed_radix<float, OutIdxT>(
+                    params, n, cuda_stream, sorted_index, sorted_value, rv,
+                    block);
+                break;
+            case detail::Route::kRowBf16:
+                detail::launch_typed_radix<maca_bfloat16, OutIdxT>(
+                    params, n, cuda_stream, sorted_index, sorted_value, rv,
+                    block);
+                break;
+        }
+    });
 }
 
 }  // namespace deep_select

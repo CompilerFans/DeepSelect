@@ -50,8 +50,9 @@
 #include <csrc/maca_kernels/common/radix_core.cuh>
 // The contract half, the two ported routes -- each of which includes the
 // contract half it hands its answer to -- and the routing that picks between
-// them.  The ladder itself is `routing.cuh`'s `topk_launch`; what is left
-// below is the scratch the ladder is handed and the tvm-ffi entry.
+// them.  The ladder itself is `routing.cuh`'s `select_route` (whose answer
+// `topk_launch` only switches on); what is left below is the scratch the
+// ladder is handed and the tvm-ffi entry.
 #include <csrc/maca_kernels/common/contract.cuh>
 #include <csrc/maca_kernels/common/topk_coarse12.cuh>
 #include <csrc/maca_kernels/common/topk_chunks.cuh>
@@ -630,20 +631,24 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // layout they derive from it, so they are separate branches over a shared
     // allocator/table front half; the fp32 arm takes the same `p.end_ptr` route
     // (its split requires `end_ptr != nullptr`).
-    const bool bf16_split =
-        value_dtype == 1 && detail::chunked_bf16_applies(p, (uint32_t)batches);
-    const bool f32_split =
-        value_dtype == 0 && detail::chunked_f32_applies(p, (uint32_t)batches);
+    //
+    // One evaluation of each shape gate per call: the scratch below is sized
+    // from these, and the route at the end is chosen from the same four, so no
+    // buffer can be sized for a route this call does not take.
+    const detail::RouteGates gates =
+        detail::route_gates(p, (uint32_t)batches, value_dtype);
+    const bool bf16_split = gates.bf16_split;
+    const bool f32_split = gates.f32_split;
     // The per-row scan table.  Every route that answers a row **without**
     // ranking it reads this table in the contract half: the coarse12 arm, the
     // chunks arm, and both splits (they hand `params.scan_flags` to the
     // contract as its `nan_flags`).  It is provided for the whole `check_nan`
     // class rather than for the routes a shape predicate can predict, because
-    // the route is chosen inside `topk_launch` -- and providing it costs one
-    // allocation, not a memset: the table is zeroed once when it grows, and
-    // each call's contract half reads and clears the slots that call could
-    // have raised.  A plain row run under `check_nan` scans the row itself,
-    // never reads this, and pays nothing for the class.
+    // the route is chosen after this point (`select_route`, below) -- and
+    // providing it costs one allocation, not a memset: the table is zeroed once
+    // when it grows, and each call's contract half reads and clears the slots
+    // that call could have raised.  A plain row run under `check_nan` scans the
+    // row itself, never reads this, and pays nothing for the class.
     //
     // **The splits must not raise into their own workspace.**  That region is
     // a geometry-dependent offset inside one grow-only scratch shared by
@@ -661,9 +666,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // `DS_CUDA_RUNTIME_CHECK`; there is no allocation-failure fallback here.
     // The `b <= 2` chunks arm shares it -- same kind of
     // answer (row columns), same contract half, and the two gates are disjoint.
-    const bool needs_coarse12_cols =
-        value_dtype == 0 && (detail::f32_coarse12_applies(p, (uint32_t)batches) ||
-                             detail::f32_chunks_applies(p, (uint32_t)batches));
+    const bool needs_coarse12_cols = gates.f32_coarse12 || gates.f32_chunks;
     if (needs_coarse12_cols) {
         const size_t need_cols = (size_t)batches * (size_t)p.topk;
         scratch_grow(scratch.retired, scratch.coarse12_cols,
@@ -698,7 +701,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // `select_chunk_count`, which needs the device's SM count -- read here
     // rather than passed in, because this is the sizing half and the launch
     // half has to agree with it exactly.
-    if (value_dtype == 0 && detail::f32_chunks_applies(p, (uint32_t)batches)) {
+    if (gates.f32_chunks) {
         const size_t need_ws = topk_select_chunks::chunks_workspace_bytes(
             (uint32_t)batches, p.vocab_size, p.sm_count);
         scratch_grow(scratch.retired, scratch.chunks_workspace,
@@ -764,7 +767,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
 
     // The per-row scan table, owned here rather than by the route that reads
     // it.  Every `check_nan` call gets one (`needs_scan_table` above): which
-    // route answers is decided inside `topk_launch`, after this point.
+    // route answers is decided after this point (`select_route` below).
     //
     // **Zeroed when it is allocated, never per call.**  What makes that safe is
     // the contract half's invariant, not this buffer's: `topk_kernel_radix`
@@ -790,9 +793,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // contract half writes a slot for every row before it can return, so a
     // memset here would buy nothing and cost the call ~11 us (see the field's
     // note).  It is allocated for the whole `abort_on_nan` class rather than
-    // for the route that will need it, because the route is chosen inside
-    // `topk_launch` and every route it can choose answers through the same
-    // contract half.
+    // for the route that will need it, because the route is chosen below and
+    // every route it can choose answers through the same contract half.
     if (check_nan && abort_when_nan_found) {
         scratch_grow(scratch.retired, scratch.nan_abort_flags,
                      scratch.nan_abort_flags_count, (size_t)batches);
@@ -807,8 +809,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         p.row_block_max = scratch.block_max;
         p.row_block_list = scratch.block_list;
     }
-    if (value_dtype == 0 && detail::f32_chunks_applies(p, (uint32_t)batches))
-        p.chunks_workspace = scratch.chunks_workspace;
+    if (gates.f32_chunks) p.chunks_workspace = scratch.chunks_workspace;
 
     // The cached branch hands out the scratch's pointers directly, so the guard
     // must not free them -- it owns only what this call allocated itself (the
@@ -820,9 +821,12 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     } free_lengths{scratch_borrowed ? nullptr : (void *)lengths},
         free_workspace{scratch_borrowed ? nullptr : workspace};
 
-    topk_launch(p, batches, (void *)stream, value_dtype, index_dtype,
-                sorted_index, sorted_value, return_value, workspace,
-                workspace_bytes);
+    // The route, from the gates the scratch was sized from and the scratch this
+    // call actually holds.
+    const detail::Route route = detail::select_route(
+        gates, p, (uint32_t)batches, value_dtype, workspace, workspace_bytes);
+    topk_launch(p, batches, (void *)stream, route, index_dtype, sorted_index,
+                sorted_value, return_value, workspace);
     // Last, because it reads the table the contract half fills.  Launched only
     // for the calls that can abort, so a `check_nan` call that answers with the
     // sentinel pays nothing for it.
