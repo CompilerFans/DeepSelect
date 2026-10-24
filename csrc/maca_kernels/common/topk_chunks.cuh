@@ -241,37 +241,6 @@ inline cudaError_t launch_topk_chunks_impl(
     void *workspace, int B, int topk, int64_t stride, int default_length,
     cudaStream_t stream);
 
-__host__ __forceinline__ int chunks_for_shape(int rows, int64_t n_cols, int num_sms);
-
-// One launch of the three kernels, for the `NChunks` the shape resolves to.
-// The workspace is the caller's (`RowParams::chunks_workspace`), sized by
-// `chunks_workspace_bytes` from the same `select_chunk_count`.
-inline cudaError_t launch_topk_chunks(
-    const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
-    void *workspace, int B, int topk, int64_t stride, int default_length,
-    int num_sms, cudaStream_t stream)
-{
-    if (topk > kMaxTopK) return cudaErrorInvalidValue;
-    if (workspace == nullptr) return cudaErrorInvalidValue;
-    const int chunks = chunks_for_shape(B, (int64_t)default_length, num_sms);
-    switch (chunks) {
-        case 3: return launch_topk_chunks_impl<3>(scores, lengths, out, nan_flags,
-                                                  workspace, B, topk, stride,
-                                                  default_length, stream);
-        case 4: return launch_topk_chunks_impl<4>(scores, lengths, out, nan_flags,
-                                                  workspace, B, topk, stride,
-                                                  default_length, stream);
-        case 5: return launch_topk_chunks_impl<5>(scores, lengths, out, nan_flags,
-                                                  workspace, B, topk, stride,
-                                                  default_length, stream);
-        case 6: return launch_topk_chunks_impl<6>(scores, lengths, out, nan_flags,
-                                                  workspace, B, topk, stride,
-                                                  default_length, stream);
-        default: return cudaErrorInvalidValue;
-    }
-}
-
-
 // ── the chunked form ───────────────────────────────────────────────────────
 //
 // The three kernels below are deep_gemm's `topk_chunks_*`, restored after the
@@ -280,7 +249,9 @@ inline cudaError_t launch_topk_chunks(
 // (ledger §12.17): 82/116/132 us against deep_gemm's 53/61/63.  The reason is
 // not subtle -- a single CTA sweeping 66551 floats twice on a 104-AP part --
 // and the conclusion recorded there, that chunking "buys at most 6 CTAs" at
-// `b <= 2`, counted the wrong thing: without it the count is **one**.
+// `b <= 2`, counted the wrong thing: without it the count is **one**.  A
+// `select_chunk_count` of 0 therefore means the shape does not reach this form
+// at all -- a decline, never a fallback to that one-CTA arm.
 //
 // `select_chunk_count` is deep_gemm's own, including its constants.  It is a
 // *scheduling* heuristic rather than a shape rule: it only adds chunks when the
@@ -303,7 +274,7 @@ inline cudaError_t launch_topk_chunks(
 // `sm_count in {104, 28, 32}` finds **zero** disagreements -- so no measurement
 // in this ledger moves, on any of the three families this repository builds.
 //
-// It is carried anyway because the divergence is **latent**: `chunks_for_shape`
+// It is carried anyway because the divergence is **latent**: `select_chunk_count`
 // is reachable at any `b`, and it is *not* inert away from the band -- at
 // `sm_count = 104` the two functions disagree on 834 of 1,393 `(b, V)` pairs
 // over `b in [1,199]` (e.g. `b18-v66551`: 6 before, 5 after).  Those shapes do
@@ -362,6 +333,43 @@ __host__ __forceinline__ int select_chunk_count(int64_t n_rows, int64_t n_cols,
         }
     }
     return selected;
+}
+
+// The chunk count is a closed set of four instantiations, and two entries have
+// to turn it into one: `launch_topk_chunks` and `chunks_workspace_bytes`.  One
+// switch, so an instantiation added to the set is added once -- a count the
+// launcher accepts but the sizer does not would size an arena smaller than the
+// kernels write.
+template <typename Fn>
+inline void dispatch_chunk_count(int chunks, Fn &&fn) {
+    switch (chunks) {
+        case 3: fn.template operator()<3>(); break;
+        case 4: fn.template operator()<4>(); break;
+        case 5: fn.template operator()<5>(); break;
+        case 6: fn.template operator()<6>(); break;
+        default: break;
+    }
+}
+
+// One launch of the three kernels, for the `NChunks` the shape resolves to.
+// The workspace is the caller's (`RowParams::chunks_workspace`), sized by
+// `chunks_workspace_bytes` from the same `select_chunk_count`.
+inline cudaError_t launch_topk_chunks(
+    const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
+    void *workspace, int B, int topk, int64_t stride, int default_length,
+    int num_sms, cudaStream_t stream)
+{
+    if (topk > kMaxTopK) return cudaErrorInvalidValue;
+    if (workspace == nullptr) return cudaErrorInvalidValue;
+    cudaError_t rc = cudaErrorInvalidValue;  // 0 chunks: the shape declines
+    dispatch_chunk_count(
+        select_chunk_count(B, (int64_t)default_length, num_sms),
+        [&]<int N>() {
+            rc = launch_topk_chunks_impl<N>(scores, lengths, out, nan_flags,
+                                            workspace, B, topk, stride,
+                                            default_length, stream);
+        });
+    return rc;
 }
 
 // One row's shared state between the three kernels, one entry per row.
@@ -434,13 +442,11 @@ constexpr size_t chunks_workspace_bytes_for() {
 // `sm_count` is the device's, as everywhere else in this file.
 inline size_t chunks_workspace_bytes(uint32_t batches, uint32_t vocab_size,
                                      uint32_t sm_count) {
-    switch (select_chunk_count((int64_t)batches, (int64_t)vocab_size, (int)sm_count)) {
-        case 3: return (size_t)batches * chunks_workspace_bytes_for<3>();
-        case 4: return (size_t)batches * chunks_workspace_bytes_for<4>();
-        case 5: return (size_t)batches * chunks_workspace_bytes_for<5>();
-        case 6: return (size_t)batches * chunks_workspace_bytes_for<6>();
-        default: return 0;
-    }
+    size_t bytes = 0;  // 0 chunks: the shape declines, and nothing is staged
+    dispatch_chunk_count(
+        select_chunk_count((int64_t)batches, (int64_t)vocab_size, (int)sm_count),
+        [&]<int N>() { bytes = (size_t)batches * chunks_workspace_bytes_for<N>(); });
+    return bytes;
 }
 
 // One CTA per (row, chunk): resolves the row's window and its own chunk bounds.
@@ -944,14 +950,6 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_compact_refine(
         __syncthreads();
     }
     if (tid == 0) workspace.arrival = 0;
-}
-
-// Does the shape reach the chunked form at all?  `select_chunk_count` returning
-// 0 means "no chunks", which is the single-CTA arm this file used to be -- and
-// that arm is slower than the split, so 0 is a decline rather than a fallback.
-__host__ __forceinline__ int chunks_for_shape(int rows, int64_t n_cols,
-                                              int num_sms) {
-    return select_chunk_count((int64_t)rows, n_cols, num_sms);
 }
 
 // The window table: one block per row, 128 threads.
