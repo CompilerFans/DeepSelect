@@ -470,7 +470,9 @@ def resolve_family(target: str) -> int:
              if norm == os.path.relpath(instantiation_dir(f), REPO_ROOT)),
             None)
     if family not in FAMILIES:
-        raise ValueError(f"Invalid `target: {target}")
+        raise ValueError(
+            f"unknown target {target!r}; expected xcore<N> for N in "
+            f"{FAMILIES}, or a family's instantiation directory")
     return family
 
 
@@ -502,6 +504,16 @@ if __name__ == '__main__':
               file=sys.stderr)
         sys.exit(1)
     # The shared row table is written/checked once, not once per family.
+    # Targets are resolved before anything is written, so a typo cannot leave
+    # the shared table updated and then fail.
+    targets = argv or [f"xcore{f}" for f in FAMILIES]
+    for target in targets:
+        try:
+            resolve_family(target)
+        except ValueError as exc:
+            print(f"Usage: {sys.argv[0]} [--check] "
+                  f"[xcore<N>|<instantiation_dir>]\n{exc}", file=sys.stderr)
+            sys.exit(1)
     if check:
         shared = check_shared()
         verdict = "clean" if not shared else f"{len(shared)} differ"
@@ -515,7 +527,7 @@ if __name__ == '__main__':
         print(f"  {line}", file=sys.stderr)
     status = 1 if shared else 0
     # No target is every family this build compiles.
-    for target in (argv or [f"xcore{f}" for f in FAMILIES]):
+    for target in targets:
         status |= main(target, check)
     if check:
         print("# check: clean" if status == 0 else "# check: DRIFT",
