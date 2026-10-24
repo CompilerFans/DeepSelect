@@ -37,7 +37,7 @@
 | 源码 | `ef57dcc3b12ad9d95983b394e38a97fd1d0005d0` |
 | DeepJIT gitlink | `6763222888a1a7f84829e1125882a608fd7a335c`（`third-party/DeepJIT`） |
 | Python / torch | 3.10.10 / `2.10.0+metax20261017.1120` |
-| MACA | `MACA_PATH=/root/maca/maca-sdk-20261017-1436/opt/maca-20261017`，`Version:20261017.1436` |
+| MACA | `MACA_PATH=<MACA SDK 根目录>`，`Version:20261017.1436` |
 | 测量设备 | 每台 `CUDA_VISIBLE_DEVICES=1`；device 0 由本任务自己的 keepalive 占用，不参与测量 |
 
 构建按 family 显式指定，不靠 `native` 猜产物身份：
@@ -52,7 +52,7 @@ CUCC_TARGETS=xcore1600 ./develop.sh
 两份构建日志都打印了同一对编译器（`develop.sh` 输出）：
 
 ```
-deep_select: device compiler is /root/maca/maca-sdk-20261017-1436/opt/maca-20261017/tools/cu-bridge/bin/cucc,
+deep_select: device compiler is $MACA_PATH/tools/cu-bridge/bin/cucc,
              host compiler is .../tools/cu-bridge/bin/gnu
 deep_select: compiling csrc/maca_kernels/common/maca_topk.cu + 89 generated instantiations
              once per family, for xcore1500     # C600-U 上为 xcore1600
@@ -129,8 +129,8 @@ cases_graph_cold、cases_graph_grow、official、official_fp32；每个阶段都
 | README 图（峰值有效带宽） | bf16 677.2 GB/s，fp32 446.0 GB/s | bf16 758.6 GB/s，fp32 486.5 GB/s |
 
 两台的 `run_header.txt` 都记 `STALE no`，并在启动瞬间拍下 `mx-smi`：被
-测量的 device 1 为 0% 占用，device 0 是本任务自己的 keepalive 进程
-（`/root/busy.py`），不参与测量。
+测量的 device 1 为 0% 占用，device 0 是本任务自己的 keepalive 进程，
+不参与测量。
 
 两处 147/30 的来历相同：`tests/test.py` 在 `deep_gemm` 包可导入时把 25 个
 selector 形状并进官方网格（122 + 25 = 147；fp32 5 + 25 = 30）。C600-A 上这
@@ -226,10 +226,10 @@ MetaX_C600-U: baseline (none) -> 20261024_062159
 
 ```bash
 export PATH=/opt/conda/bin:$PATH
-export MACA_PATH=/root/maca/maca-sdk-20261017-1436/opt/maca-20261017
+export MACA_PATH=<MACA SDK 根目录>      # Version:20261017.1436
 export CUDA_VISIBLE_DEVICES=1
 
-cd /root/github/DeepSelect
+cd <DeepSelect 仓库根目录>
 CUCC_TARGETS=xcore1500 ./develop.sh          # C600-A；C600-U 用 xcore1600
 md5sum deep_select/deep_select_maca_xcore*.so
 

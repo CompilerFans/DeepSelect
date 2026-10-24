@@ -27,7 +27,7 @@ export MACA_PATH=/opt/maca
 export CUDA_HOME="$MACA_PATH/tools/cu-bridge"
 export CUCC_PATH="$CUDA_HOME"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$LD_LIBRARY_PATH"
-cd /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect/ref/ds
+cd <DeepSelect 仓库根目录>/ref/ds
 
 # per-kernel registers / smem, one block per function:
 "$CUDA_HOME/bin/cucc" -O3 -std=c++20 -DNDEBUG -fPIC -use-fast-math \

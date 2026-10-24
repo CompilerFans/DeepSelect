@@ -143,7 +143,7 @@ refine  细直方图再做一次 256 宽扫描（只前 16 桶非零），得到
 ### 构建
 
 ```bash
-cd /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect
+cd <DeepSelect 仓库根目录>
 rm -f deep_select/deep_select_xcore1000*.so \
       build/lib.linux-x86_64-cpython-310/deep_select/deep_select_xcore1000*.so
 python setup.py build_ext --inplace
@@ -159,7 +159,7 @@ python setup.py build_ext --inplace
 ### 正确性门（官方大表）
 
 ```bash
-cd /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect
+cd <DeepSelect 仓库根目录>
 PYTHONPATH=$PWD python tests/test.py --backend maca_c --sample 1000000 -rf
 ```
 
@@ -252,7 +252,7 @@ PYTHONPATH=$PWD python tests/test.py --perf-only    # 95 个用例，先验后�
 落地顺序：
 
 ```bash
-D=/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect
+D=<DeepSelect 仓库根目录>
 git -C $D status --porcelain          # 确认只有你想提交的文件
 git -C $D commit -a -F /path/to/msg   # 或先 git -C $D add <paths> 再 commit
 git -C $D push origin main

@@ -1020,7 +1020,7 @@ session、同种子、每格 15 rep 取中位数、两侧都过契约检查）�
 ## 7. 复现这份账
 
 ```bash
-cd /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect
+cd <DeepSelect 仓库根目录>
 
 # 1) 取基准：把工作树 stash 到要对比的那棵树，按交接手册 §4 构建，存下 .so
 # 2) 换回来，同样构建
@@ -2875,9 +2875,8 @@ CTAs 从 6（1 行 × 6 chunk）涨到 96（16 × 6），在 104 AP 的机器上
 
 排除掉的其它解释：
 
-- **不是两个 deep_gemm 树。** `site-packages/deep_gemm` 和
-  `/home/compiler_gfx/mcDeepGemm/deep_gemm` 是同一份（`sys.path` 两种顺序都解析到
-  `mcDeepGemm`，`0.5.0`），实测 53.9/360.6/1242.7/5748.8 对
+- **不是两个 deep_gemm 树。** `site-packages/deep_gemm` 和另一份 checkout 里的
+  `deep_gemm` 是同一份（`sys.path` 两种顺序都解析到同一棵树，`0.5.0`），实测 53.9/360.6/1242.7/5748.8 对
   53.9/360.9/1246.9/5745.2，逐格一致。
 - **不是 `maca_policy` 走错分支。** 显式 `maca_policy="chunks"` 得到同一组
   kernel（`topk_chunks_*`）和同一时间（54.3 / 361.3 / 1116.9 / 22186.1）。

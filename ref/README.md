@@ -485,7 +485,7 @@ exactly `bs > 64` (`kF32ChunksFewBatches`) and `vocab > 262144`:
 ./run_test.sh --test --backend maca_c --sample 200 -rf --results /tmp/ref_gate
 ```
 
-from `/home/compiler_gfx/tilelang/DeepSelect` on `CUDA_VISIBLE_DEVICES=0`:
+from a DeepSelect checkout on `CUDA_VISIBLE_DEVICES=0`:
 
 ```
 ================================================================

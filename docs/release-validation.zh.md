@@ -28,11 +28,11 @@ xcore1600）**，正确性用**大样本 + 定向用例**，完整 105,138 例�
 
 ## 2. 交付物身份
 
-构建方式（pod `10.0.71.11`，2026-10-23）：
+构建方式（测试 pod，2026-10-23）：
 
 ```bash
 export PATH=/opt/conda/bin:$PATH
-export MACA_PATH=/root/maca/maca-sdk-20261017-1436/opt/maca-20261017
+export MACA_PATH=<MACA SDK 根目录>      # Version:20261017.1436
 export MAX_JOBS=16
 ./clean.sh && ./build.sh            # CUCC_TARGETS 未设置 = 每族一个目标
 ```

@@ -9,7 +9,7 @@ This directory is **its own git repository** (`origin` = this fork's remote,
 `third-party/DeepSelect`. The outer `mcDeepGEMM` root **is also a git worktree**, usually carrying unrelated uncommitted changes.
 
 - A bare `git commit -a` run from the wrong cwd sweeps the outer repo's changes into a DeepSelect commit. This has actually happened here; it was recovered with `git reset --mixed HEAD~1`.
-- Always address this repo explicitly: `git -C /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect <cmd>`. `cd` does not persist across Bash calls (cwd resets to the primary working directory), so absolute paths everywhere.
+- Always address this repo explicitly: `git -C <path-to-this-checkout> <cmd>`. `cd` does not persist across Bash calls (cwd resets to the primary working directory), so absolute paths everywhere.
 - This repo is designed to be standalone: it must import and build with `deep_gemm` absent (see `topk_deep_gemm`'s lazy import in `deep_select/interface.py`). The outer package is a soft dependency, reached only when a caller asks for `backend="deep_gemm"`.
 
 `docs/C500-radix-handover.zh.md` is the current handover manual for the C500 row kernel; `docs/C500-radix-perf-ledger.zh.md` is its measured before→after ledger. Both are authoritative and current as of HEAD — read them before touching `csrc/maca_kernels/common/`. `docs/C600U-algorithm-choice.zh.md` records why the upstream one-pass dataflow is not the shape a C600U runs, and what the routes actually shipped there are (with the measured evidence each claim rests on).
@@ -975,7 +975,7 @@ the port):
   memory. Expected total elements processed is
   `E[W] <= (1 + k/B2) · L · H_m`, `L = k+B+B2`; with `B, B2 = Θ(k)` the extra
   compute is `O(k log(N/k))`. Realized here in `csrc/maca_kernels/legacy/`.
-- **`dsa_topk`** (`/home/compiler_gfx/dsa_topk`, port commit
+- **`dsa_topk`** (port commit
   `61ab380c77b81669718bfb11b95a583b0e661001`): the two-pass radix row —
   histogram pass, then collect-and-stage into an arena. Realized here in
   the `csrc/maca_kernels/common/radix_*.cuh` headers. Note `opt/radix_topk.cuh` there is *newer*
@@ -1434,7 +1434,7 @@ change neither introduced nor repaired the defect.
 Land it as:
 
 ```bash
-D=/home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect
+D=<path-to-this-checkout>
 git -C $D status --porcelain          # confirm only the intended files
 git -C $D commit -a -F /path/to/msg   # or: git -C $D add <paths> && git -C $D commit -F ...
 git -C $D push origin main
