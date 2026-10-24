@@ -2,7 +2,8 @@
 
 ## 这是什么
 
-`third-party/DeepJIT`(CompilerFans,`712f2a3`,分支 `maca-tvm-ffi`)—— 官方
+`third-party/DeepJIT`(CompilerFans,`712f2a3`,`main` 分支;原 `main` 已备份为
+`main-pre-maca-tvm-ffi`)—— 官方
 DeepGEMM 的 header-only JIT 层(MACA 后端的下游)。自 `712f2a3` 起它只保留
 MACA 后端,并把 pybind11 模块换成 TVM FFI 的 `get_jit()` 句柄;本 harness 走
 的是纯 C++ 头(`runtime/` + `backend/maca/`),不受那次绑定层改动影响。`third-party/fmt`(12.1.0,与 mcDeepGEMM 同钉)
