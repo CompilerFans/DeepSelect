@@ -153,6 +153,11 @@ deep_select::ffi::      平台无关边缘（不变）
      26,221 B（空基线）。xcore1600 产物因此 58,559,864 → 18,812,240 B，行 TU 的 fatbin
      628,301 → 118,053 B，核符号集与尺寸逐项不变（77/77）。所以：**派发器只能住在
      `maca_topk.cu` 可见的 `routing.cuh`**，数据流头里不放任何"点到具体实例"的非模板函数。
+     这条方向现在是**可检查的**：`tools/include_gate.py` 按 `path:line` 报出引号写法或非根前缀的
+     项目 include、解析不到的路径、实例化 TU 不是恰好一条项目 include，以及 `routing.cuh` /
+     `radix_configs.inc` 被 `maca_topk.cu` 以外的文件 include（后两者就是上面那笔器件码的账）。
+     `--self-test` 是 6 个对照（5 个反向），退出码即判据；与
+     `scripts/generate_instantiations.py --check` 并列，构建前跑。
 3. **TU 结构**：手写 TU 恒为 1（`common/maca_topk.cu`）；设备核由生成出来的 `xcore<N>/instantiations/*.cu` 提供，
    每个文件一条显式实例化。`setup.py` 的源清单 = 手写清单 + 生成器的 `family_sources(family)`
    （直接调用生成器函数，不解析它的打印输出——清单只有一份，没有第二份可漂移）。

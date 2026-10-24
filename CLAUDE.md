@@ -1534,6 +1534,18 @@ Deliberate exceptions, which must not be "fixed" into the same form:
 
 - `csrc/ffi/` is the host-only FFI layer and is never a JIT feed.
 
+**The rules above are checkable, and the check ships: `tools/include_gate.py`.**
+It walks every `.cu`/`.cuh` under `csrc/maca_kernels/` and reports, with
+`path:line`, a quoted or non-root-prefixed project include, a target that does
+not resolve, an instantiation TU carrying anything but exactly one project
+include, and any inclusion of `routing.cuh` or `radix_configs.inc` by a file
+other than `maca_topk.cu` — the two whose every includer pays the device-image
+cost recorded in the build section ("The artifact's size is a property of the
+header layout" and "The same disease has a second form"). `--self-test` is 6
+controls, 5 of them negative, and the exit status is the verdict. It is textual
+and cheap on purpose: run it beside `scripts/generate_instantiations.py --check`
+before a build, not instead of one.
+
 The one constraint this does **not** solve: DeepJIT also requires exactly one
 device kernel per compilation unit, and an instantiation TU pulls in the whole
 chunk/fp32 launcher set.  A JIT feed therefore stays a self-contained single
