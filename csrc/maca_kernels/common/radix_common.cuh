@@ -139,6 +139,18 @@ constexpr uint32_t kCoarse12ArenaEntries = kCoarse12HistBytes / sizeof(uint32_t)
 static_assert(kCoarse12ArenaEntries * sizeof(uint32_t) >= (size_t)kSmemInputSize * sizeof(uint32_t),
               "the 16-bit arena must not be smaller than the region it aliases");
 
+// The split's chunk geometry: `ceil(length / chunks)` rounded up to 8 elements.
+// One definition because a chunk is one window to everything that reads it --
+// both chunked splits stage by this size, and `nan_scan_kernel`
+// (`contract.cuh`) is gridded by it, one CTA per (row, chunk) -- so a change
+// here must move all of them together.  The rounding keeps every chunk base
+// 8-element aligned for the vectorized row walk, and it lets the last chunk
+// reach past a row's `length`, which every reader clamps against.
+template <typename T>
+__host__ __device__ __forceinline__ T chunk_size_for(T length, T chunks) {
+    return ((length + chunks - 1) / chunks + 7) / 8 * 8;
+}
+
 /*
  * run_cumsum_warp: 256-element reverse inclusive scan, one buffer, warp
  * shuffles.  Each warp scans its own 32 elements, the warp totals go to

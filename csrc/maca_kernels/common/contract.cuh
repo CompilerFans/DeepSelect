@@ -425,9 +425,9 @@ __global__ __launch_bounds__(kScanBlock) void nan_scan_kernel(
     const uint32_t row = blockIdx.x / chunks;
     const uint32_t chunk = blockIdx.x - row * chunks;
     const uint32_t length = (uint32_t)__ldg(lengths + row);
-    // The same chunk geometry the split walks, so the two cover one window.
-    const uint32_t raw = (vocab_size + chunks - 1) / chunks;
-    const uint32_t chunk_size = (raw + 7u) / 8u * 8u;
+    // The split's own geometry, so the two cover one window.
+    const uint32_t chunk_size =
+        topk_select_radix::chunk_size_for(vocab_size, chunks);
     const uint32_t start = chunk * chunk_size;
     if (start >= length) return;  // uniform across the CTA
     const uint32_t end = start + chunk_size < length ? start + chunk_size : length;

@@ -162,8 +162,7 @@ inline cudaError_t launch_bf16_chunk_stage1_k(
         topk_bf16_chunk_stage1_kernel<TOPK, kNan>, kChunkSmem, smem_adopted);
     if (smem_err != cudaSuccess) return smem_err;
 
-    const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
-    const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
+    const int chunk_size = chunk_size_for(L, num_chunks);
     // Deviation 3: the row stride can be wider than the window (`L`), which is
     // how a caller with padded input rows reaches this path; upstream passes
     // `L` and so can only split packed rows.
@@ -257,9 +256,7 @@ inline cudaError_t launch_bf16_chunk_stage1_runtime(
         topk_bf16_chunk_stage1_kernel<0u, kNan>, kSMEM, smem_adopted);
     if (smem_err != cudaSuccess) return smem_err;
 
-    const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
-    // Keep each chunk base aligned for the uint4 FP16 vectorized row path.
-    const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
+    const int chunk_size = chunk_size_for(L, num_chunks);
     const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
     topk_bf16_chunk_stage1_kernel<0u, kNan>
         <<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
@@ -560,11 +557,11 @@ inline int32_t *chunked_f32_out(void *base, uint32_t batches, uint32_t topk,
                        (size_t)batches * chunks * topk);
 }
 
-// One CTA per (batch, chunk).  The chunk geometry is the 16-bit split's --
-// `raw = ceil(L / chunks)` rounded up to 8 elements -- so the two agree about
-// where a chunk starts, which is what lets `nan_scan_kernel` be shared.  With
-// `want_nan` the scan is not shared but *absorbed*: this launch is the only one
-// that walks the row, and `nan_flags` comes back from it.
+// One CTA per (batch, chunk).  The chunk geometry comes from `chunk_size_for`
+// -- one definition shared with `nan_scan_kernel` -- so the scan answers for
+// exactly the window this split stages.  With `want_nan` the scan is not a
+// separate launch but *absorbed*: this launch is the only one that walks the
+// row, and `nan_flags` comes back from it.
 // Stage 1 of the fp32 split.  **One launcher, one kernel** -- the same rule as
 // the 16-bit stages above: the generated TU for this tuple is where the device
 // code and its only launch both live.
@@ -579,8 +576,7 @@ inline cudaError_t launch_f32_chunk_stage1(
     const cudaError_t smem_err = adopt_dynamic_smem(
         topk_f32_chunk_stage1_kernel<kNan>, kSMEM, smem_adopted);
     if (smem_err != cudaSuccess) return smem_err;
-    const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
-    const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
+    const int chunk_size = chunk_size_for(L, num_chunks);
     const int candidate_stride = num_chunks * topk;
     topk_f32_chunk_stage1_kernel<kNan>
         <<<B * num_chunks, (int)kF32ChunkBlocks, kSMEM, stream>>>(
