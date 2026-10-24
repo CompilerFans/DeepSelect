@@ -44,3 +44,28 @@ AOT 产物与其收据纪律(md5、nm 符号闸、实例化计数)完全不动;�
 动态选块宽(按 B×chunks 与 chunk_size 择宽)是选项,代价是 chunk 内核
 实例化翻倍,边际收益不足,不做。数据与复现:
 `tools/jit_probe/{build.sh,flatten.py,stage1_probe.cu,jit_probe.cc}`。
+
+## fmt 改为完整源码树(2026-10-24)
+
+`third-party/fmt` 不再是 submodule,而是与 mcDeepGEMM 同形的完整源码树(128 个
+文件,`FMT_VERSION 120100`,`diff -r` 与 mcDeepGEMM 逐字节相同)。checkout 后
+无需 `git submodule update --init third-party/fmt`;
+`tools/jit_probe/build.sh` 的 `-Ithird-party/fmt/include` 不变。
+
+格式化**只用 fmt,不用 `std::format`**:DeepJIT 的 `utils/format.hpp` 定义
+`FMT_HEADER_ONLY` 并 `#include <fmt/format.h>`,因为 mxcc 驱动的是 GCC 11 的
+libstdc++,没有 `<format>`。DeepJIT 头文件里 `std::format` 出现 0 次;全树唯一
+使用它的是 `tests/test_maca_proj/main.cpp`,那套 harness 需要 clang++-22 +
+GCC-15 sysroot,本机不构建也不使用。DeepSelect 自己的源码同样 0 处使用
+(`legacy/api.cu` 只有两行注释解释为何用 `snprintf` 而不是 `std::format`)。
+
+vendored fmt 的重跑收据(两机各自 `build.sh` 重编 + 全新 JIT 缓存,shape
+b6 v1048576 k512 chunks18):
+
+| 机器 | 512 线程 | 1024 线程 |
+|---|---:|---:|
+| MetaX C600-A(32 AP) | 88.8 µs / 141.6 GB/s | 101.4 µs / 124.1 GB/s |
+| MetaX C600-U(28 AP) | 74.5 µs / 168.9 GB/s | 82.4 µs / 152.6 GB/s |
+
+两台均 `contract: PASS`、RC=0。`jit_probe.cc` 固定 `-DDEEP_SELECT_ARCH=1600`
+(探针用的 stage1 几何在两族都是 128 KiB/AP,该宏只影响编译期容量闸)。
