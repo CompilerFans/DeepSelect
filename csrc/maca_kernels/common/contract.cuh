@@ -21,8 +21,10 @@
 #include <csrc/structs.h>
 
 // The NaN predicates and the order-preserving key encodes, shared with the
-// dataflow headers below.
+// dataflow headers below, and the launch primitive every launcher here and in
+// the dataflows uses.
 #include <csrc/maca_kernels/common/primitives.cuh>
+#include <csrc/maca_kernels/common/launch.cuh>
 // The ported C500 dataflow (see the provenance banner in that file).  Its row
 // entries are what `radix_select_row` dispatches to, and the launchers below
 // are how every route -- the two splits and the two ported ones -- hands its
@@ -308,7 +310,7 @@ static __device__ __forceinline__ void radix_layout(
 // Both row entries cover every key length and every k **up to the public
 // `kMaxTopK` (4096)**, not `topk_select_radix::kMaxTopK` (2048).  The header's 2048 is the
 // bf16 *chunked* entries' arm guard, and its readers
-// (`launch_topk_bf16_chunked_k` / `launch_topk_bf16_chunked`) are on the way to
+// (`launch_topk_bf16_chunked_k` / `launch_typed_chunked`) are on the way to
 // an arm that instantiates `topk` at compile time.  The split's own gate
 // (`chunked_bf16_applies` below) admits only `topk` 512 or 1024, so the guard
 // never fires; what the two entries called here cover is every key length and
@@ -783,8 +785,8 @@ inline size_t radix_smem_bytes(uint32_t topk, bool sorted, bool wide) {
 // **The body owns the launch, and that is what makes a tuple one file.** The
 // explicit instantiation in `instantiations/*.cu` defines this function, so the
 // kernel's device code and the only launch that reaches it are compiled
-// together; the `extern template` below keeps this header's users from
-// instantiating it a second time, which would duplicate that device code.
+// together; the `extern template` list in `maca_topk.cu` keeps this header's
+// users from re-instantiating it, which would duplicate that device code.
 template <typename Cfg>
 inline void launch_radix_config(const RowParams &params, uint32_t batches,
                                 cudaStream_t stream, size_t smem) {
@@ -793,7 +795,7 @@ inline void launch_radix_config(const RowParams &params, uint32_t batches,
     // tuple, not per launch: this was the one site calling
     // `cudaFuncSetAttribute` on every call.
     static bool smem_adopted = false;
-    const cudaError_t rc = topk_select_radix::adopt_dynamic_smem(
+    const cudaError_t rc = topk_select_common::adopt_dynamic_smem(
         topk_kernel_radix<Cfg>, kSmemBudgetBytes, smem_adopted);
     if (rc != cudaSuccess) {
         std::fprintf(stderr, "[deep_select] radix smem attribute: %s\n",

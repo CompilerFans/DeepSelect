@@ -67,9 +67,11 @@
 
 #include <csrc/maca_kernels/common/primitives.cuh>
 
-// The contract half the answer is handed to (`launch_route` below), and through
-// it the radix row kernel every route emits through.
-#include <csrc/maca_kernels/common/contract.cuh>
+// This file is the dataflow only: the kernels and their launchers.  The route
+// that reaches them -- the scratch check, the launch decision and the handoff
+// to the contract half -- is `deep_select::detail::launch_typed_chunks`
+// (`routing.cuh`), with the other routes' handoffs, so a dataflow header does
+// not depend on the contract half it is emitted through.
 
 namespace topk_select_chunks {
 
@@ -336,10 +338,10 @@ __host__ __forceinline__ int select_chunk_count(int64_t n_rows, int64_t n_cols,
 }
 
 // The chunk count is a closed set of four instantiations, and two entries have
-// to turn it into one: `launch_topk_chunks` and `chunks_workspace_bytes`.  One
-// switch, so an instantiation added to the set is added once -- a count the
-// launcher accepts but the sizer does not would size an arena smaller than the
-// kernels write.
+// to turn it into one: `launch_typed_chunks` (`routing.cuh`) and
+// `chunks_workspace_bytes`.  One switch, so an instantiation added to the set
+// is added once -- a count the launcher accepts but the sizer does not would
+// size an arena smaller than the kernels write.
 template <typename Fn>
 inline void dispatch_chunk_count(int chunks, Fn &&fn) {
     switch (chunks) {
@@ -351,26 +353,12 @@ inline void dispatch_chunk_count(int chunks, Fn &&fn) {
     }
 }
 
-// One launch of the three kernels, for the `NChunks` the shape resolves to.
-// The workspace is the caller's (`RowParams::chunks_workspace`), sized by
-// `chunks_workspace_bytes` from the same `select_chunk_count`.
-inline cudaError_t launch_topk_chunks(
-    const float *scores, const int32_t *lengths, int32_t *out, int32_t *nan_flags,
-    void *workspace, int B, int topk, int64_t stride, int default_length,
-    int num_sms, cudaStream_t stream)
-{
-    if (topk > kMaxTopK) return cudaErrorInvalidValue;
-    if (workspace == nullptr) return cudaErrorInvalidValue;
-    cudaError_t rc = cudaErrorInvalidValue;  // 0 chunks: the shape declines
-    dispatch_chunk_count(
-        select_chunk_count(B, (int64_t)default_length, num_sms),
-        [&]<int N>() {
-            rc = launch_topk_chunks_impl<N>(scores, lengths, out, nan_flags,
-                                            workspace, B, topk, stride,
-                                            default_length, stream);
-        });
-    return rc;
-}
+// The shape's chunk count and the launch for it live in
+// `deep_select::detail::launch_typed_chunks` (`routing.cuh`): each `NChunks`
+// case names a concrete kernel, and a non-template body over them is compiled
+// into the device image of every including TU.  The workspace is still the
+// caller's (`RowParams::chunks_workspace`), sized by `chunks_workspace_bytes`
+// from the same `select_chunk_count`.
 
 // One row's shared state between the three kernels, one entry per row.
 //
@@ -692,7 +680,7 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
         // not serve: deep_gemm re-reads the row under a narrowing prefix in
         // that case (its `rescanned` path), and this port does not carry that
         // path, so the row is handed back whole.  Declining is a *coverage*
-        // decision -- `launch_topk_chunks`' caller turns it into the per-row
+        // decision -- the route's launcher turns it into the per-row
         // `-1` that sends the row down the row path -- and it must be taken
         // here, before the refine walks anything, because a truncated arena
         // would otherwise answer for an arbitrary subset of the bin.
@@ -1031,39 +1019,6 @@ inline cudaError_t launch_topk_chunks_impl(
     if (err != cudaSuccess) return err;
     return launch_chunks_compact_refine<ChunkCount>(
         scores, out, workspace, topk, stride, default_length, B, stream);
-}
-
-
-// The route's launch and emit, on the same handoff as the coarse12 route: the
-// kernels answer in row columns, the contract half reads them out of the
-// staging scratch, and a row they could not serve leaves an empty slot there
-// for the contract half to re-rank on the row path.  The gate that admits this
-// route is `deep_select::detail::f32_chunks_applies` (`routing.cuh`).
-template <typename OutIdxT>
-inline void launch_route(const deep_select::RowParams &params, uint32_t batches,
-                         cudaStream_t stream, bool sorted_index,
-                         bool sorted_value, bool return_value, int block) {
-    int32_t *const staging = params.coarse12_cols;
-    bool launched = false;
-    if (staging != nullptr) {
-        launched = launch_topk_chunks(
-            (const float *)params.input, params.end_ptr, staging,
-            params.scan_flags, params.chunks_workspace, (int)batches,
-            (int)params.topk,
-            (int64_t)(params.stride_input_batch / sizeof(float)),
-            (int)params.vocab_size, params.sm_count, stream) == cudaSuccess;
-    }
-    // This route is three launches, and the histogram one raises the scan
-    // table.  A later stage's launch failing leaves that kernel's work in
-    // flight while the row path answers this call -- and the row path reads
-    // no flag table, so anything raised would sit there until the next call
-    // that uses this table read a stale 1 as its own answer.  Cleared by the
-    // handoff for the same reason the splits clear theirs after a failed
-    // launch; unreachable through the gate, and cheap enough not to depend on
-    // that.
-    deep_select::detail::launch_staged_or_row<float, OutIdxT>(
-        params, batches, stream, sorted_index, sorted_value, return_value, block,
-        launched, staging, /*clear_flags_on_failure=*/true);
 }
 
 }  // namespace topk_select_chunks

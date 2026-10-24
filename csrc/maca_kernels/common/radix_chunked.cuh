@@ -290,38 +290,10 @@ inline cudaError_t launch_bf16_chunk_stage2_runtime(
 extern template cudaError_t launch_bf16_chunk_stage2_runtime<kChunkBlockSize>(
     const maca_bfloat16*, const int32_t*, int32_t*, int, int, int, cudaStream_t);
 
-inline cudaError_t launch_topk_bf16_chunked(
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* indices,
-    int32_t* candidate_indices, maca_bfloat16* candidate_values,
-    int B, int L, int topk, int num_chunks, cudaStream_t stream,
-    int64_t score_stride = 0, bool want_nan = false,
-    int32_t* nan_flags = nullptr)
-{
-    if (topk > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    switch (topk) {
-    case 512:
-        return launch_topk_bf16_chunked_k<512>(
-            scores, lengths, indices, candidate_indices, candidate_values,
-            B, L, num_chunks, stream, score_stride, want_nan, nan_flags);
-    case 1024:
-        return launch_topk_bf16_chunked_k<1024>(
-            scores, lengths, indices, candidate_indices, candidate_values,
-            B, L, num_chunks, stream, score_stride, want_nan, nan_flags);
-    default:
-        break;
-    }
-
-    cudaError_t err = want_nan
-        ? launch_bf16_chunk_stage1_runtime<true>(
-              scores, lengths, candidate_indices, candidate_values, B, L, topk,
-              num_chunks, stream, score_stride, nan_flags)
-        : launch_bf16_chunk_stage1_runtime<false>(
-              scores, lengths, candidate_indices, candidate_values, B, L, topk,
-              num_chunks, stream, score_stride, nan_flags);
-    if (err != cudaSuccess) return err;
-    return launch_bf16_chunk_stage2_runtime<kChunkBlockSize>(
-        candidate_values, candidate_indices, indices, B, num_chunks, topk, stream);
-}
+// The `topk` arm selection lives in `deep_select::detail::launch_typed_chunked`
+// (`routing.cuh`), not here: a non-template body over these concrete arms is
+// compiled into the device image of every TU that includes this header, and
+// this header is included by every split TU.
 
 // ============================================================
 // 块宽选择 — `maca_topk.cu` 的 `radix_block_for` 是唯一消费者
@@ -611,35 +583,14 @@ inline cudaError_t launch_f32_chunk_stage2(
 extern template cudaError_t launch_f32_chunk_stage2<(int)kF32ChunkBlocks>(
     const float *, const int32_t *, int32_t *, int, int, int, cudaStream_t);
 
-// stage 1, then stage 2 -- the split's entry point for the fp32 row.
-inline cudaError_t launch_topk_f32_chunks_stage1(
-    const float *scores, const int32_t *lengths, int32_t *cols, float *vals,
-    int B, int L, int topk, int num_chunks, cudaStream_t stream,
-    int64_t score_stride, bool want_nan = false, int32_t *nan_flags = nullptr)
-{
-    return want_nan ? launch_f32_chunk_stage1<true>(
-                          scores, lengths, cols, vals, B, L, topk, num_chunks,
-                          stream, score_stride, nan_flags)
-                    : launch_f32_chunk_stage1<false>(
-                          scores, lengths, cols, vals, B, L, topk, num_chunks,
-                          stream, score_stride, nan_flags);
-}
+// The fp32 split's stage 1 -> stage 2 sequence lives in
+// `deep_select::detail::launch_typed_f32_chunked` (`routing.cuh`), for the
+// reason the 16-bit note above gives: both stages name a concrete kernel, and
+// a non-template body over them is compiled into every including TU's device
+// image.
 
-inline cudaError_t launch_topk_f32_chunks_stage2(
-    const float *vals, const int32_t *cols, int32_t *out,
-    int B, int topk, int num_chunks, cudaStream_t stream)
-{
-    return launch_f32_chunk_stage2<(int)kF32ChunkBlocks>(
-        vals, cols, out, B, topk, num_chunks, stream);
-}
-
-// stage 1, then stage 2.  `cols_base` is the start of the candidate arena the
-// split carved out (`chunked_f32_cols`); `out` must have room for `topk`
-// columns per row.  They are separate arguments because `chunked_f32_vals` may
-// pad the columns region by 8 bytes to keep `vals` 16-byte aligned, so the
-// caller composes the layout once and hands its regions over.
-//
-// This is the *engine* bound, not the policy one: `chunked_f32_applies` (in
+// `f32_chunk_engine_supports` is the *engine* bound, not the policy one:
+// `chunked_f32_applies` (in
 // `maca_topk.cu`) decides whether to split and calls this to find out whether
 // the split can serve the topk.  Keeping them separate is what stops the policy
 // from looking more expensive than the engine actually is.
@@ -664,28 +615,6 @@ inline bool f32_stage1_fuses_scan() {
         return v == nullptr || v[0] == '\0' || v[0] == '0';
     }();
     return on;
-}
-
-inline cudaError_t launch_topk_f32_chunked(
-    const float *scores, const int32_t *lengths, int32_t *cols, float *vals,
-    int32_t *out, int B, int L, int topk, int num_chunks, cudaStream_t stream,
-    int64_t score_stride, bool want_nan = false, int32_t *nan_flags = nullptr)
-{
-    // The three arenas are **arguments, not derived here**.  The caller already
-    // owns the workspace and places the split's regions inside it, so it is the
-    // one that knows the layout; re-deriving it here was a second copy of the
-    // same arithmetic, and the two agreed only because they were written the
-    // same way.  `chunked_f32_cols` / `chunked_f32_vals` / `chunked_f32_out`
-    // remain as the definition of the layout, and the caller uses them.  The
-    // per-row NaN table is **not** a region of this workspace -- it is the
-    // dispatcher's own `scan_flags` allocation, passed separately, because a
-    // geometry-dependent offset into shared scratch is not a flag slot.
-    cudaError_t err = launch_topk_f32_chunks_stage1(
-        scores, lengths, cols, vals, B, L, topk, num_chunks, stream, score_stride,
-        want_nan, nan_flags);
-    if (err != cudaSuccess) return err;
-    return launch_topk_f32_chunks_stage2(
-        vals, cols, out, B, topk, num_chunks, stream);
 }
 
 }  // namespace topk_select_radix

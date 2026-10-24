@@ -50,11 +50,14 @@
 #include <cuda_runtime.h>
 
 #include <csrc/structs.h>   // ARCH_REGS_PER_AP -- the OUT=2 walk gate
+#include <csrc/maca_kernels/common/launch.cuh>
 #include <csrc/maca_kernels/common/primitives.cuh>
 
-// The contract half the answer is handed to (`launch_route` below), and through
-// it the radix row kernel every route emits through.
-#include <csrc/maca_kernels/common/contract.cuh>
+// This file is the dataflow only: the kernel and its one launcher.  The route
+// that reaches it -- the scratch check, the launch decision and the handoff to
+// the contract half -- is `deep_select::detail::launch_typed_coarse12`
+// (`routing.cuh`), with the other routes' handoffs, so a dataflow header does
+// not depend on the contract half it is emitted through.
 
 namespace topk_select_coarse12 {
 
@@ -720,7 +723,7 @@ inline cudaError_t launch_coarse12_kernel(
 {
     if (topk > kMaxTopK) return cudaErrorInvalidValue;
     static bool smem_adopted = false;
-    const cudaError_t smem_err = topk_select_radix::adopt_dynamic_smem(
+    const cudaError_t smem_err = topk_select_common::adopt_dynamic_smem(
         topk_coarse12_kernel<kThreads_>, kSmemBytes, smem_adopted);
     if (smem_err != cudaSuccess) return smem_err;
     topk_coarse12_kernel<kThreads_><<<B, (int)kThreads_, kSmemBytes, stream>>>(
@@ -741,56 +744,6 @@ inline cudaError_t launch_topk_coarse12(
     return launch_coarse12_kernel<kThreads>(scores, lengths, out, nan_flags, B,
                                             topk, stride, default_length,
                                             block_max, block_list, stream);
-}
-
-
-// The route's launch and emit.  The kernel answers in row *columns*, which are
-// int32 by nature, so it cannot write the caller's buffer directly; the
-// columns are staged and the contract half widens them the way it widens the
-// split's answer.  The gate that admits this route is
-// `deep_select::detail::f32_coarse12_applies` (`routing.cuh`); what is here is
-// everything after the decision -- the scratch check, the launch and the
-// fallback to the row path.
-template <typename OutIdxT>
-inline void launch_route(const deep_select::RowParams &params, uint32_t batches,
-                         cudaStream_t stream, bool sorted_index,
-                         bool sorted_value, bool return_value, int block) {
-    int32_t *const staging = params.coarse12_cols;
-    bool launched = false;
-    if (staging != nullptr) {
-        // No split, no workspace of its own, no NaN table of its own: this
-        // kernel walks each row itself and answers in row columns, so the
-        // contract half below is the only other thing that touches the row
-        // -- and it is a pass over the *answer*, not over the input.
-        // `params.end_ptr` is the row table the dispatcher already
-        // populated with the scratch's all-`vocab_size` entry when the
-        // caller passed no `end`, which is the same table the split reads.
-        // `params.vocab_size` -- not the row stride -- is the width to
-        // scan.  They agree for a full-width tensor and differ the moment
-        // the caller hands over a column slice of a wider matrix, which is
-        // exactly what the benchmark harness does (`s[:, :L]`): the kernel
-        // would then walk past the live prefix and rank columns that are
-        // outside the tensor the caller asked about.
-        launched = launch_topk_coarse12(
-            (const float *)params.input, params.end_ptr, staging,
-            params.scan_flags, (int)batches, (int)params.topk,
-            (int64_t)(params.stride_input_batch / sizeof(float)),
-            (int)params.vocab_size, params.coarse12_block_max,
-            params.coarse12_block_list, stream) == cudaSuccess;
-    }
-    // Hand the answer to the contract half the way the split does, so its
-    // per-row `-1` check decides row by row: a row this kernel could not
-    // serve, or one whose window is no longer than `topk`, comes back with an
-    // empty slot and is re-ranked by the row path.  A launch that did not
-    // happen leaves the buffer untouched and answers that way too -- as does
-    // an allocation that could not be made.
-    //
-    // One kernel, so a failed launch means nothing ran: there is no partial
-    // work whose scan flag could have survived, which is why this route
-    // clears nothing (`clear_flags_on_failure = false`).
-    deep_select::detail::launch_staged_or_row<float, OutIdxT>(
-        params, batches, stream, sorted_index, sorted_value, return_value, block,
-        launched, staging, /*clear_flags_on_failure=*/false);
 }
 
 }  // namespace topk_select_coarse12

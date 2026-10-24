@@ -267,6 +267,28 @@ artifacts and the wheel were not re-measured that day.  **The table belongs in `
 header reintroduces the duplication, and a build that takes ~25 minutes longer
 and a wheel ~460 MB larger is only the visible symptom.
 
+**The same disease has a second form: a non-template host function that names a
+concrete kernel.**  Measured 2026-10-25.  mxcc's device pass compiles **every
+function body present in a TU** — plain host functions, `__host__`-annotated
+ones, `static` ones, and bodies covered by an `extern template` declaration
+(that declaration is honored by the host pass only) — so a host dispatcher
+sitting in a shared header and mentioning `launch_…_k<512>` drags that kernel
+into the device image of **every TU that includes the header**.  Measured with a
+probe TU that includes `radix_core.cuh` and a dummy kernel and nothing else:
+`.mc_fatbin` 540,669 B, carrying all 12 chunked-split kernels; deleting the four
+non-template dispatchers from `radix_chunked.cuh` (`launch_topk_bf16_chunked`,
+the two fp32 stage wrappers and `launch_topk_f32_chunked`) dropped it to 26,221
+B — the empty baseline.  Removing the `extern template` declarations, adding
+`__host__`, and marking them `static inline` each changed nothing; only deleting
+the bodies did.  With that glue moved into `routing.cuh`'s `launch_typed_*` (the
+header only `maca_topk.cu` includes), the xcore1600 artifact went **58,559,864 →
+18,812,240 B** (md5 `f93276249e63`), a row instantiation's fatbin 628,301 →
+118,053 B and its object 637–715 KB → 127–215 KB, while the kernel symbol set
+stayed identical to the previous artifact — **77 names, 77 sizes, none added,
+none removed** — and the counts are 60 / 87 / 2 / 87 as before.  **So shape and
+arm dispatch lives in `routing.cuh`**, and a dataflow header carries kernels and
+their per-instantiation launchers, never a body that names an arm.
+
 **The stale `.so` must be deleted before rebuilding** — `develop.sh` does this
 for you, but a bare `setup.py build_ext --inplace` does not (see the handover
 §4):
@@ -952,10 +974,13 @@ already-set attribute, and it **lowers** the function's ceiling to the value it
 is asked for. So the opt-in is not what makes a >48 KB launch legal here (the
 default already is), and it must be given the *largest* block the kernel is
 ever launched with, not the per-call size: a per-call value would reject the
-next, larger launch. `topk_select_radix::adopt_dynamic_smem`
-(`radix_common.cuh`) is that rule, applied once per kernel via each launcher's
+next, larger launch. `topk_select_common::adopt_dynamic_smem`
+(`launch.cuh`) is that rule, applied once per kernel via each launcher's
 `static bool`; the row path was the one site calling it on every launch and
-now pays it once (2026-10-24).
+now pays it once (2026-10-24). It sat in `radix_common.cuh` until 2026-10-25:
+the two ported dataflows needed it too, and reaching into the radix namespace
+for a host launch helper is the cross-lineage reach the neutral
+`topk_select_common` layer exists to prevent.
 
 ### 3. Wave quantization against the batch — the actual binding constraint
 

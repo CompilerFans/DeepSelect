@@ -5,14 +5,15 @@
 #include <maca_bfloat16.h>   // the 16-bit path's value type
 #include <cstdint>
 
+#include <csrc/maca_kernels/common/launch.cuh>
 #include <csrc/maca_kernels/common/primitives.cuh>
 
 namespace topk_select_radix {
 
 // The bf16 *chunked* entries' arm guard -- not the array bound, and not the
-// public contract.  Its two readers (`launch_topk_bf16_chunked_k`,
-// `launch_topk_bf16_chunked`) are on the way to an arm that instantiates `topk`
-// at compile time.  The runtime-k row entries (`radix_topk_row_bf16_b`,
+// public contract.  Its two readers (`launch_topk_bf16_chunked_k` and
+// `launch_typed_chunked`, which picks between the arms) are on the way to an
+// arm that instantiates `topk` at compile time.  The runtime-k row entries (`radix_topk_row_bf16_b`,
 // `radix_topk_row_f32`) do **not** read it, and the public contract is
 // `deep_select::kMaxTopK` = 4096 in `maca_topk.cu` -- which is why the fp32
 // side has its own `kF32MaxTopK` (4096) below rather than reusing this.
@@ -85,13 +86,14 @@ constexpr size_t kSMEM = KSMEM_BYTES;
 // 类型转换
 // ============================================================
 
-// The NaN predicates and the key encodes come from `../common/primitives.cuh`
-// (one definition, shared with the two ported dataflows and `maca_topk.cu`);
-// they are pulled in unqualified because every call site below is spelled that
-// way.
+// The NaN predicates and the key encodes come from `../common/primitives.cuh`,
+// the launch primitive from `../common/launch.cuh` (one definition each, shared
+// with the two ported dataflows and `maca_topk.cu`); they are pulled in
+// unqualified because every call site below is spelled that way.
 using topk_select_common::is_nan_bits32;
 using topk_select_common::bf16_is_nan;
 using topk_select_common::refine_bin;
+using topk_select_common::adopt_dynamic_smem;
 
 #ifdef __MACACC__
 constexpr int kWarpSize = 64;
@@ -223,37 +225,6 @@ __device__ __forceinline__ uint32_t run_cumsum_warp(
     __syncthreads();
     exclusive_suffix = val - self_count;
     return val;
-}
-
-// ── host-side kernel configuration ─────────────────────────────────────────
-//
-// Every launcher that stages in dynamic shared memory opts its kernel in to
-// that much before the first launch.  The opt-in is per function, so it is
-// done once and the launcher's `static bool` is what keeps
-// `cudaFuncSetAttribute` off the per-call path: measured 0.15 us per call on a
-// C600U, which every row-path launch used to pay.
-//
-// It is not a no-op in the other direction either.  On this platform the
-// default ceiling is the whole per-AP shared memory -- measured 131072 B on an
-// xcore1600 C600U -- so a call *lowers* the function's limit to the value it
-// asks for.  Each caller therefore asks for the largest block its own kernel is
-// ever launched with, which is what makes the value it installs the right one;
-// asking for a per-call size instead would fail the next, larger call.
-//
-// A failed adoption leaves `adopted` false, so the next launch retries rather
-// than launching against a ceiling the driver never accepted.  The flag is one
-// per kernel (per template instantiation); the operator's scratch already binds
-// a process to one device, so a once-per-process flag has the same lifetime as
-// the configuration it records.
-template <typename KernelT>
-inline cudaError_t adopt_dynamic_smem(KernelT kernel, size_t bytes,
-                                      bool &adopted) {
-    if (adopted) return cudaSuccess;
-    const cudaError_t err = cudaFuncSetAttribute(
-        (const void *)kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        (int)bytes);
-    if (err == cudaSuccess) adopted = true;
-    return err;
 }
 
 }  // namespace topk_select_radix

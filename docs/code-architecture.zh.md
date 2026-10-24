@@ -73,17 +73,18 @@ csrc/
 ├── ffi/                                    tvm-ffi ABI、错误宏、host check
 └── maca_kernels/
     ├── common/                             共享实现（每族产物都编它）
-    │   ├── primitives.cuh                  跨族原语（已落地）
+    │   ├── primitives.cuh                  跨族共享件：位运算 / NaN 位型 / 键编码 / cumsum（device）
+    │   ├── launch.cuh                      跨族共享件：`adopt_dynamic_smem`（host，启动原语）
     │   ├── maca_topk.cu                    唯一手写 TU：include + host 入口 + 按表派发
     │   ├── contract.cuh                    契约半：RowParams / 常量 / 键与 NaN / emit / 布局 / 行核与发射
-    │   ├── routing.cuh                     选路：形状 → 数据流（纯函数，一处可读）＋梯子 `select_route`（`topk_launch` 只分派）
+    │   ├── routing.cuh                     选路：形状 → 数据流（纯函数，一处可读）＋梯子 `select_route`＋每条路线的 `launch_typed_*`（`topk_launch` 只分派）
     │   ├── radix_core.cuh                  数据流入口（伞头：只 include 下面四个；TU 只 include 它）
-    │   ├── radix_common.cuh                行族共享件：常数 / smem 尺寸 / 直方图与后缀和
+    │   ├── radix_common.cuh                行族共享件：常数 / smem 尺寸 / 直方图与后缀和 / 分块几何
     │   ├── radix_row_bf16.cuh              bf16 行：radix 两趟 + skip 表 + overflow
     │   ├── radix_row_fp32.cuh              fp32 行：+ 溢出重扫
     │   ├── radix_chunked.cuh               两条 dtype 的分块 split/merge（阶段核 + 发射）
-    │   ├── topk_coarse12.cuh               deep_gemm 路线一（官方核名）
-    │   └── topk_chunks.cuh                 deep_gemm 路线二（官方核名）
+    │   ├── topk_coarse12.cuh               deep_gemm 路线一（数据流：核 + 核启动子；路线在 routing.cuh）
+    │   └── topk_chunks.cuh                 deep_gemm 路线二（数据流：核 + 核启动子；路线在 routing.cuh）
     └── xcore<N>/instantiations/*.cu        族层：每族自己的生成物（一个配置元组一个文件；今日三族同表，87 × 3）
 ```
 
@@ -95,8 +96,9 @@ csrc/
 
 ```
 topk_select_common::    跨族共享原语（原 deep_select_common）：位运算 / NaN 位型 /
-                        键编码 / cumsum。与官方同名同物——它里面的 bf16_is_nan
-                        本就来自官方的 topk_select_common（bit_utils.cuh）
+                        键编码 / cumsum（primitives.cuh，device），以及启动原语
+                        adopt_dynamic_smem（launch.cuh，host）。与官方同名同物——它
+                        里面的 bf16_is_nan 本就来自官方的 topk_select_common（bit_utils.cuh）
 topk_select_radix::     我方 radix 数据流（原 rk）：两趟行核（bf16 / fp32）+ chunked 分块
 topk_select_coarse12::  移植一（原 topk_select_radix::coarse12），与文件 / 核名 topk_coarse12_* 同词干
 topk_select_chunks::    移植二（原 topk_select_radix::chunks），与文件 / 核名 topk_chunks_* 同词干
@@ -126,14 +128,27 @@ deep_select::ffi::      平台无关边缘（不变）
    `topk_chunks`（按 chunk 切分的候选合并）说清了算法。官方名是**重要来源**——调用方与计时器按它接，
    且与文件里的 `__global__` 核名一致——但贴切才用；血统名（`dg12` / `dgchunks`）两样都不占，一律不用。
    公开 API 名（`topk` / `fp8_*` / `bf16_*` …）是 ABI，官方拼写**不动**（2026-09-21 裁定仍有效）。
-2. **依赖方向**（`X ← Y` 读作"Y include X"）：`primitives ← 数据流 ← contract ← routing ← TU(入口)`；
+2. **依赖方向**（`X ← Y` 读作"Y include X"）：`primitives/launch ← 数据流 ← contract ← routing ← TU(入口)`；
    python 侧 `interface → _binding → .so`。P2 落地后实测的两点修正，两条都有理由、不是懒：
    - `contract.cuh` include `radix_core.cuh`——契约半持有行核与它的布局/发射
      （`radix_layout` / `radix_select_row` / `launch_radix_config` / `launch_typed_radix`），
      所以它在数据流**之上**，不在其下。
    - `routing.cuh` include 两个移植头——梯子读它们的 `kSmemBytes` / `kMaxTopK`，且分块发射器
      是模板，定义必须在其实例化点可见。
-   数据流文件**不 include routing**（这条成立，是方向的承重面，必须保持）。
+   数据流文件**不 include routing、也不 include contract**（这条成立，是方向的承重面，必须保持）：
+   路线胶水——暂存检查、发射、交回契约半——一律在 `routing.cuh` 的 `launch_typed_*` 里，
+   数据流头只有核与它的启动子。两个移植头曾各自带一个 `launch_route`（因此 include 契约半），
+   2026-10-25 上移；`adopt_dynamic_smem` 也在同一次搬进 `launch.cuh`，否则移植头为它还得反向
+   够进 radix 命名空间。
+   - **同一次搬走的还有"选哪个臂"**：16 位 split 的 `topk` switch、chunks 的 chunk 数派发、
+     fp32 split 的 stage1→stage2 序列。理由不是分层美学，是**器件码**：mxcc 的 device pass 会编译
+     每个 TU 里**所有函数体**（`__host__` / `static` / `extern template` 都不拦），所以一个
+     **非模板 host 函数**只要名字里点到某个具体核（`launch_..._k<512>`），就把那个核拖进
+     **每一个 include 该头的 TU** 的 device image。实测：只 include `radix_core.cuh` 的探针
+     `.mc_fatbin` 540,669 B、带着全部 12 个 chunk 核；删掉 radix_chunked 那四个非模板派发器后
+     26,221 B（空基线）。xcore1600 产物因此 58,559,864 → 18,812,240 B，行 TU 的 fatbin
+     628,301 → 118,053 B，核符号集与尺寸逐项不变（77/77）。所以：**派发器只能住在
+     `maca_topk.cu` 可见的 `routing.cuh`**，数据流头里不放任何"点到具体实例"的非模板函数。
 3. **TU 结构**：手写 TU 恒为 1（`common/maca_topk.cu`）；设备核由生成出来的 `xcore<N>/instantiations/*.cu` 提供，
    每个文件一条显式实例化。`setup.py` 的源清单 = 手写清单 + 生成器的 `family_sources(family)`
    （直接调用生成器函数，不解析它的打印输出——清单只有一份，没有第二份可漂移）。

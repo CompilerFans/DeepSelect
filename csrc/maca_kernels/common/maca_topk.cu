@@ -48,11 +48,12 @@
 // is what proves it compiles under the mxcc/cu-bridge toolchain, and so that
 // the bf16 selection path in `contract.cuh` is a header-only dependency.
 #include <csrc/maca_kernels/common/radix_core.cuh>
-// The contract half, the two ported routes -- each of which includes the
-// contract half it hands its answer to -- and the routing that picks between
-// them.  The ladder itself is `routing.cuh`'s `select_route` (whose answer
-// `topk_launch` only switches on); what is left below is the scratch the
-// ladder is handed and the tvm-ffi entry.
+// The contract half, the two ported dataflows, and the routing that picks
+// between every route (the handoff each one ends on is `routing.cuh`'s: the
+// dataflow headers carry the kernels and their launchers, not the emit).  The
+// ladder itself is `routing.cuh`'s `select_route` (whose answer `topk_launch`
+// only switches on); what is left below is the scratch the ladder is handed
+// and the tvm-ffi entry.
 #include <csrc/maca_kernels/common/contract.cuh>
 #include <csrc/maca_kernels/common/topk_coarse12.cuh>
 #include <csrc/maca_kernels/common/topk_chunks.cuh>

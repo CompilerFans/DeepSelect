@@ -154,8 +154,8 @@ def row_instantiations() -> List[Instantiation]:
 # Four arms, twelve kernels: the 16-bit split's static-k arm (stage 1 x
 # `kNan`, stage 2 per `TOPK`), the same split's runtime-`topk` arm (stage 1 x
 # `kNan`, stage 2 once), and the fp32 split (stage 1 x `kNan`, stage 2 once).
-# The composing entry points (`launch_topk_bf16_chunked_k`,
-# `launch_topk_bf16_chunked`, `launch_topk_f32_chunked`) keep their names and
+# The composing entry points (`launch_topk_bf16_chunked_k`, and `routing.cuh`'s
+# `launch_typed_chunked` / `launch_typed_f32_chunked`, which pick the arm)
 # call these; they own no launch of their own.
 CHUNK_BLOCK = "kChunkBlockSize"
 F32_CHUNK_BLOCK = "kBlockSize"

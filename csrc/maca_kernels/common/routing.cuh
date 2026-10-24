@@ -2,8 +2,12 @@
 // how many chunks a split gets, and which block width the row kernel runs at.
 // The predicates here are pure functions of the shape and the device's AP
 // count; the ladder that reads them is `select_route` below, whose answer is
-// one `Route` value, and each route owns its own launch and emit
-// (`launch_route`).  `topk_launch` switches on that value and does nothing
+// one `Route` value, and each route's launch and emit is one `launch_typed_*`
+// here -- the row paths' via `launch_typed_radix` (`contract.cuh`, where the
+// emit lives) and the four staged ones via `launch_staged_or_row`.  The
+// handoff therefore lives above the dataflows, not inside them: a dataflow
+// header is the kernel and its launcher, nothing that knows about the
+// contract half.  `topk_launch` switches on the `Route` value and does nothing
 // else -- in particular it does not re-decide.
 #ifndef ROUTING_CUH
 #define ROUTING_CUH
@@ -229,7 +233,7 @@ struct ChunkedWorkspace {
 };
 
 // The split is 16-bit only.  `topk` 512 and 1024 are the static-k arms of the
-// merge; 2048 is carried by the runtime-k arms (`launch_topk_bf16_chunked`'s
+// merge; 2048 is carried by the runtime-k arms (`launch_typed_chunked`'s
 // default branch, already compiled) and is admitted on the 128 KiB parts only.
 // Measured on a 28-AP C600U, the DSA decode cells `b1-v{262144,524288,1048576}
 // -k2048` improve 24-60% over the row path and the k512 controls are unchanged
@@ -256,7 +260,7 @@ inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
     return batches <= params.vocab_size / kChunkedVocabPerRow;
 }
 
-// The split's three regions, in the order `launch_topk_bf16_chunked` takes
+// The split's three regions, in the order `launch_typed_chunked` takes
 // them: candidate columns, candidate values, merged answer.  One definition
 // for the size and for the carve below -- a layout spelled twice is a layout
 // that can disagree with itself, and the merge reads `candidate_values` with
@@ -331,7 +335,7 @@ inline int f32_chunks_for(uint32_t batches, int ceiling, uint32_t work_target) {
 
 // **The chunk count's own rule cannot see `topk`, and above 512 it is the
 // wrong axis.**  Stage 2's merge reads `num_chunks * topk` candidates per row
-// -- `candidate_stride` in `topk_select_radix::launch_topk_f32_chunks_stage2` -- and
+// -- `candidate_stride` in `topk_select_radix::launch_f32_chunk_stage2` -- and
 // `f32_chunks_for` sizes itself from the batch alone.  The batch rule is
 // already at the optimum for `topk <= 512`; above that the merge weights the
 // count and a `topk`-aware cap is what §8.6 added.  Small-batch tier only --
@@ -590,7 +594,7 @@ inline int f32_chunks_large_batch(uint32_t vocab_size, uint32_t sm_count) {
     // Same shape as the coarse12 gate's provenance half, and the same reason:
     // the `58` below was read off this device.
     if (sm_count != kF32Coarse12MeasuredSmCount) return 2;
-    // `c = 2` is the floor: `launch_topk_f32_chunks_stage1` rejects
+    // `c = 2` is the floor: `launch_f32_chunk_stage1` rejects
     // `num_chunks <= 1`, so fewer than two is not a split at all.
     const int c = (int)((vocab_size + kF32OverflowChunkLen - 1) / kF32OverflowChunkLen);
     return c < 2 ? 2 : c;
@@ -1181,13 +1185,39 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
             (int64_t)(params.stride_input_batch / sizeof(float)),
             params.vocab_size, (uint32_t)chunks, flags, batches, stream);
     }
-    const cudaError_t rc = topk_select_radix::launch_topk_f32_chunked(
-        (const float *)params.input, params.end_ptr, ws.cols, ws.vals,
-        ws.merged,
-        (int)batches, (int)params.vocab_size, (int)params.topk, chunks, stream,
-        // The row stride is in bytes at this layer and in elements there.
-        (int64_t)(params.stride_input_batch / sizeof(float)),
-        fuse_scan, flags);
+    // Stage 1 then stage 2, named here rather than in `radix_chunked.cuh` for
+    // the reason `launch_typed_chunked` records: a non-template function body
+    // in a header every kernel TU includes is compiled into every one of those
+    // TUs' device images, and these two names are concrete specializations.
+    //
+    // The three arenas are **arguments, not derived here**.  The caller already
+    // owns the workspace and places the split's regions inside it, so it is the
+    // one that knows the layout; re-deriving it in the dataflow was a second
+    // copy of the same arithmetic, and the two agreed only because they were
+    // written the same way.  `chunked_f32_cols` / `chunked_f32_vals` /
+    // `chunked_f32_out` remain as the definition of the layout, and the caller
+    // uses them.  The per-row NaN table is **not** a region of this workspace
+    // -- it is the dispatcher's own `scan_flags` allocation, passed separately,
+    // because a geometry-dependent offset into shared scratch is not a flag
+    // slot.
+    cudaError_t rc = fuse_scan
+        ? topk_select_radix::launch_f32_chunk_stage1<true>(
+              (const float *)params.input, params.end_ptr, ws.cols, ws.vals,
+              (int)batches, (int)params.vocab_size, (int)params.topk, chunks,
+              stream,
+              // The row stride is in bytes at this layer and in elements there.
+              (int64_t)(params.stride_input_batch / sizeof(float)), flags)
+        : topk_select_radix::launch_f32_chunk_stage1<false>(
+              (const float *)params.input, params.end_ptr, ws.cols, ws.vals,
+              (int)batches, (int)params.vocab_size, (int)params.topk, chunks,
+              stream,
+              (int64_t)(params.stride_input_batch / sizeof(float)), flags);
+    if (rc == cudaSuccess) {
+        rc = topk_select_radix::launch_f32_chunk_stage2<
+            (int)topk_select_radix::kF32ChunkBlocks>(
+            ws.vals, ws.cols, ws.merged, (int)batches, (int)params.topk, chunks,
+            stream);
+    }
     // A failed launch answers through the row path, which reads no flag table;
     // the handoff clears anything a partially launched split raised.
     launch_staged_or_row<float, OutIdxT>(params, batches, stream, sorted_index,
@@ -1213,19 +1243,151 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
     // contract half reads and clears it; only a failure after a partial launch
     // can leave a raised slot behind, and that clear follows the launch.
     int32_t *const flags = params.check_nan ? params.scan_flags : nullptr;
-    const cudaError_t rc = topk_select_radix::launch_topk_bf16_chunked(
-        (const maca_bfloat16 *)params.input, params.end_ptr, ws.merged,
-        ws.candidate_indices, ws.candidate_values, (int)batches,
-        (int)params.vocab_size, (int)params.topk, chunks, stream,
-        // The row stride is in bytes at this layer and in elements there.
-        (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)),
-        params.check_nan, flags);
+    const maca_bfloat16 *const scores = (const maca_bfloat16 *)params.input;
+    // The row stride is in bytes at this layer and in elements there.
+    const int64_t score_stride =
+        (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16));
+    // The `topk` switch is here rather than in `radix_chunked.cuh` for the
+    // reason `launch_typed_f32_chunked` records: a non-template function body
+    // in a header every kernel TU includes is compiled into every one of those
+    // TUs' device images, and every arm below names a concrete kernel.  The
+    // gate is the dataflow's own -- `chunked_bf16_applies` admits only 512 and
+    // 1024, so the static-k arms are the ones a real call takes and the
+    // runtime-`topk` pair is the arm for a shape the gate has yet to admit.
+    cudaError_t rc = cudaErrorInvalidValue;
+    const int topk = (int)params.topk;
+    if (topk <= topk_select_radix::kMaxTopK && chunks > 1) {
+        switch (topk) {
+        case 512:
+            rc = topk_select_radix::launch_topk_bf16_chunked_k<512>(
+                scores, params.end_ptr, ws.merged, ws.candidate_indices,
+                ws.candidate_values, (int)batches, (int)params.vocab_size,
+                chunks, stream, score_stride, params.check_nan, flags);
+            break;
+        case 1024:
+            rc = topk_select_radix::launch_topk_bf16_chunked_k<1024>(
+                scores, params.end_ptr, ws.merged, ws.candidate_indices,
+                ws.candidate_values, (int)batches, (int)params.vocab_size,
+                chunks, stream, score_stride, params.check_nan, flags);
+            break;
+        default:
+            rc = params.check_nan
+                ? topk_select_radix::launch_bf16_chunk_stage1_runtime<true>(
+                      scores, params.end_ptr, ws.candidate_indices,
+                      ws.candidate_values, (int)batches, (int)params.vocab_size,
+                      topk, chunks, stream, score_stride, flags)
+                : topk_select_radix::launch_bf16_chunk_stage1_runtime<false>(
+                      scores, params.end_ptr, ws.candidate_indices,
+                      ws.candidate_values, (int)batches, (int)params.vocab_size,
+                      topk, chunks, stream, score_stride, flags);
+            if (rc == cudaSuccess) {
+                rc = topk_select_radix::launch_bf16_chunk_stage2_runtime<
+                    topk_select_radix::kChunkBlockSize>(
+                    ws.candidate_values, ws.candidate_indices, ws.merged,
+                    (int)batches, chunks, topk, stream);
+            }
+            break;
+        }
+    }
     // The row path that answers a failed split reads no flag table, so the
     // handoff clears a slot a partial launch raised rather than leaving it for
     // the next call to mis-read.
     launch_staged_or_row<maca_bfloat16, OutIdxT>(
         params, batches, stream, sorted_index, sorted_value, return_value,
         block, rc == cudaSuccess, ws.merged, /*clear_flags_on_failure=*/true);
+}
+
+// The coarse12 route's launch and emit.  The kernel answers in row *columns*,
+// which are int32 by nature, so it cannot write the caller's buffer directly;
+// the columns are staged and the contract half widens them the way it widens
+// the split's answer.  The gate that admits this route is
+// `f32_coarse12_applies` above; what is here is everything after the
+// decision.
+template <typename OutIdxT>
+void launch_typed_coarse12(const RowParams &params, uint32_t batches,
+                           cudaStream_t stream, bool sorted_index,
+                           bool sorted_value, bool return_value, int block) {
+    int32_t *const staging = params.coarse12_cols;
+    bool launched = false;
+    if (staging != nullptr) {
+        // No split, no workspace of its own, no NaN table of its own: this
+        // kernel walks each row itself and answers in row columns, so the
+        // contract half below is the only other thing that touches the row
+        // -- and it is a pass over the *answer*, not over the input.
+        // `params.end_ptr` is the row table the dispatcher already
+        // populated with the scratch's all-`vocab_size` entry when the
+        // caller passed no `end`, which is the same table the split reads.
+        // `params.vocab_size` -- not the row stride -- is the width to
+        // scan.  They agree for a full-width tensor and differ the moment
+        // the caller hands over a column slice of a wider matrix, which is
+        // exactly what the benchmark harness does (`s[:, :L]`): the kernel
+        // would then walk past the live prefix and rank columns that are
+        // outside the tensor the caller asked about.
+        launched = topk_select_coarse12::launch_topk_coarse12(
+            (const float *)params.input, params.end_ptr, staging,
+            params.scan_flags, (int)batches, (int)params.topk,
+            (int64_t)(params.stride_input_batch / sizeof(float)),
+            (int)params.vocab_size, params.coarse12_block_max,
+            params.coarse12_block_list, stream) == cudaSuccess;
+    }
+    // Hand the answer to the contract half the way the split does, so its
+    // per-row `-1` check decides row by row: a row this kernel could not
+    // serve, or one whose window is no longer than `topk`, comes back with an
+    // empty slot and is re-ranked by the row path.  A launch that did not
+    // happen leaves the buffer untouched and answers that way too -- as does
+    // an allocation that could not be made.
+    //
+    // One kernel, so a failed launch means nothing ran: there is no partial
+    // work whose scan flag could have survived, which is why this route
+    // clears nothing (`clear_flags_on_failure = false`).
+    launch_staged_or_row<float, OutIdxT>(
+        params, batches, stream, sorted_index, sorted_value, return_value, block,
+        launched, staging, /*clear_flags_on_failure=*/false);
+}
+
+// The chunks route's launch and emit, on the same handoff as the coarse12
+// route: the kernels answer in row columns, the contract half reads them out
+// of the staging scratch, and a row they could not serve leaves an empty slot
+// there for the contract half to re-rank on the row path.  The gate that
+// admits this route is `f32_chunks_applies` above.
+template <typename OutIdxT>
+void launch_typed_chunks(const RowParams &params, uint32_t batches,
+                         cudaStream_t stream, bool sorted_index,
+                         bool sorted_value, bool return_value, int block) {
+    int32_t *const staging = params.coarse12_cols;
+    bool launched = false;
+    // The chunk-count dispatch is here rather than in `topk_chunks.cuh` for the
+    // reason `launch_typed_f32_chunked` records -- the `NChunks` cases name
+    // concrete kernels, and a non-template body over them lands in every
+    // including TU's device image.
+    const int topk = (int)params.topk;
+    cudaError_t rc = cudaErrorInvalidValue;  // 0 chunks: the shape declines
+    if (staging != nullptr && params.chunks_workspace != nullptr &&
+        topk <= topk_select_chunks::kMaxTopK) {
+        const int chunks = topk_select_chunks::select_chunk_count(
+            (int)batches, (int64_t)params.vocab_size, params.sm_count);
+        topk_select_chunks::dispatch_chunk_count(
+            chunks, [&]<int N>() {
+                rc = topk_select_chunks::launch_topk_chunks_impl<N>(
+                    (const float *)params.input, params.end_ptr, staging,
+                    params.scan_flags, params.chunks_workspace, (int)batches,
+                    topk,
+                    (int64_t)(params.stride_input_batch / sizeof(float)),
+                    (int)params.vocab_size, stream);
+            });
+        launched = rc == cudaSuccess;
+    }
+    // This route is three launches, and the histogram one raises the scan
+    // table.  A later stage's launch failing leaves that kernel's work in
+    // flight while the row path answers this call -- and the row path reads
+    // no flag table, so anything raised would sit there until the next call
+    // that uses this table read a stale 1 as its own answer.  Cleared by the
+    // handoff for the same reason the splits clear theirs after a failed
+    // launch; unreachable through the gate, and cheap enough not to depend on
+    // that.
+    launch_staged_or_row<float, OutIdxT>(
+        params, batches, stream, sorted_index, sorted_value, return_value, block,
+        launched, staging, /*clear_flags_on_failure=*/true);
 }
 
 // Every route below is templated on the index width, and `index_dtype` is the
@@ -1366,12 +1528,12 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
                     block, chunked_workspace);
                 break;
             case detail::Route::kF32Chunks:
-                topk_select_chunks::launch_route<OutIdxT>(
+                detail::launch_typed_chunks<OutIdxT>(
                     params, n, cuda_stream, sorted_index, sorted_value, rv,
                     block);
                 break;
             case detail::Route::kF32Coarse12:
-                topk_select_coarse12::launch_route<OutIdxT>(
+                detail::launch_typed_coarse12<OutIdxT>(
                     params, n, cuda_stream, sorted_index, sorted_value, rv,
                     block);
                 break;
