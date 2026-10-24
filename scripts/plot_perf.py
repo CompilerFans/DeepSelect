@@ -23,10 +23,12 @@ README picks the one it displays.
 
 The upstream figures are in TB/s over a fixed 0-7 axis; these are in GB/s over a
 range fitted to the data, because these parts' read wall is a fraction of an
-H200's and a shared 0-7 TB/s axis would leave every bar a sliver.  What is
-matched is the rest of the style: the two series' colours, the boxed legend, the
-per-panel `batch = N` titles, the dotted horizontal grid, the `16K`-style tick
-labels and the `-- {device}` suffix each title carries.
+H200's and a shared 0-7 TB/s axis would leave every bar a sliver.  The panel
+layout is upstream's (one panel per batch size, boxed legend, `16K`-style tick
+labels, a `-- {device}` suffix on each title); the marks are drawn with a
+two-hue categorical pair on a `#fcfcfb` surface, a solid hairline grid, and a
+thin surface-coloured edge on every bar so adjacent fills read as separate
+marks rather than one block.
 
 The CSV is written by `scripts/perf_snapshot.py`; the timings in it are
 `tests/test.py`'s own, one row per (cell, backend).  Only `maca_c` and `torch`
@@ -60,9 +62,15 @@ REPO = Path(__file__).resolve().parent.parent
 PERF_ROOT = REPO / "perf_data"
 DEFAULT_ASSETS = REPO / "assets"
 
-# Upstream's own series colours, sampled from `assets/perf_bf16_cuda.png`.
-COLOR_MACA = "#66ccfe"
-COLOR_TORCH = "#ed0000"
+# A validated two-hue categorical pair (blue / orange).  Not sampled from the
+# upstream figures: red-on-cyan is a poor pair for CVD readers, and the
+# validator used here is the one the dataviz procedure requires.
+COLOR_MACA = "#2a78d6"
+COLOR_TORCH = "#eb6834"
+SURFACE = "#fcfcfb"
+INK = "#1f1f1f"
+INK_MUTED = "#6b6b66"
+GRID = "#dcdcd7"
 
 # A recording directory's name, `YYYYmmdd_HHMMSS`.
 STAMP = re.compile(r"\d{8}_\d{6}")
@@ -232,26 +240,39 @@ def _axis_top(panels, headroom=HEADROOM):
 
 
 def _grouped_bars(ax, positions, maca, torch_ref):
-    """One `maca_c`/`torch` bar pair per position, over matching values lists."""
+    """One `maca_c`/`torch` bar pair per position, over matching values lists.
+
+    The bars carry a surface-coloured edge rather than a darker one: the pair's
+    two fills touch, and the shared edge is what separates them.  A contrasting
+    stroke would draw an outline around every bar and read as a third mark.
+    """
+    edge = dict(edgecolor=SURFACE, linewidth=0.9)
     ax.bar([p - BAR_WIDTH / 2 for p, v in zip(positions, maca) if v is not None],
            [v for v in maca if v is not None], BAR_WIDTH,
-           color=COLOR_MACA, label="DeepSelect")
+           color=COLOR_MACA, label="DeepSelect", **edge)
     ax.bar([p + BAR_WIDTH / 2 for p, v in zip(positions, torch_ref) if v is not None],
            [v for v in torch_ref if v is not None], BAR_WIDTH,
-           color=COLOR_TORCH, label="torch.topk")
+           color=COLOR_TORCH, label="torch.topk", **edge)
 
 
 def _finish_axes(ax, ticks, labels, title, xlabel, top, ylabel=None):
+    ax.set_facecolor(SURFACE)
     ax.set_xticks(ticks)
     ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_title(title, fontsize=10)
-    ax.set_xlabel(xlabel, fontsize=9)
-    ax.grid(True, axis="y", linestyle=":", linewidth=0.6, alpha=0.5)
+    ax.set_title(title, fontsize=10, color=INK)
+    ax.set_xlabel(xlabel, fontsize=9, color=INK_MUTED)
+    ax.grid(True, axis="y", linestyle="-", linewidth=0.5, color=GRID)
     ax.set_axisbelow(True)
-    ax.tick_params(axis="y", labelsize=8)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
+        ax.spines[side].set_linewidth(0.8)
+    ax.tick_params(axis="y", labelsize=8, colors=INK_MUTED)
+    ax.tick_params(axis="x", colors=INK_MUTED)
     ax.set_ylim(0, top)
     if ylabel:
-        ax.set_ylabel(ylabel, fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=9, color=INK_MUTED)
 
 
 def plot_bf16(rows, output: Path) -> bool:
@@ -275,21 +296,22 @@ def plot_bf16(rows, output: Path) -> bool:
     top = _axis_top(panels)
 
     fig, axes = plt.subplots(1, len(batches), figsize=(14.0, 4.15), dpi=160,
-                             sharey=True, squeeze=False)
+                             sharey=True, squeeze=False, facecolor=SURFACE)
     x = list(range(len(vocabs)))
     for ax, batch, (maca_bars, torch_bars) in zip(axes[0], batches, panels):
         _grouped_bars(ax, x, maca_bars, torch_bars)
         _finish_axes(ax, x, [_vocab_label(v) for v in vocabs],
                      f"batch = {batch}", "vocab_size", top)
-    axes[0][0].set_ylabel("Effective bandwidth (GB/s)", fontsize=9)
-    axes[0][0].legend(frameon=True, fontsize=8, loc="upper left")
+    axes[0][0].set_ylabel("Effective bandwidth (GB/s)", fontsize=9, color=INK_MUTED)
+    axes[0][0].legend(frameon=True, fontsize=8, loc="upper left",
+                      facecolor=SURFACE, edgecolor=GRID, labelcolor=INK)
     title = "bf16, topk = 512: DeepSelect vs torch.topk"
     fig.suptitle(f"{title} ({PLATFORM}, {chip})" if chip
-                 else f"{title} ({PLATFORM})", fontsize=11)
+                 else f"{title} ({PLATFORM})", fontsize=11, color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, bbox_inches="tight")
+    fig.savefig(output, bbox_inches="tight", facecolor=SURFACE)
     plt.close(fig)
     peak = max(v for maca_bars, torch_bars in panels
                for v in maca_bars + torch_bars if v is not None)
@@ -317,18 +339,19 @@ def plot_fp32(rows, output: Path) -> bool:
     torch_bars = [torch_ref.get((b, 129280)) for b in batches]
     top = _axis_top([(maca_bars, torch_bars)])
 
-    fig, ax = plt.subplots(figsize=(6.75, 4.3), dpi=160)
+    fig, ax = plt.subplots(figsize=(6.75, 4.3), dpi=160, facecolor=SURFACE)
     _grouped_bars(ax, list(range(len(batches))), maca_bars, torch_bars)
     title = "fp32, vocab_size = 129280, topk = 512: DeepSelect vs torch.topk"
     _finish_axes(ax, list(range(len(batches))), [str(b) for b in batches],
                  f"{title} ({PLATFORM}, {chip})" if chip
                  else f"{title} ({PLATFORM})", "batch_size", top,
                  ylabel="Effective bandwidth (GB/s)")
-    ax.legend(frameon=True, fontsize=8, loc="upper left")
+    ax.legend(frameon=True, fontsize=8, loc="upper left",
+              facecolor=SURFACE, edgecolor=GRID, labelcolor=INK)
     fig.tight_layout()
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, bbox_inches="tight")
+    fig.savefig(output, bbox_inches="tight", facecolor=SURFACE)
     plt.close(fig)
     peak = max(v for v in maca_bars + torch_bars if v is not None)
     print(f"fp32: {len(batches)} batch sizes, peak {peak:.1f} GB/s on a "
