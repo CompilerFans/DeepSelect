@@ -1,0 +1,315 @@
+chip MetaX_C600-A  device MetaX C600-A  sm 32  backends ['maca_c', 'torch']  cases 147
+case                                          backend   status         kernel us     wall us      GB/s
+offic/bflo b6-v256-k512                       maca_c    pass               2.944      74.086          
+offic/bflo b6-v256-k512                       torch     pass                                            [not applicable: the reference back]
+offic/bflo b6-v1024-k512                      maca_c    pass              12.288      68.787          
+offic/bflo b6-v1024-k512                      torch     pass              27.622       28.16          
+offic/bflo b6-v4096-k512                      maca_c    pass               13.67      66.662          
+offic/bflo b6-v4096-k512                      torch     pass               45.21      45.568          
+offic/bflo b6-v16384-k512                     maca_c    pass              20.557      68.352          
+offic/bflo b6-v16384-k512                     torch     pass             115.098     114.765          
+offic/bflo b6-v65536-k512                     maca_c    pass              34.074      66.304          
+offic/bflo b6-v65536-k512                     torch     pass             162.842      167.27          
+offic/bflo b6-v131072-k512                    maca_c    pass              47.258      70.042          
+offic/bflo b6-v131072-k512                    torch     pass             191.898     172.134          
+offic/bflo b6-v262144-k512                    maca_c    pass              63.155       98.79          
+offic/bflo b6-v262144-k512                    torch     pass             239.898     219.085          
+offic/bflo b6-v524288-k512                    maca_c    pass              82.867      98.739          
+offic/bflo b6-v524288-k512                    torch     pass             379.725     358.195          
+offic/bflo b6-v1048576-k512                   maca_c    pass             111.283      116.71          
+offic/bflo b6-v1048576-k512                   torch     pass             565.914     546.662          
+offic/bflo b256-v256-k512                     maca_c    pass               5.325      68.352          
+offic/bflo b256-v256-k512                     torch     pass                                            [not applicable: the reference back]
+  ... 10/147 cases (0.2s)
+offic/bflo b256-v1024-k512                    maca_c    pass              29.133      71.168          
+offic/bflo b256-v1024-k512                    torch     pass             171.622     174.234          
+offic/bflo b256-v4096-k512                    maca_c    pass              37.478      75.059          
+offic/bflo b256-v4096-k512                    torch     pass             261.939     241.331          
+offic/bflo b256-v16384-k512                   maca_c    pass              66.688       75.52          
+offic/bflo b256-v16384-k512                   torch     pass             571.238     552.192          
+offic/bflo b256-v65536-k512                   maca_c    pass             162.995      171.52          
+offic/bflo b256-v65536-k512                   torch     pass            1377.178    1361.664          
+offic/bflo b256-v131072-k512                  maca_c    pass             238.925     247.782          
+offic/bflo b256-v131072-k512                  torch     pass            2371.917    2358.067          
+offic/bflo b256-v262144-k512                  maca_c    pass             334.592     343.091          
+offic/bflo b256-v262144-k512                  torch     pass            4416.282    4408.627          
+offic/bflo b256-v524288-k512                  maca_c    pass             512.179     520.781          
+offic/bflo b256-v524288-k512                  torch     pass            8415.232    8407.757          
+offic/bflo b256-v1048576-k512                 maca_c    pass             868.198      877.03          
+offic/bflo b256-v1048576-k512                 torch     pass           16443.213   16464.998          
+offic/bflo b512-v256-k512                     maca_c    pass               7.808      69.018          
+offic/bflo b512-v256-k512                     torch     pass                                            [not applicable: the reference back]
+offic/bflo b512-v1024-k512                    maca_c    pass              50.253      69.376          
+offic/bflo b512-v1024-k512                    torch     pass             329.523     332.851          
+  ... 20/147 cases (0.3s)
+offic/bflo b512-v4096-k512                    maca_c    pass              68.659      79.002          
+offic/bflo b512-v4096-k512                    torch     pass             305.792     287.974          
+offic/bflo b512-v16384-k512                   maca_c    pass              122.65     130.202          
+offic/bflo b512-v16384-k512                   torch     pass             753.101      734.95          
+offic/bflo b512-v65536-k512                   maca_c    pass             301.747     310.144          
+offic/bflo b512-v65536-k512                   torch     pass            2551.501     2533.12          
+offic/bflo b512-v131072-k512                  maca_c    pass             441.446     448.358          
+offic/bflo b512-v131072-k512                  torch     pass              4560.0    4544.256          
+offic/bflo b512-v262144-k512                  maca_c    pass             621.389     629.325          
+offic/bflo b512-v262144-k512                  torch     pass            8629.299    8627.123          
+offic/bflo b512-v524288-k512                  maca_c    pass              971.11      980.71          
+offic/bflo b512-v524288-k512                  torch     pass           16483.891   16485.504          
+offic/bflo b512-v1048576-k512                 maca_c    pass            1654.477    1662.848          
+offic/bflo b512-v1048576-k512                 torch     pass           32630.093   32645.068          
+offic/bflo b768-v256-k512                     maca_c    pass              10.138      68.685          
+offic/bflo b768-v256-k512                     torch     pass                                            [not applicable: the reference back]
+offic/bflo b768-v1024-k512                    maca_c    pass              70.579      80.077          
+offic/bflo b768-v1024-k512                    torch     pass             487.731     491.366          
+offic/bflo b768-v4096-k512                    maca_c    pass              98.918     107.904          
+offic/bflo b768-v4096-k512                    torch     pass             389.965     370.253          
+  ... 30/147 cases (0.4s)
+offic/bflo b768-v16384-k512                   maca_c    pass              180.25     191.667          
+offic/bflo b768-v16384-k512                   torch     pass            1039.846    1020.467          
+offic/bflo b768-v65536-k512                   maca_c    pass             439.552     447.206          
+offic/bflo b768-v65536-k512                   torch     pass            3694.208    3684.327          
+offic/bflo b768-v131072-k512                  maca_c    pass             645.658      654.31          
+offic/bflo b768-v131072-k512                  torch     pass            6719.002    6712.473          
+offic/bflo b768-v262144-k512                  maca_c    pass             908.928     917.478          
+offic/bflo b768-v262144-k512                  torch     pass           12703.462   12709.299          
+offic/bflo b768-v524288-k512                  maca_c    pass            1422.438     1431.04          
+offic/bflo b768-v524288-k512                  torch     pass           24798.669   24807.706          
+offic/bflo b768-v1048576-k512                 maca_c    pass            2446.771    2454.733          
+offic/bflo b768-v1048576-k512                 torch     pass           48797.747    48801.23          
+offic/bflo b4096-v256-k512                    maca_c    pass              39.424      66.995          
+offic/bflo b4096-v256-k512                    torch     pass                                            [not applicable: the reference back]
+offic/bflo b4096-v1024-k512                   maca_c    pass             338.739     347.494          
+offic/bflo b4096-v1024-k512                   torch     pass             723.942     703.693          
+offic/bflo b4096-v4096-k512                   maca_c    pass             486.656     496.128          
+offic/bflo b4096-v4096-k512                   torch     pass            1481.062    1463.885          
+offic/bflo b4096-v16384-k512                  maca_c    pass             884.122     890.906          
+offic/bflo b4096-v16384-k512                  torch     pass            4558.925    4546.125          
+  ... 40/147 cases (0.5s)
+offic/bflo b4096-v65536-k512                  maca_c    pass            2227.635    2235.776          
+offic/bflo b4096-v65536-k512                  torch     pass            18650.01   18651.878          
+offic/bflo b4096-v131072-k512                 maca_c    pass            3239.834    3245.824          
+offic/bflo b4096-v131072-k512                 torch     pass           35007.642   35017.831          
+offic/bflo b4096-v262144-k512                 maca_c    pass            4644.864    4650.189          
+offic/bflo b4096-v262144-k512                 torch     pass           69148.595   69161.627          
+offic/bflo b4096-v524288-k512                 maca_c    pass             7335.91    7343.385          
+offic/bflo b4096-v524288-k512                 torch     pass          138615.654   138625.72          
+offic/bflo b4096-v1048576-k512                maca_c    pass           12696.269   12706.816          
+offic/bflo b4096-v1048576-k512                torch     pass          271233.203  271252.051          
+offic/bflo b6-v256-k1024                      maca_c    pass               2.944      69.606          
+offic/bflo b6-v256-k1024                      torch     pass                                            [not applicable: the reference back]
+offic/bflo b6-v1024-k1024                     maca_c    pass               2.944      66.893          
+offic/bflo b6-v1024-k1024                     torch     pass              25.293      26.394          
+offic/bflo b6-v4096-k1024                     maca_c    pass              13.952      72.192          
+offic/bflo b6-v4096-k1024                     torch     pass              43.162      43.776          
+offic/bflo b6-v16384-k1024                    maca_c    pass              21.709      72.141          
+offic/bflo b6-v16384-k1024                    torch     pass             114.586     112.973          
+offic/bflo b6-v65536-k1024                    maca_c    pass              39.859      70.246          
+offic/bflo b6-v65536-k1024                    torch     pass             162.458     141.235          
+  ... 50/147 cases (0.4s)
+offic/bflo b6-v131072-k1024                   maca_c    pass              58.317      70.733          
+offic/bflo b6-v131072-k1024                   torch     pass             189.491     167.885          
+offic/bflo b6-v262144-k1024                   maca_c    pass              73.139      94.131          
+offic/bflo b6-v262144-k1024                   torch     pass             257.331      235.29          
+offic/bflo b6-v524288-k1024                   maca_c    pass              90.854      97.818          
+offic/bflo b6-v524288-k1024                   torch     pass             346.906     326.861          
+offic/bflo b6-v1048576-k1024                  maca_c    pass             132.224     136.243          
+offic/bflo b6-v1048576-k1024                  torch     pass             580.762     560.179          
+offic/bflo b256-v256-k1024                    maca_c    pass               5.581      69.402          
+offic/bflo b256-v256-k1024                    torch     pass                                            [not applicable: the reference back]
+offic/bflo b256-v1024-k1024                   maca_c    pass               5.734      66.074          
+offic/bflo b256-v1024-k1024                   torch     pass             148.122     150.938          
+offic/bflo b256-v4096-k1024                   maca_c    pass              40.064      67.558          
+offic/bflo b256-v4096-k1024                   torch     pass             259.354     239.923          
+offic/bflo b256-v16384-k1024                  maca_c    pass              72.064      80.486          
+offic/bflo b256-v16384-k1024                  torch     pass             584.166     566.118          
+offic/bflo b256-v65536-k1024                  maca_c    pass             192.768     201.882          
+offic/bflo b256-v65536-k1024                  torch     pass            1391.898    1373.619          
+offic/bflo b256-v131072-k1024                 maca_c    pass             298.291     306.867          
+offic/bflo b256-v131072-k1024                 torch     pass            2413.158    2390.451          
+  ... 60/147 cases (0.4s)
+offic/bflo b256-v262144-k1024                 maca_c    pass             443.213      450.79          
+offic/bflo b256-v262144-k1024                 torch     pass             4425.19    4417.869          
+offic/bflo b256-v524288-k1024                 maca_c    pass             636.365     643.942          
+offic/bflo b256-v524288-k1024                 torch     pass             8511.77    8507.187          
+offic/bflo b256-v1048576-k1024                maca_c    pass             999.091     1006.31          
+offic/bflo b256-v1048576-k1024                torch     pass           16483.866   16490.369          
+offic/bflo b512-v256-k1024                    maca_c    pass               8.218      74.061          
+offic/bflo b512-v256-k1024                    torch     pass                                            [not applicable: the reference back]
+offic/bflo b512-v1024-k1024                   maca_c    pass               8.192      67.251          
+offic/bflo b512-v1024-k1024                   torch     pass             288.179     291.763          
+offic/bflo b512-v4096-k1024                   maca_c    pass              73.651      82.202          
+offic/bflo b512-v4096-k1024                   torch     pass             307.354     289.485          
+offic/bflo b512-v16384-k1024                  maca_c    pass             133.376      141.85          
+offic/bflo b512-v16384-k1024                  torch     pass             763.341     744.166          
+offic/bflo b512-v65536-k1024                  maca_c    pass              355.61     364.467          
+offic/bflo b512-v65536-k1024                  torch     pass            2586.138    2573.901          
+offic/bflo b512-v131072-k1024                 maca_c    pass             553.651     561.766          
+offic/bflo b512-v131072-k1024                 torch     pass            4612.864    4595.021          
+offic/bflo b512-v262144-k1024                 maca_c    pass             821.325      830.08          
+offic/bflo b512-v262144-k1024                 torch     pass            8627.917    8624.589          
+  ... 70/147 cases (0.7s)
+offic/bflo b512-v524288-k1024                 maca_c    pass            1194.214    1201.946          
+offic/bflo b512-v524288-k1024                 torch     pass           16703.616   16714.548          
+offic/bflo b512-v1048576-k1024                maca_c    pass            1889.152    1897.805          
+offic/bflo b512-v1048576-k1024                torch     pass           33026.074   33033.139          
+offic/bflo b768-v256-k1024                    maca_c    pass              10.624      72.832          
+offic/bflo b768-v256-k1024                    torch     pass                                            [not applicable: the reference back]
+offic/bflo b768-v1024-k1024                   maca_c    pass              10.573      67.533          
+offic/bflo b768-v1024-k1024                   torch     pass             425.549     428.211          
+offic/bflo b768-v4096-k1024                   maca_c    pass             106.189     114.662          
+offic/bflo b768-v4096-k1024                   torch     pass             392.474     372.173          
+offic/bflo b768-v16384-k1024                  maca_c    pass             193.613     202.522          
+offic/bflo b768-v16384-k1024                  torch     pass            1037.773    1016.858          
+offic/bflo b768-v65536-k1024                  maca_c    pass             517.376     526.464          
+offic/bflo b768-v65536-k1024                  torch     pass            3761.843      3750.4          
+offic/bflo b768-v131072-k1024                 maca_c    pass             806.323     814.413          
+offic/bflo b768-v131072-k1024                 torch     pass            6773.786    6766.361          
+offic/bflo b768-v262144-k1024                 maca_c    pass            1201.562    1209.062          
+offic/bflo b768-v262144-k1024                 torch     pass           12826.138   12832.999          
+offic/bflo b768-v524288-k1024                 maca_c    pass            1748.787    1756.902          
+offic/bflo b768-v524288-k1024                 torch     pass           24831.642   24850.227          
+  ... 80/147 cases (1.3s)
+offic/bflo b768-v1048576-k1024                maca_c    pass            2779.955    2788.557          
+offic/bflo b768-v1048576-k1024                torch     pass           48955.955   48973.621          
+offic/bflo b4096-v256-k1024                   maca_c    pass              43.238      73.421          
+offic/bflo b4096-v256-k1024                   torch     pass                                            [not applicable: the reference back]
+offic/bflo b4096-v1024-k1024                  maca_c    pass              42.803       67.43          
+offic/bflo b4096-v1024-k1024                  torch     pass             723.174     703.206          
+offic/bflo b4096-v4096-k1024                  maca_c    pass             529.971     537.165          
+offic/bflo b4096-v4096-k1024                  torch     pass            1489.306    1469.875          
+offic/bflo b4096-v16384-k1024                 maca_c    pass             973.312     981.274          
+offic/bflo b4096-v16384-k1024                 torch     pass            4584.653    4574.643          
+offic/bflo b4096-v65536-k1024                 maca_c    pass            2590.797    2598.938          
+offic/bflo b4096-v65536-k1024                 torch     pass           18958.566    18970.88          
+offic/bflo b4096-v131072-k1024                maca_c    pass             4096.64     4106.65          
+offic/bflo b4096-v131072-k1024                torch     pass           35303.859   35316.147          
+offic/bflo b4096-v262144-k1024                maca_c    pass             6103.91    6112.154          
+offic/bflo b4096-v262144-k1024                torch     pass           69758.387   69760.229          
+offic/bflo b4096-v524288-k1024                maca_c    pass            8962.688    8969.498          
+offic/bflo b4096-v524288-k1024                torch     pass          139110.554  139114.807          
+offic/bflo b4096-v1048576-k1024               maca_c    pass           14389.606     14400.0          
+offic/bflo b4096-v1048576-k1024               torch     pass          272232.525  272255.762          
+  ... 90/147 cases (10.1s)
+offic/bflo b1-v131072-k512                    maca_c    pass              48.282      66.227          
+offic/bflo b1-v131072-k512                    torch     pass             131.942     135.014          
+offic/bflo b1-v262144-k512                    maca_c    pass              43.059      93.594          
+offic/bflo b1-v262144-k512                    torch     pass             151.373     134.707          
+offic/bflo b1-v1048576-k512                   maca_c    pass              64.358      95.002          
+offic/bflo b1-v1048576-k512                   torch     pass              229.99     208.256          
+offic/bflo b64-v131072-k512                   maca_c    pass              75.238      82.662          
+offic/bflo b64-v131072-k512                   torch     pass             749.798     732.595          
+offic/bflo b64-v262144-k512                   maca_c    pass             101.939     108.928          
+offic/bflo b64-v262144-k512                   torch     pass            1278.413    1258.931          
+offic/bflo b64-v1048576-k512                  maca_c    pass             244.685     254.643          
+offic/bflo b64-v1048576-k512                  torch     pass            4286.131    4275.584          
+offic/bflo b128-v131072-k512                  maca_c    pass             138.675     147.072          
+offic/bflo b128-v131072-k512                  torch     pass             1318.63     1299.84          
+offic/bflo b128-v262144-k512                  maca_c    pass             185.856     192.947          
+offic/bflo b128-v262144-k512                  torch     pass            2300.032    2285.133          
+offic/bflo b128-v1048576-k512                 maca_c    pass             448.563     455.757          
+offic/bflo b128-v1048576-k512                 torch     pass            8326.784      8339.2          
+offic/bflo b1-v131072-k1024                   maca_c    pass              56.013      72.499          
+offic/bflo b1-v131072-k1024                   torch     pass             131.405     135.629          
+  ... 100/147 cases (0.4s)
+offic/bflo b1-v262144-k1024                   maca_c    pass              50.432      98.918          
+offic/bflo b1-v262144-k1024                   torch     pass             152.064     132.941          
+offic/bflo b1-v1048576-k1024                  maca_c    pass               76.39      98.611          
+offic/bflo b1-v1048576-k1024                  torch     pass              219.93     198.144          
+offic/bflo b64-v131072-k1024                  maca_c    pass              88.986      97.792          
+offic/bflo b64-v131072-k1024                  torch     pass             770.714      752.87          
+offic/bflo b64-v262144-k1024                  maca_c    pass             130.483     138.163          
+offic/bflo b64-v262144-k1024                  torch     pass            1259.827    1247.309          
+offic/bflo b64-v1048576-k1024                 maca_c    pass             283.674     290.714          
+offic/bflo b64-v1048576-k1024                 torch     pass            4305.613    4296.448          
+offic/bflo b128-v131072-k1024                 maca_c    pass             164.736     172.595          
+offic/bflo b128-v131072-k1024                 torch     pass            1339.392    1317.248          
+offic/bflo b128-v262144-k1024                 maca_c    pass             242.509     252.365          
+offic/bflo b128-v262144-k1024                 torch     pass            2345.165     2332.57          
+offic/bflo b128-v1048576-k1024                maca_c    pass             514.867     522.291          
+offic/bflo b128-v1048576-k1024                torch     pass            8359.373    8358.733          
+offic/bflo b1-v131072-k2048                   maca_c    pass               95.36       96.87          
+offic/bflo b1-v131072-k2048                   torch     pass             130.381     157.875          
+offic/bflo b1-v262144-k2048                   maca_c    pass              63.872      92.621          
+offic/bflo b1-v262144-k2048                   torch     pass             150.605     133.146          
+  ... 110/147 cases (0.4s)
+offic/bflo b1-v1048576-k2048                  maca_c    pass               89.19      96.768          
+offic/bflo b1-v1048576-k2048                  torch     pass              223.77     202.086          
+offic/bflo b64-v131072-k2048                  maca_c    pass             128.358     136.806          
+offic/bflo b64-v131072-k2048                  torch     pass             765.466     748.698          
+offic/bflo b64-v262144-k2048                  maca_c    pass             200.627     209.331          
+offic/bflo b64-v262144-k2048                  torch     pass             1293.44    1274.163          
+offic/bflo b64-v1048576-k2048                 maca_c    pass             419.917     427.034          
+offic/bflo b64-v1048576-k2048                 torch     pass            4319.078    4308.326          
+offic/bflo b128-v131072-k2048                 maca_c    pass             196.198     205.338          
+offic/bflo b128-v131072-k2048                 torch     pass            1343.283    1321.984          
+offic/bflo b128-v262144-k2048                 maca_c    pass             316.058     323.738          
+offic/bflo b128-v262144-k2048                 torch     pass            2347.981    2332.877          
+offic/bflo b128-v1048576-k2048                maca_c    pass             693.197     700.646          
+offic/bflo b128-v1048576-k2048                torch     pass            8451.482    8449.971          
+offic/floa b6-v129280-k512                    maca_c    pass              89.805     102.477          
+offic/floa b6-v129280-k512                    torch     pass             271.411     273.638          
+offic/floa b256-v129280-k512                  maca_c    pass             350.925     357.581          
+offic/floa b256-v129280-k512                  torch     pass            3144.474    3189.197          
+offic/floa b512-v129280-k512                  maca_c    pass             651.955     659.866          
+offic/floa b512-v129280-k512                  torch     pass             5920.87      6028.8          
+  ... 120/147 cases (0.6s)
+offic/floa b768-v129280-k512                  maca_c    pass             949.658     957.568          
+offic/floa b768-v129280-k512                  torch     pass            8670.925    8850.356          
+offic/floa b4096-v129280-k512                 maca_c    pass            4806.016    4814.746          
+offic/floa b4096-v129280-k512                 torch     pass           45621.094   46602.011          
+deep_/floa b1-v66551-k2048                    maca_c    pass              70.784       83.43          
+deep_/floa b1-v66551-k2048                    torch     pass             183.578     232.038          
+deep_/floa b16-v66551-k2048                   maca_c    pass              70.016      78.259          
+deep_/floa b16-v66551-k2048                   torch     pass              307.61     292.634          
+deep_/floa b132-v66551-k2048                  maca_c    pass              163.43     169.344          
+deep_/floa b132-v66551-k2048                  torch     pass            1097.344    1192.269          
+deep_/floa b512-v66551-k2048                  maca_c    pass             457.216     463.539          
+deep_/floa b512-v66551-k2048                  torch     pass            3213.005    3670.938          
+deep_/floa b1-v131072-k2048                   maca_c    pass             118.349     116.096          
+deep_/floa b1-v131072-k2048                   torch     pass             187.187     232.883          
+deep_/floa b1-v131072-k2048                   maca_c    pass             118.016     115.763          
+deep_/floa b1-v131072-k2048                   torch     pass             189.491     165.402          
+deep_/floa b1-v131072-k2048                   maca_c    pass             120.192     117.914          
+deep_/floa b1-v131072-k2048                   torch     pass             186.854     234.086          
+deep_/floa b1-v131072-k2048                   maca_c    pass              128.41     126.029          
+deep_/floa b1-v131072-k2048                   torch     pass             187.187     164.685          
+  ... 130/147 cases (0.4s)
+deep_/floa b132-v131072-k2048                 maca_c    pass              260.71     266.394          
+deep_/floa b132-v131072-k2048                 torch     pass            1793.459    1767.654          
+deep_/floa b132-v131072-k2048                 maca_c    pass             261.504     266.931          
+deep_/floa b132-v131072-k2048                 torch     pass            1798.451    1761.664          
+deep_/floa b132-v131072-k2048                 maca_c    pass             260.326     265.779          
+deep_/floa b132-v131072-k2048                 torch     pass            1798.195    1774.054          
+deep_/floa b132-v131072-k2048                 maca_c    pass             261.069     266.931          
+deep_/floa b132-v131072-k2048                 torch     pass             1800.32    1773.363          
+deep_/floa b256-v131072-k2048                 maca_c    pass             387.814     394.112          
+deep_/floa b256-v131072-k2048                 torch     pass            3193.062    3186.432          
+deep_/floa b256-v131072-k2048                 maca_c    pass             387.968     393.549          
+deep_/floa b256-v131072-k2048                 torch     pass            3199.923     3172.48          
+deep_/floa b256-v131072-k2048                 maca_c    pass             387.866     393.062          
+deep_/floa b256-v131072-k2048                 torch     pass            3162.726    3145.011          
+deep_/floa b256-v131072-k2048                 maca_c    pass             388.326     394.522          
+deep_/floa b256-v131072-k2048                 torch     pass             3186.15    3158.323          
+deep_/floa b4096-v131072-k2048                maca_c    pass             5323.52     5329.51          
+deep_/floa b4096-v131072-k2048                torch     pass           46454.144   46544.974          
+deep_/floa b4096-v131072-k2048                maca_c    pass            5323.392    5329.894          
+deep_/floa b4096-v131072-k2048                torch     pass           46488.934    46600.04          
+  ... 140/147 cases (2.1s)
+deep_/floa b4096-v131072-k2048                maca_c    pass            5327.053    5329.357          
+deep_/floa b4096-v131072-k2048                torch     pass           46466.432   46558.105          
+deep_/floa b4096-v131072-k2048                maca_c    pass            5321.446    5327.104          
+deep_/floa b4096-v131072-k2048                torch     pass           46387.891   46510.925          
+deep_/floa b1-v107520-k2048                   maca_c    pass             140.339     140.186          
+deep_/floa b1-v107520-k2048                   torch     pass              193.69     230.707          
+deep_/floa b16-v66551-k2048                   maca_c    pass              70.963      78.566          
+deep_/floa b16-v66551-k2048                   torch     pass             308.813     294.374          
+deep_/floa b132-v107520-k2048                 maca_c    pass             217.728     223.795          
+deep_/floa b132-v107520-k2048                 torch     pass            1508.941    1484.211          
+deep_/floa b256-v107520-k2048                 maca_c    pass             324.992     333.133          
+deep_/floa b256-v107520-k2048                 torch     pass            2602.112    2576.947          
+deep_/floa b4096-v107520-k2048                maca_c    pass            4450.816    4459.725          
+deep_/floa b4096-v107520-k2048                torch     pass           36971.034   37056.461          
+
+wrote perf_data/MetaX_C600-A/20261024_061341/deepselect_perf.csv  (294 rows, 147 cases)
+  maca_c     pass         147
+  torch      pass         147
+# exit 0

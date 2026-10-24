@@ -1,11 +1,32 @@
 # CHANGELOG
 
-Notable changes, newest first.  This repository is the C500/C600U `topk`
+Notable changes, newest first.  This repository is the C500/C600/C600U `topk`
 operator; the performance work and its evidence live in
 `docs/C500-radix-perf-ledger.zh.md`, and every number quoted here has a section
 there.
 
 ## Unreleased
+
+### The same commit, built and measured on both C600 boards
+
+`ef57dcc` was built and validated on two machines rather than one: MetaX
+C600-A (32 AP, family 1500, artifact `4cdaee40f496`) and MetaX C600-U (28 AP,
+family 1600, `98af089849a0`).  On each, `tests/contract_test.py` is 73/70,
+`scripts/wheel_smoke.py --allow-checkout` 12/12, `tools/sample_gate.py
+--sample 8000 --seed 20261024` 8000/8000, and all eight `run_bench.sh` stages
+pass.  Records: `perf_data/MetaX_C600-A/20261024_061341`,
+`perf_data/MetaX_C600-U/20261024_062159`; the four README figures are rendered
+from those two CSVs.  `docs/release-validation-c600-boards.zh.md` is the
+record, and it states what was **not** run (the 105,138-case full table, and
+C500/xcore1000).
+
+The one new finding is an environment fact, not a defect here: deep_gemm 0.6.0
+ships an xcore1600 image and **no xcore1500 image**, so on C600-A its first
+call dies with `ErrorNoBinaryForGpu`, poisons the context, and truncates the
+snapshot at 125/147.  That board's record therefore runs `--backends
+maca_c,torch`; the 25 selector cells are still timed by both of those.  On
+C600-U the three-backend run is complete (147 cells, deep_gemm 25 pass /
+122 unsupported).
 
 ### One dispatch table in one TU: the wheel drops from 527 MB to 63 MB
 

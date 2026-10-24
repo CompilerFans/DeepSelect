@@ -1,0 +1,45 @@
+# run_bench.sh    device_dir=MetaX_C600-A
+# timestamp_utc   2026-10-24T06:13:42Z
+# host            mx-cjxu-ws-cr-2026102410053200003ea7
+# extension       /root/github/DeepSelect/deep_select/deep_select_maca_xcore1500.so
+# extension_md5   4cdaee40f496ac7789cb23e9fbb5b808
+# cuda_visible_devices 1
+# backends        maca_c,torch
+# STALE           no
+# ---
+# mx-smi
+mx-smi  version: 2.3.4
+
+=================== MetaX System Management Interface Log ===================
+Timestamp                                         : Sat Oct 24 06:13:42 2026
+
+Attached GPUs                                     : 2
++---------------------------------------------------------------------------------+
+| MX-SMI 2.3.4                       Kernel Mode Driver Version: 3.9.6            |
+| MACA Version: 3.0.1436.20261017    BIOS Version: 2.3.3.0                        |
+|------------------+-----------------+---------------------+----------------------|
+| Board       Name | GPU   Persist-M | Bus-id              | GPU-Util      sGPU-M |
+| Pwr:Usage/Cap    | Temp       Perf | Memory-Usage        | GPU-State            |
+|==================+=================+=====================+======================|
+| 0   MetaX C600-A | 0           Off | 0000:86:00.0        | 99%         Disabled |
+| NA / 850W        | 41C          P9 | 750/73728 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+| 1   MetaX C600-A | 1           Off | 0000:c6:00.0        | 0%          Disabled |
+| NA / 850W        | 42C          P0 | 198/73728 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+
++---------------------------------------------------------------------------------+
+| Process:                                                                        |
+|  GPU                    PID         Process Name                 GPU Memory     |
+|                                                                  Usage(MiB)     |
+|=================================================================================|
+|  0                    28807         python                       568            |
++---------------------------------------------------------------------------------+
+
+End of Log
+# pgrep -af python
+#   28807 /opt/conda/bin/python /root/busy.py
+
+# ---
+# run_bench.sh: finished rc=0
+# out             perf_data/MetaX_C600-A/20261024_061341
