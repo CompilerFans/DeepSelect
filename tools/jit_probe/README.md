@@ -2,8 +2,9 @@
 
 ## 这是什么
 
-`third-party/DeepJIT`(gitlink `6763222`,`main` 分支;原 `main` 已备份为
-`main-pre-maca-tvm-ffi`)—— 官方
+`third-party/DeepJIT`(gitlink `1c81a45`,`main` 分支;`54d85dd` 是发布准备
+提交——MetaX 版权头、上游同步与注释清理,`1c81a45` 更正 CLAUDE.md 里消费者与
+fmt 的描述;原 `main` 已备份为 `main-pre-maca-tvm-ffi`)—— 官方
 DeepGEMM 的 header-only JIT 层(MACA 后端的下游)。自 `712f2a3` 起它只保留
 MACA 后端,并把 pybind11 模块换成 TVM FFI 的 `get_jit()` 句柄;本 harness 走
 的是纯 C++ 头(`runtime/` + `backend/maca/`),不受那次绑定层改动影响。`third-party/fmt`(12.1.0,**完整源码树**,与 mcDeepGEMM 同形:
@@ -79,6 +80,16 @@ passed.`。skip 的是 `cooperative launch`:这一代 MACA 驱动接受 2^20 块
 cooperative 网格并分波执行而不是拒绝,harness 现在按能力跳过而不是判失败。
 root 下还有一条 NOTE —— `/proc` 条目的 mtime 改得动,只读 secondary cache
 那一半前提不成立,lookup 那半照常跑。
+
+更新到 `1c81a45` 后在 MetaX C600-U(28 AP)上重跑:`tests/test_maca.py` 在
+两台设备均可见时 **52 passed / 1 skipped / 0 failed**,`55 cache entries
+validated`(只可见一台时是 51/2/0、54 条,差别就是 `multiple devices` 一条);
+`tests/test_exception.py` RC=0。集成探针在同一棵树的 device 1 上重跑:
+flatten 63 行,`build.sh` 构建通过(`ldd` 把 `libc10.so` 解到 torch 的
+`lib/`),`/tmp/jit_probe` 在仓库根目录直接运行(不再需要
+`DEEP_SELECT_REPO`);`KCHUNK_BLOCK_SIZE=512` 80.4 µs / 156.5 GB/s、`1024`
+90.9 µs / 138.5 GB/s,两组 `contract: PASS`,RC=0。探针时间是接入验证的
+收据,不是性能记录(同一 pod 上 device 0 仍有 keepalive)。
 
 ## 宿主编译器改用 SDK 自带的 mxcc(2026-10-24,DeepJIT `6763222`)
 
