@@ -193,10 +193,10 @@ P5 的另一半是**把模板改成配置结构**（`template <typename Cfg> __g
 所以每个生成文件实例化的是一个 host 函数 `launch_radix_config<Cfg>`，**函数体持有该核唯一的
 `<<<>>>`**——设备码与唯一发射点同 TU。同一枚硬币的另一面：头文件里的**非模板** `__global__` 被
 两个 TU include 就是 `__device_stub__` 重复定义（链接错误），因此树里每个核都是模板——含原本不是的
-五个（chunked 两个 stage 2、coarse12、`nan_abort_kernel`），各自以自己既有的
-块宽/线程数为模板参数（1024 / 512 / 640 / 128）。其余三族（chunked 两阶段 /
+五个（split 两个 stage 2、coarse12、`nan_abort_kernel`），各自以自己既有的
+块宽/线程数为模板参数（1024 / 512 / 640 / 128）。其余三族（split 两阶段 /
 coarse12 / chunks）的元组轴同一步里从各自发射点枚举，逐族一张表、逐元组一个文件：**87**
-（行核 60 / chunked 12 / chunks 12 / coarse12 1 / contract 2）。
+（row 60 / split 12 / coarse12 1 / chunks 12 / nan 2）。
 
 表的两份副本（`contract.cuh` 的 X-macro 清单、生成器的文件表）由**收据**对齐，不由约定：
 第一版 X-macro 把可达的 `(SI,RV,SV)=(1,1,0)` 抄成了不可达的 `(0,0,1)`，产物**照常链接**

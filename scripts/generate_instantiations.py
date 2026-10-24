@@ -97,8 +97,8 @@ def _inst(group, name, namespace, header, instantiation) -> Instantiation:
 
 # The headers are the shared implementation in `common/`; an instantiation
 # directory sits two levels below it.
-ROW_HEADER = "<csrc/maca_kernels/common/contract.cuh>"
-CHUNKED_HEADER = "<csrc/maca_kernels/common/radix_chunked.cuh>"
+CONTRACT_HEADER = "<csrc/maca_kernels/common/contract.cuh>"
+SPLIT_HEADER = "<csrc/maca_kernels/common/radix_chunked.cuh>"
 COARSE12_HEADER = "<csrc/maca_kernels/common/topk_coarse12.cuh>"
 CHUNKS_HEADER = "<csrc/maca_kernels/common/topk_chunks.cuh>"
 
@@ -109,6 +109,10 @@ CHUNKS_HEADER = "<csrc/maca_kernels/common/topk_chunks.cuh>"
 # also the spelling the table in `maca_topk.cu` uses.  The two lists must agree;
 # a tuple here that the table does not carry is an unused instantiation, and one
 # the table wants that this list does not carry is an undefined symbol.
+#
+# The 60 tuples are two arms of that one kernel: `PRE=false` (30) is the row
+# dataflow selecting for itself, and `PRE=true` (30) is the contract half
+# emitting a row whose candidates a staged route already chose.
 ROW_VALUE_TYPES = (("bf16", "maca_bfloat16"), ("fp32", "float"))
 ROW_INDEX_TYPES = (("i32", "int32_t"), ("i64", "int64_t"))
 # (SI, SV, RV).  `sorted_value` implies `return_value` and is exclusive with
@@ -139,13 +143,13 @@ def row_instantiations() -> List[Instantiation]:
                             "row",
                             f"value_{value_tag}_outidx_{idx_tag}_block_{block}"
                             f"_si{si}_rv{rv}_sv{sv}_pre{pre}",
-                            "deep_select::detail", ROW_HEADER,
+                            "deep_select::detail", CONTRACT_HEADER,
                             f"template void launch_radix_config<{cfg}>(\n"
                             f"    {ROW_SIGNATURE});"))
     return out
 
 
-# ── chunked: the two splits' stages ─────────────────────────────────────────
+# ── split: the two-stage split's stage kernels ──────────────────────────────
 #
 # Four arms, twelve kernels: the 16-bit split's static-k arm (stage 1 x
 # `kNan`, stage 2 per `TOPK`), the same split's runtime-`topk` arm (stage 1 x
@@ -157,13 +161,13 @@ CHUNK_BLOCK = "kChunkBlockSize"
 F32_CHUNK_BLOCK = "kBlockSize"
 
 
-def chunked_instantiations() -> List[Instantiation]:
+def split_instantiations() -> List[Instantiation]:
     out = []
     for topk in (512, 1024):
         for nan in (0, 1):
             out.append(_inst(
-                "chunked", f"bf16_stage1_k_topk{topk}_nan{nan}",
-                "topk_select_radix", CHUNKED_HEADER,
+                "split", f"bf16_stage1_k_topk{topk}_nan{nan}",
+                "topk_select_radix", SPLIT_HEADER,
                 f"template cudaError_t launch_bf16_chunk_stage1_k<{topk}u, "
                 f"{_b(nan)}>(\n"
                 "    const maca_bfloat16 *scores, const int32_t *lengths,\n"
@@ -171,38 +175,38 @@ def chunked_instantiations() -> List[Instantiation]:
                 "    int B, int L, int num_chunks, cudaStream_t stream,\n"
                 "    int64_t score_stride, int32_t *nan_flags);"))
         out.append(_inst(
-            "chunked", f"bf16_stage2_k_topk{topk}",
-            "topk_select_radix", CHUNKED_HEADER,
+            "split", f"bf16_stage2_k_topk{topk}",
+            "topk_select_radix", SPLIT_HEADER,
             f"template cudaError_t launch_bf16_chunk_stage2_k<{topk}u>(\n"
             "    const maca_bfloat16 *candidate_values,\n"
             "    const int32_t *candidate_indices, int32_t *indices, int B,\n"
             "    int num_chunks, cudaStream_t stream);"))
     for nan in (0, 1):
         out.append(_inst(
-            "chunked", f"bf16_stage1_topk_runtime_nan{nan}",
-            "topk_select_radix", CHUNKED_HEADER,
+            "split", f"bf16_stage1_topk_runtime_nan{nan}",
+            "topk_select_radix", SPLIT_HEADER,
             f"template cudaError_t launch_bf16_chunk_stage1_runtime<{_b(nan)}>(\n"
             "    const maca_bfloat16 *scores, const int32_t *lengths,\n"
             "    int32_t *candidate_indices, maca_bfloat16 *candidate_values,\n"
             "    int B, int L, int topk, int num_chunks, cudaStream_t stream,\n"
             "    int64_t score_stride, int32_t *nan_flags);"))
     out.append(_inst(
-        "chunked", "bf16_stage2_topk_runtime",
-        "topk_select_radix", CHUNKED_HEADER,
+        "split", "bf16_stage2_topk_runtime",
+        "topk_select_radix", SPLIT_HEADER,
         f"template cudaError_t launch_bf16_chunk_stage2_runtime<{CHUNK_BLOCK}>(\n"
         "    const maca_bfloat16 *candidate_values,\n"
         "    const int32_t *candidate_indices, int32_t *indices, int B,\n"
         "    int num_chunks, int topk, cudaStream_t stream);"))
     for nan in (0, 1):
         out.append(_inst(
-            "chunked", f"fp32_stage1_nan{nan}",
-            "topk_select_radix", CHUNKED_HEADER,
+            "split", f"fp32_stage1_nan{nan}",
+            "topk_select_radix", SPLIT_HEADER,
             f"template cudaError_t launch_f32_chunk_stage1<{_b(nan)}>(\n"
             "    const float *scores, const int32_t *lengths, int32_t *cols,\n"
             "    float *vals, int B, int L, int topk, int num_chunks,\n"
             "    cudaStream_t stream, int64_t score_stride, int32_t *nan_flags);"))
     out.append(_inst(
-        "chunked", "fp32_stage2", "topk_select_radix", CHUNKED_HEADER,
+        "split", "fp32_stage2", "topk_select_radix", SPLIT_HEADER,
         f"template cudaError_t launch_f32_chunk_stage2<{F32_CHUNK_BLOCK}>(\n"
         "    const float *vals, const int32_t *cols, int32_t *out, int B,\n"
         "    int topk, int num_chunks, cudaStream_t stream);"))
@@ -254,7 +258,7 @@ def chunks_instantiations() -> List[Instantiation]:
     return out
 
 
-# ── the contract group ──────────────────────────────────────────────────────
+# ── nan: the NaN contract's device half ─────────────────────────────────────
 #
 # It is not shape-selected: its two kernels are launched from the ladder and the
 # entry point rather than chosen by a predicate.  They are in the table because
@@ -262,14 +266,14 @@ def chunks_instantiations() -> List[Instantiation]:
 # launches it -- and the file count is what says so.
 
 
-def contract_instantiations() -> List[Instantiation]:
+def nan_instantiations() -> List[Instantiation]:
     return [
-        _inst("contract", "nan_scan_fp32", "deep_select", ROW_HEADER,
+        _inst("nan", "nan_scan_fp32", "deep_select", CONTRACT_HEADER,
               "template void launch_nan_scan<float>(\n"
               "    const void *input, const int32_t *lengths, int64_t stride_elems,\n"
               "    uint32_t vocab_size, uint32_t chunks, int32_t *flags,\n"
               "    uint32_t batches, cudaStream_t stream);"),
-        _inst("contract", "nan_abort", "deep_select", ROW_HEADER,
+        _inst("nan", "nan_abort", "deep_select", CONTRACT_HEADER,
               "template void launch_nan_abort<kNanAbortBlock>(\n"
               "    const int32_t *flags, uint32_t batches, cudaStream_t stream);"),
     ]
@@ -285,9 +289,9 @@ def family_instantiations(family: int) -> List[Instantiation]:
     """
     if family not in FAMILIES:
         raise ValueError(f"unknown family {family!r}; known: {FAMILIES}")
-    return (row_instantiations() + chunked_instantiations()
+    return (row_instantiations() + split_instantiations()
             + coarse12_instantiations() + chunks_instantiations()
-            + contract_instantiations())
+            + nan_instantiations())
 
 
 def family_sources(family: int) -> List[str]:
