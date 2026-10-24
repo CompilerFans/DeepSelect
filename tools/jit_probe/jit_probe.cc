@@ -2,12 +2,14 @@
 // stage1 kernel at two KCHUNK_BLOCK_SIZE variants through DeepJIT, replacing
 // an 8-minute AOT arm build with ~30 s of runtime compiles.
 //
-// Build with ./build.sh (cucc).  Run from the repo root:
-//   DEEP_SELECT_REPO=$PWD /tmp/jit_probe
+// Build with ./build.sh (cucc).  The repository root is the working directory
+// unless DEEP_SELECT_REPO names one:
+//   /tmp/jit_probe
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <cuda_runtime.h>
@@ -26,7 +28,8 @@ int kChunks = 18;
 
 int main(int argc, char** argv) try {
     const char* repo_env = std::getenv("DEEP_SELECT_REPO");
-    const std::string repo = repo_env ? repo_env : "/root/github/DeepSelect";
+    const std::string repo =
+        repo_env ? repo_env : std::filesystem::current_path().string();
     const char* maca = std::getenv("MACA_PATH");
     DJ_HOST_ASSERT(maca != nullptr, "MACA_PATH must be set");
     const std::string maca_path(maca);
