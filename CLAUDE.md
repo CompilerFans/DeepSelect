@@ -382,6 +382,12 @@ hand-written TU (`common/maca_topk.cu`) plus `generated_sources(family)`, the 87
 (one device kernel per file, the file name *is* the configuration tuple). There
 is no second kernel tree and no environment variable that adds one: a second
 tree would be a source change to that function, which is the point.
+**`python3 scripts/generate_instantiations.py --check` verifies the three
+directories against the tables without writing** — content, not just names, and
+exit status non-zero on any `missing` / `extra` / `differs` — so a hand edit or a
+tree one table edit behind is caught by a command rather than by a build that
+compiles one family's older tuples.  (`setup.py` already refuses a table file
+that is absent; what it cannot see is a body that no longer matches its row.)
 
 The port was not retired for tidiness: it selects wrong on a C600U (see the
 removal record below), and the C500-derived kernel is the **better** artifact

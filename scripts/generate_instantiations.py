@@ -5,9 +5,17 @@ Usage, from the repo root:
     python3 scripts/generate_instantiations.py                  # every family
     python3 scripts/generate_instantiations.py xcore1600        # one family
     python3 scripts/generate_instantiations.py <instantiation_dir>
+    python3 scripts/generate_instantiations.py --check          # verify only
 
 Creates one .cu per kernel, then prints the paths (repo-root relative) to copy
 into `setup.py`'s `sources`.
+
+`--check` writes nothing: it rebuilds each family's expected file set in memory
+and compares it with what is on disk -- content, not just names -- and exits
+non-zero on any drift.  The three directories are the generator's output and
+nothing else maintains them, so a hand edit, a half-regenerated tree, or one
+family regenerated after a table change is caught here rather than by a build
+that quietly compiles one family's older tuples.
 
 The one kernel tree it generates is **`csrc/maca_kernels/xcore<N>/instantiations/`**
 -- what family <N>'s artifact compiles, and the default argument (all three
@@ -312,16 +320,32 @@ def group_counts(instantiations: List[Instantiation]) -> List[tuple]:
     return counts
 
 
-def write_family(family: int) -> List[Instantiation]:
-    """Remake the family's directory and write one file per tuple."""
-    out_dir = instantiation_dir(family)
-    if os.path.exists(out_dir):
-        shutil.rmtree(out_dir)
-    os.makedirs(out_dir)
+def _checked(family: int) -> List[Instantiation]:
+    """The family's table, with the one invariant a file name carries checked."""
     everything = family_instantiations(family)
     names = [i.file_name for i in everything]
     if len(set(names)) != len(names):
         raise ValueError("two tuples share a file name")
+    return everything
+
+
+def file_texts(family: int) -> dict:
+    """The family's expected file set: `{file name: text}`, from the tables.
+
+    One description of the output -- the tables plus `Instantiation.file_text()`
+    -- read by both the writer and `--check`, so the checker cannot certify
+    something the writer would not produce.
+    """
+    return {i.file_name: i.file_text() for i in _checked(family)}
+
+
+def write_family(family: int) -> List[Instantiation]:
+    """Remake the family's directory and write one file per tuple."""
+    out_dir = instantiation_dir(family)
+    everything = _checked(family)
+    if os.path.exists(out_dir):
+        shutil.rmtree(out_dir)
+    os.makedirs(out_dir)
     for inst in everything:
         with open(os.path.join(out_dir, inst.file_name),
                   "w", encoding="utf-8") as f:
@@ -329,36 +353,78 @@ def write_family(family: int) -> List[Instantiation]:
     return everything
 
 
-def main(target: str):
-    # `target` is a family spelled `xcore<N>`, or a family's instantiation
-    # directory's path.
-    family = None
+def check_family(family: int) -> List[str]:
+    """The family's drift against the tables, one line per file.  Empty is clean.
+
+    Compares content, not only names: `setup.py` rejects a table file that is
+    missing, so the name-side check is already made at build; what it cannot see
+    is a file whose body no longer matches its table row, a table file no longer
+    produced, or a directory one table edit behind.
+    """
+    expected = file_texts(family)
+    out_dir = instantiation_dir(family)
+    if not os.path.isdir(out_dir):
+        return [f"the directory is missing: {out_dir}"]
+    on_disk = sorted(n for n in os.listdir(out_dir) if n.endswith(".cu"))
+    problems = []
+    for name in sorted(set(expected) - set(on_disk)):
+        problems.append(f"missing  {name}")
+    for name in sorted(set(on_disk) - set(expected)):
+        problems.append(f"extra    {name}")
+    for name in sorted(set(expected) & set(on_disk)):
+        with open(os.path.join(out_dir, name), encoding="utf-8") as f:
+            if f.read() != expected[name]:
+                problems.append(f"differs  {name}")
+    return problems
+
+
+def resolve_family(target: str) -> int:
+    """A family spelled `xcore<N>`, or a family's instantiation directory."""
     if target.startswith("xcore") and target[len("xcore"):].isdigit():
         family = int(target[len("xcore"):])
     else:
         norm = os.path.normpath(target)
-        for f in FAMILIES:
-            if norm == os.path.relpath(instantiation_dir(f), REPO_ROOT):
-                family = f
-                break
-    if family is None:
+        family = next(
+            (f for f in FAMILIES
+             if norm == os.path.relpath(instantiation_dir(f), REPO_ROOT)),
+            None)
+    if family not in FAMILIES:
         raise ValueError(f"Invalid `target: {target}")
+    return family
+
+
+def main(target: str, check: bool = False) -> int:
+    family = resolve_family(target)
+    if check:
+        problems = check_family(family)
+        print(f"xcore{family}: {len(file_texts(family))} expected, "
+              f"{'clean' if not problems else str(len(problems)) + ' differ'}",
+              file=sys.stderr)
+        for line in problems:
+            print(f"  {line}", file=sys.stderr)
+        return 0 if not problems else 1
     written = write_family(family)
     for group, count in group_counts(written):
         print(f"# {group}: {count}", file=sys.stderr)
     print(f"# total: {len(written)}", file=sys.stderr)
     for path in family_sources(family):
         print(f"\"{path}\",")
+    return 0
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 2:
-        print(f"Usage: {sys.argv[0]} [xcore<N>|<instantiation_dir>]",
+    argv = sys.argv[1:]
+    check = "--check" in argv
+    argv = [a for a in argv if a != "--check"]
+    if len(argv) > 1:
+        print(f"Usage: {sys.argv[0]} [--check] [xcore<N>|<instantiation_dir>]",
               file=sys.stderr)
         sys.exit(1)
-    if len(sys.argv) == 2:
-        main(sys.argv[1])
-    else:
-        # No argument is every family this build compiles.
-        for f in FAMILIES:
-            main(f"xcore{f}")
+    # No target is every family this build compiles.
+    status = 0
+    for target in (argv or [f"xcore{f}" for f in FAMILIES]):
+        status |= main(target, check)
+    if check:
+        print("# check: clean" if status == 0 else "# check: DRIFT",
+              file=sys.stderr)
+    sys.exit(status)

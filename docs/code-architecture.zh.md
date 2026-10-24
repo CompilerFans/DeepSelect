@@ -41,6 +41,8 @@ scripts/generate_instantiations.py  setup.py  tests/{test.py, lib.py, kernelkit/
 - 生成器**同时打印 setup.py 要收的源清单**（`generate_instantiations.py:10-11`），所以"编哪些实例"是数据，不是散在
   host 代码里的 switch；
 - 元组表（生成器）与调用点（`api.cu` 的 `TopkSelectConfig<…>` 实参）是两半，不一致报**链接错误**。
+- 三个 family 目录由生成器独占维护：`python3 scripts/generate_instantiations.py --check`
+  只读比对文件名与文件内容（`missing` / `extra` / `differs`），有漂移即非零退出。
 
 结论：官方的实例化是**文件清单 + 一张表**；派发是**按表查**。这正是"文件层次清晰、易改"的机械保证——
 增删一个实例是一次生成 + 一行表，不是在一万行里找一个 switch 分支。
