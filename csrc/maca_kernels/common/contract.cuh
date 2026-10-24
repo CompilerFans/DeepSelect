@@ -1,9 +1,9 @@
-// The contract half: `RowParams`, the window shortcut, the NaN bit-pattern
-// check, the index offsets, the out-of-band fills and the optional ordered
-// emit -- one layer every mode shares, over whichever dataflow the routing
-// picked.  The radix row kernel below is what emits the answer; which of the
-// two row dataflows it ranks with is the dtype's decision (`radix_select_row`),
-// not the routing's.
+// The contract half: `RowParams`, `OutputSpec`, the window shortcut, the NaN
+// bit-pattern check, the index offsets, the out-of-band fills and the optional
+// ordered emit -- one layer every mode shares, over whichever dataflow the
+// routing picked.  The radix row kernel below is what emits the answer; which
+// of the two row dataflows it ranks with is the dtype's decision
+// (`radix_select_row`), not the routing's.
 #ifndef CONTRACT_CUH
 #define CONTRACT_CUH
 
@@ -159,6 +159,40 @@ struct RowParams {
     // reads it.  The abort answered here instead cost this kernel 15 MT of
     // registers (see that kernel).
     bool check_nan;
+};
+
+// ── the answer's shape: the caller's three output switches, as one value ────
+//
+// `topk()` takes them as three separate booleans -- that signature is
+// upstream's and stays -- and it is the one place they stay three, because it
+// is also the one place that rejects the combinations that mean nothing
+// (`sorted_value` needs `return_value` and excludes `sorted_index`).  Every
+// layer below wants them as one thing, and as the *normalized* triple the
+// launcher table is keyed on rather than the caller's spelling:
+//
+//   `ordered()`        the emit sorts: `sorted_index || sorted_value`
+//   `writes_values()`  values are written: `return_value || sorted_value`
+//   `by_value()`       sorts by value, not by index: `sorted_value`
+//
+// The widening that is not obvious is `ordered()`'s `|| sorted_value`: sorting
+// by value orders the `topk` values, so it cannot be answered without the
+// ordered emit -- and, as the entry checks, without writing them either.
+//
+// As three loose booleans the trio travels in three different orders in this
+// tree: the entry's `(sorted_value, sorted_index)`, every internal signature's
+// `(sorted_index, sorted_value, return_value)`, and the table's `(si, rv,
+// sv)`.  Adjacent same-typed arguments in three orders is a swap no call site
+// and no compiler can catch, and a site that normalized one of the three and
+// not the others selected a different instantiation from the same flags.  One
+// value with named accessors closes both.
+struct OutputSpec {
+    bool sorted_index;
+    bool sorted_value;
+    bool return_value;
+
+    constexpr bool ordered() const { return sorted_index || sorted_value; }
+    constexpr bool writes_values() const { return return_value || sorted_value; }
+    constexpr bool by_value() const { return sorted_value; }
 };
 
 // ── key encode / decode ─────────────────────────────────────────────────────
@@ -791,18 +825,16 @@ using radix_launcher_fn = void (*)(const RowParams &, uint32_t, cudaStream_t,
                                    size_t);
 
 radix_launcher_fn radix_launcher_for(int value_dtype, int index_dtype,
-                                     int block, bool si, bool rv, bool sv,
-                                     bool pre);
+                                     int block, OutputSpec spec, bool pre);
 
 template <typename ValueT, typename OutIdxT>
 void launch_typed_radix(const RowParams &params, uint32_t batches,
-                        cudaStream_t stream, bool sorted_index,
-                        bool sorted_value, bool return_value, int block,
+                        cudaStream_t stream, OutputSpec spec, int block,
                         bool preselected = false) {
     // The contract half follows the dataflow in this kernel, so the request is
     // the plan's total (arena or scratch, then the `topk` staging slots).
     const size_t smem = topk_select_radix::radix_smem_plan(
-                            params.topk, sorted_index || sorted_value,
+                            params.topk, spec.ordered(),
                             std::is_same<ValueT, maca_bfloat16>::value)
                             .total_bytes;
     // The fp32 row has a single width, so only the 16-bit row selects between
@@ -815,16 +847,10 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
                 block == (int)topk_select_radix::kLongRowBlockSize
             ? (int)topk_select_radix::kLongRowBlockSize
             : (int)topk_select_radix::kBlockSize;
-    // `sorted_value` implies `return_value` and is exclusive with
-    // `sorted_index` (both checked at the entry), so of the eight combinations
-    // these three expressions produce only the five the table carries.
-    const bool si = sorted_index || sorted_value;
-    const bool sv = sorted_value;
-    const bool rv = return_value || sorted_value;
     radix_launcher_fn launch = radix_launcher_for(
         radix_value_dtype<ValueT>::value, radix_index_dtype<OutIdxT>::value,
-        width, si, rv, sv, preselected);
-    // A miss means this image's table and the expressions above disagree, and
+        width, spec, preselected);
+    // A miss means this image's table and the spec's accessors disagree, and
     // the call then has no correct output to produce -- so it fails loudly
     // rather than returning with the caller's buffer unwritten.
     if (launch == nullptr) {
@@ -833,8 +859,9 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
                      "{value_dtype=%d, index_dtype=%d, block=%d, si=%d, rv=%d, "
                      "sv=%d, pre=%d}\n",
                      radix_value_dtype<ValueT>::value,
-                     radix_index_dtype<OutIdxT>::value, width, (int)si, (int)rv,
-                     (int)sv, (int)preselected);
+                     radix_index_dtype<OutIdxT>::value, width,
+                     (int)spec.ordered(), (int)spec.writes_values(),
+                     (int)spec.by_value(), (int)preselected);
         std::abort();
     }
     launch(params, batches, stream, smem);
@@ -859,8 +886,7 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
 // the next call mistook it for its own answer.
 template <typename ValueT, typename OutIdxT>
 void launch_staged_or_row(const RowParams &params, uint32_t batches,
-                          cudaStream_t stream, bool sorted_index,
-                          bool sorted_value, bool return_value, int block,
+                          cudaStream_t stream, OutputSpec spec, int block,
                           bool launched, const int32_t *staging,
                           bool clear_flags_on_failure) {
     const bool preselected = launched && staging != nullptr;
@@ -878,8 +904,7 @@ void launch_staged_or_row(const RowParams &params, uint32_t batches,
     // `params.check_nan` itself, so handing it over unconditionally is the
     // same thing as gating here.
     merged.nan_flags = preselected ? params.scan_flags : nullptr;
-    launch_typed_radix<ValueT, OutIdxT>(merged, batches, stream, sorted_index,
-                                        sorted_value, return_value, block,
+    launch_typed_radix<ValueT, OutIdxT>(merged, batches, stream, spec, block,
                                         preselected);
 }
 

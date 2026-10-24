@@ -1159,8 +1159,7 @@ inline ChunkedF32Workspace chunked_f32_workspace(void *base, uint32_t batches,
 // dispatch below (`params.end_ptr != nullptr`) meaningful.
 template <typename OutIdxT>
 void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
-                              cudaStream_t stream, bool sorted_index,
-                              bool sorted_value, bool return_value, int block,
+                              cudaStream_t stream, OutputSpec spec, int block,
                               void *workspace) {
     const int chunks = f32_chunked_chunks(batches, params.topk,
                                           params.vocab_size, params.sm_count);
@@ -1220,18 +1219,16 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
     }
     // A failed launch answers through the row path, which reads no flag table;
     // the handoff clears anything a partially launched split raised.
-    launch_staged_or_row<float, OutIdxT>(params, batches, stream, sorted_index,
-                                         sorted_value, return_value, block,
-                                         rc == cudaSuccess, ws.merged,
-                                         /*clear_flags_on_failure=*/true);
+    launch_staged_or_row<float, OutIdxT>(
+        params, batches, stream, spec, block, rc == cudaSuccess, ws.merged,
+        /*clear_flags_on_failure=*/true);
 }
 
 // Split, merge, then run the row kernel's contract half over the merged
 // answer.  `params` must satisfy `chunked_bf16_applies`, workspace included.
 template <typename OutIdxT>
 void launch_typed_chunked(const RowParams &params, uint32_t batches,
-                          cudaStream_t stream, bool sorted_index,
-                          bool sorted_value, bool return_value, int block,
+                          cudaStream_t stream, OutputSpec spec, int block,
                           void *workspace) {
     const int chunks = chunked_chunks(params);
     const ChunkedWorkspace ws =
@@ -1293,8 +1290,8 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
     // handoff clears a slot a partial launch raised rather than leaving it for
     // the next call to mis-read.
     launch_staged_or_row<maca_bfloat16, OutIdxT>(
-        params, batches, stream, sorted_index, sorted_value, return_value,
-        block, rc == cudaSuccess, ws.merged, /*clear_flags_on_failure=*/true);
+        params, batches, stream, spec, block, rc == cudaSuccess, ws.merged,
+        /*clear_flags_on_failure=*/true);
 }
 
 // The coarse12 route's launch and emit.  The kernel answers in row *columns*,
@@ -1305,8 +1302,7 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
 // decision.
 template <typename OutIdxT>
 void launch_typed_coarse12(const RowParams &params, uint32_t batches,
-                           cudaStream_t stream, bool sorted_index,
-                           bool sorted_value, bool return_value, int block) {
+                           cudaStream_t stream, OutputSpec spec, int block) {
     int32_t *const staging = params.coarse12_cols;
     bool launched = false;
     if (staging != nullptr) {
@@ -1341,8 +1337,8 @@ void launch_typed_coarse12(const RowParams &params, uint32_t batches,
     // work whose scan flag could have survived, which is why this route
     // clears nothing (`clear_flags_on_failure = false`).
     launch_staged_or_row<float, OutIdxT>(
-        params, batches, stream, sorted_index, sorted_value, return_value, block,
-        launched, staging, /*clear_flags_on_failure=*/false);
+        params, batches, stream, spec, block, launched, staging,
+        /*clear_flags_on_failure=*/false);
 }
 
 // The chunks route's launch and emit, on the same handoff as the coarse12
@@ -1352,8 +1348,7 @@ void launch_typed_coarse12(const RowParams &params, uint32_t batches,
 // admits this route is `f32_chunks_applies` above.
 template <typename OutIdxT>
 void launch_typed_chunks(const RowParams &params, uint32_t batches,
-                         cudaStream_t stream, bool sorted_index,
-                         bool sorted_value, bool return_value, int block) {
+                         cudaStream_t stream, OutputSpec spec, int block) {
     int32_t *const staging = params.coarse12_cols;
     bool launched = false;
     // The chunk-count dispatch is here rather than in `topk_chunks.cuh` for the
@@ -1386,8 +1381,8 @@ void launch_typed_chunks(const RowParams &params, uint32_t batches,
     // launch; unreachable through the gate, and cheap enough not to depend on
     // that.
     launch_staged_or_row<float, OutIdxT>(
-        params, batches, stream, sorted_index, sorted_value, return_value, block,
-        launched, staging, /*clear_flags_on_failure=*/true);
+        params, batches, stream, spec, block, launched, staging,
+        /*clear_flags_on_failure=*/true);
 }
 
 // Every route below is templated on the index width, and `index_dtype` is the
@@ -1567,12 +1562,10 @@ inline Route select_route(const RouteGates &gates, const RowParams &params,
 // not re-decide anything, it only resolves the last axis that is still a value:
 // the output index width, which is a template argument on every route and is
 // therefore turned into a type once, below.
-void topk_launch(const RowParams &params, int64_t batches, void *stream,
-                 detail::Route route, int index_dtype, bool sorted_index,
-                 bool sorted_value, bool return_value, void *chunked_workspace) {
-    auto *cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+void topk_launch(const RowParams &params, int64_t batches,
+                 cudaStream_t cuda_stream, detail::Route route, int index_dtype,
+                 OutputSpec spec, void *chunked_workspace) {
     const uint32_t n = (uint32_t)batches;
-    const bool rv = return_value || sorted_value;
     // Both dtypes run the ported radix dataflow; only the block width differs,
     // and the fp32 row has a single width.
     const bool bf16 = route == detail::Route::kRowBf16 ||
@@ -1585,33 +1578,27 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
         switch (route) {
             case detail::Route::kSplitBf16:
                 detail::launch_typed_chunked<OutIdxT>(
-                    params, n, cuda_stream, sorted_index, sorted_value, rv,
-                    block, chunked_workspace);
+                    params, n, cuda_stream, spec, block, chunked_workspace);
                 break;
             case detail::Route::kF32Chunks:
                 detail::launch_typed_chunks<OutIdxT>(
-                    params, n, cuda_stream, sorted_index, sorted_value, rv,
-                    block);
+                    params, n, cuda_stream, spec, block);
                 break;
             case detail::Route::kF32Coarse12:
                 detail::launch_typed_coarse12<OutIdxT>(
-                    params, n, cuda_stream, sorted_index, sorted_value, rv,
-                    block);
+                    params, n, cuda_stream, spec, block);
                 break;
             case detail::Route::kSplitF32:
                 detail::launch_typed_f32_chunked<OutIdxT>(
-                    params, n, cuda_stream, sorted_index, sorted_value, rv,
-                    block, chunked_workspace);
+                    params, n, cuda_stream, spec, block, chunked_workspace);
                 break;
             case detail::Route::kRowF32:
                 detail::launch_typed_radix<float, OutIdxT>(
-                    params, n, cuda_stream, sorted_index, sorted_value, rv,
-                    block);
+                    params, n, cuda_stream, spec, block);
                 break;
             case detail::Route::kRowBf16:
                 detail::launch_typed_radix<maca_bfloat16, OutIdxT>(
-                    params, n, cuda_stream, sorted_index, sorted_value, rv,
-                    block);
+                    params, n, cuda_stream, spec, block);
                 break;
         }
     });

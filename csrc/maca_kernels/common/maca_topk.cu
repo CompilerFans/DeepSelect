@@ -201,11 +201,11 @@ const RadixEntry kRadixTable[] = {
 // `value_dtype` / `index_dtype` come from the trait above, and the entry point
 // derives its pair from the tensor dtypes the same way.
 radix_launcher_fn radix_launcher_for(int value_dtype, int index_dtype,
-                                     int block, bool si, bool rv, bool sv,
-                                     bool pre) {
+                                     int block, OutputSpec spec, bool pre) {
     for (const RadixEntry &e : kRadixTable) {
         if (e.value_dtype == value_dtype && e.index_dtype == index_dtype &&
-            e.block == block && e.si == si && e.rv == rv && e.sv == sv &&
+            e.block == block && e.si == spec.ordered() &&
+            e.rv == spec.writes_values() && e.sv == spec.by_value() &&
             e.pre == pre) {
             return e.launch;
         }
@@ -467,6 +467,16 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
                   "`return_value` must be enabled when `sorted_value` is True");
     DS_HOST_CHECK(!(sorted_value && sorted_index),
                   "`sorted_value` and `sorted_index` cannot be used at the same time");
+    // The three switches are validated; the routing, the launchers and the
+    // instantiation table read them only through this value (`contract.cuh`'s
+    // `OutputSpec`), which is also where the normalization the table is keyed
+    // on lives.  The public signature keeps them apart because it is
+    // upstream's.  (`return_value` is still read directly below -- for the
+    // output tensor it gates and the strides it decides -- but that is the
+    // boundary's own bookkeeping, not the answer's shape.)
+    const OutputSpec output{.sorted_index = sorted_index,
+                            .sorted_value = sorted_value,
+                            .return_value = return_value};
     DS_HOST_CHECK(float32 || bfloat16,
                   "input dtype must be float32 or bfloat16");
     DS_HOST_CHECK(dsf::is_index_type(output_index),
@@ -795,8 +805,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // call actually holds.
     const detail::Route route = detail::select_route(
         gates, p, (uint32_t)batches, value_dtype, workspace, workspace_bytes);
-    topk_launch(p, batches, (void *)stream, route, index_dtype, sorted_index,
-                sorted_value, return_value, workspace);
+    topk_launch(p, batches, stream, route, index_dtype, output, workspace);
     // Last, because it reads the table the contract half fills.  Launched only
     // for the calls that can abort, so a `check_nan` call that answers with the
     // sentinel pays nothing for it.
