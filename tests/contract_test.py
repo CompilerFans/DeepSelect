@@ -397,8 +397,9 @@ def shapes(backend):
         x = row_major(b, v, torch.bfloat16, seed=v)
         name = f"bf16 b{b} v{v} k{k}"
         expect_ok(name + ": contract", x, k, backend, indices_type=torch.int32)
-        # bf16 + sorted_value is accepted by this kernel and rejected by the
-        # reference backend (upstream's contract), so it is a maca_c-only arm.
+        # bf16 + sorted_value: this kernel orders bf16 too (upstream's ported
+        # kernel rejects it).  The arm stays on the kernel path because that is
+        # the acceptance it pins; the reference backend here serves it as well.
         if backend == "maca_c":
             expect_ok(name + ": sorted value", x, k, backend, sorted=True,
                       indices_type=torch.int32)

@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repo identity — read this first
 
-This directory is **its own git repository** (`origin` = `git@github.com:CompilerFans/DeepSelect.git`, `upstream` = deepseek-ai), vendored inside the outer `mcDeepGEMM` checkout as `third-party/DeepSelect`. The outer `mcDeepGEMM` root **is also a git worktree**, usually carrying unrelated uncommitted changes.
+This directory is **its own git repository** (`origin` = this fork's remote,
+`upstream` = deepseek-ai), vendored inside the outer `mcDeepGEMM` checkout as
+`third-party/DeepSelect`. The outer `mcDeepGEMM` root **is also a git worktree**, usually carrying unrelated uncommitted changes.
 
 - A bare `git commit -a` run from the wrong cwd sweeps the outer repo's changes into a DeepSelect commit. This has actually happened here; it was recovered with `git reset --mixed HEAD~1`.
 - Always address this repo explicitly: `git -C /home/compiler_gfx/tilelang/mcDeepGEMM/third-party/DeepSelect <cmd>`. `cd` does not persist across Bash calls (cwd resets to the primary working directory), so absolute paths everywhere.
@@ -71,9 +73,10 @@ read its md5 as the "which artifact did I measure" receipt.
 
 **But they do not require the checkout's.** The extension is resolved by asking
 the package that will answer — `_binding.extension_path`, the same glob and
-newest-wins rule `load()` uses — and `$REPO` goes on the path only when the
-checkout has a built extension. With one, the tree answers (every existing
-receipt keeps naming the same file); without one, an **installed wheel answers**,
+last-path-wins rule `load()` uses (path ordering, not mtime) — and `$REPO`
+goes on the path only when the checkout has a built extension. With one, the
+tree answers (every existing receipt keeps naming the same file); without one,
+an **installed wheel answers**,
 so `./install.sh` + `./run_bench.sh` works with no build step. That is the
 reference's shape too: `mcDeepGEMM/run_all.sh` installs a wheel, strips the repo
 from the path, and only then runs its suites.
