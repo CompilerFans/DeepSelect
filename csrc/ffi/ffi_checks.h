@@ -29,12 +29,6 @@ inline bool shape_is(const tvm::ffi::TensorView &t, std::initializer_list<int64_
     return true;
 }
 
-// Optional forms: an absent optional satisfies the check (that is what
-// `_check_optional_tensor` did).
-inline bool device_ok(const tvm::ffi::Optional<tvm::ffi::TensorView> &t) {
-    return !t.has_value() || t.value().device().device_type == kDLCUDA;
-}
-
 }  // namespace deep_select::ffi
 
 // `#tensor` in the old macros spelled the argument; these keep that.

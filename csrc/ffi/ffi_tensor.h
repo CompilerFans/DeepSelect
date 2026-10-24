@@ -34,7 +34,6 @@ constexpr DLDataType kFloat32{kDLFloat, 32, 1};
 constexpr DLDataType kBFloat16{kDLBfloat, 16, 1};
 constexpr DLDataType kInt32{kDLInt, 32, 1};
 constexpr DLDataType kInt64{kDLInt, 64, 1};
-constexpr DLDataType kUInt8{kDLUInt, 8, 1};
 
 inline bool same_dtype(const DLDataType &a, const DLDataType &b) {
     return a.code == b.code && a.bits == b.bits && a.lanes == b.lanes;

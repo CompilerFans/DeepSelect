@@ -1081,8 +1081,6 @@ inline bool topk_worth_splitting_f32(const RowParams &params,
     // V=32768 rows, and every row of V<=65536 at a batch past the 768 tier.
     if (params.vocab_size <= kF32ChunkedMinVocab) return false;
     if (params.vocab_size <= 65536 && batches > 256) return false;
-    // So does b4096 at V=65536.  (`batches == 4096` is the gate's own ceiling.)
-    if (params.vocab_size <= 65536 && batches == kF32ChunkedMaxBatches) return false;
     return true;
 }
 
@@ -1133,10 +1131,9 @@ inline ChunkedF32Workspace chunked_f32_workspace(void *base, uint32_t batches,
                                                  uint32_t topk, int chunks) {
     ChunkedF32Workspace ws{};
     const uint32_t b = batches, k = (uint32_t)topk, c = (uint32_t)chunks;
-    const size_t candidates = (size_t)b * c * k;
     ws.cols = topk_select_radix::chunked_f32_cols(base, b, k, c);
     ws.vals = topk_select_radix::chunked_f32_vals(ws.cols, b, k, c);
-    ws.merged = (int32_t *)(ws.vals + candidates);
+    ws.merged = topk_select_radix::chunked_f32_out(base, b, k, c);
     return ws;
 }
 

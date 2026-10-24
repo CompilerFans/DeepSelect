@@ -144,7 +144,6 @@ def _native_family(this_dir):
     """
     if "family" in _NATIVE_FAMILY:
         return _NATIVE_FAMILY["family"]
-    import importlib.util
 
     import torch
 

@@ -72,7 +72,6 @@
 #include <tvm/ffi/extra/c_env_api.h>
 
 #include <utility>
-#include <vector>
 
 namespace deep_select {
 

@@ -141,7 +141,7 @@ if [[ "$so" == "$PWD"/deep_select/* ]]; then stage_pythonpath="."; fi
 stale_note="# STALE           n/a (installed package; no csrc/ to compare against)"
 if [[ "$so" == "$PWD"/deep_select/* ]]; then
     stale_note="# STALE           no (extension is newer than every csrc source)"
-    newest_src=$(find csrc -newer "$so" \( -name '*.cu' -o -name '*.cuh' \) 2>/dev/null | head -1 || true)
+    newest_src=$(find csrc -newer "$so" \( -name '*.cu' -o -name '*.cuh' -o -name '*.h' \) 2>/dev/null | head -1 || true)
     if [[ -n "$newest_src" ]]; then
         echo "run_test.sh: $newest_src is newer than $so; the extension may not" >&2
         echo "             match the sources -- the md5 below is what is measured." >&2

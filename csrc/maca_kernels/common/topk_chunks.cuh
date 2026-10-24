@@ -92,7 +92,6 @@ constexpr int kHistogramPadding = 1;
 // where the original has it; see `radix_core.cuh`'s `kF32K2048` block for the
 // same treatment of a dead constant.
 constexpr size_t kSmemBytes = 2 * (size_t)kCandidateCapacity * sizeof(int32_t);
-constexpr float kNegativeInfinity = -__builtin_huge_valf();
 
 static_assert(kFineBins + kHistogramPadding <= kThreads,
               "the fine histogram is cleared and cumsum'd by one thread per "

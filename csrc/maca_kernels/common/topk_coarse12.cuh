@@ -94,8 +94,6 @@ static_assert((size_t)kCoarseBins * sizeof(int32_t) <= kSmemBytes,
               "it does, with nothing to spare (16 KB is exactly 4096 bins and "
               "exactly the two 2048-entry candidate halves)");
 
-constexpr float kNegativeInfinity = -__builtin_huge_valf();
-
 // The second pass reads a list, not the row.
 //
 // Pass 2 acts only on the elements whose 12-bit bin is at or above the

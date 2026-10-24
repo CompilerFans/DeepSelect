@@ -139,7 +139,7 @@ def main():
              indices_type=torch.int32)
 
     xf = row_major(torch, 8, 131072, torch.float32, seed=2)
-    val, idx = run_case(torch, ds, "fp32 b8 v131072 k2048 (Sampler)", xf, 2048,
+    _, idx = run_case(torch, ds, "fp32 b8 v131072 k2048 (Sampler)", xf, 2048,
                         indices_type=torch.int32, sorted_index=True)
     if idx is not None:
         _, ref = ds.topk(xf, 2048, backend="torch", indices_type=torch.int32,
@@ -152,7 +152,7 @@ def main():
     # a padded allocation (stride(0) stays a multiple of 1024 B).
     xr = row_major(torch, 4, 4099, torch.float32, seed=3)
     check("the ragged row is padded and served", xr.stride(0) * xr.element_size() % 1024 == 0)
-    val, idx = run_case(torch, ds, "fp32 b4 v4099 k512", xr, 512,
+    _, idx = run_case(torch, ds, "fp32 b4 v4099 k512", xr, 512,
                         indices_type=torch.int32, sorted_index=True)
     if idx is not None:
         _, ref = ds.topk(xr, 512, backend="torch", indices_type=torch.int32,

@@ -6,15 +6,22 @@
 #
 # Stages, in order, all under `perf_data/<device>/<stamp>/`:
 #
-#   1. snapshot       `scripts/perf_snapshot.py` writes the CSV -- the official
-#                     grid plus `--cases-file`, one row per (cell, backend).
-#   2. official       `tests/test.py --perf-only -nc`, the same grid driven by
-#                     upstream's own file.  Redundant with (1) on purpose: it is
-#                     the gate.
-#   3. official_fp32  the same, `--dtype fp32` -- the Sampler cells.
+#   1. snapshot          `scripts/perf_snapshot.py` writes the CSV -- the
+#                        official grid plus `--cases-file`, one row per
+#                        (cell, backend).
+#   2. correctness       `tests/test.py --seed ... --sample 400 -rf`; the
+#                        verdict is read off its summary, not its exit status.
+#   3. cases_chunks      `tests/cases/chunks_arm_official.py` -- the `b <= 2`
+#                        band and the NaN contract on it.
+#   4. cases_graph       `tests/cases/graph_capture.py` -- capture and replay.
+#   5. cases_graph_cold  `... --probe` -- a capture that is the first call.
+#   6. cases_graph_grow  `... --grow-probe` -- a replay after a scratch growth.
+#   7. official          `tests/test.py --perf-only -nc`, the bf16 grid.
+#   8. official_fp32     the same, `--dtype fp32` -- the Sampler cells.
 #
-# Every stage is upstream's file; nothing here re-implements a measurement.
-# `--skip-gate` drops 2 and 3, which is the only way to measure without gating.
+# Every stage is upstream's file or this tree's own case file; nothing here
+# re-implements a measurement.  `--skip-gate` drops 2-8, which is the only way
+# to measure without gating.
 #
 # Usage:
 #     ./run_bench.sh                          # snapshot + the official gate
@@ -134,7 +141,7 @@ fi
 stale_note="# STALE           n/a (installed package; no csrc/ to compare against)"
 if [[ "$so" == "$PWD"/deep_select/* ]]; then
     stale_note="# STALE           no"
-    newest_src=$(find csrc -newer "$so" \( -name '*.cu' -o -name '*.cuh' \) 2>/dev/null | head -1 || true)
+    newest_src=$(find csrc -newer "$so" \( -name '*.cu' -o -name '*.cuh' -o -name '*.h' \) 2>/dev/null | head -1 || true)
     if [[ -n "$newest_src" ]]; then
         echo "run_bench.sh: $newest_src is newer than $so -- the extension may not" >&2
         echo "              match the sources; the md5 in the manifest is the record." >&2
@@ -264,7 +271,7 @@ if [[ ${skip_gate} -eq 0 ]]; then
     # reading a scratch buffer a later call had moved) were both invisible to
     # them for exactly that reason.
     #
-    # A sample rather than the whole 105,140-case table: it is the same
+    # A sample rather than the whole 105,138-case table: it is the same
     # predicate on the same generator, and a fixed seed makes the draw a
     # receipt someone else can re-run.  `-rf` so one bad case does not hide
     # the rest.
