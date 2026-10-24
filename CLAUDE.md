@@ -903,11 +903,13 @@ in `lib/occupancy.py`, which is a pure-Python reimplementation of
 ```
 
 **It needs `tvm_ffi`'s and Python's include dirs added**, because `maca_topk.cu`
-now includes `csrc/ffi/ffi_checks.h` — append
+includes `csrc/ffi/ffi_error.h` and `csrc/ffi/ffi_tensor.h` (and `ffi_entries.h`
+at its foot), which reach `tvm/ffi/*` — append
 `-I$(python -c "import tvm_ffi,os;print(os.path.dirname(tvm_ffi.__file__))")/include`
-and `-I$(python -c "import sysconfig;print(sysconfig.get_paths()['include'])")`.
-Without them the compile dies on `'tvm/ffi/error.h' file not found`, which reads
-like a doctor bug and is not one.
+and `-I$(python -c "import sysconfig;print(sysconfig.get_paths()['include'])")`
+(the second is what `build_ext` adds for every extension and a bare `mxcc` does
+not). Without the first the compile dies on `'tvm/ffi/error.h' file not found`,
+which reads like a doctor bug and is not one.
 
 **The trap that matters: `--resource-usage` reports *static* shared memory
 only.** The row kernel's arena comes from `radix_smem_bytes()` and is attached

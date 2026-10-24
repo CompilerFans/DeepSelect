@@ -228,9 +228,9 @@ radix_launcher_fn radix_launcher_for(int value_dtype, int index_dtype,
 //
 // Three properties make reuse safe rather than merely fast:
 //
-//   * `chunked_workspace(base, batches, topk)` walks forward from `base` by the
-//     *geometry of this call*, not by the capacity, so a buffer larger than this
-//     call needs is correct by construction.
+//   * `chunked_workspace(base, batches, topk, chunks)` walks forward from `base`
+//     by the *geometry of this call*, not by the capacity, so a buffer larger
+//     than this call needs is correct by construction.
 //   * the split's kernels write every slot they read back -- stage 1 fills each
 //     candidate slot it is asked for, and the contract half reads and clears
 //     each row's NaN vote -- so nothing is inherited from the previous call.
@@ -552,26 +552,27 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
 
     const int value_dtype = float32 ? 0 : 1;
     const int index_dtype = dsf::same_dtype(output_index.dtype(), dsf::kInt32) ? 0 : 1;
-    // Both tables below are allocated and handed over on this one answer, so the
-    // two sites cannot drift apart: an allocated-but-unpassed table is a walk
-    // that reads a summary nothing wrote.
+    // ── the row path's skip tables ──
+    // Allocated under this predicate and handed over at `p.row_block_max` /
+    // `p.row_block_list` below, in one function, so the two sites cannot drift
+    // apart: an allocated-but-unpassed table is a walk that reads a summary
+    // nothing wrote, and a passed-but-unallocated one is a fault.
     //
-    // `value_dtype == 1` is bf16 (`float32 ? 0 : 1` above) -- the round is
-    // compiled into the *16-bit* row's instantiation only, so this is the only
-    // dtype that has a reader.  The floor is a row length; the second comparison
-    // is a *density*, and it is the one that decides the sign of the change: a
+    // The first two terms are `contract.cuh`'s `kSkipRow`
+    // (`is_same<OutIdxT, int32_t> || ARCH_REGS_PER_AP >= 131072`), the device
+    // half of the gate: the summary is compiled into the 16-bit row's
+    // instantiation only under it, so the host half must be the same test --
+    // on a 64 KiB-regfile part (C500) an int64-index row carries no summary,
+    // and a table allocated for it would never be read.
+    //
+    // `value_dtype == 1` is bf16 (`float32 ? 0 : 1` above), the only dtype with
+    // a reader.  The vocab floor is a row length; the second comparison is a
+    // *density*, and it is the one that decides the sign of the change: a
     // 64-element block is kept when any element in it is at or above the
     // threshold, so the walk keeps `1 - (1 - k/V)^64` of the blocks.  Measured
     // on the official grid (docs/experiments/20261010_skim_rate/): `k/V = 1/128`
     // (39% kept) is a wash, `k/V = 1/64` (64% kept) costs +11..+16% -- the list
     // is traffic on top of a walk that then reads most of the row anyway.
-    // The row path's skip tables.  Allocated for the calls whose shape passes
-    // `skip_tables` and whose row instantiation carries the round.  The
-    // 32-bit-index row always carries it; the 64-bit row carries it only where
-    // the register file pays for the summary body -- `contract.cuh`'s
-    // `kSkipRow` is the device half of this predicate and must agree with it:
-    // an allocated-but-unread table is a walk that reads a summary nothing
-    // wrote, and a read-but-unallocated one is a fault.
     const bool skip_tables =
         value_dtype == 1 &&
         (index_dtype == 0 || ARCH_REGS_PER_AP >= 131072) &&
@@ -681,12 +682,9 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         scratch_grow(scratch.retired, scratch.coarse12_blist,
                      scratch.coarse12_blist_count, need_bmax);
     }
-    // The row path's skip tables.  Allocated for the calls whose shape passes
-    // `skip_tables` and whose row instantiation carries the round -- the
-    // 32-bit-index row everywhere, the 64-bit row on the 128 KiB-regfile
-    // parts (`kSkipRow` in `contract.cuh`); the routes that do not walk rows
-    // never read them.  Sized by `vocab_size`, the table's own row length, so
-    // a row with a shorter window still finds its own entry.
+    // The row path's skip tables (predicate and rule at `skip_tables` above).
+    // Sized by `vocab_size`, the table's own row length, so a row with a
+    // shorter window still finds its own entry.
     if (skip_tables) {
         const size_t need_blocks = (size_t)batches * (((size_t)p.vocab_size + 63) / 64);
         scratch_grow(scratch.retired, scratch.block_max,

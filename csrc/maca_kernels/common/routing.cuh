@@ -254,23 +254,39 @@ inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
     return batches <= params.vocab_size / kChunkedVocabPerRow;
 }
 
+// The split's three regions, in the order `launch_topk_bf16_chunked` takes
+// them: candidate columns, candidate values, merged answer.  One definition
+// for the size and for the carve below -- a layout spelled twice is a layout
+// that can disagree with itself, and the merge reads `candidate_values` with
+// the vectorized row path, which needs that region 16-byte aligned
+// (`bf16x8_is_aligned`; the scalar fallback covers it otherwise).  The seam is
+// `chunks * topk * 4` bytes per row, a multiple of 2048 for every `topk` this
+// split admits (512 and up), so an aligned arena keeps it aligned.
+inline size_t chunked_values_offset(uint32_t batches, uint32_t topk,
+                                    uint32_t chunks) {
+    return (size_t)batches * chunks * topk * sizeof(int32_t);
+}
+
+inline size_t chunked_merged_offset(uint32_t batches, uint32_t topk,
+                                    uint32_t chunks) {
+    return chunked_values_offset(batches, topk, chunks) +
+           (size_t)batches * chunks * topk * sizeof(maca_bfloat16);
+}
+
 inline size_t chunked_workspace_bytes(uint32_t batches, uint32_t topk,
                                       uint32_t chunks) {
-    const size_t candidates = (size_t)batches * chunks * topk;
-    // The merge reads `candidate_values` with the vectorized row path, so the
-    // two candidate arrays are 16-byte apart at the seam.
-    const size_t indices_bytes = candidates * sizeof(int32_t);
-    const size_t values_bytes = candidates * sizeof(maca_bfloat16);
-    return indices_bytes + values_bytes + (size_t)batches * topk * sizeof(int32_t);
+    return chunked_merged_offset(batches, topk, chunks) +
+           (size_t)batches * topk * sizeof(int32_t);
 }
 
 inline ChunkedWorkspace chunked_workspace(void *base, uint32_t batches,
                                           uint32_t topk, uint32_t chunks) {
-    const size_t candidates = (size_t)batches * chunks * topk;
     ChunkedWorkspace ws{};
     ws.candidate_indices = (int32_t *)base;
-    ws.candidate_values = (maca_bfloat16 *)((char *)base + candidates * sizeof(int32_t));
-    ws.merged = (int32_t *)((char *)ws.candidate_values + candidates * sizeof(maca_bfloat16));
+    ws.candidate_values = (maca_bfloat16 *)((char *)base +
+        chunked_values_offset(batches, topk, chunks));
+    ws.merged = (int32_t *)((char *)base +
+        chunked_merged_offset(batches, topk, chunks));
     return ws;
 }
 
@@ -1109,15 +1125,12 @@ inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
 // The workspace's layout.  `topk_select_radix::chunked_f32_cols` / `_vals_offset` / `_out` are
 // the *definition* of it -- the split's own region order and the 16-byte pad
 // `radix_topk_row_f32`'s unguarded `float4` walkers need -- and this function
-// is the one place that composes them.  The region in front used to be the
-// flag table; it lives in the dispatcher's dedicated `scan_flags` now, so the
-// arena base is the `cudaMalloc`'d workspace and `cols` is its first region,
-// which is what `chunked_f32_cols` documents.  It used to re-derive the same
-// arithmetic by hand while `topk_select_radix::launch_topk_f32_chunked`
-// re-derived it a second time from the arena base; those two copies agreed
-// only because they were written the same way, and the pad is exactly the kind
-// of thing one of them would have missed.  The launch takes the three
-// pointers, so there is one composition site.
+// is the one place that composes them: the pad is exactly the kind of thing a
+// second copy of the arithmetic would miss, and the launch takes the three
+// pointers rather than re-deriving them from the arena base.  The region in
+// front used to be the flag table; it lives in the dispatcher's dedicated
+// `scan_flags` now, so the arena base is the `cudaMalloc`'d workspace and
+// `cols` is its first region, which is what `chunked_f32_cols` documents.
 struct ChunkedF32Workspace {
     int32_t *cols;
     float *vals;
