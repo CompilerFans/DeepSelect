@@ -58,6 +58,9 @@
 #include <csrc/maca_kernels/common/topk_coarse12.cuh>
 #include <csrc/maca_kernels/common/topk_chunks.cuh>
 #include <csrc/maca_kernels/common/routing.cuh>
+// The row dataflow's configuration tuples -- generated beside the one
+// `instantiations/*.cu` per line it names, and expanded into the table below.
+#include <csrc/maca_kernels/common/radix_configs.inc>
 
 // ── the tvm-ffi entry points ────────────────────────────────────────────────
 //
@@ -81,15 +84,16 @@ namespace detail {
 
 // ── the instantiation list, and the table the ladder reads ──────────────────
 //
-// One line per tuple, spelled once and expanded twice: as the `extern
-// template` declaration that says "this tuple's launcher is defined in its own
+// One line per tuple, expanded twice: as the `extern template` declaration
+// that says "this tuple's launcher is defined in its own
 // `instantiations/*.cu`", and as the dispatch entry that points at it.  The
-// generator writes the matching list of files, so the two are two copies of
-// one table -- and a tuple they disagree about does **not** fail loudly: this
-// list's entry would name a symbol no TU defines, and a shared library links
-// with that symbol undefined.  What checks the agreement is the artifact
-// itself: `ls instantiations/*.cu | wc -l` against the kernel count, and the
-// device-kernel set against the previous build's.
+// list is **generated** (`radix_configs.inc`, included above):
+// `scripts/generate_instantiations.py` writes it and one
+// `instantiations/*.cu` per line from the same table, so the dispatch table
+// and the file set cannot disagree -- a tuple in one and not the other used to
+// fail quietly (an entry naming a symbol no TU defines links in a shared
+// library; a file no entry names is a kernel the artifact carries and never
+// launches).  `--check` verifies the `.inc` against the generator.
 //
 // **The table lives here, in this one TU, and not in `contract.cuh`.**  Every
 // entry takes `&launch_radix_config<Cfg>`, and a TU that merely sees the table
@@ -98,68 +102,6 @@ namespace detail {
 // instantiation TU defining one launcher was a 7.6 MB object whose device
 // bitcode held all 180 `topk_kernel_radix` kernels.  With the table confined to
 // this file, each `instantiations/*.cu` carries only its own kernel.
-
-#define DEEP_SELECT_RADIX_CONFIGS(X)                                        \
-    X(maca_bfloat16, int32_t, 512, false, false, false, false)              \
-    X(maca_bfloat16, int32_t, 512, false, false, false, true)               \
-    X(maca_bfloat16, int32_t, 512, false, true, false, false)               \
-    X(maca_bfloat16, int32_t, 512, false, true, false, true)                \
-    X(maca_bfloat16, int32_t, 512, true, false, false, false)               \
-    X(maca_bfloat16, int32_t, 512, true, false, false, true)                \
-    X(maca_bfloat16, int32_t, 512, true, true, false, false)                \
-    X(maca_bfloat16, int32_t, 512, true, true, false, true)                 \
-    X(maca_bfloat16, int32_t, 512, true, true, true, false)                 \
-    X(maca_bfloat16, int32_t, 512, true, true, true, true)                  \
-    X(maca_bfloat16, int32_t, 1024, false, false, false, false)             \
-    X(maca_bfloat16, int32_t, 1024, false, false, false, true)              \
-    X(maca_bfloat16, int32_t, 1024, false, true, false, false)              \
-    X(maca_bfloat16, int32_t, 1024, false, true, false, true)               \
-    X(maca_bfloat16, int32_t, 1024, true, false, false, false)              \
-    X(maca_bfloat16, int32_t, 1024, true, false, false, true)               \
-    X(maca_bfloat16, int32_t, 1024, true, true, false, false)               \
-    X(maca_bfloat16, int32_t, 1024, true, true, false, true)                \
-    X(maca_bfloat16, int32_t, 1024, true, true, true, false)                \
-    X(maca_bfloat16, int32_t, 1024, true, true, true, true)                 \
-    X(maca_bfloat16, int64_t, 512, false, false, false, false)              \
-    X(maca_bfloat16, int64_t, 512, false, false, false, true)               \
-    X(maca_bfloat16, int64_t, 512, false, true, false, false)               \
-    X(maca_bfloat16, int64_t, 512, false, true, false, true)                \
-    X(maca_bfloat16, int64_t, 512, true, false, false, false)               \
-    X(maca_bfloat16, int64_t, 512, true, false, false, true)                \
-    X(maca_bfloat16, int64_t, 512, true, true, false, false)                \
-    X(maca_bfloat16, int64_t, 512, true, true, false, true)                 \
-    X(maca_bfloat16, int64_t, 512, true, true, true, false)                 \
-    X(maca_bfloat16, int64_t, 512, true, true, true, true)                  \
-    X(maca_bfloat16, int64_t, 1024, false, false, false, false)             \
-    X(maca_bfloat16, int64_t, 1024, false, false, false, true)              \
-    X(maca_bfloat16, int64_t, 1024, false, true, false, false)              \
-    X(maca_bfloat16, int64_t, 1024, false, true, false, true)               \
-    X(maca_bfloat16, int64_t, 1024, true, false, false, false)              \
-    X(maca_bfloat16, int64_t, 1024, true, false, false, true)               \
-    X(maca_bfloat16, int64_t, 1024, true, true, false, false)               \
-    X(maca_bfloat16, int64_t, 1024, true, true, false, true)                \
-    X(maca_bfloat16, int64_t, 1024, true, true, true, false)                \
-    X(maca_bfloat16, int64_t, 1024, true, true, true, true)                 \
-    X(float, int32_t, 512, false, false, false, false)                      \
-    X(float, int32_t, 512, false, false, false, true)                       \
-    X(float, int32_t, 512, false, true, false, false)                       \
-    X(float, int32_t, 512, false, true, false, true)                        \
-    X(float, int32_t, 512, true, false, false, false)                       \
-    X(float, int32_t, 512, true, false, false, true)                        \
-    X(float, int32_t, 512, true, true, false, false)                        \
-    X(float, int32_t, 512, true, true, false, true)                         \
-    X(float, int32_t, 512, true, true, true, false)                         \
-    X(float, int32_t, 512, true, true, true, true)                          \
-    X(float, int64_t, 512, false, false, false, false)                      \
-    X(float, int64_t, 512, false, false, false, true)                       \
-    X(float, int64_t, 512, false, true, false, false)                       \
-    X(float, int64_t, 512, false, true, false, true)                        \
-    X(float, int64_t, 512, true, false, false, false)                       \
-    X(float, int64_t, 512, true, false, false, true)                        \
-    X(float, int64_t, 512, true, true, false, false)                        \
-    X(float, int64_t, 512, true, true, false, true)                         \
-    X(float, int64_t, 512, true, true, true, false)                         \
-    X(float, int64_t, 512, true, true, true, true)                          \
 
 #define DEEP_SELECT_RADIX_EXTERN(VD, ID, BLK, SI, RV, SV, PRE)                \
     extern template void launch_radix_config<                                 \

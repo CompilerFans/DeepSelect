@@ -388,6 +388,14 @@ exit status non-zero on any `missing` / `extra` / `differs` — so a hand edit o
 tree one table edit behind is caught by a command rather than by a build that
 compiles one family's older tuples.  (`setup.py` already refuses a table file
 that is absent; what it cannot see is a body that no longer matches its row.)
+The **row tuple list itself is generator output too**:
+`csrc/maca_kernels/common/radix_configs.inc` — the 60-line `X(...)` list
+`maca_topk.cu` expands into its `extern template` declarations and its launcher
+table — is written from the same table as the files, and `--check` covers it
+too.  It used to be a second hand-written copy of the same 60 tuples, and a
+disagreement was silent in both directions (an entry naming a symbol no TU
+defines links in a shared library; a generated file no entry names is a kernel
+the artifact carries and never launches).
 
 The port was not retired for tidiness: it selects wrong on a C600U (see the
 removal record below), and the C500-derived kernel is the **better** artifact
