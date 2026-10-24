@@ -1,7 +1,3 @@
 [submodule "third-party/DeepJIT"]
 	path = third-party/DeepJIT
 	url = git@github.com:CompilerFans/DeepJIT.git
-[submodule "third-party/fmt"]
-	path = third-party/fmt
-	url = https://github.com/fmtlib/fmt.git
-	branch = 12.1.0

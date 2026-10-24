@@ -6,8 +6,8 @@
 `main-pre-maca-tvm-ffi`)—— 官方
 DeepGEMM 的 header-only JIT 层(MACA 后端的下游)。自 `712f2a3` 起它只保留
 MACA 后端,并把 pybind11 模块换成 TVM FFI 的 `get_jit()` 句柄;本 harness 走
-的是纯 C++ 头(`runtime/` + `backend/maca/`),不受那次绑定层改动影响。`third-party/fmt`(12.1.0,与 mcDeepGEMM 同钉)
-是它的 header-only 依赖。`tools/jit_probe/` 是首个消费者:一个独立 harness,
+的是纯 C++ 头(`runtime/` + `backend/maca/`),不受那次绑定层改动影响。`third-party/fmt`(12.1.0,**完整源码树**,与 mcDeepGEMM 同形:
+普通文件而非 submodule,checkout 后无需 `git submodule update`)是它的 header-only 依赖。`tools/jit_probe/` 是首个消费者:一个独立 harness,
 把仓内内核变体**在运行时编译**(~10-30 秒)并启动,替代"改一个编译期常量
 就要全量 AOT 重编一轮(6-8 分钟)"的实验循环。
 
