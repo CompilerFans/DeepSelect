@@ -535,6 +535,24 @@ struct radix_index_dtype<int64_t> {
     static constexpr int value = 1;
 };
 
+// A NaN row's whole answer: the sentinel in slot 0 and the abort flag.  One
+// spelling, because there are two arms that reach it -- the preselected one,
+// whose earlier kernel raised the vote, and the row path, whose scan folds into
+// pass 1 -- and the slot each must leave is the same slot.
+//
+// Neither caller aborts from here: the flag is what `nan_abort_kernel` reads
+// after this kernel, and the abort belongs in that kernel rather than in this
+// one (see it for the 15 MT this costs when inlined).
+template <typename OutIdxT>
+static __device__ __forceinline__ void dispose_nan_row(OutIdxT *out_index_row,
+                                                       const RowParams &params,
+                                                       uint32_t row) {
+    if (threadIdx.x == 0) {
+        out_index_row[0] = (OutIdxT)0x3F3F3F3F;
+        if (params.nan_abort_flags != nullptr) params.nan_abort_flags[row] = 1;
+    }
+}
+
 template <typename Cfg>
 __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params) {
     using ValueT = typename Cfg::ValueT;
@@ -641,11 +659,7 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
     if constexpr (kPreSelected) {
         nan_local = params.check_nan && nan_vote != 0;
         if (nan_local) {
-            if (tid == 0) {
-                out_index_row[0] = (OutIdxT)0x3F3F3F3F;
-                if (params.nan_abort_flags != nullptr)
-                    params.nan_abort_flags[row] = 1;
-            }
+            dispose_nan_row(out_index_row, params, row);
             return;
         }
     }
@@ -697,18 +711,11 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
             row_block_max, row_block_list);
     }
 
-    // The fold's vote lands only now, after the kernel has ranked the row.  The
-    // slot it owns is row 0's and the disposition is the one the preselected
-    // arm ran above; what differs is when the answer arrived.  Neither arm
-    // aborts from here: the flag raised below is what `nan_abort_kernel` reads,
-    // and the abort belongs in that kernel rather than in this one (see it for
-    // the 15 MT this costs when inlined).
+    // The fold's vote lands only now, after the kernel has ranked the row; the
+    // disposition is `dispose_nan_row` above, and what differs from the
+    // preselected arm is only when the answer arrived.
     if (nan_local) {
-        if (tid == 0) {
-            out_index_row[0] = (OutIdxT)0x3F3F3F3F;
-            if (params.nan_abort_flags != nullptr)
-                params.nan_abort_flags[row] = 1;
-        }
+        dispose_nan_row(out_index_row, params, row);
         return;
     }
 

@@ -306,10 +306,8 @@ inline ChunkedWorkspace chunked_workspace(void *base, uint32_t batches,
 // launch, not a constant, so it is not made on arithmetic alone.
 namespace {
 // The work target is `f32_chunk_work_target(sm_count)` above -- `sm_count * 5
-// / 2`, the 2.5 being the only fit ever measured (on C500).  This comment sent
-// readers to `deep_select/_arch.py`'s `F32_CHUNK_WORK_TARGET` until
-// 2026-09-16; no such symbol exists there or anywhere, and the module itself
-// went on 2026-09-17 -- the SM count is read at the one place it is used.
+// / 2`, the 2.5 being the only fit ever measured (on C500).  The SM count is
+// read where the split is sized, not cached in a module-level constant.
 //
 // `DEEP_SELECT_F32_CHUNK32` raises the ceiling from 16 to 32 for the b6/V=1M
 // cell the V-sweep flagged (parity plan §17.3).  A ceiling, not a count, so
