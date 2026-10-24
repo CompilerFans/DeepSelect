@@ -1011,19 +1011,23 @@ suggestions are small:
   and is a much larger change than it looks (the chunked split is the closest
   thing in the tree to reading a row once, and it is a split-and-merge over
   `chunks` CTAs, not a single-pass row).
-- **`radix_topk_row_bf16_b` already has the `remain_topk == 0` exact-fit exit**
-  (`radix_row_bf16.cuh`) — it returns after the coarse
-  complement, exactly as deep_gemm's `topk_coarse12_impl` does. It is the
-  *overflow* path that lacks the corresponding exit, and
-  **`overflow_emit_member` (`radix_row_bf16.cuh`) may write slot 0 twice**: its slots all use
-  `output[atomicAdd(&s_counter, 1u)]`, but `output[0]` is already the coarse
-  complement when `remain_topk == 0`. The condition appears reachable
-  algebraically (`s_high_threshold_bin_id` is the sub-bin index while
-  `threshold_bin` counts the whole bucket, so `high <= threshold_bin` can sit
-  just inside the arena capacity). A seeded probe on `b4096-v1024-k512` (three
-  values of 100.0 with `topk=512`) returned no `-1` sentinel and no duplicate,
-  so **the defect is unconfirmed — do not "fix" it on this evidence**. Test it
-  deliberately with a crafted exact-fill row before touching the code.
+- **`radix_topk_row_bf16_b` has the `remain_topk == 0` exact-fit exit at both
+  levels** (`radix_row_bf16.cuh`) — the coarse one returns after the complement,
+  exactly as deep_gemm's `topk_coarse12_impl` does, and the overflow rescan has
+  its own: with nothing left to take from the tie bin, `overflow_emit_member`
+  writes only the fine members strictly above the threshold.  **The question
+  this file used to record — whether it writes slot 0 twice — is settled as not
+  reachable** (tested 2026-10-24 with `tools/overflow_exactfit.py`: six crafted
+  rows on C600-U covering an overflowing bin with a fine-level exact fit on both
+  walk arms, plus ties, the coarse exit and the arena's own exact fit; 5 rounds
+  each, all pass, no duplicate, no sentinel).  The mechanism, so the next reader
+  need not re-derive it: `s_counter` is zeroed only in `scan_threshold`'s
+  crossing branch and only the complement increments it before the rescan, so
+  the rescan's slab starts at `s_wide_above` — never at 0 unless the complement
+  is empty, and then slot 0 is still unwritten — and `remain_topk` after the
+  fine subtraction is identically `s_last_remain`, so the tie branch's gate is
+  the same question.  The two `overflow_emit_member` parameters that read as one
+  name are a 12-bit bin and a 4-bit nibble, and nothing compares them.
 - **Upstream's integer-add → float-add trick** (for `0 <= x,y <= 2^22`,
   `x+y == __float_as_uint(__uint_as_float(x) + __uint_as_float(y))`, so a
   denormal float add replaces an integer add and frees the integer pipe) is
