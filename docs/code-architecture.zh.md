@@ -236,7 +236,7 @@ nm -S --defined-only deep_select/deep_select_maca_xcore<N>.so  # 与改前对照
 git status --porcelain                                          # 干净（不留残留）
 
 # 整轮收尾（P3/P4/P6… 全部落地 main 之后）跑一次，不按阶段跑：
-CUDA_VISIBLE_DEVICES=<独占的一张卡> ./run_test.sh --test       # 339 pass / 0 check_fail / 0 crash
+CUDA_VISIBLE_DEVICES=<独占的一张卡> ./run_test.sh --test       # 固定种子的抽样 + 完整性能格（读法见下）
 ```
 
 - **身份收据已工具化**：`tools/artifact_receipt.py` 一个路径打印身份块（size / md5 / `.text` /
@@ -257,7 +257,17 @@ CUDA_VISIBLE_DEVICES=<独占的一张卡> ./run_test.sh --test       # 339 pass 
 - **测试节奏：全量套件按"轮"跑，不按阶段跑**（用户 2026-10-12：「不需要每次修改都全量测试，
   效率太低」）。阶段自身的收据 = 构建 rc=0 + nm 判据 + 该阶段特有的**便宜**检查（python 层：
   `inspect.signature` 与导出表不变；冒烟用 `tests/test.py --sample 50`）。整轮收尾在 main 上跑
-  一次 339 格作为共同门。提交信息如实写"全量套件留待轮收尾"，不声称未跑的测试。
+  一次 `./run_test.sh --test` 作为共同门。提交信息如实写"全量套件留待轮收尾"，不声称未跑的测试。
+
+  这道门的**格数不是常量**，所以收据引用状态表，不引用一个"N/N pass"：`--test` 展开为
+  `tests/test.py --seed 20260911 --sample 200 -rf`，用例数 = 200 例固定抽样 + 整个性能格
+  （`deep_gemm` 可 import 时再加它的 2 例正确性和 25 格选择器性能用例）。实测 2026-10-24
+  C600-U：2 + 200 + 122 + 25 = **349** 格，包不可用（`deep_gemm_available()` 为假）时
+  200 + 122 = **322** 格；通过数再减去 OOM `skip`——那是设备当时的内存，不是用例的属性
+  （该记录的 6 例 skip 都是 19–32 GiB 的单次分配失败，卡共 71.89 GiB）。同一次运行的状态表：
+  **343 pass / 6 skip / 0 check_fail / 0 crash**，约 8 分钟（日志自身从头部 19:51:24Z 到
+  末行 19:59:38Z 是 494 s），artifact `ccd4ad0ee312`
+  （`results/deepselect_run_20261024_195124_test.log`）。
 
 - **搬迁 / 改名（码流未变）**：`nm -S --defined-only` 按**名字 → (size, type)** 比，存活符号逐项相同。
   无 size 的符号（`GCC_except_table*`、CRT 桩）按**去数字后缀的基名**比——编号与地址随布局移动，不算差异。

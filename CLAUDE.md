@@ -1185,7 +1185,7 @@ DS_TOPK_BACKEND=maca_c PYTHONPATH=. python tests/test.py         # the unpinned 
 
   ```bash
   ./run_test.sh --perf --dtype bf16 -nc # the perf grid, ~1 min on C500
-  ./run_test.sh --test                  # correctness sample, 200/200
+  ./run_test.sh --test                  # seeded 200-case draw + the whole perf grid
   ./run_test.sh --all                   # both, perf first
   CUDA_VISIBLE_DEVICES=3 ./run_test.sh --perf   # pick the device with the env
   ```
@@ -1453,7 +1453,7 @@ Beyond mcDeepGEMM's general rules (state the principle and the magnitude; keep r
 - Why: the old approach's cost, with measured numbers.
 - A before→after table over the representative cells, in **both currencies** — µs **and** GB/s, with the trip count and the % of the read-only wall. Logical GB/s is `B × V × 2 B ÷ kernel time`; the wall is a measured **1,650 GB/s streaming read** on C500 (1,344 GB/s mixed) — do not back it out of the kernel. **1,487 was the old number and it is wrong** — it is the 104-block point on the ramp, not the wall; `C500-to-parity-plan.zh.md` §7.1 retracts it (104 blocks 767 GB/s, 208 → 1,298, 416 → 1,650, 832 → 1,641), and that retraction applies to every citation of 1,487 in this repo. **The wall is per-part; measure it for the part you are on.** On C600U it is **1,545 GB/s**, measured with a purpose-written `uint4` grid-stride read kernel (`/tmp/readwall.cu` in the session that took it — a torch reduction measures 274 GB/s on the same device and is *not* the wall): 224 blocks → 1,545, 448 → 1,532, 896 → 1,523, 1792 → 1,401. The two numbers being close is a coincidence of these two parts, not a constant.
 - A **roofline verdict** for the affected cell: if it is not bandwidth-bound, say what it *is* bound on (currently: per-CTA dependency chain — `load → key transform → compare → shared atomic` — and serialized shared atomics).
-- The gate results. Both suites: the perf grid — `147/147` where the `deep_gemm` package is present, `122/122` where it is not (`./run_test.sh --perf -nc`; 111 s measured on C600-U with 147 cells) **and** a correctness suite — the seeded sample (`./run_test.sh --test`, `200/200`, ~63 s on C600U) when the change is being iterated rather than landed, or the full table (`tests/test.py --backend maca_c --sample 1000000 -rf`, 105,138 correctness cases; ~16–17 h projected on C500 and no complete single-process run taken) before a release. Say which one you ran.
+- The gate results. Both suites: the perf grid — `147/147` where the `deep_gemm` package is present, `122/122` where it is not (`./run_test.sh --perf -nc`; 111 s measured on C600-U with 147 cells) **and** a correctness suite — the seeded sample (`./run_test.sh --test`: `tests/test.py --seed 20260911 --sample 200 -rf`, so a 200-case draw **plus the whole perf grid** — 349 cases where `deep_gemm` is importable, 322 where it is not, and the pass count is that minus OOM skips; measured on C600-U, 2026-10-24: `343 pass / 6 skip / 0 check_fail / 0 crash` in ~8 min — 494 s from the log's own header to its last line) when the change is being iterated rather than landed, or the full table (`tests/test.py --backend maca_c --sample 1000000 -rf`, 105,138 correctness cases; ~16–17 h projected on C500 and no complete single-process run taken) before a release. Say which one you ran.
 - An architecture-boundary statement, and it has to name what actually ships.
   A family's artifact is `csrc/maca_kernels/common/` **plus** that family's own
   `xcore<N>/instantiations/` (`setup.py`'s `sources_for_family`, printed as
