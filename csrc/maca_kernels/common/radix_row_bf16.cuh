@@ -1,7 +1,7 @@
 #ifndef RADIX_ROW_BF16_CUH
 #define RADIX_ROW_BF16_CUH
 
-#include <csrc/structs.h>   // ARCH_REGS_PER_AP -- the pair-walk's family gate
+#include <csrc/structs.h>   // ARCH_HAS_WIDE_REG_FILE -- the pair-walk's family gate
 #include <csrc/maca_kernels/common/radix_common.cuh>
 
 // The block-max summary's step-down tree as a MACRO, so the text the compiler
@@ -264,8 +264,8 @@ __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
     // (register/schedule blowup), and 559.2 -> 535.6 for the dense arm -- so the
     // change is confined to this arm.  What moves is only the order blocks are
     // visited in: the summary, the list, every bin and every count are the same.
-    constexpr bool kAdjacent4 = (ARCH_REGS_PER_AP >= 131072) && !kHist;
-    if constexpr (ARCH_REGS_PER_AP >= 131072) {
+    constexpr bool kAdjacent4 = ARCH_HAS_WIDE_REG_FILE && !kHist;
+    if constexpr (ARCH_HAS_WIDE_REG_FILE) {
         if constexpr (!kHist) {
             // Row `r` (16 lanes) owns blocks `[8r, 8r+8)`, each half-row its
             // four adjacent ones, and strides by `4*step` (= 8 blocks x the

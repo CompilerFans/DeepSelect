@@ -49,7 +49,7 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
-#include <csrc/structs.h>   // ARCH_REGS_PER_AP -- the OUT=2 walk gate
+#include <csrc/structs.h>   // ARCH_HAS_WIDE_REG_FILE -- the OUT=2 walk gate
 #include <csrc/maca_kernels/common/launch.cuh>
 #include <csrc/maca_kernels/common/primitives.cuh>
 
@@ -265,7 +265,7 @@ __device__ __forceinline__ bool topk_coarse12_row(
     int vec = tid;
     int it = 0;
     const int bulk_iters = vector_length / kThreads;
-    if constexpr (ARCH_REGS_PER_AP >= 131072) {
+    if constexpr (ARCH_HAS_WIDE_REG_FILE) {
         for (; it + 1 < bulk_iters; it += 2, vec += 2 * kThreads) {
             const float4 va = __ldg(vector_input + vec);
             const float4 vb = __ldg(vector_input + vec + kThreads);
@@ -484,7 +484,7 @@ __device__ __forceinline__ bool topk_coarse12_row(
         }
     } else {
     vec = tid;
-    if constexpr (ARCH_REGS_PER_AP >= 131072) {
+    if constexpr (ARCH_HAS_WIDE_REG_FILE) {
         for (; vec + kThreads < vector_length; vec += 2 * kThreads) {
             const float4 va = __ldg(vector_input + vec);
             const float4 vb = __ldg(vector_input + vec + kThreads);

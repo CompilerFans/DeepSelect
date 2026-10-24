@@ -554,34 +554,6 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
 
     const int value_dtype = float32 ? 0 : 1;
     const int index_dtype = dsf::same_dtype(output_index.dtype(), dsf::kInt32) ? 0 : 1;
-    // ── the row path's skip tables ──
-    // Allocated under this predicate and handed over at `p.row_block_max` /
-    // `p.row_block_list` below, in one function, so the two sites cannot drift
-    // apart: an allocated-but-unpassed table is a walk that reads a summary
-    // nothing wrote, and a passed-but-unallocated one is a fault.
-    //
-    // The first two terms are `contract.cuh`'s `kSkipRow`
-    // (`is_same<OutIdxT, int32_t> || ARCH_REGS_PER_AP >= 131072`), the device
-    // half of the gate: the summary is compiled into the 16-bit row's
-    // instantiation only under it, so the host half must be the same test --
-    // on a 64 KiB-regfile part (C500) an int64-index row carries no summary,
-    // and a table allocated for it would never be read.
-    //
-    // `value_dtype == 1` is bf16 (`float32 ? 0 : 1` above), the only dtype with
-    // a reader.  The vocab floor is a row length; the second comparison is a
-    // *density*, and it is the one that decides the sign of the change: a
-    // 64-element block is kept when any element in it is at or above the
-    // threshold, so the walk keeps `1 - (1 - k/V)^64` of the blocks.  Measured
-    // on the official grid (docs/experiments/20261010_skim_rate/): `k/V = 1/128`
-    // (39% kept) is a wash, `k/V = 1/64` (64% kept) costs +11..+16% -- the list
-    // is traffic on top of a walk that then reads most of the row anyway.
-    const bool skip_tables =
-        value_dtype == 1 &&
-        (index_dtype == 0 || ARCH_REGS_PER_AP >= 131072) &&
-        p.vocab_size >= detail::kSkipMinVocab &&
-        (uint64_t)p.vocab_size >=
-            (uint64_t)p.topk * detail::kSkipMinRowPerSlot &&
-        detail::bf16_skip_enabled();
     // The FFI environment holds torch's current stream while the python
     // facade is inside `tvm_ffi.use_torch_stream()` (deep_select/_binding.py).
     // Outside it TVMFFIEnvGetStream reports the null handle, which is the
@@ -635,40 +607,24 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     //
     // One evaluation of each shape gate per call: the scratch below is sized
     // from these, and the route at the end is chosen from the same four, so no
-    // buffer can be sized for a route this call does not take.
+    // buffer can be sized for a route this call does not take.  `scratch_plan`
+    // is the same gates plus the dtypes and the two NaN switches, turned into
+    // the list of buffers this call needs -- its predicates and the
+    // measurements behind them live beside the constants they read
+    // (`routing.cuh`), and each buffer below is allocated *and* bound to `p` in
+    // one block so neither half of a gate can be edited without the other.
     const detail::RouteGates gates =
         detail::route_gates(p, (uint32_t)batches, value_dtype);
-    const bool bf16_split = gates.bf16_split;
+    const detail::ScratchPlan plan = detail::scratch_plan(
+        p, gates, value_dtype, index_dtype, abort_when_nan_found);
     const bool f32_split = gates.f32_split;
-    // The per-row scan table.  Every route that answers a row **without**
-    // ranking it reads this table in the contract half: the coarse12 arm, the
-    // chunks arm, and both splits (they hand `params.scan_flags` to the
-    // contract as its `nan_flags`).  It is provided for the whole `check_nan`
-    // class rather than for the routes a shape predicate can predict, because
-    // the route is chosen after this point (`select_route`, below) -- and
-    // providing it costs one allocation, not a memset: the table is zeroed once
-    // when it grows, and each call's contract half reads and clears the slots
-    // that call could have raised.  A plain row run under `check_nan` scans the
-    // row itself, never reads this, and pays nothing for the class.
-    //
-    // **The splits must not raise into their own workspace.**  That region is
-    // a geometry-dependent offset inside one grow-only scratch shared by
-    // every split shape and both dtypes, so the slot a call reads is whatever
-    // the previous call wrote at that offset -- a candidate index, not a flag
-    // (measured: a b1 v262144 bf16 cell after a b6 v1048576 call returns the
-    // NaN sentinel on a clean row).  This table is the one region that is only
-    // ever flags.
-    const bool needs_scan_table = check_nan;
-    // The coarse12 answer buffer, allocated by the same rule: a call the route
-    // can reach gets one, so `topk_launch` can stage the columns it ranks
-    // whatever the caller's index width is.  Allocated up front rather than
-    // inside the dispatch because the dispatch is the kernel layer and this is
-    // a host allocation.  Allocation failures are reported by
-    // `DS_CUDA_RUNTIME_CHECK`; there is no allocation-failure fallback here.
-    // The `b <= 2` chunks arm shares it -- same kind of
-    // answer (row columns), same contract half, and the two gates are disjoint.
-    const bool needs_coarse12_cols = gates.f32_coarse12 || gates.f32_chunks;
-    if (needs_coarse12_cols) {
+
+    // ── the coarse12 answer buffer and its block tables ──
+    // Allocated up front rather than inside the dispatch because the dispatch
+    // is the kernel layer and this is a host allocation.  Allocation failures
+    // are reported by `DS_CUDA_RUNTIME_CHECK`; there is no allocation-failure
+    // fallback here.
+    if (plan.coarse12_cols) {
         const size_t need_cols = (size_t)batches * (size_t)p.topk;
         scratch_grow(scratch.retired, scratch.coarse12_cols,
                      scratch.coarse12_cols_count, need_cols);
@@ -685,30 +641,41 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
                      scratch.coarse12_bmax_count, need_bmax);
         scratch_grow(scratch.retired, scratch.coarse12_blist,
                      scratch.coarse12_blist_count, need_bmax);
+        p.coarse12_cols = scratch.coarse12_cols;
+        p.coarse12_block_max = scratch.coarse12_bmax;
+        p.coarse12_block_list = scratch.coarse12_blist;
     }
-    // The row path's skip tables (predicate and rule at `skip_tables` above).
+
+    // ── the row path's skip tables ──
     // Sized by `vocab_size`, the table's own row length, so a row with a
-    // shorter window still finds its own entry.
-    if (skip_tables) {
+    // shorter window still finds its own entry.  The predicate's device half
+    // is `radix_skip_row` (`contract.cuh`), the same function this plan field
+    // calls.
+    if (plan.row_skip_tables) {
         const size_t need_blocks = (size_t)batches * (((size_t)p.vocab_size + 63) / 64);
         scratch_grow(scratch.retired, scratch.block_max,
                      scratch.block_max_count, need_blocks);
         scratch_grow(scratch.retired, scratch.block_list,
                      scratch.block_list_count, need_blocks);
+        p.row_block_max = scratch.block_max;
+        p.row_block_list = scratch.block_list;
     }
-    // The chunks route's workspace, on the same grow-only allocation rule.
-    // Allocation failure is reported by `DS_CUDA_RUNTIME_CHECK`, not converted
-    // into a row-path fallback.  The count itself comes from
-    // `select_chunk_count`, which needs the device's SM count -- read here
-    // rather than passed in, because this is the sizing half and the launch
-    // half has to agree with it exactly.
-    if (gates.f32_chunks) {
+
+    // ── the chunks route's workspace ──
+    // Same grow-only allocation rule; allocation failure is reported by
+    // `DS_CUDA_RUNTIME_CHECK`, not converted into a row-path fallback.  The
+    // count itself comes from `select_chunk_count`, which needs the device's
+    // SM count -- read here rather than passed in, because this is the sizing
+    // half and the launch half has to agree with it exactly.
+    if (plan.chunks_workspace) {
         const size_t need_ws = topk_select_chunks::chunks_workspace_bytes(
             (uint32_t)batches, p.vocab_size, p.sm_count);
         scratch_grow(scratch.retired, scratch.chunks_workspace,
                      scratch.chunks_workspace_bytes, need_ws);
+        p.chunks_workspace = scratch.chunks_workspace;
     }
-    if (bf16_split || f32_split) {
+
+    if (plan.split_workspace) {
         const int f32_chunks =
             detail::f32_chunked_chunks((uint32_t)batches, p.topk,
                                        p.vocab_size, p.sm_count);
@@ -766,9 +733,23 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
         }
     }
 
-    // The per-row scan table, owned here rather than by the route that reads
-    // it.  Every `check_nan` call gets one (`needs_scan_table` above): which
-    // route answers is decided after this point (`select_route` below).
+    // ── the per-row scan table ──
+    // Owned here rather than by the route that reads it: every route that
+    // answers a row **without** ranking it reads this table in the contract
+    // half -- the coarse12 arm, the chunks arm, and both splits (they hand
+    // `params.scan_flags` to the contract as its `nan_flags`) -- and the route
+    // is chosen after this point (`select_route` below).  It is therefore
+    // provided for the whole `check_nan` class rather than for the routes a
+    // shape predicate can predict.  A plain row run under `check_nan` scans
+    // the row itself, never reads this, and pays nothing for the class.
+    //
+    // **The splits must not raise into their own workspace.**  That region is
+    // a geometry-dependent offset inside one grow-only scratch shared by
+    // every split shape and both dtypes, so the slot a call reads is whatever
+    // the previous call wrote at that offset -- a candidate index, not a flag
+    // (measured: a b1 v262144 bf16 cell after a b6 v1048576 call returns the
+    // NaN sentinel on a clean row).  This table is the one region that is only
+    // ever flags.
     //
     // **Zeroed when it is allocated, never per call.**  What makes that safe is
     // the contract half's invariant, not this buffer's: `topk_kernel_radix`
@@ -780,37 +761,25 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // allocation-bound `cudaMemsetAsync` on every call (~4 us on a C600U, ~15%
     // of a b1 decode cell, measured).  A caller that ever supplies its own
     // table owns zeroing it.
-    if (needs_scan_table) {
-        if (p.scan_flags == nullptr) {
-            if (scratch_grow(scratch.retired, scratch.scan_flags,
-                             scratch.scan_flags_count, (size_t)batches)) {
-                DS_CUDA_RUNTIME_CHECK(cudaMemset(
-                    scratch.scan_flags, 0, (size_t)batches * sizeof(int32_t)));
-            }
-            p.scan_flags = scratch.scan_flags;
+    if (plan.scan_table && p.scan_flags == nullptr) {
+        if (scratch_grow(scratch.retired, scratch.scan_flags,
+                         scratch.scan_flags_count, (size_t)batches)) {
+            DS_CUDA_RUNTIME_CHECK(cudaMemset(
+                scratch.scan_flags, 0, (size_t)batches * sizeof(int32_t)));
         }
+        p.scan_flags = scratch.scan_flags;
     }
     // The abort table: same grow-only pattern, opposite zeroing policy.  The
     // contract half writes a slot for every row before it can return, so a
     // memset here would buy nothing and cost the call ~11 us (see the field's
     // note).  It is allocated for the whole `abort_on_nan` class rather than
-    // for the route that will need it, because the route is chosen below and
-    // every route it can choose answers through the same contract half.
-    if (check_nan && abort_when_nan_found) {
+    // for the route that will need it, because every route the plan admits
+    // answers through the same contract half.
+    if (plan.abort_table) {
         scratch_grow(scratch.retired, scratch.nan_abort_flags,
                      scratch.nan_abort_flags_count, (size_t)batches);
         p.nan_abort_flags = scratch.nan_abort_flags;
     }
-    if (needs_coarse12_cols) {
-        p.coarse12_cols = scratch.coarse12_cols;
-        p.coarse12_block_max = scratch.coarse12_bmax;
-        p.coarse12_block_list = scratch.coarse12_blist;
-    }
-    if (skip_tables) {
-        p.row_block_max = scratch.block_max;
-        p.row_block_list = scratch.block_list;
-    }
-    if (gates.f32_chunks) p.chunks_workspace = scratch.chunks_workspace;
 
     // The cached branch hands out the scratch's pointers directly, so the guard
     // must not free them -- it owns only what this call allocated itself (the

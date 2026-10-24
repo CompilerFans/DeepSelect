@@ -1443,6 +1443,67 @@ inline RouteGates route_gates(const RowParams &params, uint32_t batches,
     };
 }
 
+// ── what a call allocates, decided once beside what answers it ──────────────
+//
+// `RouteGates` says which routes this call could take; this says which scratch
+// buffers the dispatcher must therefore hold.  The two are computed before the
+// allocation for the same reason: a buffer sized for a route this call does
+// not take is waste, and one *not* sized for a route it does take is a
+// fallback the caller never asked for.  Every field is a pure function of the
+// shape, the dtypes and the two switches (`check_nan`, `abort_when_nan_found`)
+// -- no allocation state, so the plan a call computes is the plan it needs.
+//
+// It exists as one type because the alternative is what it replaced: six
+// predicates scattered through the entry TU, one of them (the skip summary)
+// restating a device template argument 130 lines away from the allocation that
+// has to agree with it.
+struct ScratchPlan {
+    // The 16-bit row's summary + block list.  `radix_skip_row` is the device
+    // half (`contract.cuh`'s `kSkip` template argument) -- one function, so
+    // the two cannot drift.  The vocab floor is a row length and the second
+    // comparison is a *density* (`k/V >= 1/128`); the sweep behind both is
+    // the skip-table section at the top of this file.
+    bool row_skip_tables;
+    // The coarse12 answer buffer (`n_rows * topk` int32 columns) and the two
+    // block tables beside it.  The `b <= 2` chunks route shares the answer
+    // buffer -- same kind of answer, same contract half, and the two gates are
+    // disjoint -- while the block tables are allocated on the same branch
+    // because the route that reads them is a subset of these calls.
+    bool coarse12_cols;
+    // The chunks route's per-row workspaces.
+    bool chunks_workspace;
+    // Either split's workspace (+ the lengths table, which the split's stage 1
+    // consumes and the entry owns).
+    bool split_workspace;
+    // The per-row scan table.  Every route that answers a row *without*
+    // ranking it reads this in its contract half -- both splits included, as
+    // each hands it to the contract as `nan_flags`.  Provided for the whole
+    // `check_nan` class rather than for the routes a shape predicate can
+    // predict, because the route is chosen after the allocation.
+    bool scan_table;
+    // The abort table, for the calls that can abort.  Both are flags tables
+    // and nothing else; the difference is their zeroing policy, which is the
+    // allocation's (`maca_topk.cu`).
+    bool abort_table;
+};
+
+inline ScratchPlan scratch_plan(const RowParams &params,
+                                const RouteGates &gates, int value_dtype,
+                                int index_dtype, bool abort_when_nan_found) {
+    return ScratchPlan{
+        value_dtype == 1 && radix_skip_row(index_dtype == 0) &&
+            params.vocab_size >= kSkipMinVocab &&
+            (uint64_t)params.vocab_size >=
+                (uint64_t)params.topk * kSkipMinRowPerSlot &&
+            bf16_skip_enabled(),
+        gates.f32_coarse12 || gates.f32_chunks,
+        gates.f32_chunks,
+        gates.bf16_split || gates.f32_split,
+        params.check_nan,
+        params.check_nan && abort_when_nan_found,
+    };
+}
+
 // What answers this call.  `workspace`/`bytes` are the split's scratch as this
 // call has it; the guards are re-tested rather than assumed from the gate,
 // because a null or undersized workspace must answer through the row path

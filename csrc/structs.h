@@ -162,6 +162,17 @@ static_assert(ARCH_REGS_PER_AP > 0,
 // `radix_block_for`'s C600U arm already makes when it reasons "2 x 1024- or
 // 4 x 512-thread CTAs (128 KiB of registers)" about a part reached through
 // `is_c600u_ap_count`.
+//
+// **Four decisions ask the register file the same question, so it is named
+// once.**  Each of them reads "at least 131072 registers per AP" and each
+// means the heavier body still keeps its second CTA per AP: the bf16 row's
+// skip summary (the device template switch in `contract.cuh` and the host
+// allocation gate in `maca_topk.cu`, which must agree), that row's
+// adjacent-block walk (`radix_row_bf16.cuh`), and the coarse12 selector's
+// two-loads-in-flight walk (`topk_coarse12.cuh`).  A family that does not
+// reach the threshold takes the lighter body at all four sites, so the four
+// move together or not at all.
+static constexpr bool ARCH_HAS_WIDE_REG_FILE = ARCH_REGS_PER_AP >= 131072;
 
 // The per-family constants are above, in the `DEEP_SELECT_ARCH` table.  They
 // are compile-time constants *because* there is one artifact per family: host

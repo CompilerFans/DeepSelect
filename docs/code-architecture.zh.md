@@ -153,7 +153,10 @@ deep_select::ffi::      平台无关边缘（不变）
    每个文件一条显式实例化。`setup.py` 的源清单 = 手写清单 + 生成器的 `family_sources(family)`
    （直接调用生成器函数，不解析它的打印输出——清单只有一份，没有第二份可漂移）。
 4. **路由即表**：所有形状判据（哪条数据流、几个 chunk、什么块宽）集中在 `routing.cuh`，纯函数、可读、可测；
-   数据流文件里不出现形状门。
+   数据流文件里不出现形状门。**"这次调用要分配哪些 scratch"是同一张表的下半张**：`RouteGates` 说能走哪条路，
+   `ScratchPlan` 说因此要持有哪些缓冲——判据和它读的常量、测量住在一起，`maca_topk.cu` 的分配段只按字段
+   grow+bind，每块分配与回填同处，不隔着 130 行。同一个事实在器件半也只有一份定义：行核的摘要开关是
+   `radix_skip_row`（`contract.cuh`），四个寄存器预算门读 `ARCH_HAS_WIDE_REG_FILE`（`structs.h`）。
 5. **产物与平台不变**：每族一件产物、`-offload-arch` 与 `-DDEEP_SELECT_ARCH` 一一配对、`sm_count` 运行期读设备——
    这些是既定契约，重构不动它们。
 6. **实例化清单可数**：`ls instantiations/*.cu | wc -l` 与 `nm | grep -c <kernel>` 两个数必须对得上；

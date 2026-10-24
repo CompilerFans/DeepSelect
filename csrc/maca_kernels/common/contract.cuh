@@ -16,8 +16,8 @@
 #include <cstdlib>
 #include <type_traits>
 
-// The family table, for `ARCH_REGS_PER_AP` -- the budget the `kSkipRow`
-// predicate below is sized against.
+// The family table, for `ARCH_HAS_WIDE_REG_FILE` -- the budget `radix_skip_row`
+// below is sized against.
 #include <csrc/structs.h>
 
 // The NaN predicates and the order-preserving key encodes, shared with the
@@ -68,8 +68,8 @@ struct RowParams {
     // split must not put flags in its own workspace, whose offset is a
     // geometry-dependent expression into process-global scratch, so a slot can
     // hold another shape's candidate index; measured: a b1 v262144 bf16 call
-    // returned the sentinel after a b6 v1048576 call).  `needs_scan_table` in
-    // `maca_topk.cu` decides which calls get one.  Written by the scanning
+    // returned the sentinel after a b6 v1048576 call).  `ScratchPlan::scan_table`
+    // (`routing.cuh`) decides which calls get one.  Written by the scanning
     // kernel, read and cleared by the contract half (`nan_flags` above is the
     // field it reaches it through).  Null when nothing scans.
     int32_t *scan_flags;
@@ -525,6 +525,22 @@ struct TopkRadixConfig {
     static constexpr bool PRE = PRE_;
 };
 
+// The one definition of "this row instantiation carries the skip summary",
+// read from both sides of the gate: the row kernel's `kSkip` template argument
+// and the dispatcher's `row_skip_tables` plan field (`scratch_plan`,
+// `routing.cuh`).
+// **The two sites must agree** -- an allocated-but-unread table is a walk that
+// reads a summary nothing wrote, and a read-but-unallocated one is a fault.
+//
+// A 32-bit output index pays for the summary on every family; a 64-bit one
+// pays only where the register file can afford it.  The tables cost the body
+// ~3 MT over the bare one, and a 1024-thread block keeps its second CTA per SM
+// at <= 64 MT, which is within reach of the 128 Ki-register parts and not of
+// the C500's 65536 (`structs.h`'s `ARCH_HAS_WIDE_REG_FILE`).
+__host__ __device__ constexpr bool radix_skip_row(bool index_is_32bit) {
+    return index_is_32bit || ARCH_HAS_WIDE_REG_FILE;
+}
+
 // The dispatch key's two halves: the entry point reads `value_dtype` /
 // `index_dtype` off the tensors (`float32 ? 0 : 1` and the output index width),
 // and the table below has to be keyed the same way.
@@ -708,18 +724,10 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
         uint32_t *row_block_list =
             params.row_block_list != nullptr
                 ? params.row_block_list + (uint64_t)row * blocks_per_row : nullptr;
-        // `kSkip` is `true` for the 32-bit-index row on every family, and for
-        // the 64-bit row only where the register file can afford the summary:
-        // the tables cost the body ~3 MT over the bare one, and a 1024-thread
-        // block keeps its second CTA per SM at <= 64 MT -- within reach of the
-        // 128 KiB-regfile parts (measured 131072 regs/AP on a C600U,
-        // `structs.h`'s `ARCH_REGS_PER_AP`), not of the C500's 65536.  The
-        // host allocates the tables under the same predicate
-        // (`skip_tables` in `maca_topk.cu`) -- the two sites must agree, or an
-        // allocated-but-unread table is a walk that reads a summary nothing
-        // wrote.
-        constexpr bool kSkipRow = std::is_same<OutIdxT, int32_t>::value ||
-                                  ARCH_REGS_PER_AP >= 131072;
+        // The predicate and its reasoning are `radix_skip_row`'s, above -- the
+        // host allocates the tables under the same function.
+        constexpr bool kSkipRow =
+            radix_skip_row(std::is_same<OutIdxT, int32_t>::value);
         radix_select_row<ValueT, BLOCK, kSkipRow>(
             input_row, length, (int32_t *)selected, topk, fold_nan, &nan_local,
             row_block_max, row_block_list);
