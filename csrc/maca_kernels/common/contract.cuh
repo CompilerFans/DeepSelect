@@ -278,9 +278,15 @@ constexpr size_t kRadixArenaBytes =
 constexpr size_t kCoarse12HistBytes =
     (size_t)topk_select_radix::kCoarse12ArenaEntries * sizeof(uint32_t);
 
-static __device__ __forceinline__ void radix_layout(
-    uint8_t *base, uint32_t topk, bool sorted, bool wide, uint32_t *&selected,
-    uint64_t *&sort_buf) {
+// The lead region every launch of the row kernel reserves, and where `selected`
+// begins: the ordered emit's scratch when it is larger, else the arena -- and
+// on the 16-bit row the histogram laid over that arena.  The host
+// (`radix_smem_bytes`) and the device (`radix_layout`) both read this, so the
+// bytes a launch asks for and the offset it carves cannot disagree; `wide`
+// must be the same flag at both sites (`is_same<ValueT, maca_bfloat16>`), for
+// the reason `kCoarse12HistBytes` records.
+static __host__ __device__ __forceinline__ size_t radix_lead_bytes(
+    uint32_t topk, bool sorted, bool wide) {
     uint32_t n_pad = 1;
     if (sorted) {
         while (n_pad < topk) n_pad <<= 1;
@@ -288,9 +294,15 @@ static __device__ __forceinline__ void radix_layout(
     const size_t sort_bytes =
         sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
     const size_t arena_bytes = wide ? kCoarse12HistBytes : kRadixArenaBytes;
+    return sort_bytes > arena_bytes ? sort_bytes : arena_bytes;
+}
+
+static __device__ __forceinline__ void radix_layout(
+    uint8_t *base, uint32_t topk, bool sorted, bool wide, uint32_t *&selected,
+    uint64_t *&sort_buf) {
     sort_buf = reinterpret_cast<uint64_t *>(base);
     selected = reinterpret_cast<uint32_t *>(
-        base + (sort_bytes > arena_bytes ? sort_bytes : arena_bytes));
+        base + radix_lead_bytes(topk, sorted, wide));
 }
 
 // Both row entries cover every key length and every k **up to the public
@@ -758,15 +770,7 @@ constexpr size_t kSmemBudgetBytes =
 // buffer has to stay under half of `smemPerSM` for a second CTA to be resident
 // (32 KB static+dynamic per CTA on C500's 64 KB SM).
 inline size_t radix_smem_bytes(uint32_t topk, bool sorted, bool wide) {
-    uint32_t n_pad = 1;
-    if (sorted) {
-        while (n_pad < topk) n_pad <<= 1;
-    }
-    const size_t sort_bytes =
-        sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
-    const size_t arena_bytes = wide ? kCoarse12HistBytes : kRadixArenaBytes;
-    const size_t lead = sort_bytes > arena_bytes ? sort_bytes : arena_bytes;
-    return lead + sizeof(uint32_t) * topk;
+    return radix_lead_bytes(topk, sorted, wide) + sizeof(uint32_t) * topk;
 }
 
 // One launch site for one configuration tuple: the row path selects, the
