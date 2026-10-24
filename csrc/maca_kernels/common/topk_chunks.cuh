@@ -2,7 +2,7 @@
 //
 // Why this file exists
 // -------------------
-// `radix_topk_row_f32` (radix_core.cuh) and `topk_coarse12`
+// `radix_topk_row_f32` (`radix_row_fp32.cuh`) and `topk_coarse12`
 // (`topk_coarse12.cuh`) both serve this operator, and neither is the right shape
 // at one or two rows.  Measured, interleaved five rounds, device 2, `k = 2048`
 // (ledger §12.16.6):
@@ -149,8 +149,8 @@ __device__ __forceinline__ int coarse_bin(float value)
 // The barrier count is the point, not the instruction count.  The walk was
 // 10 rounds x 2 `__syncthreads()` plus one before the loop = **21 barriers**,
 // all of them block-wide, in the merge CTA -- the one CTA that every other CTA
-// of the row has already finished waiting for.  This arm is **3** (`:237`,
-// `:249`, `:253` in the original).  `docs/C500-radix-profile.zh.md` §5.3
+// of the row has already finished waiting for.  This arm is **3**.
+// `docs/C500-radix-profile.zh.md` §5.3
 // measures the fp32 row's own residual the same way: of its ~104 us
 // unaccounted, ~103 us is barrier wait and ~1 us is atomics.  Barriers are the
 // cost this path was paying.
@@ -289,7 +289,7 @@ inline cudaError_t launch_topk_chunks(
 //
 // **"Including its constants" used to overstate this, and the two missing
 // stages were a real divergence.**  The port stopped at `return max_chunks`
-// while the original (`ref:1495-1518`) has two more: the largest count that
+// while the original (deep_gemm's `select_chunk_count`) has two more: the largest count that
 // still fits a single wave, and -- when no count fits one -- the smallest whose
 // tail fills at least half a wave, else the widest tail seen.  Both are
 // *scheduling* refinements rather than shape rules, which is why they are worth
@@ -633,7 +633,7 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     // **One pass, not two.**  This used to sum into a `total` local, then
     // re-run the identical `ChunkCount`-deep loop into `histogram`, with the
     // first result discarded (`(void)total`).  The original sums once
-    // (`ref:1149-1154`, `histogram[tid] = total`).  The loop reads
+    // (`histogram[tid] = total`).  The loop reads
     // `ChunkCount * kCoarseBins` ints of **device** memory -- 24 KB per row at
     // `ChunkCount == 6` -- so the duplicate was a second device-memory pass
     // over the whole coarse workspace, taken in the one CTA every other CTA of
@@ -1046,37 +1046,26 @@ inline void launch_route(const deep_select::RowParams &params, uint32_t batches,
                          cudaStream_t stream, bool sorted_index,
                          bool sorted_value, bool return_value, int block) {
     int32_t *const staging = params.coarse12_cols;
+    bool launched = false;
     if (staging != nullptr) {
-        const cudaError_t rc = launch_topk_chunks(
+        launched = launch_topk_chunks(
             (const float *)params.input, params.end_ptr, staging,
             params.scan_flags, params.chunks_workspace, (int)batches,
             (int)params.topk,
             (int64_t)(params.stride_input_batch / sizeof(float)),
-            (int)params.vocab_size, params.sm_count, stream);
-        if (rc == cudaSuccess) {
-            deep_select::RowParams merged = params;
-            merged.preselected = staging;
-            merged.nan_flags = params.scan_flags;
-            deep_select::detail::launch_typed_radix<float, OutIdxT>(
-                merged, batches, stream, sorted_index, sorted_value, return_value,
-                block, /*preselected=*/true);
-            return;
-        }
-        // This route is three launches, and the histogram one raises the scan
-        // table.  A later stage's launch failing leaves that kernel's work in
-        // flight while the row path answers this call -- and the row path
-        // reads no flag table, so anything raised would sit there until the
-        // next call that uses this table read a stale 1 as its own answer.
-        // Cleared here for the same reason the splits clear theirs after a
-        // failed launch; unreachable through the gate, and cheap enough not
-        // to depend on that.
-        if (params.check_nan && params.scan_flags != nullptr)
-            cudaMemsetAsync(params.scan_flags, 0,
-                            (size_t)batches * sizeof(int32_t), stream);
+            (int)params.vocab_size, params.sm_count, stream) == cudaSuccess;
     }
-    deep_select::detail::launch_typed_radix<float, OutIdxT>(
+    // This route is three launches, and the histogram one raises the scan
+    // table.  A later stage's launch failing leaves that kernel's work in
+    // flight while the row path answers this call -- and the row path reads
+    // no flag table, so anything raised would sit there until the next call
+    // that uses this table read a stale 1 as its own answer.  Cleared by the
+    // handoff for the same reason the splits clear theirs after a failed
+    // launch; unreachable through the gate, and cheap enough not to depend on
+    // that.
+    deep_select::detail::launch_staged_or_row<float, OutIdxT>(
         params, batches, stream, sorted_index, sorted_value, return_value, block,
-        /*preselected=*/false);
+        launched, staging, /*clear_flags_on_failure=*/true);
 }
 
 }  // namespace topk_select_chunks

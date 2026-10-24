@@ -9,16 +9,25 @@
 
 namespace topk_select_radix {
 
+// One body, two arms.  `TOPK == 0` is the runtime-`topk` arm -- `topk` arrives
+// as an argument instead of a template parameter -- and an explicit non-zero
+// `TOPK` is the static-`k` arm the 512/1024 decode cells take, where
+// `topk_arg` folds away at compile time.  The two are one function so a change
+// to the chunk's walk cannot land in one and miss the other; the launchers
+// below keep the tuple-per-kernel split the build needs.
+//
 // `kNan` is the caller's `check_nan`: with it on this kernel is *also* the NaN
 // scan and `flags` is the table it raises, in place of `nan_scan_kernel`.  The
 // two share the grid by construction (`nan_scan_kernel`'s comment), so the only
 // thing that changes is which kernel reads the chunk's bytes.
 template <uint32_t TOPK, bool kNan = false>
-__global__ void topk_bf16_chunk_stage1_kernel_k(
+__global__ void topk_bf16_chunk_stage1_kernel(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* candidate_indices,
-    maca_bfloat16* candidate_values, int64_t score_stride, int B,
+    maca_bfloat16* candidate_values, int64_t score_stride, int topk_arg, int B,
     int num_chunks, int chunk_size, int32_t* flags = nullptr)
 {
+    constexpr int TOPK_I = static_cast<int>(TOPK);
+    const int topk = TOPK_I != 0 ? TOPK_I : topk_arg;
     const int global_bid = blockIdx.x;
     const int bid = global_bid / num_chunks;
     const int chunk = global_bid - bid * num_chunks;
@@ -28,26 +37,25 @@ __global__ void topk_bf16_chunk_stage1_kernel_k(
     const int start = chunk * chunk_size;
     const int chunk_len = (start < length) ? min(chunk_size, static_cast<int>(length - start)) : 0;
     constexpr int BLOCK_SIZE = kChunkBlockSize;
-    constexpr int TOPK_I = static_cast<int>(TOPK);
-    const int candidate_stride = num_chunks * TOPK_I;
-    int32_t* chunk_indices = candidate_indices + bid * candidate_stride + chunk * TOPK_I;
-    maca_bfloat16* chunk_values = candidate_values + bid * candidate_stride + chunk * TOPK_I;
+    const int candidate_stride = num_chunks * topk;
+    int32_t* chunk_indices = candidate_indices + bid * candidate_stride + chunk * topk;
+    maca_bfloat16* chunk_values = candidate_values + bid * candidate_stride + chunk * topk;
     const maca_bfloat16* row = scores + bid * score_stride;
     const maca_bfloat16 invalid_value = __float2bfloat16(-65504.0f);
 
     if (chunk_len <= 0) {
-        for (int i = threadIdx.x; i < TOPK_I; i += BLOCK_SIZE) {
+        for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
             chunk_indices[i] = -1;
             chunk_values[i] = invalid_value;
         }
         return;
     }
 
-    if (chunk_len <= TOPK_I) {
+    if (chunk_len <= topk) {
         // The window is shorter than `topk`, so the copy already touches every
         // byte the scan would read: the vote rides it, as in the fp32 split.
         bool nan_local = false;
-        for (int i = threadIdx.x; i < TOPK_I; i += BLOCK_SIZE) {
+        for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
             if (i < chunk_len) {
                 const int32_t idx = start + i;
                 const maca_bfloat16 raw = __ldg(row + idx);
@@ -72,77 +80,10 @@ __global__ void topk_bf16_chunk_stage1_kernel_k(
     // runs at 382 GB/s on the 12-bit level against 256 on the 8-bit one
     // (§9.12), and `b6 x 262144 k512` goes from 103.9 to 70.5 us e2e against
     // the row kernel's 97.7.  Both stages rank with it, and both therefore
-    // take `kChunkSmem`.
+    // take `kChunkSmem`.  `kSkip=false`: these rows carry no skip tables (the
+    // candidates live in the global arrays), so the summary is compiled out.
     bool nan_row = false;
     radix_topk_row_bf16_b<kChunkBlockSize, kNan, false>(
-        row + start, chunk_indices, chunk_len, (uint32_t)TOPK_I,
-        kNan ? &nan_row : nullptr);
-    if (kNan && flags != nullptr && nan_row && threadIdx.x == 0)
-        atomicOr(flags + bid, 1);
-    for (int i = threadIdx.x; i < TOPK_I; i += BLOCK_SIZE) {
-        const int32_t local_idx = chunk_indices[i];
-        if (local_idx >= 0 && local_idx < chunk_len) {
-            const int32_t idx = start + local_idx;
-            chunk_indices[i] = idx;
-            chunk_values[i] = __ldg(row + idx);
-        } else {
-            chunk_indices[i] = -1;
-            chunk_values[i] = invalid_value;
-        }
-    }
-}
-
-template <bool kNan = false>
-__global__ void topk_bf16_chunk_stage1_kernel(
-    const maca_bfloat16* scores, const int32_t* lengths, int32_t* candidate_indices,
-    maca_bfloat16* candidate_values, int64_t score_stride, int topk, int B,
-    int num_chunks, int chunk_size, int32_t* flags = nullptr)
-{
-    const int global_bid = blockIdx.x;
-    const int bid = global_bid / num_chunks;
-    const int chunk = global_bid - bid * num_chunks;
-    if (bid >= B) return;
-
-    const int32_t length = lengths[bid];
-    const int start = chunk * chunk_size;
-    const int chunk_len = (start < length) ? min(chunk_size, static_cast<int>(length - start)) : 0;
-    const int candidate_stride = num_chunks * topk;
-    constexpr int BLOCK_SIZE = kChunkBlockSize;
-    int32_t* chunk_indices = candidate_indices + bid * candidate_stride + chunk * topk;
-    maca_bfloat16* chunk_values = candidate_values + bid * candidate_stride + chunk * topk;
-    const maca_bfloat16* row = scores + bid * score_stride;
-    const maca_bfloat16 invalid_value = __float2bfloat16(-65504.0f);
-
-    if (chunk_len <= 0) {
-        for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
-            chunk_indices[i] = -1;
-            chunk_values[i] = invalid_value;
-        }
-        return;
-    }
-
-    if (chunk_len <= topk) {
-        bool nan_local = false;
-        for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
-            if (i < chunk_len) {
-                const int32_t idx = start + i;
-                const maca_bfloat16 raw = __ldg(row + idx);
-                chunk_indices[i] = idx;
-                chunk_values[i] = raw;
-                if (kNan) nan_local |= bf16_is_nan(__bfloat16_as_ushort(raw));
-            } else {
-                chunk_indices[i] = -1;
-                chunk_values[i] = invalid_value;
-            }
-        }
-        if (kNan && flags != nullptr && __syncthreads_or((int)nan_local) != 0
-            && threadIdx.x == 0)
-            atomicOr(flags + bid, 1);
-        return;
-    }
-
-    bool nan_row = false;
-    radix_topk_row_bf16_b<kChunkBlockSize, kNan>(
         row + start, chunk_indices, chunk_len, (uint32_t)topk,
         kNan ? &nan_row : nullptr);
     if (kNan && flags != nullptr && nan_row && threadIdx.x == 0)
@@ -160,39 +101,17 @@ __global__ void topk_bf16_chunk_stage1_kernel(
     }
 }
 
-template <uint32_t TOPK>
-__global__ void topk_bf16_chunk_stage2_kernel_k(
-    const maca_bfloat16* candidate_values, const int32_t* candidate_indices,
-    int32_t* indices, int candidate_stride, int B)
-{
-    const int bid = blockIdx.x;
-    if (bid >= B) return;
-
-    const maca_bfloat16* values = candidate_values + bid * candidate_stride;
-    const int32_t* candidates = candidate_indices + bid * candidate_stride;
-    int32_t* out = indices + bid * TOPK;
-    constexpr int BLOCK_SIZE = kChunkBlockSize;
-
-    // The merge's input is `chunks * topk` candidate values rather than the
-    // row's bytes, and the coarse12 row is the faster one over it too:
-    // measured at 10/10 of the split's cells, 0.804x summed, where the same
-    // swap on stage 1 was 0.832x (`README.md` §9.15 and §9.12).  The arena is
-    // `kCoarse12ArenaEntries` on a `chunks * topk` row, not the row kernel's
-    // longer one.
-    radix_topk_row_bf16_b<kChunkBlockSize, false, false>(values, out, candidate_stride, (uint32_t)TOPK);
-    for (int i = threadIdx.x; i < static_cast<int>(TOPK); i += BLOCK_SIZE) {
-        const int32_t candidate_pos = out[i];
-        out[i] = (candidate_pos >= 0 && candidate_pos < candidate_stride)
-               ? candidates[candidate_pos]
-               : -1;
-    }
-}
-
-template <int kBlock>
+// Stage 2 of both arms, on the same `TOPK == 0` sentinel: `kBlock` is the
+// block width (both launchers pass `kChunkBlockSize`, and it is a template
+// parameter because the launcher's tuple spells it), a non-zero `TOPK` folds
+// `topk_arg` away, and `kSkip=false` for the same reason as stage 1.
+template <int kBlock, uint32_t TOPK = 0u>
 __global__ void topk_bf16_chunk_stage2_kernel(
     const maca_bfloat16* candidate_values, const int32_t* candidate_indices,
-    int32_t* indices, int candidate_stride, int topk, int B)
+    int32_t* indices, int candidate_stride, int topk_arg, int B)
 {
+    constexpr int TOPK_I = static_cast<int>(TOPK);
+    const int topk = TOPK_I != 0 ? TOPK_I : topk_arg;
     const int bid = blockIdx.x;
     if (bid >= B) return;
 
@@ -201,7 +120,13 @@ __global__ void topk_bf16_chunk_stage2_kernel(
     int32_t* out = indices + bid * topk;
     constexpr int BLOCK_SIZE = kBlock;
 
-    radix_topk_row_bf16_b<kBlock>(values, out, candidate_stride, topk);
+    // The merge's input is `chunks * topk` candidate values rather than the
+    // row's bytes, and the coarse12 row is the faster one over it too:
+    // measured at 10/10 of the split's cells, 0.804x summed, where the same
+    // swap on stage 1 was 0.832x (`README.md` §9.15 and §9.12).  The arena is
+    // `kCoarse12ArenaEntries` on a `chunks * topk` row, not the row kernel's
+    // longer one.
+    radix_topk_row_bf16_b<kBlock, false, false>(values, out, candidate_stride, (uint32_t)topk);
     for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
         const int32_t candidate_pos = out[i];
         out[i] = (candidate_pos >= 0 && candidate_pos < candidate_stride)
@@ -235,7 +160,7 @@ inline cudaError_t launch_bf16_chunk_stage1_k(
     static bool init = false;
     if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            (const void*)topk_bf16_chunk_stage1_kernel_k<TOPK, kNan>,
+            (const void*)topk_bf16_chunk_stage1_kernel<TOPK, kNan>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, kChunkSmem);
         if (err != cudaSuccess) return err;
         init = true;
@@ -247,10 +172,11 @@ inline cudaError_t launch_bf16_chunk_stage1_k(
     // how a caller with padded input rows reaches this path; upstream passes
     // `L` and so can only split packed rows.
     const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
-    topk_bf16_chunk_stage1_kernel_k<TOPK, kNan>
+    topk_bf16_chunk_stage1_kernel<TOPK, kNan>
         <<<B * num_chunks, kChunkBlockSize, kChunkSmem, stream>>>(
-            scores, lengths, candidate_indices, candidate_values, stride, B,
-            num_chunks, chunk_size, kNan ? nan_flags : nullptr);
+            scores, lengths, candidate_indices, candidate_values, stride,
+            static_cast<int>(TOPK), B, num_chunks, chunk_size,
+            kNan ? nan_flags : nullptr);
     return cudaGetLastError();
 }
 
@@ -279,15 +205,17 @@ inline cudaError_t launch_bf16_chunk_stage2_k(
     static bool init = false;
     if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            topk_bf16_chunk_stage2_kernel_k<TOPK>,
+            (const void*)topk_bf16_chunk_stage2_kernel<kChunkBlockSize, TOPK>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, kChunkSmem);
         if (err != cudaSuccess) return err;
         init = true;
     }
 
     const int candidate_stride = num_chunks * static_cast<int>(TOPK);
-    topk_bf16_chunk_stage2_kernel_k<TOPK><<<B, kChunkBlockSize, kChunkSmem, stream>>>(
-        candidate_values, candidate_indices, indices, candidate_stride, B);
+    topk_bf16_chunk_stage2_kernel<kChunkBlockSize, TOPK>
+        <<<B, kChunkBlockSize, kChunkSmem, stream>>>(
+            candidate_values, candidate_indices, indices, candidate_stride,
+            static_cast<int>(TOPK), B);
     return cudaGetLastError();
 }
 
@@ -320,9 +248,9 @@ inline cudaError_t launch_topk_bf16_chunked_k(
                                             indices, B, num_chunks, stream);
 }
 
-// Stage 1 of the runtime-`topk` arm: the same kernel with `topk` as an
-// argument rather than a template parameter, which is why it is one
-// instantiation per `kNan` instead of per (`TOPK`, `kNan`).
+// Stage 1 of the runtime-`topk` arm -- the `TOPK == 0` instantiation of the
+// kernel above, which is why it is one instantiation per `kNan` instead of per
+// (`TOPK`, `kNan`).
 template <bool kNan>
 inline cudaError_t launch_bf16_chunk_stage1_runtime(
     const maca_bfloat16* scores, const int32_t* lengths,
@@ -334,7 +262,7 @@ inline cudaError_t launch_bf16_chunk_stage1_runtime(
     static bool init = false;
     if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            (const void*)topk_bf16_chunk_stage1_kernel<kNan>,
+            (const void*)topk_bf16_chunk_stage1_kernel<0u, kNan>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
         if (err != cudaSuccess) return err;
         init = true;
@@ -344,7 +272,7 @@ inline cudaError_t launch_bf16_chunk_stage1_runtime(
     // Keep each chunk base aligned for the uint4 FP16 vectorized row path.
     const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
     const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
-    topk_bf16_chunk_stage1_kernel<kNan>
+    topk_bf16_chunk_stage1_kernel<0u, kNan>
         <<<B * num_chunks, kChunkBlockSize, kSMEM, stream>>>(
             scores, lengths, candidate_indices, candidate_values, stride,
             topk, B, num_chunks, chunk_size, kNan ? nan_flags : nullptr);
@@ -367,7 +295,7 @@ inline cudaError_t launch_bf16_chunk_stage2_runtime(
     static bool init = false;
     if (!init) {
         cudaError_t err = cudaFuncSetAttribute(
-            topk_bf16_chunk_stage2_kernel<kBlock>,
+            (const void*)topk_bf16_chunk_stage2_kernel<kBlock>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
         if (err != cudaSuccess) return err;
         init = true;

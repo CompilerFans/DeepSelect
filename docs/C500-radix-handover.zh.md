@@ -95,7 +95,8 @@ walk 合计 283 µs，对两趟下界 233.4 = 82% 可达速率。要看"下一�
 
 **哪条路径在生产里活着**：梯子只启动两条行内核——
 `radix_topk_row_bf16_b<BLOCK>`（bf16）与 `radix_topk_row_f32`（fp32）；
-bf16 的 chunked split 两级（`topk_bf16_chunk_stage1/stage2_kernel_k`）也各自
+bf16 的 chunked split 两级（`topk_bf16_chunk_stage1_kernel` /
+`topk_bf16_chunk_stage2_kernel`，静态 k 与运行时 k 两个实例共用同一个函数体）也各自
 用 `_b` 排自己那一段。改 `_b` 之前先确认自己改的是不是生产路径。
 
 ---

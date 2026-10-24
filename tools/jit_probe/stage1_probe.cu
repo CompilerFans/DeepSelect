@@ -3,8 +3,8 @@
 // than the instantiation TU, whose header pull-in carries the whole chunk/f32
 // launcher set (DeepJIT requires exactly one kernel per artifact).
 //
-// The body mirrors `topk_bf16_chunk_stage1_kernel_k` in
-// `csrc/maca_kernels/common/radix_chunked.cuh`; keep it in step with that
+// The body mirrors `topk_bf16_chunk_stage1_kernel<TOPK, kNan>` at `TOPK != 0`
+// in `csrc/maca_kernels/common/radix_chunked.cuh`; keep it in step with that
 // function (the chunk geometry, the rank, the candidate write, the NaN flag).
 #include <csrc/maca_kernels/common/radix_row_bf16.cuh>
 

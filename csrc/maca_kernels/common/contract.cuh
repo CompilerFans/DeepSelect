@@ -851,6 +851,49 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
     launch(params, batches, stream, smem);
 }
 
+// The handoff every staging route ends on.  A route (a split, the coarse12
+// selector, the chunks selector) answers in row *columns* written to
+// `staging`, the contract half widens them the way it widens any preselected
+// answer, and a row the route could not serve leaves an empty slot there for
+// the contract half to re-rank on the row path.  `launched` is the route's
+// launch result and `staging` its buffer; a null buffer is the caller saying
+// the scratch was never allocated.  Four routes used to spell this out
+// themselves, one copy each, and the copies differed only in which pointer
+// they passed.
+//
+// `clear_flags_on_failure` is the route saying its failure can leave raised
+// rows in `params.scan_flags`: true for a route that launches more than one
+// kernel (a later stage can fail while an earlier one's scan is in flight) and
+// for the bf16 split's stage 1, which raises the flag it is handed; false for
+// the coarse12 route, whose one launch failing means nothing ran.  The row
+// path reads no flag table, so a raised slot would otherwise sit there until
+// the next call mistook it for its own answer.
+template <typename ValueT, typename OutIdxT>
+void launch_staged_or_row(const RowParams &params, uint32_t batches,
+                          cudaStream_t stream, bool sorted_index,
+                          bool sorted_value, bool return_value, int block,
+                          bool launched, const int32_t *staging,
+                          bool clear_flags_on_failure) {
+    const bool preselected = launched && staging != nullptr;
+    if (!preselected && clear_flags_on_failure && params.check_nan &&
+        params.scan_flags != nullptr) {
+        cudaMemsetAsync(params.scan_flags, 0,
+                        (size_t)batches * sizeof(int32_t), stream);
+    }
+    RowParams merged = params;
+    merged.preselected = preselected ? staging : nullptr;
+    // The scan table goes with the answer, and that is not optional: the route
+    // answered the row *without* ranking it, so under `check_nan` the contract
+    // half must read a flag rather than scan -- and the flag is the one the
+    // route's own walk raised while reading the row.  It gates on
+    // `params.check_nan` itself, so handing it over unconditionally is the
+    // same thing as gating here.
+    merged.nan_flags = preselected ? params.scan_flags : nullptr;
+    launch_typed_radix<ValueT, OutIdxT>(merged, batches, stream, sorted_index,
+                                        sorted_value, return_value, block,
+                                        preselected);
+}
+
 }  // namespace detail
 
 }  // namespace deep_select

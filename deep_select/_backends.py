@@ -54,6 +54,28 @@ def deep_gemm_available() -> bool:
         return False
 
 
+def _check_common_contract(input: torch.Tensor, topk: int,
+                           indices_type: torch.dtype) -> None:
+    """The rejections both reference backends owe their caller, word for word.
+
+    These four are properties of the operator's contract rather than of an
+    implementation -- and the kernel enforces the same four in
+    `csrc/maca_kernels/common/maca_topk.cu` -- so a caller must hear the same
+    thing whichever backend it picked.  One body here rather than one per
+    backend is what stops the two drifting apart: `topk_deep_gemm` and
+    `topk_torch` each reached the same four checks by spelling them out.
+    """
+    if topk <= 0:
+        raise ValueError(f"topk must be positive, got {topk}")
+    if input.dim() != 2:
+        raise ValueError(f"input must be 2-D, got {input.dim()} dimensions")
+    if input.stride(1) != 1:
+        raise ValueError("input.stride(1) must be 1")
+    if indices_type not in (torch.int32, torch.int64):
+        raise ValueError(
+            f"indices_type must be int32 or int64, got {indices_type}")
+
+
 @log_call
 def topk_deep_gemm(
     input: torch.Tensor,
@@ -106,15 +128,7 @@ def topk_deep_gemm(
     # The operator's own contract rejections, as `topk_torch` enforces them:
     # they are properties of the contract, not of an implementation, so a
     # caller must hear the same thing whichever backend it picked.
-    if topk <= 0:
-        raise ValueError(f"topk must be positive, got {topk}")
-    if input.dim() != 2:
-        raise ValueError(f"input must be 2-D, got {input.dim()} dimensions")
-    if input.stride(1) != 1:
-        raise ValueError("input.stride(1) must be 1")
-    if indices_type not in (torch.int32, torch.int64):
-        raise ValueError(
-            f"indices_type must be int32 or int64, got {indices_type}")
+    _check_common_contract(input, topk, indices_type)
     if input.dtype != torch.float32:
         raise UnsupportedByBackend(
             f"backend 'deep_gemm' ranks float32 scores, and was given "
@@ -211,27 +225,21 @@ def topk_torch(
     out-of-window tail to `-inf` and taking one `torch.topk` over the padded
     row, which reproduces the per-row window without a loop over rows.
     """
-    if topk <= 0:
-        raise ValueError(f"topk must be positive, got {topk}")
+    # The contract rejections both backends owe the caller, then this one's
+    # own.  They are the kernel's too (`csrc/maca_kernels/common/maca_topk.cu`,
+    # which is what every family builds) -- the operator's contract, not an
+    # implementation's, so a strided view must be an error whichever backend
+    # was chosen.  `sorted` is *not* float32-only here: the kernel orders
+    # bfloat16 too.
+    _check_common_contract(input, topk, indices_type)
     if topk > 4096:
         raise ValueError(f"topk must be <= 4096, got {topk}")
-    # The same contract rejections the kernel path enforces
-    # (`csrc/maca_kernels/common/maca_topk.cu`, which is what every family builds) -- the
-    # operator's contract, not an implementation's, so a strided view must be an
-    # error whichever backend was chosen.  `sorted` is *not* float32-only here:
-    # that kernel orders bfloat16 too.
     if sorted and not return_value:
         raise ValueError("`return_value` must be enabled when `sorted` is True")
     if sorted and sorted_index:
         raise ValueError("`sorted` and `sorted_index` cannot be used at the same time")
-    if input.dim() != 2:
-        raise ValueError(f"input must be 2-D, got {input.dim()} dimensions")
     if input.dtype not in (torch.float32, torch.bfloat16):
         raise ValueError(f"input dtype must be float32 or bfloat16, got {input.dtype}")
-    if input.stride(1) != 1:
-        raise ValueError("input.stride(1) must be 1")
-    if indices_type not in (torch.int32, torch.int64):
-        raise ValueError(f"indices_type must be int32 or int64, got {indices_type}")
     if output_idx is not None:
         if output_idx.dtype != indices_type:
             raise ValueError(f"output_idx dtype must be {indices_type}, got {output_idx.dtype}")

@@ -19,16 +19,16 @@ __device__ __forceinline__ uint8_t float_to_uint8(float x) {
 // 向量化直方图 (smem atomicAdd)
 // ============================================================
 
-// `hist_add_f32`'s call sites are the *unit-strided* walk: pass 1 (:584-590)
-// takes `tx, tx+BS, tx+2BS, tx+3BS` float4 units per lane, so adjacent lanes of
-// one load instruction are 16 bytes apart and a 128-byte segment carries 128
-// useful bytes.
+// `hist_add_f32`'s call sites are the *unit-strided* walk: pass 1 of
+// `radix_topk_row_f32` takes `tx, tx+BS, tx+2BS, tx+3BS` float4 units per lane,
+// so adjacent lanes of one load instruction are 16 bytes apart and a 128-byte
+// segment carries 128 useful bytes.
 //
 // **The `tx*4` walk this note used to describe is a different loop.**  It is
-// pass 2's two open-coded `__ldg(float4*)` loops (:626, :641), which take four
-// CONSECUTIVE float4 per thread -- 64 bytes between adjacent lanes, 32 useful
-// bytes per 128-byte segment.  They do not call this function, and they were
-// left alone on purpose when pass 1 was coalesced (`eaa0131`).
+// pass 2's two open-coded `__ldg(float4*)` loops, in that same function, which
+// take four CONSECUTIVE float4 per thread -- 64 bytes between adjacent lanes,
+// 32 useful bytes per 128-byte segment.  They do not call this function, and
+// they were left alone on purpose when pass 1 was coalesced (`eaa0131`).
 //
 // The stride is real and deliberate -- but it is NOT why pass 1 is short of
 // the wall.  Coalescing that walk is a 65% win in a microbench and -0.7% in
@@ -245,11 +245,11 @@ __device__ __forceinline__ void radix_topk_row_f32(
     __shared__ uint32_t s_histogram_buf[2][RADIX + 32];
     __shared__ uint32_t s_counter;
     __shared__ uint32_t s_threshold_bin_id;
-    // **Write-only in this function.**  Set at :650 alongside
-    // `s_threshold_bin_id`, never read in `radix_topk_row_f32`, its rescan or
-    // `stage_f32_lane` -- the fp32 path narrows with `s_histogram` directly.
-    // The readers are the 16-bit row entries, which declare their own copy
-    // (:1178, :1401).  Kept because the static-smem accounting above is
+    // **Write-only in this function.**  Set alongside `s_threshold_bin_id`,
+    // never read in `radix_topk_row_f32`, its rescan or `stage_f32_lane` --
+    // the fp32 path narrows with `s_histogram` directly.  The readers are the
+    // 16-bit row entries, which declare their own copy in
+    // `radix_row_bf16.cuh`.  Kept because the static-smem accounting above is
     // written against this declaration list: deleting it would move
     // `kF32StaticBytes` and with it `kF32SmemInputSize`.
     __shared__ uint32_t s_high_threshold_bin_id;

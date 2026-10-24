@@ -885,7 +885,7 @@ Measured 2026-09-14 on the xcore1000 TU (the build's own flags): the
 launched device functions report a **48-byte stack frame, no spill**, with
 **`topk_kernel_radix<…,512,…>` at 44 MT / up to 78 STregisters** and
 **`topk_kernel_radix<…,1024,…>` at 46 MT / up to 78 ST**. The `topk_bf16_chunk_*`
-stage kernels (`topk_bf16_chunk_stage1_kernel_k` / `topk_bf16_chunk_stage2_kernel_k`,
+stage kernels (`topk_bf16_chunk_stage1_kernel` / `topk_bf16_chunk_stage2_kernel`,
 the bf16 split's live arm) measure 20-40 MT / 30-42 ST (2026-10-12, the same TU
 compiled through `cucc --resource-usage`) and are reached only by the chunked path (below).
 

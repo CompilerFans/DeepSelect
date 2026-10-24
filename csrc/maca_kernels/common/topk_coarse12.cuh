@@ -2,7 +2,7 @@
 //
 // Why this file exists
 // -------------------
-// `radix_topk_row_f32` (radix_core.cuh) and `topk_coarse12`
+// `radix_topk_row_f32` (`radix_row_fp32.cuh`) and `topk_coarse12`
 // (`mcDeepGEMM/csrc/kernels/fp32_topk.cu`) answer the same question with the
 // same class of algorithm -- histogram the high bits, pick the bin holding
 // rank `topk`, rank that bin -- and the ported one is **2.0-2.3x faster** on
@@ -760,6 +760,7 @@ inline void launch_route(const deep_select::RowParams &params, uint32_t batches,
                          cudaStream_t stream, bool sorted_index,
                          bool sorted_value, bool return_value, int block) {
     int32_t *const staging = params.coarse12_cols;
+    bool launched = false;
     if (staging != nullptr) {
         // No split, no workspace of its own, no NaN table of its own: this
         // kernel walks each row itself and answers in row columns, so the
@@ -774,39 +775,26 @@ inline void launch_route(const deep_select::RowParams &params, uint32_t batches,
         // exactly what the benchmark harness does (`s[:, :L]`): the kernel
         // would then walk past the live prefix and rank columns that are
         // outside the tensor the caller asked about.
-        const cudaError_t rc = launch_topk_coarse12(
+        launched = launch_topk_coarse12(
             (const float *)params.input, params.end_ptr, staging,
             params.scan_flags, (int)batches, (int)params.topk,
             (int64_t)(params.stride_input_batch / sizeof(float)),
             (int)params.vocab_size, params.coarse12_block_max,
-            params.coarse12_block_list, stream);
-        if (rc == cudaSuccess) {
-            // Hand the answer to the contract half the way the split does,
-            // so its per-row `-1` check decides row by row: a row this
-            // kernel could not serve, or one whose window is no longer
-            // than `topk`, comes back with an empty slot and is re-ranked
-            // by the row path.
-            //
-            // The scan table goes with it, and that is not optional: this
-            // kernel answers a row *without* ranking it, so under
-            // `check_nan` the contract half must read a flag rather than
-            // scan -- and the flag is the one that kernel raised while
-            // reading the row anyway.
-            deep_select::RowParams merged = params;
-            merged.preselected = staging;
-            merged.nan_flags = params.scan_flags;
-            deep_select::detail::launch_typed_radix<float, OutIdxT>(
-                merged, batches, stream, sorted_index, sorted_value, return_value,
-                block, /*preselected=*/true);
-            return;
-        }
+            params.coarse12_block_list, stream) == cudaSuccess;
     }
-    // A launch that did not happen leaves the buffer untouched, so the row
-    // path answers instead -- the same fallback the split takes.  So does
+    // Hand the answer to the contract half the way the split does, so its
+    // per-row `-1` check decides row by row: a row this kernel could not
+    // serve, or one whose window is no longer than `topk`, comes back with an
+    // empty slot and is re-ranked by the row path.  A launch that did not
+    // happen leaves the buffer untouched and answers that way too -- as does
     // an allocation that could not be made.
-    deep_select::detail::launch_typed_radix<float, OutIdxT>(
+    //
+    // One kernel, so a failed launch means nothing ran: there is no partial
+    // work whose scan flag could have survived, which is why this route
+    // clears nothing (`clear_flags_on_failure = false`).
+    deep_select::detail::launch_staged_or_row<float, OutIdxT>(
         params, batches, stream, sorted_index, sorted_value, return_value, block,
-        /*preselected=*/false);
+        launched, staging, /*clear_flags_on_failure=*/false);
 }
 
 }  // namespace topk_select_coarse12

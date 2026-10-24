@@ -54,10 +54,11 @@ constexpr int kChunkBlockSize = KCHUNK_BLOCK_SIZE;
 //     -DKSMEM_BYTES=32768  static_assert fails: '16384 >= 30440'
 //     -DKSMEM_BYTES=49152  static_assert fails: '16384 >= 46824'
 //
-// The failing assert is `kCoarse12ArenaEntries * 4 >= kSmemInputSize * 4` at
-// :350 -- the 16-bit coarse level's 12-bit histogram aliases the *whole*
-// dynamic arena, so 4096 bins (16,384 B) is a hard floor and any `kSMEM` that
-// grows the arena past it fails to compile.  `kSmemInputSize` is
+// The failing assert is this file's
+// `kCoarse12ArenaEntries * sizeof(uint32_t) >= kSmemInputSize * sizeof(uint32_t)`
+// -- the 16-bit coarse level's 12-bit histogram aliases the *whole* dynamic
+// arena, so 4096 bins (16,384 B) is a hard floor and any `kSMEM` that grows the
+// arena past it fails to compile.  `kSmemInputSize` is
 // `(kSMEM - kSmemStaticBytes) / 4`, i.e. 14,056 B / 30,440 B / 46,824 B for
 // the three values above.  So the 16 KB arm is not a conservative choice that
 // a bigger part could raise: on this source it is the only buildable one.
@@ -65,7 +66,8 @@ constexpr int kChunkBlockSize = KCHUNK_BLOCK_SIZE;
 // `'16384 >= 46824'`, 32 KB with `'16384 >= 30440'` -- which is why they are
 // unbuilt rather than merely untaken.)
 //
-// Read `kF32SmemInputSize` at :521 for what 16 KB actually buys.
+// Read `kF32SmemInputSize` (`radix_row_fp32.cuh`) for what 16 KB actually
+// buys.
 //
 // `maca_topk.cu`'s `#ifdef KSMEM_BYTES` assert has the same shape of problem
 // from the other side -- see the note there.
@@ -142,15 +144,17 @@ static_assert(kCoarse12ArenaEntries * sizeof(uint32_t) >= (size_t)kSmemInputSize
  * shuffles.  Each warp scans its own 32 elements, the warp totals go to
  * s_histogram_buf[0][257..264] (256 stays a sentinel), warp 0 scans those
  * eight, and each warp adds its offset -- three __syncthreads (the two above
- * plus the one that publishes the per-bin result at :427), against eight in
- * the naive form.  Returns the calling thread's bin suffix so the caller can
- * avoid reading a neighbouring bin before another barrier.
+ * plus the one that publishes the per-bin result, the last barrier in this
+ * function), against eight in the naive form.  Returns the calling thread's
+ * bin suffix so the caller can avoid reading a neighbouring bin before another
+ * barrier.
  *
- * **The 16-bit path uses this, not fp32.**  Every call site is a bf16 row
- * entry -- :1204, :1299, :1407, :1493, :1614, :1653 -- plus the dead k2048 pair
- * at :965/:1015.  `run_cumsum` (the double-buffered Hillis-Steele form above)
- * is what `radix_topk_row_f32` calls, at :502, :610 and :669.  The sentence
- * here used to say the reverse, which is the kind of thing a reader trusts.
+ * **The 16-bit path uses this, not fp32.**  Its only caller is
+ * `radix_topk_row_bf16_b` (`radix_row_bf16.cuh`), twice per row, once per
+ * pass.  `run_cumsum` (the double-buffered Hillis-Steele form) is what
+ * `radix_topk_row_f32` calls, at three sites in `radix_row_fp32.cuh`.  The
+ * sentence here used to say the reverse, which is the kind of thing a reader
+ * trusts.
  */
 __device__ __forceinline__ uint32_t run_cumsum_warp(
     uint32_t s_histogram_buf[2][256 + 32], uint32_t tx, uint32_t& exclusive_suffix)

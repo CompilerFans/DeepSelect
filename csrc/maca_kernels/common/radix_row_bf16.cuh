@@ -395,10 +395,13 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     //
     // `kSkip` is the caller saying whether this build of the row carries the
     // round at all: false compiles the summary, the list and the walks out.
-    // The 64-bit-index row is the one caller that says false -- its epilogue
-    // already costs it two registers more than the 32-bit row's, and carrying
-    // the summary on top of that puts it over the 32 MT a 1024-thread block
-    // needs for its second CTA per SM (measured with `--resource-usage`).
+    // Two kinds of caller say false: the chunked split's two stages, whose
+    // rows never carry tables (their candidates live in the global arrays),
+    // and `contract.cuh`'s 64-bit-index row on a part below the register
+    // floor -- its epilogue already costs it two registers more than the
+    // 32-bit row's, and carrying the summary on top of that puts it over the
+    // 32 MT a 1024-thread block needs for its second CTA per SM (measured
+    // with `--resource-usage`).
     uint16_t* block_max = nullptr, uint32_t* block_list = nullptr)
 {
     constexpr uint32_t RADIX = kRadix;

@@ -312,10 +312,6 @@ inline int f32_chunks_for(uint32_t batches, int ceiling, uint32_t work_target) {
     while (c < ceiling && (uint64_t)(c * 2) * b <= work_target) c *= 2;
     return c;
 }
-inline int f32_chunks_small_batch(uint32_t batches, int ceiling,
-                                  uint32_t work_target) {
-    return f32_chunks_for(batches, ceiling, work_target);
-}
 
 // **The chunk count's own rule cannot see `topk`, and above 512 it is the
 // wrong axis.**  Stage 2's merge reads `num_chunks * topk` candidates per row
@@ -538,7 +534,7 @@ inline constexpr uint32_t kF32OverflowChunkLen = topk_select_radix::kF32SmemInpu
 // carry the old ratio into a new arena without anything noticing.
 //
 // **The guard below cannot fire in any build this tree has.**  `KSMEM_BYTES`
-// is undefined by default (`radix_core.cuh`'s `#ifndef KSMEM_BYTES` picks 16 KB
+// is undefined by default (`radix_common.cuh`'s `#ifndef KSMEM_BYTES` picks 16 KB
 // for `__MACACC__` and 48 KB otherwise), and no entry in `setup.py`'s
 // `build_for_maca`, no `CUCC_TARGETS` value and no script in this repository
 // passes `-DKSMEM_BYTES=`.  So it is a trap for a build nobody runs, and the
@@ -547,12 +543,13 @@ inline constexpr uint32_t kF32OverflowChunkLen = topk_select_radix::kF32SmemInpu
 // stops being the measurement, and a silent wrong bound is worse than a
 // compile error.  Making it fire would take an `#else` branch asserting the
 // default `1757`, which is the same check written twice; the honest statement
-// is that the default is unguarded and `radix_core.cuh`'s `kSMEM` is the one
+// is that the default is unguarded and `radix_common.cuh`'s `kSMEM` is the one
 // place to read what the arena is.
 //
 // **A `-DKSMEM_BYTES=` build cannot get that far anyway**, which is a stronger
-// statement than "nobody passes it": `radix_core.cuh`'s `kCoarse12ArenaEntries`
-// assert (:350) fails for both 32 KB and 48 KB, so the only value that compiles
+// statement than "nobody passes it": `radix_common.cuh`'s
+// `kCoarse12ArenaEntries` assert fails for both 32 KB and 48 KB, so the only
+// value that compiles
 // is the 16 KB default.  This assert is therefore unreachable twice over --
 // once because nothing sets the macro, and once because setting it to anything
 // else does not build.  Measured on this tree with `-fsyntax-only`, both
@@ -991,7 +988,7 @@ int f32_chunked_chunks(uint32_t batches, uint32_t topk, uint32_t vocab_size,
     if (batches > kF32ChunksFewBatches)
         return f32_chunks_large_batch(vocab_size, sm_count);
     const int ceiling = f32_chunk_ceiling_32() ? 32 : kF32ChunkCeiling;
-    const int c = f32_chunks_small_batch(batches, ceiling, work_target);
+    const int c = f32_chunks_for(batches, ceiling, work_target);
     const int cap = f32_topk_chunk_cap(topk, vocab_size, (uint32_t)c, work_target);
     int n = (cap != 0 && c > cap) ? cap : c;
     // **The arena floor, which this branch never had.**  `f32_chunks_large_batch`
@@ -1161,10 +1158,9 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
     // otherwise.  The contract half reads and clears each row's slot in the
     // same breath, so there is no per-call memset here; only a failure after a
     // partial launch can leave a raised slot behind, and that is what the
-    // clear below covers.  Both the scan and that clear go when `check_nan` is
-    // off: the row kernel reads this table only under that same flag.
+    // handoff's clear covers.  Both the scan and that clear go when `check_nan`
+    // is off: the row kernel reads this table only under that same flag.
     int32_t *const flags = params.check_nan ? params.scan_flags : nullptr;
-    const size_t table_bytes = (size_t)batches * sizeof(int32_t);
     const bool fuse_scan = params.check_nan && topk_select_radix::f32_stage1_fuses_scan();
     if (params.check_nan && !fuse_scan) {
         launch_nan_scan<float>(
@@ -1179,18 +1175,12 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
         // The row stride is in bytes at this layer and in elements there.
         (int64_t)(params.stride_input_batch / sizeof(float)),
         fuse_scan, flags);
-    // A failed launch answers through the row path, which reads no flag table.
-    // Anything a partially launched split already raised is cleared here so
-    // the next call cannot read it.
-    if (rc != cudaSuccess && flags != nullptr)
-        cudaMemsetAsync(flags, 0, table_bytes, stream);
-    RowParams merged = params;
-    const bool preselected = rc == cudaSuccess;
-    merged.preselected = preselected ? ws.merged : nullptr;
-    merged.nan_flags = preselected ? flags : nullptr;
-    launch_typed_radix<float, OutIdxT>(merged, batches, stream, sorted_index,
-                                       sorted_value, return_value, block,
-                                       preselected);
+    // A failed launch answers through the row path, which reads no flag table;
+    // the handoff clears anything a partially launched split raised.
+    launch_staged_or_row<float, OutIdxT>(params, batches, stream, sorted_index,
+                                         sorted_value, return_value, block,
+                                         rc == cudaSuccess, ws.merged,
+                                         /*clear_flags_on_failure=*/true);
 }
 
 // Split, merge, then run the row kernel's contract half over the merged
@@ -1219,21 +1209,12 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
         // The row stride is in bytes at this layer and in elements there.
         (int64_t)(params.stride_input_batch / sizeof(maca_bfloat16)),
         params.check_nan, flags);
-    // The row path that answers a failed split reads no flag table, so a slot
-    // a partial launch raised is cleared here rather than left for the next
-    // call to mis-read.
-    if (rc != cudaSuccess && flags != nullptr)
-        cudaMemsetAsync(flags, 0, (size_t)batches * sizeof(int32_t), stream);
-    RowParams merged = params;
-    // A split that could not be launched leaves the workspace unfilled; the row
-    // dataflow answers instead of the contract reading an empty slot.  The gate
-    // keeps this unreachable (the split rejects only what it was gated on).
-    const bool preselected = rc == cudaSuccess;
-    merged.preselected = preselected ? ws.merged : nullptr;
-    merged.nan_flags = preselected ? flags : nullptr;
-    launch_typed_radix<maca_bfloat16, OutIdxT>(merged, batches, stream,
-                                               sorted_index, sorted_value,
-                                               return_value, block, preselected);
+    // The row path that answers a failed split reads no flag table, so the
+    // handoff clears a slot a partial launch raised rather than leaving it for
+    // the next call to mis-read.
+    launch_staged_or_row<maca_bfloat16, OutIdxT>(
+        params, batches, stream, sorted_index, sorted_value, return_value,
+        block, rc == cudaSuccess, ws.merged, /*clear_flags_on_failure=*/true);
 }
 
 }  // namespace detail
