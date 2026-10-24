@@ -73,10 +73,35 @@ b6 v1048576 k512 chunks18):
 两台均 `contract: PASS`、RC=0。`jit_probe.cc` 固定 `-DDEEP_SELECT_ARCH=1600`
 (探针用的 stage1 几何在两族都是 128 KiB/AP,该宏只影响编译期容量闸)。
 
-同一轮的两机还各自构建并跑通了 DeepJIT 自带的 `tests/test_maca_proj` harness
-(DeepJIT `4109b07`,`build.sh` 的宿主机 `g++` 回退,无 conda toolchain):
+同一轮的两机还各自构建并跑通了 DeepJIT 自带的 `tests/test_maca_proj` harness:
 两台均 **52 passed / 1 skipped / 0 failed**,末行 `All MACA DeepJIT tests
 passed.`。skip 的是 `cooperative launch`:这一代 MACA 驱动接受 2^20 块的
 cooperative 网格并分波执行而不是拒绝,harness 现在按能力跳过而不是判失败。
 root 下还有一条 NOTE —— `/proc` 条目的 mtime 改得动,只读 secondary cache
 那一半前提不成立,lookup 那半照常跑。
+
+## 宿主编译器改用 SDK 自带的 mxcc(2026-10-24,DeepJIT `6763222`)
+
+MACA SDK 的 `mxgpu_llvm/bin/` 里没有独立的 `clang`/`clang++`:**`mxcc` 就是它
+自带的 clang 驱动**,编宿主机 C++ 和编设备代码一样直接。DeepJIT 的 harness
+和自包含检查因此不再依赖 conda 工具链:
+
+- `tests/test_maca_proj/build.sh` 默认 `CXX=$MACA_PATH/mxgpu_llvm/bin/mxcc`;
+  `MACA_TOOLCHAIN`/clang++-22/sysroot/`--gcc-toolchain` 那一整支删除
+  ——它们只是把系统 libstdc++ 找回来,mxcc 自己就会。`CXX`/`TORCH_ROOT`/
+  `FMT_ROOT`/`MACA_PATH` 仍是覆盖点。不传 `-pthread`:mxcc 的选项表里没有,
+  这一代 glibc 已把 pthread 并进 libc。
+- `tests/test_maca.py` 的 `host_toolchain()`/`gcc_tree()`/`gcc_limits_include()`
+  换成 `host_compiler()`(默认 mxcc,`MACA_HOST_CXX`/`CXX` 覆盖);header
+  self-containment 用 `mxcc -c -o <obj>` 而不是 `-fsyntax-only`(后者不在
+  mxcc 选项表里),`-Werror` 保持同等严格。用例计账改比多重集,skip 落在
+  套件中间不再算 mismatch。
+- `tests/test_exception.py` 的 libdw 头查找候选只剩 `$MACA_PATH/include`
+  与 `$MACA_PATH/mxgpu_llvm/include`,不再提 `MACA_TOOLCHAIN`/hipcc。
+
+收据(两台,无 conda 工具链参与,全新 JIT 缓存):
+
+| 机器 | `python tests/test_maca.py` | `python tests/test_exception.py` |
+|---|---|---|
+| MetaX C600-A(32 AP) | 52/1/0,`55 cache entries validated` | pass |
+| MetaX C600-U(28 AP) | 52/1/0,`55 cache entries validated` | pass |
