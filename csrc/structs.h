@@ -13,21 +13,14 @@
 // forgets the flag is an error naming the flag rather than a silent choice
 // between platforms.
 //
-// Deliberately before the platform headers: without it the first complaint
-// would be `maca_bfloat16.h not found`, which names the symptom and not the
-// cause.
+// The check stands in the header every translation unit includes, and before
+// anything else this file declares, so a build that forgets the flag fails on
+// this message rather than on a missing MACA header further down.
 #if !defined(DEEP_SELECT_IS_BUILD_ON_MACA)
 #error "DEEP_SELECT_IS_BUILD_ON_MACA is not set: this source is built for the \
 MACA platform.  See setup.py's build_for_maca, which passes it beside \
 -offload-arch and -DDEEP_SELECT_ARCH."
 #endif
-
-#include <cuda_runtime_api.h>
-
-// MACA's native bf16.  Every TU includes this header, so `api.cu` and each
-// instantiation TU see the same `maca_bfloat16` -- one symbol for
-// `TopkSelectConfig<maca_bfloat16, ...>` on both sides.
-#include <maca_bfloat16.h>
 
 static constexpr uint32_t INPUT_STRIDE_ALIGNMENT_REQUIREMENT = 1024; // In number of bytes
 static constexpr uint32_t OUTPUT_STRIDE_ALIGNMENT_REQUIREMENT = 32; // In number of bytes
@@ -170,10 +163,6 @@ static_assert(ARCH_REGS_PER_AP > 0,
 // 4 x 512-thread CTAs (128 KiB of registers)" about a part reached through
 // `is_c600u_ap_count`.
 
-static constexpr uint32_t MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION = 1u << 23;
-static constexpr uint32_t MAX_VOCAB_SIZE = 1u << 23;
-static_assert(MAX_VOCAB_SIZE <= MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION);
-
 // The per-family constants are above, in the `DEEP_SELECT_ARCH` table.  They
 // are compile-time constants *because* there is one artifact per family: host
 // code exists once per compilation, so the family the image is for is known
@@ -183,48 +172,3 @@ static_assert(MAX_VOCAB_SIZE <= MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION);
 // working when it is handed a device that is not the one the artifact was
 // built for, and refusing a mismatched grid is a better failure than a grid
 // sized for the wrong part.
-//
-// The ported kernels under `csrc/maca_kernels/legacy/` selected their config tuples
-// against `NATIVE_SHARED_MEMORY_PER_SM_BYTES` (64 KiB for family 1000, 128 KiB
-// for 1500/1600) and asserted at compile time that their staging fitted.  That
-// is `ARCH_SMEM_PER_AP_BYTES` now, and the assertion can come back with it:
-// the constant is per-family again, so a 1600 image can check its own tuples
-// against its own budget.
-//
-// **The port is off the build, and the rename has not been done.**  Two
-// `static_assert`s in that tree still name the old
-// `NATIVE_SHARED_MEMORY_PER_SM_BYTES` -- `v3/topk_select.cuh` and
-// `v3_fp32/topk_select.cuh`, one each -- and that identifier is defined
-// nowhere, so those files would not compile if `csrc/maca_kernels/legacy/` went back on
-// `SOURCES`.  The rename is part of re-adding the tree, not something a
-// reader can assume is already done; see `setup.py`'s note in
-// `build_for_maca` for what re-adding takes.
-
-
-struct TopkSelectArgs {
-    uint32_t batch_size;
-    uint32_t vocab_size;
-    uint32_t topk;
-
-    void* input;
-    void* output_value;
-    void* output_index;
-    int* begin_ptr;
-    int* end_ptr;
-    int* output_idx_offset;
-
-    // All strides are in number of elements, not bytes
-    uint64_t stride_input_batch;
-    uint64_t stride_output_value_batch;
-    uint64_t stride_output_index_batch;
-
-    bool sorted_value;
-    bool sorted_index;
-    bool return_value;
-    int idx_oob_fill_value;
-    float value_oob_fill_value;
-    bool abort_when_nan_found;      
-
-    uint64_t shared_memory_size_per_sm;
-    cudaStream_t stream;
-};

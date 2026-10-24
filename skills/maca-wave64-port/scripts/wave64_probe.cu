@@ -104,7 +104,9 @@ __global__ void k_collectives(unsigned long long *ballot32, unsigned long long *
 
 // ── 3. does the port's own scan helper survive a 64-lane wave? ──────────────
 
-// Verbatim from csrc/maca_kernels/legacy/utils.cuh: the 32-lane form the port uses.
+// The 32-lane form the port used (its `utils.cuh`, removed with the ported
+// tree on 2026-10-24; source in git history). Self-contained on purpose: the
+// verdict it prints is about the shape of the bug, not about a live file.
 template<typename T>
 __device__ __forceinline__ T scan32(T x, uint32_t lane_idx) {
     #pragma unroll

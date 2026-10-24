@@ -84,8 +84,7 @@ csrc/
     │   ├── radix_chunked.cuh               两条 dtype 的分块 split/merge（阶段核 + 发射）
     │   ├── topk_coarse12.cuh               deep_gemm 路线一（官方核名）
     │   └── topk_chunks.cuh                 deep_gemm 路线二（官方核名）
-    ├── xcore<N>/instantiations/*.cu        族层：每族自己的生成物（一个配置元组一个文件；今日三族同表，87 × 3）
-    └── legacy/                             移植版上游内核：不编译，仅史料/审计留存（见其 README.md）
+    └── xcore<N>/instantiations/*.cu        族层：每族自己的生成物（一个配置元组一个文件；今日三族同表，87 × 3）
 ```
 
 ### 3b. 命名空间（用户 2026-10-12 裁定：一条逻辑、一套词汇，照官方的）

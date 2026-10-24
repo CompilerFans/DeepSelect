@@ -60,8 +60,7 @@ libstdc++,没有 `<format>`。DeepJIT 头文件里 `std::format` 出现 0 次;�
 同一个 `utils/format.hpp`。两者对 `{:a}` 并不可互换:fmt 打 printf 的 `0x`
 前缀,`std::format` 跟 `to_chars`、不带前缀 —— harness 生成十六进制浮点字面量
 的模板原先自己写了 `0x`,换成 fmt 后前缀重复、mxcc 拒收,已改为由格式符给出。
-DeepSelect 自己的源码同样 0 处使用(`legacy/api.cu` 只有两行注释解释为何用
-`snprintf` 而不是 `std::format`)。
+DeepSelect 自己的源码同样 0 处使用。
 
 vendored fmt 的重跑收据(两机各自 `build.sh` 重编 + 全新 JIT 缓存,shape
 b6 v1048576 k512 chunks18):

@@ -38,7 +38,7 @@ precision.
 | `lane_idx = threadIdx.x % 32` | `% 64`, or `__lane_id()` |
 | `NUM_WARPS = NUM_THREADS / 32` | `NUM_THREADS / 64` |
 | `static_assert(NUM_WARPS <= 32)` | re-derive; the bound came from the old width |
-| `cu::canonical_warp_idx_sync()` (kerutils: `threadIdx.x / 32u`) | `threadIdx.x / 64`, or own it locally |
+| `cu::canonical_warp_idx_sync()` (upstream's vendored `kerutils` spells it `threadIdx.x / 32u`) | `threadIdx.x / 64`, or own it locally |
 | scan loop `i = 1; i <= 16; i <<= 1` | `i <= 32` |
 | shuffle guard `lane_idx + i < 32` | `< 64` |
 

@@ -16,14 +16,12 @@
 //     `__syncthreads`, `__syncthreads_or`.  No inline asm, no TMA, no mbarrier,
 //     no cluster.
 //   * The wave is 64 lanes, not 32.  Any mask or `/ 32` inherited from the
-//     CUDA-era kernels is suspect -- see `csrc/maca_kernels/legacy/` for what
-//     that looks like when it is wrong.
+//     CUDA-era kernels is suspect -- `skills/maca-wave64-port/` is the audit.
 //
-// The upstream `v3` (bf16) and `v3_fp32` trees are ported under `csrc/maca_kernels/legacy/`
-// and are NOT built; `v3_cluster` is deleted (MACA has no cluster launch), so
-// the shapes it served fall through to this kernel -- the same path every other
-// shape takes, with `topk <= 4096` and no vocabulary bound, so they are served,
-// only without the cluster-specific scheduling.
+// The upstream clustered variant (`v3_cluster`) is not carried: MACA has no
+// cluster launch, so the shapes it served fall through to this kernel -- the
+// same path every other shape takes, with `topk <= 4096` and no vocabulary
+// bound, so they are served, only without the cluster-specific scheduling.
 //
 // This file is the shared half of every family's artifact: family <N> compiles
 // `common/` plus its own tuple set in `csrc/maca_kernels/xcore<N>/instantiations/`.

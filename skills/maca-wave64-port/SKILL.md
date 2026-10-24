@@ -76,8 +76,11 @@ The four shapes that matter:
    `NUM_THREADS / 64`. This one is worse than it looks: it silently doubles, so
    every `warp_cnt[NUM_WARPS]` array is the wrong size, `warp_idx` addresses
    the wrong slot, and `lane_idx < NUM_WARPS` predicates admit the wrong lanes.
-   **`kerutils`'s `canonical_warp_idx_sync()` is `threadIdx.x / 32u`** and is
-   part of this — a port that calls it inherits the bug from a vendored header.
+   **Upstream's vendored `kerutils` spells `canonical_warp_idx_sync()` as
+   `threadIdx.x / 32u`** and is part of this — a port that calls it inherits
+   the bug from a vendored header. (This tree's vendored copy was removed with
+   the ported kernel tree on 2026-10-24; the rule is about the header, not
+   about this checkout.)
 4. **A scan/prefix width, in the loop bound *and* the guard.** Both
    `for (i = 1; i <= 16; i <<= 1)` and `if (lane_idx + i < 32)` are 32-lane;
    a 64-lane scan is `i <= 32` with `< 64`, and each needs fixing on its own.
@@ -260,20 +263,29 @@ specific to this bug class and belong in the record:
   broke it"** — usually a fixed input run several times, and if a baseline is
   being compared, note that the baseline had to be patched to build at all.
 
-## 8. Worked example: `csrc/maca_kernels/legacy/` in this repository
+## 8. Worked example: the ported kernel tree (removed 2026-10-24)
 
-The tree this skill was written against. **Partly fixed since** — the scan
-helper, the warp-count derivation and most of the masks have been repaired, and
-the site inventory in §8.2 was re-verified against the current sources rather
-than carried over. Read §8.2 before acting on §8.1: the primitive semantics
-measured there are unchanged and still the reason the bugs happened, but
-several of the sites they were measured against no longer exist.
+The tree this skill was written against, `csrc/maca_kernels/legacy/`, **is no
+longer in the repository**: it was never compiled, selected wrong on a 128 KiB
+part, and was removed together with the vendored `csrc/3rdparty/kerutils/` it
+alone included. Sources, file by file, are in git history
+(`git log --all -- csrc/maca_kernels/legacy/`). **Every path and line number
+below is a historical record** — kept because the measurement and the diagnosis
+are what a later port (of this or any CUDA-era kernel) starts from, and because
+a reader following an old link should land on the reason it no longer resolves.
+
+**Partly fixed before removal** — the scan helper, the warp-count derivation
+and most of the masks had been repaired, and the site inventory in §8.2 was
+re-verified against the then-current sources rather than carried over. Read
+§8.2 before acting on §8.1: the primitive semantics measured there are
+unchanged and still the reason the bugs happened.
 
 The measurement and the diagnosis below are kept as written, because they are
 what the fix started from.
 
 One caveat before you quote §8.1's verdict line: the probe's scan block is
-**self-contained**, not a call into `csrc/maca_kernels/legacy/utils.cuh` — it carries its
+**self-contained**, not a call into the port's `utils.cuh` (removed with the
+tree; git history) — it carries its
 own copy of the pre-fix 32-lane helper (`wave64_probe.cu:105-132`, `as_port[tx]
 = scan32<int>(1, tx % 32)`) and its own 64-lane replacement. So it still prints
 `VERDICT: port scan wrong on 32/64 lanes` **on a tree where that scan is fixed**
@@ -329,17 +341,20 @@ that addressed fewer than all three would have left it wrong:
    64 needs `i <= 32`;
 3. the guard `lane_idx + i < 32` (suffix scan) discards everything above lane 31.
 
-**All three were fixed, and they were fixed in one place rather than three**:
-`utils.cuh` now defines the wave width and the full mask once
-(`MACA_WARP_SIZE 64u` at `:11`, `MACA_FULL_MASK` at `:15`) and every scan
-spells the bound in terms of them — `i <= MACA_WARP_SIZE / 2` at `:22` and
-`:39`, `lane_idx + i < MACA_WARP_SIZE` at `:41`. That is the shape §3 argues
-for: widen the model, not the literal.
+**All three were fixed before the tree was removed, and they were fixed in one
+place rather than three**: its `utils.cuh` defined the wave width and the full
+mask once (`MACA_WARP_SIZE 64u` at `:11`, `MACA_FULL_MASK` at `:15`) and every
+scan spelled the bound in terms of them — `i <= MACA_WARP_SIZE / 2` at `:22`
+and `:39`, `lane_idx + i < MACA_WARP_SIZE` at `:41`. That is the shape §3
+argues for: widen the model, not the literal. The shipping kernel does the
+same thing its own way (`radix_common.cuh`'s `kWarpSize = 64` under
+`__MACACC__`, with a `0xFFFFFFFFFFFFFFFFULL` mask at every cross-lane site).
 
 ### 8.2 Site inventory
 
-**Re-verified 2026-09-19 against the current `csrc/maca_kernels/legacy/`**:
-`common_parts.cuh` is 1433 lines, `utils.cuh` 51. The table is split into what
+**A historical inventory: re-verified 2026-09-19 against the tree as it then
+stood, removed 2026-10-24** (`csrc/maca_kernels/legacy/`; git history).
+`common_parts.cuh` was 1433 lines, `utils.cuh` 51. The table is split into what
 is fixed, what remains, and what was a stale citation — the rows that were
 stale are kept rather than deleted, because a reader who follows an old link
 should land on the reason it no longer resolves.
@@ -358,7 +373,7 @@ should land on the reason it no longer resolves.
 | `common_parts.cuh:1386`, `:1388` | `__ballot_sync(MACA_FULL_MASK, …) & ((1ull << lane_idx) - 1ull)`, `__popcll(bit)` | 64-bit end to end: the 32-bit shift UB and the `__popc` truncation are both gone |
 | `common_parts.cuh:451`, `:459`, `:460`, `:548`, `:748`, `:755`, `:1353`, `:1361`, `:1393` | `__reduce_add_sync(MACA_FULL_MASK, …)`, `__reduce_or_sync(MACA_FULL_MASK, …)` | the 32-bit literals are gone from `common_parts.cuh` — these nine are every collective in the file, and each names all 64 lanes |
 | `common_parts.cuh:616`, `:668` | `SEGS_PER_WARP = NUM_SEGS_PER_ROUND / NUM_WARPS`, `local_seg_idx = warp_idx + s * NUM_WARPS` | **the uninitialized read is closed**: with the real warp count each warp now takes `SEGS_PER_WARP` segments (`:667` loop) instead of the top half of the round going unloaded |
-| `v3/topk_select.cuh:57-58`, `v3_fp32/topk_select.cuh:88-89` | `warp_idx = threadIdx.x / MACA_WARP_SIZE`, `lane_idx = threadIdx.x % MACA_WARP_SIZE` | both call sites stopped calling kerutils' `canonical_warp_idx_sync()`; the two lines of comment above them say why |
+| `v3/topk_select.cuh:57-58`, `v3_fp32/topk_select.cuh:88-89` | `warp_idx = threadIdx.x / MACA_WARP_SIZE`, `lane_idx = threadIdx.x % MACA_WARP_SIZE` | both call sites stopped calling the vendored `canonical_warp_idx_sync()`; the two lines of comment above them say why |
 
 **Remains**
 
@@ -386,12 +401,12 @@ should land on the reason it no longer resolves.
 | `common_parts.cuh:684` | the chunk loop is at `:650` and its stride is `MACA_WARP_SIZE`; the "decide, do not edit" note was decided |
 | `common_parts.cuh:536`, `:538`, `:566` | the reconstruct mapping moved to `:502`, `:503`, `:506`, `:534`; `NUM_RECONSTRUCT_BUCKETS` is still `1 << NUM_RECONSTRUCT_RADIX_BITS` at `:351`, and the fix was indeed 4 buckets per lane over 64 lanes |
 | `common_parts.cuh:448`, `:490/786/1434` exchange | the exchange now lives at `:411` (`warp_cnt[NUM_WARPS]`), `:453`, `:750`, `:1355`; it was re-derived for 64 lanes, not resized |
-| `kerutils/.../device/cuda/common.h:89` | **still `return threadIdx.x / 32u;`** — but it is no longer in the compiled path: its only callers were the two `v3*` entries, and both now derive `warp_idx`/`lane_idx` from `MACA_WARP_SIZE` directly (`v3/topk_select.cuh:57-58`, `v3_fp32/topk_select.cuh:88-89`), with a comment at `:53-54` / `:84-85` recording why |
+| `kerutils/.../device/cuda/common.h:89` | **was still `return threadIdx.x / 32u;`** — but it was no longer in the compiled path: its only callers were the two `v3*` entries, and both derived `warp_idx`/`lane_idx` from `MACA_WARP_SIZE` directly (`v3/topk_select.cuh:57-58`, `v3_fp32/topk_select.cuh:88-89`), with a comment at `:53-54` / `:84-85` recording why. The vendored copy went with the tree on 2026-10-24; the rule holds for any vendored `kerutils` a new port brings |
 
 ### 8.3 Not to be "fixed"
 
-Line numbers re-checked 2026-09-19 alongside §8.2; the `common_parts.cuh` rows
-below moved with the fixes there.
+Historical, like §8.2: line numbers re-checked 2026-09-19 in the tree as it
+then stood; the `common_parts.cuh` rows below moved with the fixes there.
 
 `bit_utils.cuh:37/127` (`>> 31`, `0x80000000u`) are the fp32 sign bit;
 `common_parts.cuh:1379` `static_assert(NUM_ELEMS_PER_THREAD_PER_ROUND < 32)`
@@ -405,11 +420,13 @@ and it uses `0xffffffffffffffffull` masks) — slow, but not part of this bug.
 
 ### 8.4 Containment
 
-Nothing routes to this tree any more: `setup.py` builds
-`csrc/maca_kernels/common/maca_topk.cu` for every family (plus that family's own
-`xcore<N>/instantiations/` set), and that is the hand-written
-64-lane kernel, which passes the slice 200/200 on a C600U (and is faster there).
-The port's sources are
-off every family's source list and its `kerutils` include is off `include_dirs`, and re-adding
-both is what building it again would take. There is no environment variable for
-it, by design.
+The tree was first contained and then removed. While it existed, `setup.py`
+built only `csrc/maca_kernels/common/maca_topk.cu` for every family (plus that
+family's own `xcore<N>/instantiations/` set) — the hand-written 64-lane kernel,
+which passed the slice 200/200 on a C600U and was faster there. The port's
+sources were off every family's source list and its `kerutils` include was off
+`include_dirs`, and there was no environment variable for it, by design. On
+2026-10-24 the sources were deleted rather than kept one flag away: a switch
+that could put a kernel that selects wrong back is a switch that can be left
+on. Re-adding it is a revert (`git log --all -- csrc/maca_kernels/legacy/`),
+not an environment variable.

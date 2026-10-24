@@ -34,13 +34,6 @@ exec(open("deep_select/__version__.py").read())
 # in the generator's `family_instantiations()`, and a family-specific
 # hand-written TU is a row added to `sources_for_family` -- both land with the
 # measurement that earns them.
-#
-# `csrc/maca_kernels/legacy/` -- the ported upstream kernels that the
-# `xcore1600/` directory used to hold -- is **not** a family: no source list
-# points at it and its `kerutils` include is off `include_dirs`, so it is
-# kept as source and never compiled.  The name collision that made this table
-# a trap is retired: the directory `xcore1600/` now *is* family 1600's own
-# source set.
 _REPO_ROOT = Path(__file__).resolve().parent
 GENERATOR = _REPO_ROOT / "scripts" / "generate_instantiations.py"
 
@@ -329,20 +322,9 @@ def build_for_maca():
     pass only, so a host `#if` on it takes the `#else` branch on every
     architecture, and host code exists once in a fat binary regardless.
 
-    `csrc/maca_kernels/legacy/` -- the ported upstream kernels -- is not built:
-    no family's source list points at it and its `kerutils` include is off
-    `include_dirs` below.  Re-adding both is what building it would take.
-
-    **Adding that consumer back does not exercise the vendored library's MACA
-    arm.**  The two edits above are the whole mechanical change, so they are
-    what a reader looks at -- and nothing in this tree compiles the arm today:
-    it is where this tree's platform selection lives, and it is the one thing
-    that cannot be checked by the act of adding the consumer back.  Check it
-    with a standalone compilation whose flags are read out of this file.
-
     Every source is a `.cu`, so the device compiler is the only compiler this
     build invokes (torch would route a `.cpp` to `$cxx`, meaning a second flag
-    list and a second kerutils mode macro).  `CUDA_HOME` is deliberately left
+    list).  `CUDA_HOME` is deliberately left
     alone -- see the cu-bridge note above.
     """
     import torch.utils.cpp_extension as cpp_extension
@@ -424,11 +406,6 @@ def build_for_maca():
         # these includes independent of where a kernel tree sits.
         os.path.join(this_dir, "csrc", "ffi"),
         os.path.join(maca_root, "include"),
-        # `csrc/maca_kernels/legacy/` is NOT on this list and neither is
-        # `csrc/3rdparty/kerutils/include`, which only its kernels include
-        # (`csrc/ffi/` names kerutils once, in a comment, and includes nothing
-        # from it).  Both trees stay in the repo as source; neither is compiled.
-        # Re-adding these two paths is the first half of building it again.
     ]
 
     # In mxcc's dialect.  cucc forwards what it does not recognize, so these
@@ -443,11 +420,9 @@ def build_for_maca():
         # build that names no platform, so the declaration is checked rather
         # than conventional.
         #
-        # It is deliberately *not* what kerutils keys on.  That library
-        # detects its platform from the toolchain -- `__CUDACC__`,
-        # `__has_include("kernel_operator.h")`, `__MACA__` -- so it keeps
-        # working when vendored into a build that passes no flags, which a
-        # vendored library cannot require.
+        # It is the only source of that fact: `cucc` defines `__CUDACC__` on
+        # this platform too, so a macro test cannot tell MACA from CUDA, and
+        # nothing in the tree tries to.
         "-DDEEP_SELECT_IS_BUILD_ON_MACA",
         "-Wno-deprecated-declarations",
         # torch injects `-fPIC` on the `cxx` side and

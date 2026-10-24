@@ -7,6 +7,54 @@ there.
 
 ## Unreleased
 
+### The ported upstream kernel tree leaves the repository
+
+`csrc/maca_kernels/legacy/` — the port of upstream's `v3` / `v3_fp32`
+kernels, 63 files including both generated instantiation sets — is removed
+together with `csrc/3rdparty/kerutils/` (12 files), the vendored device
+abstraction library nothing else included.  Neither was ever compiled: every
+family's build is `csrc/maca_kernels/common/` plus that family's own
+`xcore<N>/instantiations/` (`setup.py`'s `sources_for_family()`), and the
+vendored include was on no `include_dirs`.  The reason is measured rather than
+tidy: on a C600U the port selects wrong (deterministic wrong values on a tied
+run, 4/200 on the official slice) while the shipping kernel passes 200/200
+there and is 1.5–2.9x faster.  It had been kept as source behind a two-line
+`setup.py` change; a kernel that can be put back with one flag is a flag that
+can be left on.  Its diagnosis, the 32-lane audit and the C600U measurements
+stay in `skills/maca-wave64-port/` and `docs/C600U-algorithm-choice.zh.md`,
+and the sources are in git history (`git log --all -- csrc/maca_kernels/legacy/`).
+
+The legacy-only surface goes with it, so no reader has to re-derive which
+declarations are live:
+
+- `csrc/structs.h`: `struct TopkSelectArgs` (the port's params type, carrying
+  `shared_memory_size_per_sm` and the `cudaStream_t`), `MAX_VOCAB_SIZE` /
+  `MAX_INT_ADDITION_RANGE_BY_FP32_SIMULATION` (its fp32-simulated census) and
+  the `<cuda_runtime_api.h>` / `<maca_bfloat16.h>` includes that existed for
+  the port's TUs — every live TU that uses either header includes it itself,
+  and `structs.h` is now what its name says: the contract constants and the
+  per-family table, nothing else.
+- `scripts/generate_instantiations.py`: `TopkSelectConfigs`,
+  `check_fits_maca`, `generate_instantiations` and `MACA_SMEM_CAPACITY_BYTES`
+  (113 lines) — the port's config-tuple machinery.  The script now has one
+  job, `xcore<N>/instantiations/`, and regenerating all three families writes
+  87 files each with a byte-identical tree.
+
+Receipts, taken offline: the reference audit (`grep` for every removed symbol
+across the tree — `TopkSelectArgs`, `MAX_VOCAB_SIZE`,
+`NATIVE_SHARED_MEMORY_PER_SM_BYTES`, `check_fits_maca`, `TopkSelectConfigs`,
+`kerutils`, `maca_kernels/legacy` — leaves only the removal records in this
+file and `CLAUDE.md`); `tools/comment_gate.py --worktree` reports 7 files
+documentation-only, 2 code-differing (the two deletions above) and 7 not
+gated; the generator idempotence run above; `py_compile` / `bash -n` /
+`git diff --check` clean.  **The device rebuild and the runtime gates are not
+taken yet** — no MACA host was reachable when this landed.  Nothing compiled
+changes: the build's source list and include path are untouched, so the
+artifact counts (`topk_kernel_radix` 60, `__device_stub__` 87, `__tvm_ffi_*`
+2, 87 `instantiations/*.cu`) and the gates (`wheel_smoke` 12/12,
+`contract_test` 73/0 + 70/0, `sample_gate --sample 8000` 8000/8000) are
+expected to reproduce exactly and must be recorded on the next pod session.
+
 ### Dead paths leave the production tree
 
 Under the policy now written into `CLAUDE.md` — a generic primitive stays even

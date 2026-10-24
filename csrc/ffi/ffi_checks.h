@@ -1,8 +1,8 @@
 // 2026 - Modified for DeepSelect.  The torch-free replacements for the
-// `KU_CHECK_*` family the ported kernel's host layer used
-// (`kerutils/supplemental/torch_tensors.h`, which is torch-only).
+// `KU_CHECK_*` family the upstream host layer used (torch-only helpers, not
+// carried here).
 //
-// These are the DeepSelect spellings of the corresponding legacy `KU_CHECK_*`
+// These are the DeepSelect spellings of the corresponding `KU_CHECK_*`
 // checks.  The validation semantics and messages are unchanged, so a rejected
 // call still says which tensor and what was wrong.  The `_opt` forms accept a
 // `tvm::ffi::Optional` and are a no-op when it holds nothing -- that is what

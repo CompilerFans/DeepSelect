@@ -39,7 +39,7 @@
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 
-// ── the port's current form, verbatim from csrc/maca_kernels/legacy/utils.cuh ─────────
+// ── the port's form at its last revision (its `utils.cuh`, removed 2026-10-24) ────────
 template<typename T>
 __device__ __forceinline__ T scan_port(T x, uint32_t lane_idx) {
     for (uint32_t i = 1; i <= 16; i <<= 1) {

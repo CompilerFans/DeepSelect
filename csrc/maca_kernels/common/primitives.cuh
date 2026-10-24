@@ -14,8 +14,8 @@
 // file the `topk_select_coarse12` / `topk_select_chunks` dataflows were ported from, whose call
 // sites spell both the same way); the NaN tests are **this port's** bit-pattern
 // spelling, in upstream's `topk_select_common` namespace -- upstream has no bit
-// test (it detects NaN with PTX `set.nan.bf16`), and the ported tree carries
-// the twin in `legacy/bit_utils.cuh`.  The key transform is upstream's
+// test (it detects NaN with PTX `set.nan.bf16`); the twin in the upstream-derived
+// port is in git history with that tree.  The key transform is upstream's
 // `distort` under deep_gemm's name: same operation, and the two lineages spell
 // it differently, so renaming either side diverges silently from the code the
 // dataflows are re-merged with.
