@@ -1059,7 +1059,7 @@ Every production route **fuses** the scan into a pass that already reads the row
 `"torch"` is the right backend for **adapter and interface** work, and it is not an
 oracle for the *ranking*.  Both halves are measured; keep them apart.
 
-- **It is not a bare `torch.topk`.**  `topk_torch` (`interface.py:387-557`) is
+- **It is not a bare `torch.topk`.**  `topk_torch` (`_backends.py`) is
   ~140 lines of contract glue over one `torch.topk`: the window mask, the
   re-pick loop for rows whose window holds fewer than `k_eff` values above the
   `-inf` mask, the padding fills, `output_idx_offset`, `sorted_index`'s stable
