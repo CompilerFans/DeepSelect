@@ -2,10 +2,11 @@
 
 ## 这是什么
 
-`third-party/DeepJIT`(gitlink `4f9eaa4`,`main` 分支;`54d85dd` 是发布准备
+`third-party/DeepJIT`(gitlink `e97994c`,`main` 分支;`54d85dd` 是发布准备
 提交——MetaX 版权头、上游同步与注释清理,`1c81a45` 更正 CLAUDE.md 里消费者与
-fmt 的描述,`8ccb0a7` 给共享状态加锁并支持多入口选择,`4f9eaa4` 声明 Python
-测试依赖;原 `main` 已备份为 `main-pre-maca-tvm-ffi`)—— 官方
+fmt 的描述,`8ccb0a7` 给共享状态加锁并支持多入口选择,`4f9eaa4`/`e97994c`
+补充 Python 测试依赖并改用标准 requirements.txt;原 `main` 已备份为
+`main-pre-maca-tvm-ffi`)—— 官方
 DeepGEMM 的 header-only JIT 层(MACA 后端的下游)。自 `712f2a3` 起它只保留
 MACA 后端,并把 pybind11 模块换成 TVM FFI 的 `get_jit()` 句柄;本 harness 走
 的是纯 C++ 头(`runtime/` + `backend/maca/`),不受那次绑定层改动影响。`third-party/fmt`(12.1.0,**完整源码树**,与 mcDeepGEMM 同形:
@@ -91,8 +92,8 @@ flatten 63 行,`build.sh` 构建通过(`ldd` 把 `libc10.so` 解到 torch 的
 90.9 µs / 138.5 GB/s,两组 `contract: PASS`,RC=0。探针时间是接入验证的
 收据,不是性能记录(同一 pod 上 device 0 仍有 keepalive)。
 
-更新到 `4f9eaa4` 后(该提交只补充 Python 测试依赖,测试代码与 `8ccb0a7`
-相同)在 MetaX C600-U(28 AP)上重跑:`tests/test_maca.py` 全绿,`59 cache
+更新到 `e97994c` 后(`4f9eaa4`/`e97994c` 只补充 Python 测试依赖并改用标准
+requirements.txt,测试代码与 `8ccb0a7` 相同)在 MetaX C600-U(28 AP)上重跑:`tests/test_maca.py` 全绿,`59 cache
 entries validated`;`tests/test_exception.py` RC=0。新增覆盖包括 8 线程同时
 命中 LazyInit/Device/Parser/MemCache、同一 key 的 4 线程并发编译只执行一次、
 以及 `multiple_entry_points.cu` 按 `kernel_name` 选择
