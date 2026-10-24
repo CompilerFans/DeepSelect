@@ -64,7 +64,7 @@ Usage: run_bench.sh [options]
   --set-baseline      repoint <chip>/baseline at this run (only if all stages pass)
   --baseline-dir DIR  repoint the baseline at DIR and exit without measuring
   --compare-only      compare the latest run against the baseline, measure nothing
-  --skip-gate         do not run tests/test.py --perf-only (the official grid)
+  --skip-gate         run stage 1 only (snapshot; no correctness or case stages)
   --results DIR       output root (default perf_data)
   -h, --help          this message
 
