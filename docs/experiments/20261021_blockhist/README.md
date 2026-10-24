@@ -1,7 +1,7 @@
 # bf16 行内核 pass 1:先数块最大值,再只数留下的元素(2026-10-21)
 
 设备:MetaX C600-U(28 AP,family 1600,MACA 3.8.1.3)。落地提交 `095224c`
-(`nan_scan_table` 分支),改动只在
+(在 `main` 上),改动只在
 `csrc/maca_kernels/common/radix_row_bf16.cuh`。
 
 产物收据:旧臂 `187d7932c7992b237058e3888ca1f41f`(树 `e168b4e`,干净),
