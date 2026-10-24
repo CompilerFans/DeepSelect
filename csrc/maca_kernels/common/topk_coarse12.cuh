@@ -719,14 +719,10 @@ inline cudaError_t launch_coarse12_kernel(
     uint16_t *block_max, uint32_t *block_list, cudaStream_t stream)
 {
     if (topk > kMaxTopK) return cudaErrorInvalidValue;
-    static bool init = false;
-    if (!init) {
-        cudaError_t err = cudaFuncSetAttribute(
-            topk_coarse12_kernel<kThreads_>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, (int)kSmemBytes);
-        if (err != cudaSuccess) return err;
-        init = true;
-    }
+    static bool smem_adopted = false;
+    const cudaError_t smem_err = topk_select_radix::adopt_dynamic_smem(
+        topk_coarse12_kernel<kThreads_>, kSmemBytes, smem_adopted);
+    if (smem_err != cudaSuccess) return smem_err;
     topk_coarse12_kernel<kThreads_><<<B, (int)kThreads_, kSmemBytes, stream>>>(
         scores, lengths, out, nan_flags, topk, B, stride, default_length,
         block_max, block_list);

@@ -393,6 +393,38 @@ inline void scratch_retire(std::vector<void *> &retired, void *buffer) {
     if (buffer != nullptr) retired.push_back(buffer);
 }
 
+// The allocation rule every buffer below uses: a request larger than the
+// recorded capacity retires the old pointer (never frees it -- see
+// `scratch_retire`) and installs a fresh allocation.  `count` is the capacity,
+// which is what makes the next call a no-op.  Returns true when the buffer was
+// replaced, so a caller with an initialisation step on a fresh allocation (the
+// scan table's one-time zero) can key off it.
+//
+// Two forms, one rule: the typed form's capacity is in elements of `T`, the
+// `void *` form's in bytes (the two opaque workspaces).
+template <typename T>
+inline bool scratch_grow(std::vector<void *> &retired, T *&buffer,
+                         size_t &count, size_t need) {
+    if (need <= count) return false;
+    T *grown = nullptr;
+    DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need * sizeof(T)));
+    scratch_retire(retired, buffer);
+    buffer = grown;
+    count = need;
+    return true;
+}
+
+inline bool scratch_grow(std::vector<void *> &retired, void *&buffer,
+                         size_t &count, size_t need) {
+    if (need <= count) return false;
+    void *grown = nullptr;
+    DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need));
+    scratch_retire(retired, buffer);
+    buffer = grown;
+    count = need;
+    return true;
+}
+
 ChunkedScratch &chunked_scratch() {
     static ChunkedScratch s;
     return s;
@@ -633,14 +665,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
                              detail::f32_chunks_applies(p, (uint32_t)batches));
     if (needs_coarse12_cols) {
         const size_t need_cols = (size_t)batches * (size_t)p.topk;
-        if (need_cols > scratch.coarse12_cols_count) {
-            int32_t *grown = nullptr;
-            DS_CUDA_RUNTIME_CHECK(
-                cudaMalloc(&grown, need_cols * sizeof(int32_t)));
-            scratch_retire(scratch.retired, scratch.coarse12_cols);
-            scratch.coarse12_cols = grown;
-            scratch.coarse12_cols_count = need_cols;
-        }
+        scratch_grow(scratch.retired, scratch.coarse12_cols,
+                     scratch.coarse12_cols_count, need_cols);
         // The block tables ride on the same gate as the answer buffer: the
         // route that reads them is a subset of the calls this branch already
         // serves.  Their allocations use the same checked failure policy; a
@@ -650,22 +676,10 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             ((size_t)p.vocab_size + (size_t)topk_select_coarse12::kBlockElems - 1)
             / (size_t)topk_select_coarse12::kBlockElems;
         const size_t need_bmax = (size_t)batches * blocks_per_row;
-        if (need_bmax > scratch.coarse12_bmax_count) {
-            uint16_t *grown = nullptr;
-            DS_CUDA_RUNTIME_CHECK(
-                cudaMalloc(&grown, need_bmax * sizeof(uint16_t)));
-            scratch_retire(scratch.retired, scratch.coarse12_bmax);
-            scratch.coarse12_bmax = grown;
-            scratch.coarse12_bmax_count = need_bmax;
-        }
-        if (need_bmax > scratch.coarse12_blist_count) {
-            uint32_t *grown = nullptr;
-            DS_CUDA_RUNTIME_CHECK(
-                cudaMalloc(&grown, need_bmax * sizeof(uint32_t)));
-            scratch_retire(scratch.retired, scratch.coarse12_blist);
-            scratch.coarse12_blist = grown;
-            scratch.coarse12_blist_count = need_bmax;
-        }
+        scratch_grow(scratch.retired, scratch.coarse12_bmax,
+                     scratch.coarse12_bmax_count, need_bmax);
+        scratch_grow(scratch.retired, scratch.coarse12_blist,
+                     scratch.coarse12_blist_count, need_bmax);
     }
     // The row path's skip tables.  Allocated for the calls whose shape passes
     // `skip_tables` and whose row instantiation carries the round -- the
@@ -675,22 +689,10 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // a row with a shorter window still finds its own entry.
     if (skip_tables) {
         const size_t need_blocks = (size_t)batches * (((size_t)p.vocab_size + 63) / 64);
-        if (need_blocks > scratch.block_max_count) {
-            uint16_t *grown = nullptr;
-            DS_CUDA_RUNTIME_CHECK(cudaMalloc(
-                &grown, need_blocks * sizeof(uint16_t)));
-            scratch_retire(scratch.retired, scratch.block_max);
-            scratch.block_max = grown;
-            scratch.block_max_count = need_blocks;
-        }
-        if (need_blocks > scratch.block_list_count) {
-            uint32_t *grown = nullptr;
-            DS_CUDA_RUNTIME_CHECK(cudaMalloc(
-                &grown, need_blocks * sizeof(uint32_t)));
-            scratch_retire(scratch.retired, scratch.block_list);
-            scratch.block_list = grown;
-            scratch.block_list_count = need_blocks;
-        }
+        scratch_grow(scratch.retired, scratch.block_max,
+                     scratch.block_max_count, need_blocks);
+        scratch_grow(scratch.retired, scratch.block_list,
+                     scratch.block_list_count, need_blocks);
     }
     // The chunks route's workspace, on the same grow-only allocation rule.
     // Allocation failure is reported by `DS_CUDA_RUNTIME_CHECK`, not converted
@@ -701,13 +703,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     if (value_dtype == 0 && detail::f32_chunks_applies(p, (uint32_t)batches)) {
         const size_t need_ws = topk_select_chunks::chunks_workspace_bytes(
             (uint32_t)batches, p.vocab_size, p.sm_count);
-        if (need_ws > scratch.chunks_workspace_bytes) {
-            void *grown = nullptr;
-            DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need_ws));
-            scratch_retire(scratch.retired, scratch.chunks_workspace);
-            scratch.chunks_workspace = grown;
-            scratch.chunks_workspace_bytes = need_ws;
-        }
+        scratch_grow(scratch.retired, scratch.chunks_workspace,
+                     scratch.chunks_workspace_bytes, need_ws);
     }
     if (bf16_split || f32_split) {
         const int f32_chunks =
@@ -739,13 +736,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             // exactly the cost this buffer exists to avoid, so the peak is held
             // -- and the old buffer is *retired* rather than freed, because a
             // captured graph may have recorded it (`scratch_retire`).
-            if (need_workspace > scratch.workspace_bytes) {
-                void *grown = nullptr;
-                DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, need_workspace));
-                scratch_retire(scratch.retired, scratch.workspace);
-                scratch.workspace = grown;
-                scratch.workspace_bytes = need_workspace;
-            }
+            scratch_grow(scratch.retired, scratch.workspace,
+                         scratch.workspace_bytes, need_workspace);
             if (!end.has_value()) {
                 // The row table, keyed by the *pair* that is its content.
                 //
@@ -788,13 +780,10 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // table owns zeroing it.
     if (needs_scan_table) {
         if (p.scan_flags == nullptr) {
-            if ((size_t)batches > scratch.scan_flags_count) {
-                int32_t *grown = nullptr;
-                DS_CUDA_RUNTIME_CHECK(cudaMalloc(&grown, (size_t)batches * sizeof(int32_t)));
-                DS_CUDA_RUNTIME_CHECK(cudaMemset(grown, 0, (size_t)batches * sizeof(int32_t)));
-                scratch_retire(scratch.retired, scratch.scan_flags);
-                scratch.scan_flags = grown;
-                scratch.scan_flags_count = (size_t)batches;
+            if (scratch_grow(scratch.retired, scratch.scan_flags,
+                             scratch.scan_flags_count, (size_t)batches)) {
+                DS_CUDA_RUNTIME_CHECK(cudaMemset(
+                    scratch.scan_flags, 0, (size_t)batches * sizeof(int32_t)));
             }
             p.scan_flags = scratch.scan_flags;
         }
@@ -807,14 +796,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // `topk_launch` and every route it can choose answers through the same
     // contract half.
     if (check_nan && abort_when_nan_found) {
-        if ((size_t)batches > scratch.nan_abort_flags_count) {
-            int32_t *grown = nullptr;
-            DS_CUDA_RUNTIME_CHECK(
-                cudaMalloc(&grown, (size_t)batches * sizeof(int32_t)));
-            scratch_retire(scratch.retired, scratch.nan_abort_flags);
-            scratch.nan_abort_flags = grown;
-            scratch.nan_abort_flags_count = (size_t)batches;
-        }
+        scratch_grow(scratch.retired, scratch.nan_abort_flags,
+                     scratch.nan_abort_flags_count, (size_t)batches);
         p.nan_abort_flags = scratch.nan_abort_flags;
     }
     if (needs_coarse12_cols) {

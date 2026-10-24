@@ -774,10 +774,12 @@ template <typename Cfg>
 inline void launch_radix_config(const RowParams &params, uint32_t batches,
                                 cudaStream_t stream, size_t smem) {
     // Every mode is configured with the one ceiling; each launch then asks for
-    // exactly what its own mode needs (`radix_smem_bytes`).
-    const cudaError_t rc = cudaFuncSetAttribute(
-        (const void *)topk_kernel_radix<Cfg>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, (int)kSmemBudgetBytes);
+    // exactly what its own mode needs (`radix_smem_bytes`).  Adopted once per
+    // tuple, not per launch: this was the one site calling
+    // `cudaFuncSetAttribute` on every call.
+    static bool smem_adopted = false;
+    const cudaError_t rc = topk_select_radix::adopt_dynamic_smem(
+        topk_kernel_radix<Cfg>, kSmemBudgetBytes, smem_adopted);
     if (rc != cudaSuccess) {
         std::fprintf(stderr, "[deep_select] radix smem attribute: %s\n",
                      cudaGetErrorString(rc));

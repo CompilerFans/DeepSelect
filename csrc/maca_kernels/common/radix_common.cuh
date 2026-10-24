@@ -213,6 +213,37 @@ __device__ __forceinline__ uint32_t run_cumsum_warp(
     return val;
 }
 
+// ── host-side kernel configuration ─────────────────────────────────────────
+//
+// Every launcher that stages in dynamic shared memory opts its kernel in to
+// that much before the first launch.  The opt-in is per function, so it is
+// done once and the launcher's `static bool` is what keeps
+// `cudaFuncSetAttribute` off the per-call path: measured 0.15 us per call on a
+// C600U, which every row-path launch used to pay.
+//
+// It is not a no-op in the other direction either.  On this platform the
+// default ceiling is the whole per-AP shared memory -- measured 131072 B on an
+// xcore1600 C600U -- so a call *lowers* the function's limit to the value it
+// asks for.  Each caller therefore asks for the largest block its own kernel is
+// ever launched with, which is what makes the value it installs the right one;
+// asking for a per-call size instead would fail the next, larger call.
+//
+// A failed adoption leaves `adopted` false, so the next launch retries rather
+// than launching against a ceiling the driver never accepted.  The flag is one
+// per kernel (per template instantiation); the operator's scratch already binds
+// a process to one device, so a once-per-process flag has the same lifetime as
+// the configuration it records.
+template <typename KernelT>
+inline cudaError_t adopt_dynamic_smem(KernelT kernel, size_t bytes,
+                                      bool &adopted) {
+    if (adopted) return cudaSuccess;
+    const cudaError_t err = cudaFuncSetAttribute(
+        (const void *)kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        (int)bytes);
+    if (err == cudaSuccess) adopted = true;
+    return err;
+}
+
 }  // namespace topk_select_radix
 
 #endif  // RADIX_COMMON_CUH

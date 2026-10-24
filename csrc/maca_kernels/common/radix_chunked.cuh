@@ -157,14 +157,10 @@ inline cudaError_t launch_bf16_chunk_stage1_k(
     // histogram it aliases, followed by the `topk` staging the core writes.
     constexpr size_t kChunkSmem =
         kCoarse12HistBytes + sizeof(uint32_t) * (size_t)TOPK;
-    static bool init = false;
-    if (!init) {
-        cudaError_t err = cudaFuncSetAttribute(
-            (const void*)topk_bf16_chunk_stage1_kernel<TOPK, kNan>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, kChunkSmem);
-        if (err != cudaSuccess) return err;
-        init = true;
-    }
+    static bool smem_adopted = false;
+    const cudaError_t smem_err = adopt_dynamic_smem(
+        topk_bf16_chunk_stage1_kernel<TOPK, kNan>, kChunkSmem, smem_adopted);
+    if (smem_err != cudaSuccess) return smem_err;
 
     const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
     const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
@@ -202,14 +198,11 @@ inline cudaError_t launch_bf16_chunk_stage2_k(
     if (TOPK > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
     constexpr size_t kChunkSmem =
         kCoarse12HistBytes + sizeof(uint32_t) * (size_t)TOPK;
-    static bool init = false;
-    if (!init) {
-        cudaError_t err = cudaFuncSetAttribute(
-            (const void*)topk_bf16_chunk_stage2_kernel<kChunkBlockSize, TOPK>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, kChunkSmem);
-        if (err != cudaSuccess) return err;
-        init = true;
-    }
+    static bool smem_adopted = false;
+    const cudaError_t smem_err = adopt_dynamic_smem(
+        topk_bf16_chunk_stage2_kernel<kChunkBlockSize, TOPK>, kChunkSmem,
+        smem_adopted);
+    if (smem_err != cudaSuccess) return smem_err;
 
     const int candidate_stride = num_chunks * static_cast<int>(TOPK);
     topk_bf16_chunk_stage2_kernel<kChunkBlockSize, TOPK>
@@ -259,14 +252,10 @@ inline cudaError_t launch_bf16_chunk_stage1_runtime(
     int64_t score_stride, int32_t* nan_flags)
 {
     if (topk > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    static bool init = false;
-    if (!init) {
-        cudaError_t err = cudaFuncSetAttribute(
-            (const void*)topk_bf16_chunk_stage1_kernel<0u, kNan>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
-        if (err != cudaSuccess) return err;
-        init = true;
-    }
+    static bool smem_adopted = false;
+    const cudaError_t smem_err = adopt_dynamic_smem(
+        topk_bf16_chunk_stage1_kernel<0u, kNan>, kSMEM, smem_adopted);
+    if (smem_err != cudaSuccess) return smem_err;
 
     const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
     // Keep each chunk base aligned for the uint4 FP16 vectorized row path.
@@ -292,14 +281,10 @@ inline cudaError_t launch_bf16_chunk_stage2_runtime(
     int32_t* indices, int B, int num_chunks, int topk, cudaStream_t stream)
 {
     if (topk > kMaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    static bool init = false;
-    if (!init) {
-        cudaError_t err = cudaFuncSetAttribute(
-            (const void*)topk_bf16_chunk_stage2_kernel<kBlock>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
-        if (err != cudaSuccess) return err;
-        init = true;
-    }
+    static bool smem_adopted = false;
+    const cudaError_t smem_err = adopt_dynamic_smem(
+        topk_bf16_chunk_stage2_kernel<kBlock>, kSMEM, smem_adopted);
+    if (smem_err != cudaSuccess) return smem_err;
     topk_bf16_chunk_stage2_kernel<kBlock><<<B, kBlock, kSMEM, stream>>>(
         candidate_values, candidate_indices, indices, num_chunks * topk, topk, B);
     return cudaGetLastError();
@@ -590,14 +575,10 @@ inline cudaError_t launch_f32_chunk_stage1(
     int64_t score_stride, int32_t *nan_flags)
 {
     if (topk > (int)kF32MaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    static bool init = false;
-    if (!init) {
-        cudaError_t err = cudaFuncSetAttribute(
-            (const void *)topk_f32_chunk_stage1_kernel<kNan>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
-        if (err != cudaSuccess) return err;
-        init = true;
-    }
+    static bool smem_adopted = false;
+    const cudaError_t smem_err = adopt_dynamic_smem(
+        topk_f32_chunk_stage1_kernel<kNan>, kSMEM, smem_adopted);
+    if (smem_err != cudaSuccess) return smem_err;
     const int raw_chunk_size = (L + num_chunks - 1) / num_chunks;
     const int chunk_size = (raw_chunk_size + 7) / 8 * 8;
     const int candidate_stride = num_chunks * topk;
@@ -621,14 +602,10 @@ inline cudaError_t launch_f32_chunk_stage2(
     int B, int topk, int num_chunks, cudaStream_t stream)
 {
     if (topk > (int)kF32MaxTopK || num_chunks <= 1) return cudaErrorInvalidValue;
-    static bool init = false;
-    if (!init) {
-        cudaError_t err = cudaFuncSetAttribute(
-            topk_f32_chunk_stage2_kernel<kBlock>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, kSMEM);
-        if (err != cudaSuccess) return err;
-        init = true;
-    }
+    static bool smem_adopted = false;
+    const cudaError_t smem_err = adopt_dynamic_smem(
+        topk_f32_chunk_stage2_kernel<kBlock>, kSMEM, smem_adopted);
+    if (smem_err != cudaSuccess) return smem_err;
     const int candidate_stride = num_chunks * topk;
     topk_f32_chunk_stage2_kernel<kBlock><<<B, (int)kBlock, kSMEM, stream>>>(
         vals, cols, out, topk, B, candidate_stride);
