@@ -1207,13 +1207,11 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
     const ChunkedWorkspace ws =
         chunked_workspace(workspace, batches, params.topk, (uint32_t)chunks);
     // The flags table is the dispatcher's dedicated `scan_flags`, not a region
-    // of this workspace: the workspace is one grow-only scratch shared by every
-    // split geometry and both dtypes, so a slot at a geometry-dependent offset
-    // holds whatever the previous call left there -- a candidate index, read as
-    // a NaN vote.  Stage 1 raises a row's slot and the contract half reads and
-    // clears it; the table is zeroed once when it grows.  Only a failure after
-    // a partial launch can leave a raised slot behind, and that clear follows
-    // the launch.
+    // of this workspace -- the rule and the trap are the fp32 split's note
+    // above; this arm differs only in having no separate scan kernel, because
+    // its stage 1 always fuses the scan.  Stage 1 raises a row's slot and the
+    // contract half reads and clears it; only a failure after a partial launch
+    // can leave a raised slot behind, and that clear follows the launch.
     int32_t *const flags = params.check_nan ? params.scan_flags : nullptr;
     const cudaError_t rc = topk_select_radix::launch_topk_bf16_chunked(
         (const maca_bfloat16 *)params.input, params.end_ptr, ws.merged,
@@ -1228,6 +1226,20 @@ void launch_typed_chunked(const RowParams &params, uint32_t batches,
     launch_staged_or_row<maca_bfloat16, OutIdxT>(
         params, batches, stream, sorted_index, sorted_value, return_value,
         block, rc == cudaSuccess, ws.merged, /*clear_flags_on_failure=*/true);
+}
+
+// Every route below is templated on the index width, and `index_dtype` is the
+// dispatcher's encoding of it -- 0 is `int32_t`, anything else `int64_t`, the
+// same encoding `maca_topk.cu` derives from `output_index.dtype()`.  One place
+// turns the int into a type, so a route cannot carry the pair and give its two
+// arms different arguments: the call is written once, against `OutIdxT`.
+template <typename RouteFn>
+inline void dispatch_index_width(int index_dtype, RouteFn &&route) {
+    if (index_dtype == 0) {
+        route.template operator()<int32_t>();
+    } else {
+        route.template operator()<int64_t>();
+    }
 }
 
 }  // namespace detail
@@ -1253,30 +1265,13 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
         chunked_bytes >= detail::chunked_workspace_bytes(
                              n, params.topk, (uint32_t)detail::chunked_chunks(params)) &&
         detail::chunked_bf16_applies(params, n)) {
-        if (index_dtype == 0) {
-            detail::launch_typed_chunked<int32_t>(
+        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
+            detail::launch_typed_chunked<OutIdxT>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block,
                 chunked_workspace);
-        } else {
-            detail::launch_typed_chunked<int64_t>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
-                chunked_workspace);
-        }
+        });
         return;
     }
-    // **Both index widths, and that is the point.**  The gate here used to be
-    // `index_dtype == 0`, which made the whole route unreachable through the
-    // public facade: `deep_select.topk`'s default `indices_type` is
-    // `torch.int64`, so every default call took the split and this kernel was
-    // never launched.  The first A/B of this route measured 0.0% for exactly
-    // that reason.
-    //
-    // The kernel itself is width-agnostic -- it answers in row *columns*, which
-    // are int32 by nature -- so widening means staging those columns through
-    // the dispatcher's scratch and letting the contract half do the widening it
-    // already does for the split.  Writing them straight into `output_index`
-    // would be wrong for int64 (`int32_t*` arithmetic over an int64 buffer), so
-    // the scratch is not an optimization here, it is what makes the arm legal.
     // ── the `b <= 2` arm: deep_gemm's chunks kernel ────────────────────────
     // Same handoff as the coarse12 arm below it -- answer in row columns, staged
     // through the scratch, contract half reads the per-row `-1` -- because it is
@@ -1286,23 +1281,26 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
     // but the order makes that a fact about the code rather than about two
     // constants that have to keep agreeing.
     if (value_dtype == 0 && detail::f32_chunks_applies(params, n)) {
-        if (index_dtype == 0) {
-            topk_select_chunks::launch_route<int32_t>(
+        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
+            topk_select_chunks::launch_route<OutIdxT>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        } else {
-            topk_select_chunks::launch_route<int64_t>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        }
+        });
         return;
     }
+    // ── the coarse12 arm: fp32, answered in row columns ─────────────────────
+    // Both index widths are served, and that is what makes it reachable at
+    // all: `deep_select.topk`'s default `indices_type` is `torch.int64`.  The
+    // kernel answers in row *columns*, which are int32 by nature, so a 64-bit
+    // call stages them through the dispatcher's scratch and the contract half
+    // does the widening it already does for the split.  Writing them straight
+    // into `output_index` would be wrong for int64 (`int32_t*` arithmetic over
+    // an int64 buffer), so the scratch is not an optimization here, it is what
+    // makes the arm legal.
     if (value_dtype == 0 && detail::f32_coarse12_applies(params, n)) {
-        if (index_dtype == 0) {
-            topk_select_coarse12::launch_route<int32_t>(
+        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
+            topk_select_coarse12::launch_route<OutIdxT>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        } else {
-            topk_select_coarse12::launch_route<int64_t>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        }
+        });
         return;
     }
     if (value_dtype == 0 && chunked_workspace != nullptr &&
@@ -1317,33 +1315,23 @@ void topk_launch(const RowParams &params, int64_t batches, void *stream,
         // the two cannot be confused (they were one expression until §21.2).
         // The row path serves anything the engine cannot.
         topk_select_radix::f32_chunk_engine_supports((int)params.topk)) {
-        if (index_dtype == 0) {
-            detail::launch_typed_f32_chunked<int32_t>(
+        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
+            detail::launch_typed_f32_chunked<OutIdxT>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block,
                 chunked_workspace);
-        } else {
-            detail::launch_typed_f32_chunked<int64_t>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block,
-                chunked_workspace);
-        }
+        });
         return;
     }
     if (value_dtype == 0) {  // float32
-        if (index_dtype == 0) {
-            detail::launch_typed_radix<float, int32_t>(
+        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
+            detail::launch_typed_radix<float, OutIdxT>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        } else {
-            detail::launch_typed_radix<float, int64_t>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        }
+        });
     } else {  // bfloat16
-        if (index_dtype == 0) {
-            detail::launch_typed_radix<maca_bfloat16, int32_t>(
+        detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
+            detail::launch_typed_radix<maca_bfloat16, OutIdxT>(
                 params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        } else {
-            detail::launch_typed_radix<maca_bfloat16, int64_t>(
-                params, n, cuda_stream, sorted_index, sorted_value, rv, block);
-        }
+        });
     }
 }
 
