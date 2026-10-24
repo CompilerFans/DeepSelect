@@ -47,13 +47,23 @@ across the tree — `TopkSelectArgs`, `MAX_VOCAB_SIZE`,
 file and `CLAUDE.md`); `tools/comment_gate.py --worktree` reports 7 files
 documentation-only, 2 code-differing (the two deletions above) and 7 not
 gated; the generator idempotence run above; `py_compile` / `bash -n` /
-`git diff --check` clean.  **The device rebuild and the runtime gates are not
-taken yet** — no MACA host was reachable when this landed.  Nothing compiled
-changes: the build's source list and include path are untouched, so the
-artifact counts (`topk_kernel_radix` 60, `__device_stub__` 87, `__tvm_ffi_*`
-2, 87 `instantiations/*.cu`) and the gates (`wheel_smoke` 12/12,
-`contract_test` 73/0 + 70/0, `sample_gate --sample 8000` 8000/8000) are
-expected to reproduce exactly and must be recorded on the next pod session.
+`git diff --check` clean.
+
+Receipts, on the device (C600U, 28 APs, MACA 20261017,
+`CUCC_TARGETS=xcore1600`, `./clean.sh && ./develop.sh`): `BUILD_RC=0`, and the
+artifact is **65,655,232 B** (md5 `85db4d4665a4`) with `topk_kernel_radix` 60,
+`__device_stub__` 87, `__tvm_ffi_*` 2 and 87 `instantiations/*.cu` — the
+pre-removal size and counts.  Against the pre-removal artifact this tree
+records (`b98579f65469`) the symbol table is identical (`nm -S --defined-only
+| sort` diffs in 0 lines) and `cmp -l` differs in 39 bytes: 33 `.text`
+immediates all shifted by one constant (embedded source line numbers) and 6
+bytes in `.strtab` (mxcc's random intermediate filename), so no function
+moved.  Gates: `wheel_smoke --allow-checkout` 12/12; `contract_test` 73/0
+(`maca_c`) + 70/0 (`torch`); `sample_gate --sample 8000 --seed 20261024
+--backend maca_c` **8000/8000** (0 `check_fail`, 0 `crash`, 0 `skip`, 0
+`unsupported`, 621 s, 12.88 cases/s).  The xcore1000/xcore1500 artifacts were
+not rebuilt: nothing compiled changed, and no family's source list ever named
+the removed tree.
 
 ### Dead paths leave the production tree
 
