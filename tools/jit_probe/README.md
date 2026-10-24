@@ -21,14 +21,13 @@ AOT 产物与其收据纪律(md5、nm 符号闸、实例化计数)完全不动;�
 - `tools/jit_probe/build.sh` — harness 构建(cucc,宿主编译;设备侧由 DeepJIT
   自己编)。依赖:elfutils(`libdw-dev`)、torch 头(`TORCH_API_INCLUDE_EXTENSION_H`
   与 `USE_MACA` 两个宏,ATen 头需要)、python 头与链接库。
-- `tools/jit_probe/flatten.py` — 把仓内"引号式 #include"头文件树摊平成单文件。
-  DeepJIT 的 include parser 只接受 `<...>` 角括号带前缀 include;且它要求**每个
-  编译单元恰好一个 device 内核**,所以摊平时会剥掉 `extern template` 声明
-  (多行,剥到 `;` 为止)。
-- `tools/jit_probe/stage1_probe.cu` — 自包含单内核的写法范式:**不拉实例化 TU**
-  (它的头会带进全部 chunk/f32 launcher,实例化出几十个内核),改为直接
-  `#include "radix_row_bf16.cuh"`(纯 device-inline 模板,无 launcher zoo)
-  并复写 stage1 的 40 行几何。任何想 JIT 的内核都按这个范式写一个 feed。
+- `tools/jit_probe/stage1_probe.cu` — 自包含单内核的 JIT feed:直接
+  `#include <csrc/maca_kernels/common/radix_row_bf16.cuh>`(纯 device-inline
+  模板)并复写 stage1 的 40 行几何,排序走 `radix_topk_row_bf16_b`。它不直接吃
+  实例化 TU 的理由是**变量,不是内核数**:探针要改 `KCHUNK_BLOCK_SIZE`,一个
+  AOT 表里没有的模板参数;实测 2026-10-25,实例化 TU 的器件镜像里恰好一个内核
+  (见末节)。任何想 JIT 的内核都按这个范式写一个 feed,`jit_probe` 直接读它
+  (`argv[1]`,缺省 `tools/jit_probe/stage1_probe.cu`)。
 - `tools/jit_probe/jit_probe.cc` — DeepJIT 用法样板:`create_lazy_jit<MACA>(
   Config(repo, "DSPROBE", include_dirs))` → `compile(tag, source, opts{extra_mxcc_flags})`
   → `launch(kernel, {.num_smem_bytes, .grid_dim, .block_dim}, args...)`。
@@ -46,7 +45,8 @@ AOT 产物与其收据纪律(md5、nm 符号闸、实例化计数)完全不动;�
 只在小批大 chunk(b6-1M,108 CTAs 撞波次边界)输 ~7%。**不翻全局默认。**
 动态选块宽(按 B×chunks 与 chunk_size 择宽)是选项,代价是 chunk 内核
 实例化翻倍,边际收益不足,不做。数据与复现:
-`tools/jit_probe/{build.sh,flatten.py,stage1_probe.cu,jit_probe.cc}`。
+`tools/jit_probe/{build.sh,stage1_probe.cu,jit_probe.cc}`(当时还经
+`flatten.py`,2026-10-25 删除,它的输出与源文件只差一行注释,见末节)。
 
 ## fmt 改为完整源码树(2026-10-24)
 
@@ -126,3 +126,49 @@ MACA SDK 的 `mxgpu_llvm/bin/` 里没有独立的 `clang`/`clang++`:**`mxcc` 就
 |---|---|---|
 | MetaX C600-A(32 AP) | 52/1/0,`55 cache entries validated` | pass |
 | MetaX C600-U(28 AP) | 52/1/0,`55 cache entries validated` | pass |
+
+## JIT feed 直接吃源文件,`flatten.py` 删除(2026-10-25)
+
+`flatten.py` 的两个职责(把引号式 include 摊平、剥掉 `extern template`
+声明)在这棵树上都已无事可做,两半都是测出来的:
+
+- **include 形式**:`csrc/maca_kernels/` 全树已是 `<csrc/...>` 角括号带前缀
+  (`tools/include_gate.py`:274 个文件 0 违规),探针自己的 feed 也是同一写法。
+  `flatten.py` 在这份 feed 上的输出与输入只差它自己加的一行注释(HEAD 的 62 行
+  feed 摊平成 63 行),内联器一次都没触发 —— DeepJIT 一直是通过 `include_dirs`
+  解析这些 include 的。
+- **单内核**:`cucc -aop -S -maca-device-only` 逐 TU 列出器件函数,C600-U
+  (`xcore1600`、build 自己的编译参数)上五个实例化组各取代表,每个 TU 恰好
+  一个 device 内核:
+
+| TU | 器件内核 | `.mc_fatbin` |
+|---|---|---:|
+| `value_bf16_outidx_i32_block_1024_si1_rv0_sv0_pre1` | `topk_kernel_radix<...1024,true,...>` | 118,069 B |
+| `bf16_stage1_k_topk512_nan0` | `topk_bf16_chunk_stage1_kernel<512u,false>` | 64,389 B |
+| `fp32_stage1_nan0` | `topk_f32_chunk_stage1_kernel<false>` | 92,677 B |
+| `fp32_stage2` | `topk_f32_chunk_stage2_kernel<512>` | 80,373 B |
+| `nan_scan_fp32` | `nan_scan_kernel<float>` | 30,405 B |
+| `chunks_coarse_hist_c3` | `topk_chunks_coarse_hist<3>` | 43,573 B |
+| `coarse12_kernel` | `topk_coarse12_kernel<512>` | 88,581 B |
+
+  头文件里的 `extern template` 声明没有让声明的整集落进器件镜像:
+  `radix_chunked.cuh` 里那些是宿主函数模板,器件 pass 只编译被实例化的那一个。
+  对照是行内核表还在头文件里的时代(2026-10-23):每个 TU 的器件镜像带着全部
+  180 个 `topk_kernel_radix`,单 TU 7,626,616 B。
+
+因此 `jit_probe` 直接读源文件:`argv[1]` 是 feed 路径,缺省
+`tools/jit_probe/stage1_probe.cu`。
+
+端到端收据(MetaX C600-U,device 1,MACA `20261017.1436`,harness 用 `build.sh`
+现编,DeepJIT 按 gitlink `e97994c` 的本机副本;这台 pod 原本缺 `build.sh` 依赖的
+elfutils 头,本轮以 `apt-get install --no-install-recommends libdw-dev` 补上):
+
+| feed | 512 线程 | 1024 线程 | 合同 |
+|---|---:|---:|---|
+| 源文件(缺省路径) | 78.1 µs / 161.2 GB/s | 85.2 µs / 147.6 GB/s | PASS / PASS |
+| HEAD 的 `flatten.py` 输出 | 78.6 µs / 160.1 GB/s | 83.2 µs / 151.2 GB/s | PASS / PASS |
+
+两次 RC=0,同一台机器同一会话,差值在重复噪声内。`flatten.py` 对同一份 feed 的
+输出与输入 `diff` 为空(只多第一行它自己的注释),这是它已无事可做的直接证据;
+2026-10-24 那次 `e97994c` 上的记录(`KCHUNK_BLOCK_SIZE=512` 80.4 µs /
+156.5 GB/s、`contract: PASS`、flatten 63 行、RC=0)是同一形状的读数。

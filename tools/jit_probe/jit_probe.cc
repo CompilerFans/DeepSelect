@@ -3,8 +3,10 @@
 // an 8-minute AOT arm build with ~30 s of runtime compiles.
 //
 // Build with ./build.sh (cucc).  The repository root is the working directory
-// unless DEEP_SELECT_REPO names one:
+// unless DEEP_SELECT_REPO names one; argv[1] is the JIT feed source and
+// defaults to tools/jit_probe/stage1_probe.cu under it:
 //   /tmp/jit_probe
+//   /tmp/jit_probe path/to/other_feed.cu
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -38,21 +40,25 @@ int main(int argc, char** argv) try {
         kL = std::atoi(argv[3]);
         kChunks = std::atoi(argv[4]);
     }
-    const std::string flat =
-        argc > 1 ? argv[1] : "/tmp/stage1_probe_flat.cu";
-    // Read the flattened kernel source (tools/jit_probe/flatten.py output --
-    // DeepJIT's include parser accepts only angle-bracket prefixed includes,
-    // and our header tree is quote-form).
+    const std::string feed =
+        argc > 1 ? argv[1] : repo + "/tools/jit_probe/stage1_probe.cu";
+    // The feed is the source file itself, not a flattened copy: the kernel
+    // tree spells every project include as <csrc/...>, the form DeepJIT's
+    // parser accepts and resolves through the include_dirs below, and a feed
+    // that names one explicit instantiation carries exactly one device kernel,
+    // which is DeepJIT's other requirement.  `flatten.py` did both jobs
+    // (rewriting quoted includes, stripping `extern template`) and was deleted
+    // once both measured moot on this tree.
     std::string source;
     {
-        FILE* f = std::fopen(flat.c_str(), "rb");
-        DJ_HOST_ASSERT(f != nullptr, "cannot open flattened source: {}", flat);
+        FILE* f = std::fopen(feed.c_str(), "rb");
+        DJ_HOST_ASSERT(f != nullptr, "cannot open JIT feed: {}", feed);
         std::fseek(f, 0, SEEK_END);
         const long n = std::ftell(f);
         std::fseek(f, 0, SEEK_SET);
         source.resize((size_t)n);
         DJ_HOST_ASSERT(std::fread(source.data(), 1, (size_t)n, f) == (size_t)n,
-                       "short read on {}", flat);
+                       "short read on {}", feed);
         std::fclose(f);
     }
 

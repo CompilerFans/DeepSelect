@@ -1546,13 +1546,21 @@ controls, 5 of them negative, and the exit status is the verdict. It is textual
 and cheap on purpose: run it beside `scripts/generate_instantiations.py --check`
 before a build, not instead of one.
 
-The one constraint this does **not** solve: DeepJIT also requires exactly one
-device kernel per compilation unit, and an instantiation TU pulls in the whole
-chunk/fp32 launcher set.  A JIT feed therefore stays a self-contained single
-kernel written against a device-inline core (`tools/jit_probe/stage1_probe.cu`
-is the pattern); the include form only removes the flattening half of that
-(`tools/jit_probe/flatten.py` still exists for the day an instantiation TU must
-be probed anyway).
+The other requirement DeepJIT imposes is **exactly one device kernel per
+compilation unit**, and after `routing.cuh` took the non-template dispatchers an
+instantiation TU meets it.  Measured 2026-10-25 on a C600U, one TU per group
+compiled standalone with the build's own flags (`cucc -aop -S
+-maca-device-only` lists the device functions): the row, bf16-split, fp32-split,
+contract, chunks and coarse12 TUs each emit **exactly one** device kernel — the
+one their table row names — with a `.mc_fatbin` of 30,405–118,069 B, against the
+7,626,616 B each of 89 TUs carried while the row table was still in a header.
+`tools/jit_probe/flatten.py` was deleted on the same measurement: both of its
+jobs fire on nothing now — the tree spells every project include the
+angle-bracket way this file requires (`tools/include_gate.py`), and
+`radix_chunked.cuh`'s `extern template` declarations are *host-function*
+templates, which the device pass does not materialize.  The probe's feed stays a
+hand-written file for a different reason: it varies `kChunkBlockSize`, a
+template parameter the AOT instantiation set does not carry.
 
 **Debugging mis-ranked output**: the fastest localizer is to write the kernel's threshold triple `{wide_threshold, above, fine_threshold, remain, num_staged, last_remain}` into `output[topk-8+tx]` on `blockIdx.x == 0 && tx < 8` and compare it against the same row computed with torch on CPU. That is how the `0xBFA` vs true `0xBFC`-class bug was found in one step. Clean it up afterwards — `rg RKPROBE` must be 0. (This probe is written for the radix row kernel's threshold triple (`radix_row_bf16.cuh`).)
 

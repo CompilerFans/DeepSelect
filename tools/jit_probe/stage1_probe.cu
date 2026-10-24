@@ -1,7 +1,9 @@
 // DeepJIT feed: the bf16 chunk stage1 kernel as ONE self-contained kernel.
 // Written against the device-inline row core (`radix_topk_row_bf16_b`) rather
-// than the instantiation TU, whose header pull-in carries the whole chunk/f32
-// launcher set (DeepJIT requires exactly one kernel per artifact).
+// than the instantiation TU because its point is to vary `KCHUNK_BLOCK_SIZE`,
+// a template parameter the AOT set does not carry -- not because a TU would
+// drag in more than one kernel (measured 2026-10-25: one TU, one device
+// kernel, in every instantiation group).
 //
 // The body mirrors `topk_bf16_chunk_stage1_kernel<TOPK, kNan>` at `TOPK != 0`
 // in `csrc/maca_kernels/common/radix_chunked.cuh`; keep it in step with that
