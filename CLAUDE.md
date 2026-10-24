@@ -940,6 +940,21 @@ hand-computation over a boundary that is not where it was assumed. Use
 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` with the *kernel's own* static
 + dynamic total, and never label an occupancy by hand.
 
+**The dynamic-smem opt-in is not the CUDA-ism it looks like, and copying it
+costs every row-path launch a driver call.** Every launcher opts its kernel in
+with `cudaFuncSetAttribute(..., cudaFuncAttributeMaxDynamicSharedMemorySize,
+…)` before the first launch; measured on a C600U (`xcore1600`) with a
+two-kernel probe, the *default* `maxDynamicSharedSizeBytes` is the
+whole per-AP shared memory — **131072 B** — the call costs **0.152 us** on an
+already-set attribute, and it **lowers** the function's ceiling to the value it
+is asked for. So the opt-in is not what makes a >48 KB launch legal here (the
+default already is), and it must be given the *largest* block the kernel is
+ever launched with, not the per-call size: a per-call value would reject the
+next, larger launch. `topk_select_radix::adopt_dynamic_smem`
+(`radix_common.cuh`) is that rule, applied once per kernel via each launcher's
+`static bool`; the row path was the one site calling it on every launch and
+now pays it once (2026-10-24).
+
 ### 3. Wave quantization against the batch — the actual binding constraint
 
 C500: **104 AP × 2048 threads = 212,992 thread-slots**. The row kernel is one
