@@ -1,3 +1,3 @@
 [submodule "tools/jit_probe/third-party/DeepJIT"]
 	path = tools/jit_probe/third-party/DeepJIT
-	url = ../DeepJIT.git
+	url = https://github.com/CompilerFans/DeepJIT.git
