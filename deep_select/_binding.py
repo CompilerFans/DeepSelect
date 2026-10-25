@@ -90,8 +90,9 @@ def device_family_suffix() -> str:
     The sm spellings are the toolkit's: `xcore1000` is sm80, `xcore1500` sm86,
     `xcore1600` sm87/88/89 (the C600U-class part renumbers across SDK
     generations, which is why the family and not the number is the anchor).
-    `tests/kernelkit/platform.py` carries the same rows -- it cannot import
-    them from anywhere, so a change to one belongs in the same review.
+    **This function is the one copy of those rows**: `setup.py` imports it to
+    resolve `native`, and no other file in the tree carries a table — so a new
+    family is an edit here and nowhere else.
     Anything outside those -- H200, a CPU-only host -- gets `""`, which names
     the unsuffixed artifact and nothing else; see `_library_pattern` for why an
     unknown family must not fall through to *some* family's image.

@@ -36,9 +36,10 @@ def _row_lengths(end: Optional[torch.Tensor], n_rows: int, vocab_size: int,
                  device: torch.device) -> torch.Tensor:
     """The per-row visible length `end` names, or a full row each.
 
-    `end` is an exclusive upper bound, clamped into the row.  One body for
-    both reference backends: they spelled this identically, and a difference
-    here would be a difference in what "the row" means.
+    `end` is an exclusive upper bound, clamped into the row.  This is the one
+    definition of what "the row" means on the reference side; the kernel
+    clamps the same way (`contract.cuh`), so a difference here would be a
+    difference in what the two operators answer.
     """
     if end is None:
         return torch.full((n_rows,), vocab_size, dtype=torch.int64,
@@ -54,10 +55,9 @@ def _nan_rows(input: torch.Tensor, lengths: torch.Tensor,
     that short is answered by returning its whole window, so a NaN in it is
     ranked like any other value and never raises the flag.  That is the
     kernel's rule -- `contract.cuh`'s `length <= topk` shortcut returns before
-    its scan -- and both reference backends keep it.  They used to scan every
-    row whose window held a NaN as soon as one long row in the batch turned
-    the scan on, so a batch mixing the two could abort where the kernel
-    answered.
+    its scan.  Scanning every row whose window held a NaN as soon as one long
+    row in the batch turned the scan on would abort on a batch that mixes the
+    two, where the kernel answers.
 
     `None` means nothing was scanned (no row is long enough), which is
     distinct from flags that are all False.  The `any()` probes are device
@@ -74,10 +74,10 @@ def _nan_rows(input: torch.Tensor, lengths: torch.Tensor,
 
 
 def _abort_on_nan_rows(nan_rows: Optional[torch.Tensor]) -> None:
-    """The abort arm of the NaN contract, for either reference backend.
+    """The abort arm of the NaN contract.
 
-    One definition of the raise, so the two cannot answer the same input
-    differently.  It fires only for the rows `_nan_rows` scanned -- a short
+    One definition of the raise, so the reference and the kernel cannot word
+    it differently.  It fires only for the rows `_nan_rows` scanned -- a short
     row's NaN is ranked like any other value.
     """
     if nan_rows is not None and bool(nan_rows.any().item()):
