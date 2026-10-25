@@ -70,7 +70,6 @@ Requires a MACA toolkit (`MACA_PATH`) and the MACA-compatible PyTorch build.
 
 ```bash
 # from a checkout of this MACA fork
-git submodule update --init --recursive
 ./install.sh
 ```
 

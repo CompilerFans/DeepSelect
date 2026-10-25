@@ -1,15 +1,41 @@
-# DeepSelect + DeepJIT 接入说明(2026-10-20)
+# tools/jit_probe — DeepSelect 内核的实验环(不是产品的一部分)
+
+## 依赖与使用场景(先读这一节)
+
+**产品不使用本目录。** wheel、扩展、`build.sh`/`develop.sh`/`install.sh` 与
+`tests/` 都不引用它:产品是纯 AOT,每个实例化都在 `.so` 里;不带 `--recursive`
+的 `git clone` 就是完整产品,产品安装不需要初始化任何 submodule。第三方依赖
+**全部集中在本目录下**,只有构建这个探针时才需要:
+
+| 依赖 | 位置 | 形式 |
+| --- | --- | --- |
+| DeepJIT(MACA 后端的 header-only JIT 层) | `tools/jit_probe/third-party/DeepJIT` | submodule,pin 由本 checkout 的 gitlink 决定(`git submodule status` 可读):`git submodule update --init tools/jit_probe/third-party/DeepJIT` |
+| fmt 12.1.0 | `tools/jit_probe/third-party/fmt` | 完整源码树(MIT,128 个文件),随仓库携带,不是 submodule;DeepJIT 的 header-only 格式化依赖(`FMT_HEADER_ONLY`) |
+
+**用法场景**:改一个 AOT 实例化表不展开的模板参数(例如 `KCHUNK_BLOCK_SIZE`)
+时,用 DeepJIT 在运行时编出该变体(~10–30 秒)并计时,替代"改一个编译期常量
+就要全量 AOT 重编一轮(6–8 分钟)"的实验循环。AOT 产物与它的收据纪律(md5、
+`nm` 符号闸、实例化计数)完全不动;它是实验环,不是出货路径。
+
+**构建与运行**:`tools/jit_probe/build.sh`(需要 `MACA_PATH`、一个能
+`import torch` 的 `PYTHON`、elfutils 头 `libdw-dev`)→ `/tmp/jit_probe [feed.cu]`,
+用环境变量 `KCHUNK_BLOCK_SIZE` 选变体;缺省 feed 是
+`tools/jit_probe/stage1_probe.cu`。
+
+下面按日期记录接入过程与测量;路径随 2026-10-25 的搬迁(从顶层
+`third-party/` 移入本目录)更新,数值保持当时的读数。
 
 ## 这是什么
 
-`third-party/DeepJIT`(gitlink `e50a95d`,`main` 分支;`54d85dd` 是发布准备
+`tools/jit_probe/third-party/DeepJIT`(gitlink 由本 checkout 固定,接入开始时
+的值是 `e50a95d`,`main` 分支;`54d85dd` 是发布准备
 提交——MetaX 版权头、上游同步与注释清理,`1c81a45` 更正 CLAUDE.md 里消费者与
 fmt 的描述,`8ccb0a7` 给共享状态加锁并支持多入口选择,`4f9eaa4`/`e97994c`
 补充 Python 测试依赖并改用标准 requirements.txt,`e50a95d` 让缓存清理不再跟随
 符号链接;TVM-FFI 改造前的 `main` 备份分支 `main-pre-maca-tvm-ffi` 已删除)—— 官方
 DeepGEMM 的 header-only JIT 层(MACA 后端的下游)。自 `712f2a3` 起它只保留
 MACA 后端,并把 pybind11 模块换成 TVM FFI 的 `get_jit()` 句柄;本 harness 走
-的是纯 C++ 头(`runtime/` + `backend/maca/`),不受那次绑定层改动影响。`third-party/fmt`(12.1.0,**完整源码树**,与 mcDeepGEMM 同形:
+的是纯 C++ 头(`runtime/` + `backend/maca/`),不受那次绑定层改动影响。`tools/jit_probe/third-party/fmt`(12.1.0,**完整源码树**,与 mcDeepGEMM 同形:
 普通文件而非 submodule,checkout 后无需 `git submodule update`)是它的 header-only 依赖。`tools/jit_probe/` 是首个消费者:一个独立 harness,
 把仓内内核变体**在运行时编译**(~10-30 秒)并启动,替代"改一个编译期常量
 就要全量 AOT 重编一轮(6-8 分钟)"的实验循环。
@@ -51,10 +77,10 @@ AOT 产物与其收据纪律(md5、nm 符号闸、实例化计数)完全不动;�
 
 ## fmt 改为完整源码树(2026-10-24)
 
-`third-party/fmt` 不再是 submodule,而是与 mcDeepGEMM 同形的完整源码树(128 个
+`tools/jit_probe/third-party/fmt` 不再是 submodule,而是与 mcDeepGEMM 同形的完整源码树(128 个
 文件,`FMT_VERSION 120100`,`diff -r` 与 mcDeepGEMM 逐字节相同)。checkout 后
-无需 `git submodule update --init third-party/fmt`;
-`tools/jit_probe/build.sh` 的 `-Ithird-party/fmt/include` 不变。
+无需 `git submodule update --init tools/jit_probe/third-party/fmt`;
+`tools/jit_probe/build.sh` 的 `-Itools/jit_probe/third-party/fmt/include` 随 2026-10-25 的搬迁更新。
 
 格式化**只用 fmt,不用 `std::format`**:DeepJIT 的 `utils/format.hpp` 定义
 `FMT_HEADER_ONLY` 并 `#include <fmt/format.h>`,因为 mxcc 驱动的是 GCC 11 的
