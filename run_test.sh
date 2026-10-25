@@ -84,13 +84,13 @@ while [[ $# -gt 0 ]]; do
 done
 suite="${suite:-perf}"
 
-# The correctness suite's defaults are the deleted driver's: the seed it
-# defaulted to (20260911), a 200-case draw rather than the whole 105,138-case
-# table, and `-rf` so a case that goes wrong is recorded and the run still
-# reaches its summary.  The seed is the part that is easy to drop and expensive
-# to lose: without it `--sample 200` draws a *different* 200 every run, and
-# "200/200" stops being a receipt anyone can re-run.  A caller's own `--seed` /
-# `--sample` is appended after these and argparse keeps the last occurrence.
+# The correctness suite's defaults are the deleted driver's: a fixed seed, a
+# 200-case draw rather than the whole table, and `-rf` so a case that goes wrong
+# is recorded and the run still reaches its summary.  The seed is the part that
+# is easy to drop and expensive to lose: without it `--sample 200` draws a
+# *different* 200 every run, and "200/200" stops being a receipt anyone can
+# re-run.  A caller's own `--seed` / `--sample` is appended after these and
+# argparse keeps the last occurrence.
 declare -a test_args=(--seed 20260911 --sample 200 -rf)
 
 # ── the extension: which one ────────────────────────────────────────────────

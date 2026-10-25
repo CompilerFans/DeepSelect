@@ -812,11 +812,11 @@ inline void launch_radix_config(const RowParams &params, uint32_t batches,
 // entry takes `&launch_radix_config<Cfg>`, and a translation unit that merely
 // *sees* that table instantiates all of its rows in the device pass -- an
 // `extern template` is honored by the host pass and ignored there, so a TU
-// including this header with no table of its own still carried all 180
-// `topk_kernel_radix` kernels (measured 2026-10-23: a TU that defines one
-// launcher yielded 5.2 MB of device bitcode holding 180 of them).  With the
-// table out of this header, an instantiation TU's device image holds the one
-// kernel its `instantiations/*.cu` names.  Keep the table there.
+// including this header with no table of its own still carries every
+// `topk_kernel_radix` kernel in the table.  With the table out of this header,
+// an instantiation TU's device image holds the one kernel its
+// `instantiations/*.cu` names.  Keep the table there; the measured sizes are in
+// the build section of `CLAUDE.md`.
 //
 // The two spellings of the key are the same number by construction: the table's
 // `value_dtype` / `index_dtype` come from the trait above, and the entry point

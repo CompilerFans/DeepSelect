@@ -1,0 +1,26 @@
+# 147 cells from perf_data/MetaX_C600-U/20261024_062159/deepselect_perf.csv
+# 2 arms x 3 rounds x 10 iters, device 1
+# round 0 arm base lib=6ca00ada6973 abort=default /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 0 arm e1 lib=ba7aa0f73191 abort=default /root/arm_nan/deep_select/deep_select_maca_xcore1600.so
+# round 1 arm base lib=6ca00ada6973 abort=default /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 1 arm e1 lib=ba7aa0f73191 abort=default /root/arm_nan/deep_select/deep_select_maca_xcore1600.so
+# round 2 arm base lib=6ca00ada6973 abort=default /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 2 arm e1 lib=ba7aa0f73191 abort=default /root/arm_nan/deep_select/deep_select_maca_xcore1600.so
+
+# arm base: libs=['6ca00ada6973'] abort_when_nan_found=['default']
+# arm e1: libs=['ba7aa0f73191'] abort_when_nan_found=['default']
+
+=== e1 vs base — all operator kernels ===
+  route c12    n= 10  median 1.0025x  [0.997, 1.005]
+  route row    n= 95  median 0.9945x  [0.977, 1.026]
+  route split  n= 16  median 1.0020x  [0.994, 1.011]
+  ALL    n=121  median 0.9992x  [0.977, 1.026]
+
+=== e1 vs base — selection kernels only (no follower) ===
+  route c12    n= 10  median 1.0025x  [0.997, 1.005]
+  route row    n= 95  median 0.9951x  [0.977, 1.026]
+  route split  n= 16  median 1.0026x  [0.993, 1.010]
+  ALL    n=121  median 0.9994x  [0.977, 1.026]
+
+
+[exited with code 0]

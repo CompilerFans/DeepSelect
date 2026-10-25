@@ -89,11 +89,11 @@ setup.py's build_for_maca."
 // its sibling.
 //
 // **The split predicates are where this paragraph gets checked, and the two
-// are no longer in the same state**: `chunked_bf16_applies` grew a C600U arm
-// (2026-10-10, `kC600UChunkedVocabPerBatchSq`) keyed on the same set
-// `is_c600u_ap_count` names -- while `chunked_f32_applies` still has no such
-// guard, so a 1600 image routes its fp32 split on the C500 chunk *band*
-// (`wave_filled_chunks` adapts the count, not the band).
+// are not in the same state**: `chunked_bf16_applies` has a 28/32-AP arm
+// (`kC600UChunkedVocabPerBatchSq`) keyed on the same set `is_c600u_ap_count`
+// names -- while `chunked_f32_applies` has no such guard, so a 1600 image
+// routes its fp32 split on the 104-AP chunk *band* (`wave_filled_chunks`
+// adapts the count, not the band).
 //
 // **The C600U is built two ways -- 28 APs and 32 -- and both are ordinary
 // parts, so this row cannot name the family's count and the 1500 row's 28 is
@@ -113,9 +113,9 @@ setup.py's build_for_maca."
 // is a record either way.  **Two consequences a reader should not have to
 // discover:**
 //
-//   - The two `perf_data/MetaX_C600-U/20260915_*` snapshots carry `sm_count
-//     32`; later records on a 28-AP part use the same device directory.  The
-//     manifests, not the path, distinguish those measurements.
+//   - Records in one device directory can carry either AP count: the 28-AP and
+//     32-AP parts share a device name.  The manifests, not the path,
+//     distinguish those measurements.
 //   - `f32_chunks_large_batch` and `f32_chunk_work_target` read the *runtime*
 //     `sm_count`, so they already adapt; but the chunk *band* was fitted on
 //     104 APs.  A re-fit needs measurements from the target part, not an AP
@@ -156,12 +156,11 @@ static_assert(ARCH_SMEM_PER_AP_BYTES > 0,
 static_assert(ARCH_REGS_PER_AP > 0,
               "ARCH_REGS_PER_AP must be set per family");
 // The register file is the budget the bf16 row's skip tables are sized
-// against.  Measured on a 28-AP C600U (family 1600) as 131072 via torch's
-// `regs_per_multiprocessor` (2026-10-19), against the C500's 65536; the 1500
-// row carries the sibling's number -- the same extrapolation
-// `radix_block_for`'s C600U arm already makes when it reasons "2 x 1024- or
-// 4 x 512-thread CTAs (128 KiB of registers)" about a part reached through
-// `is_c600u_ap_count`.
+// against.  The 128 KiB rows are that number as torch reports it
+// (`regs_per_multiprocessor`), against the 64 KiB family's 65536; the 1500 row
+// carries its sibling's number -- the same extrapolation `radix_block_for`'s
+// 28/32-AP arm already makes when it reasons "2 x 1024- or 4 x 512-thread CTAs
+// (128 KiB of registers)" about a part reached through `is_c600u_ap_count`.
 //
 // **Four decisions ask the register file the same question, so it is named
 // once.**  Each of them reads "at least 131072 registers per AP" and each

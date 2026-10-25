@@ -52,13 +52,13 @@ tvm::ffi::Array<int64_t> get_alignment_requirement();
 // in front of the call rather than of the part the image was built for.
 //
 // Keep this in step with the definition in `csrc/maca_kernels/common/maca_topk.cu`,
-// parameter for parameter.  It had drifted: `sm_count` was added to the
-// definition (2026-09-15, the arch-constants work) and never here, and
-// nothing failed -- the built extension takes 13 arguments and rejects 12
-// with `TypeError: Mismatched number of arguments`, so the stale form was
-// never the one being exported, and a declaration off by a parameter on this
-// side is a defect no build or test reports.  Read the definition, or check
-// the artifact's own arity, when you change either.
+// parameter for parameter.  It has drifted before: `sm_count` was added to the
+// definition and never here, and nothing failed -- the built extension takes
+// the definition's arity and rejects the declaration's with
+// `TypeError: Mismatched number of arguments`, so the stale form was never the
+// one being exported.  A declaration off by a parameter on this side is a
+// defect no build or test reports: read the definition, or check the
+// artifact's own arity, when you change either.
 void topk(const tvm::ffi::TensorView &input, int64_t topk,
           const tvm::ffi::Optional<tvm::ffi::TensorView> &end,
           bool sorted_value, bool sorted_index,

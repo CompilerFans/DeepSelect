@@ -35,8 +35,8 @@
 // - Keys are compared as uint32.  mov_shfl moves bits without interpreting
 //   them; float values must arrive pre-encoded (`refine_bin`).
 //
-// **Direction, MEASURED 2026-10-21** (MetaX C600-U; `docs/experiments/
-// 20261021_mov_shfl_tree/tree_probe`'s lane table + SASS): Row Shift Left
+// **Direction, established by probe and SASS** (`docs/experiments/
+// 20261021_mov_shfl_tree/tree_probe`'s lane table): Row Shift Left
 // (modes 0x10d) reads lane i+d into lane i, so a chained reduce lands on the
 // row's/group's FIRST lane -- this header's default.  Row Shift Right
 // (0x11d) reads lane i-d; `-DDS_ROW_SHIFT_RIGHT` flips every mode and leader
@@ -61,7 +61,7 @@
 
 namespace topk_select_common {
 
-// ── the direction spelling (measured; see the banner) ──────────────────────
+// ── the direction spelling (see the banner) ────────────────────────────────
 #ifdef DS_ROW_SHIFT_RIGHT
 // the guide's Row Shift Right modes (0x11d): lane i reads lane i-d, so the
 // reduction lands on each row's/group's LAST lane.

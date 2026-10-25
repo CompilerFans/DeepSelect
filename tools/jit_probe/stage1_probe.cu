@@ -5,8 +5,8 @@
 // build, so the probe measures the shipping dataflow rather than a copy of it.
 // What a feed adds is the width -- `KCHUNK_BLOCK_SIZE` is a template parameter
 // the AOT instantiation set does not vary -- and that is the whole reason this
-// file exists (measured 2026-10-25: an instantiation TU carries exactly one
-// device kernel, so kernel count is not one).
+// file exists: an instantiation TU already carries exactly one device kernel,
+// so kernel count is not a reason to vary anything.
 #include <csrc/maca_kernels/common/radix_chunked.cuh>
 
 #ifndef STAGE1_TOPK

@@ -6,25 +6,22 @@
 
 // The block-max summary's step-down tree as a MACRO, so the text the compiler
 // sees is byte-identical to the inline form it replaced.  A function form
-// (`group_max8(key, tx)`, `__forceinline__`) was measured BROKEN IN SITU
-// 2026-10-19: instruction-identical to the inline text in an isolated kernel
-// (0/16384 blocks differ, `maxtree_bisect.cu` in
-// `docs/experiments/20261019_c600u_pass1/`), but in the full row kernel it
-// computes a low block max on ~35% of blocks -- the tree reads other lanes'
-// registers, and the function boundary shifts the compiler's schedule around
-// it.  Never extract this into a function again.
+// (`group_max8(key, tx)`, `__forceinline__`) is instruction-identical in an
+// isolated kernel and **wrong in the full row kernel**: it computes a low block
+// max on a third of the blocks, because the tree reads other lanes' registers
+// and the function boundary shifts the compiler's schedule around it.  Never
+// extract this into a function again -- the bisect is in
+// `docs/experiments/20261019_c600u_pass1/`.
 #ifdef __MACACC__
-// Row shuffle (`mov_shfl`), NOT `bsm_bpermute` -- measured 2026-10-21 on a
-// MetaX C600-U (see `docs/experiments/20261021_mov_shfl_tree/`).  SASS:
-// `mov_shfl` lowers to ONE `mov_b32 ... row_shl:N rmsk bmsk bc` (ALU pipe,
-// DPP form) while `sm_bperm_b32` travels the shared-memory pipe, so the old
-// tree competed with this walk's own block-max atomics for the one pipe.
-// Pure reduce (one wave, chained): 62.0 ns here vs 747.5 ns for the
-// bpermute butterfly and 918.9 for the `__shfl_down_sync` wrapper;
-// throughput 39.7 vs 79.7 / 358.2 ns.  This walk, isolated at V=1M bf16:
-// 1061 -> 1117 GB/s at BLOCK 1024, 1037 -> 1111 at BLOCK 512 -- at or above
-// the no-tree ceiling, because the tree leaves the pipe AND the row-paired
-// mapping below reads 8 adjacent blocks per row.
+// Row shuffle (`mov_shfl`), NOT `bsm_bpermute`.  SASS: `mov_shfl` lowers to ONE
+// `mov_b32 ... row_shl:N rmsk bmsk bc` (ALU pipe, DPP form) while
+// `sm_bperm_b32` travels the shared-memory pipe, so a bpermute tree competes
+// with this walk's own block-max atomics for the one pipe.  A chained row
+// shuffle is the cheapest of the three forms by an order of magnitude, and at
+// the real shape the tree costs nothing measurable because it leaves that pipe
+// alone AND the row-paired mapping below reads 8 adjacent blocks per row.
+// Probe, instruction counts and per-form timings:
+// `docs/experiments/20261021_mov_shfl_tree/`.
 //
 // Direction, measured: `row_shl:d` reads lane i+d into lane i, so the
 // chained d=4,2,1 lands each half-row's max on its FIRST lane -- the same
@@ -209,9 +206,9 @@ constexpr uint32_t kBlockHistMinRowPerSlot = 256;
 // a list of the ones that can hold a candidate, instead of the whole row.
 //
 // This is the shape the lever needs, not a detail: a test in front of the walk
-// leaves the decision and the line on one latency chain and measures at 0.45 of
-// the full walk even when 96% of the blocks are skipped, while this decoupled
-// form reaches 0.14 (docs/experiments/20261010_skim_rate/).
+// leaves the decision and the line on one latency chain, so it saves a fraction
+// of what skipping the same blocks should save; walking a list does not.
+// `docs/experiments/20261010_skim_rate/`.
 template <uint32_t BLOCK_SIZE, typename F>
 __device__ __forceinline__ void walk_kept_blocks(const maca_bfloat16* input,
                                                  const uint32_t* list,
@@ -257,14 +254,12 @@ __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
     uint32_t blk = group;
 #ifdef __MACACC__
     // The block-histogram arm visits four ADJACENT blocks per group iteration;
-    // the dense arm keeps its step-strided pair.  Adjacency is worth 1.5x on
+    // the dense arm keeps its step-strided pair.  Adjacency is a large win on
     // the walk that has no per-element atomics and nothing on the one that has
-    // them: measured at the real shape (4096 x 1M bf16, BLOCK 1024, 2 CTAs/SM,
-    // walk4-6 in `docs/experiments/20261021_adjacent_walk/`) 861.7 GB/s for
-    // the step-strided pair, 1295.6 for four adjacent blocks, 859.7 for eight
-    // (register/schedule blowup), and 559.2 -> 535.6 for the dense arm -- so the
-    // change is confined to this arm.  What moves is only the order blocks are
-    // visited in: the summary, the list, every bin and every count are the same.
+    // them -- four is the width, eight blows the register/schedule budget --
+    // so the change is confined to this arm.  What moves is only the order
+    // blocks are visited in: the summary, the list, every bin and every count
+    // are the same.  Walk table: `docs/experiments/20261021_adjacent_walk/`.
     constexpr bool kAdjacent4 = ARCH_HAS_WIDE_REG_FILE && !kHist;
     if constexpr (ARCH_HAS_WIDE_REG_FILE) {
         if constexpr (!kHist) {
@@ -586,13 +581,14 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // with.  Those are 96% of the row on a long one, so compaction turns the
     // second read of the row into a read of a list -- and the compaction has to
     // be its own step: a test in front of the walk leaves the decision and the
-    // fetch on one latency chain and measures at 0.45 of the full walk, while
-    // this decoupled form reaches 0.14 (docs/experiments/20261010_skim_rate/).
+    // fetch on one latency chain, so it saves a fraction of what skipping the
+    // same blocks should save; walking a list does not
+    // (`docs/experiments/20261010_skim_rate/`).
     //
     // Past three quarters of the blocks it stops paying -- the walk reads most
-    // of the row anyway and the list is traffic on top of it (measured: 0.63 at
-    // half the blocks, 1.21 at all of them) -- so the count decides and the list
-    // is not written past the cap.  `nlist` counts every kept block either way.
+    // of the row anyway and the list is traffic on top of it -- so the count
+    // decides and the list is not written past the cap.  `nlist` counts every
+    // kept block either way.
     // The cut is the block summary's when the block histogram took the first
     // scan, and the element threshold otherwise; either one names blocks that
     // can hold a candidate.

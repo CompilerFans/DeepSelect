@@ -3,12 +3,11 @@
 
 `compare_snapshots.py` compares two *recorded* runs, and a recorded run is a
 session: two snapshots taken hours apart on the same box differ by whatever the
-box was doing in between.  Measured 2026-09-18 on a C500, comparing the 09-15
-baseline against a 09-16 snapshot: `maca_c` median +0.53% and `torch` median
-+1.2%, with `torch` regressing on 26 cells and improving on **none** -- the
-control backend moving in one direction is the session, not the code.  A
-per-cell tolerance cannot tell the two apart, so that comparator's verdict is
-only as good as the two sessions were similar.
+box was doing in between.  The tell is the control backend -- `torch.topk`
+cannot move because of a kernel change, so a one-directional drift there is the
+session, not the code -- but a per-cell tolerance cannot tell the two apart, so
+that comparator's verdict is only as good as the two sessions were similar.
+`docs/` carries a session where exactly that happened.
 
 This tool removes the session from the comparison instead of correcting for it:
 both artifacts run **in one session, alternating**, so clock, thermals and
@@ -75,12 +74,11 @@ IX = {"int32": torch.int32, "int64": torch.int64}
 DT = {"bfloat16": torch.bfloat16, "float32": torch.float32}
 CELLS = json.loads(sys.argv[1])
 # One allocation width for every cell, so the shapes compared share a layout --
-# but it has to cover the widest cell asked for.  It read a fixed `524288`
-# until 2026-10-08, and `[:, :L]` *clamps*: a `4096 x 1048576 k=512` row was
-# silently measured at `L = 524288` (half the elements, and 1.93x the time the
-# same binary takes at the real width).  Ratios between two arms survived that
-# only while both arms routed the same way at the truncated width -- and the
-# width is exactly what the route predicates read.
+# but it has to cover the widest cell asked for.  A fixed width is a silent
+# truncation: `[:, :L]` *clamps*, so a row wider than `L` is measured at `L`,
+# and the ratios between two arms only survive that while both arms route the
+# same way at the truncated width -- and the width is exactly what the route
+# predicates read.
 WIDTH = max(524288, max(c[1] for c in CELLS))
 out = []
 for bs, L, k, dt, ix in CELLS:

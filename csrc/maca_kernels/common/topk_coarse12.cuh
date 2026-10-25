@@ -14,10 +14,10 @@
 //   * one 16 KB arena doing double duty (coarse histogram, then candidates)
 //     against a 14 KB arena plus a ping-pong refine buffer.
 //
-// The block size is the original's 512 as well.  It was 640 until 2026-10-22,
-// and 640 x 3 CTAs is 1920 threads -- under the 2048-thread/AP ceiling, so the
-// AP ran 3 CTA/SM where 512 fills four, worth 3.7-6.2% on the fp32 cells with
-// the bf16 controls flat (`docs/experiments/20261022_f32_occupancy/`).
+// The block size is the original's 512 as well, and the reason is occupancy:
+// 640 x 3 CTAs is 1920 threads, under the 2048-thread/AP ceiling, so that width
+// ran 3 CTAs/SM where 512 fills four.  Measurements:
+// `docs/experiments/20261022_f32_occupancy/`.
 //
 // The port is deliberately an *extraction*, not a rewrite: the arithmetic,
 // the round structure and the overflow handler below are deep_gemm's, so the
@@ -107,9 +107,9 @@ static_assert((size_t)kCoarseBins * sizeof(int32_t) <= kSmemBytes,
 // walk strides over.  All of it mirrors the 16-bit row (`radix_row_bf16.cuh`),
 // and the compaction is not optional: a test in front of the walk costs what
 // the walk costs, because one kept block in a 64-lane warp puts every lane of
-// that warp through the block body (measured on this part:
-// `docs/experiments/20261022_f32_pass2_skip/` -- a table-gated walk 2.811 ms
-// against the dense walk's 2.782, the same walk over a compacted list 1.489).
+// that warp through the block body -- a table-gated walk is the dense walk's
+// cost, and only the compacted list pays off
+// (`docs/experiments/20261022_f32_pass2_skip/`).
 constexpr int kBlockElems = 16;                 // = 4 float4, the whole block
 constexpr int kBlockVecs = kBlockElems / 4;     // one lane per float4
 constexpr int kBlockLanes = 4;                  // lanes per block in the walk
@@ -641,9 +641,9 @@ __device__ __forceinline__ bool topk_coarse12_row(
 
 // One CTA per row.  `__launch_bounds__` is `kThreads` (512, the original's
 // width): the widest cooperative step is the 4096-bin histogram clear and the
-// candidate walk, and 512 is what fills the AP -- 640 x 3 CTAs is 1920 threads,
-// under the 2048-thread/AP ceiling, so it left 128 of the AP's 2048 thread
-// slots unused (measured, `docs/experiments/20261022_f32_occupancy/`).
+// candidate walk, and 512 is what fills the AP -- 640 x 3 CTAs is 1920
+// threads, under the 2048-thread/AP ceiling, so it leaves slots unused
+// (`docs/experiments/20261022_f32_occupancy/`).
 //
 // The width is a template parameter because the kernel is instantiated
 // explicitly in the generated TU that owns its launch; the row body below is

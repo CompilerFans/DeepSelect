@@ -97,10 +97,10 @@ namespace detail {
 // **The table lives here, in this one TU, and not in `contract.cuh`.**  Every
 // entry takes `&launch_radix_config<Cfg>`, and a TU that merely sees the table
 // instantiates every row in the *device* pass -- the `extern template` below is
-// honored by the host pass and ignored there.  Measured 2026-10-23: an
-// instantiation TU defining one launcher was a 7.6 MB object whose device
-// bitcode held all 180 `topk_kernel_radix` kernels.  With the table confined to
-// this file, each `instantiations/*.cu` carries only its own kernel.
+// honored by the host pass and ignored there, so such a TU's device image
+// holds every kernel in the table rather than its own.  With the table confined
+// to this file, each `instantiations/*.cu` carries only its own kernel; the
+// measured sizes are in the build section of `CLAUDE.md`.
 
 #define DEEP_SELECT_RADIX_EXTERN(VD, ID, BLK, SI, RV, SV, PRE)                \
     extern template void launch_radix_config<                                 \

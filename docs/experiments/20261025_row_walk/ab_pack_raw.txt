@@ -1,0 +1,28 @@
+35928 python /root/busy.py
+=== running ab ===
+# 147 cells from perf_data/MetaX_C600-U/20261024_062159/deepselect_perf.csv
+# 2 arms x 3 rounds x 10 iters, device 1
+# round 0 arm base lib=6ca00ada6973 abort=default /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 0 arm pack lib=4207a39cccce abort=default /root/arm_pack/deep_select/deep_select_maca_xcore1600.so
+# round 1 arm base lib=6ca00ada6973 abort=default /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 1 arm pack lib=4207a39cccce abort=default /root/arm_pack/deep_select/deep_select_maca_xcore1600.so
+# round 2 arm base lib=6ca00ada6973 abort=default /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 2 arm pack lib=4207a39cccce abort=default /root/arm_pack/deep_select/deep_select_maca_xcore1600.so
+
+# arm base: libs=['6ca00ada6973'] abort_when_nan_found=['default']
+# arm pack: libs=['4207a39cccce'] abort_when_nan_found=['default']
+
+=== pack vs base — all operator kernels ===
+  route c12    n= 10  median 1.0010x  [0.999, 1.005]
+  route row    n= 95  median 0.9985x  [0.956, 1.018]
+  route split  n= 16  median 0.9990x  [0.994, 1.002]
+  ALL    n=121  median 0.9991x  [0.956, 1.018]
+
+=== pack vs base — selection kernels only (no follower) ===
+  route c12    n= 10  median 1.0010x  [1.000, 1.005]
+  route row    n= 95  median 0.9982x  [0.954, 1.020]
+  route split  n= 16  median 0.9984x  [0.994, 1.002]
+  ALL    n=121  median 0.9991x  [0.954, 1.020]
+
+
+[exited with code 0]

@@ -525,6 +525,17 @@ Four properties, each of which has been a defect:
 
 `kSkip` is chosen by the **index type** (`std::is_same<OutIdxT, int32_t>`), not by whether this call gets a table — so every bf16+int32 row pays the heavier body, and the cells *below* the gate pay it for code they never run: measured +1.0..+22.9% (median +4.05%) on the 30 bf16+int32 rows with `vocab_size < 65536`, and the +1.15% residue on the 8 cells the density half excludes. It is one instantiation set, not two, and that is the trade: the alternative is a gate-keyed instantiation axis, which doubles this family's compiled kernels. The heavier body itself is worth **1.2..2.8%** on the long-row cells (`docs/experiments/20261010_skim_rate/probe_inst_arm.py`: the same two-pass walk compiled into 36-39 MT vs 20-26), which is the whole price of running at 1 CTA/SM rather than 2 — so the register peak is not where the next lever is.
 
+**Where the row's time actually goes, and three shapes not to re-try** (`docs/experiments/20261025_row_walk/`,
+2026-10-25, `b4096` bf16). In isolation the production walk reaches **65.2%** of the 1,545 GB/s wall — pure
+read 91.8%, `+` key transform 99.2%, `+` group-max tree and `block_max` store 79.6%, `+` the per-block shared
+atomics 65.2% — and in the kernel it runs at **88%** of that. A per-row fit over four `V` gives
+`11.6 µs + 8.23 µs × (V / 131072)` at k512 (`18.2 + 8.77` at k1024): the **fixed** term is the two passes over the
+kept-block list (`collect` 27.4% + `pass 2 hist` 14.3% at V=131072), the **slope** is pass 1 (73.3% of the row at
+V=1048576). Three measured and closed: flattening `walk_kept_blocks` into a test-and-load (90 MT, one CTA/SM,
+**1.54× slower**), the NaN vote as key-range min tracking (**0.9992×** over 121 cells — walk ALU is not the
+bottleneck), and the four 2-byte `block_max` stores as one `uint2` (**+4.4% isolated, 0.9991× in the operator** —
+the four separate stores are what ships).
+
 #### Pass 1 on block counts — one atomic per block, then elements only where it pays
 
 The same summary is a histogram too. On a dense-enough row `radix_topk_row_bf16_b` counts each block's **max bin** into `s_wide` (one atomic per 64-element block instead of one per element), scans *that* for the block cut `m` — the bin where the block count crosses `topk`, so `#blocks(max ≥ m) ≥ topk`, hence `#elements ≥ m ≥ topk`, hence the k-th element `T ≥ m` — builds the list from `m`, and takes the element histogram over the listed blocks alone. The fold/cumsum/narrow then runs a **second** time on those counts; the element threshold, the arena, the collect and every return path are unchanged. The second scan is exact rather than a heuristic: every element at or above `T` lies in a kept block, so the counts it sees are the global counts, and the arena-overflow rule sees the true bin population.
@@ -1652,19 +1663,31 @@ wrong without it?**
 
 - **Keep, always:** the silent-wrong-answer warning (the `above + c > remain_topk` crossing test, the
   `s_wide = s_input_flat` aliasing, the fp32 arena overflow and its rescan, the NaN bit-pattern contract, the skip
-  tables' `nb << 6` remainder rule), the contract invariant, the naming of an env knob, and any measured number that *is*
-  the argument for the code being there. A path labelled "do not remove" whose evidence has been replaced by a
-  qualitative claim is a path that gets deleted as unreachable — the fp32 rescan's
-  "8025 members against an arena of 1757, 391 of 512 picks mis-placed" earns its four lines.
+  tables' `nb << 6` remainder rule), the contract invariant, the naming of an env knob, and the constant that *is*
+  the decision (the arena's 1757 entries, the 64-lane mask). These are rules: a reader about to edit the line is
+  wrong without them.
+- **Cut: the measurement record.** Implementation code (`csrc/`, `deep_select/`, `setup.py`, the two shell runners,
+  `scripts/`, `tools/`) carries **no date, no device name and no before→after number**, and no narrative of an
+  experiment tried and retracted. Those are records, and records live in `docs/` — a one-off experiment in
+  `docs/experiments/YYYYMMDD_slug/README.md`, a standing before→after in the ledgers (`docs/C500-radix-perf-ledger.zh.md`,
+  `docs/C600U-algorithm-choice.zh.md`) or the handover. The code carries the rule plus a pointer to the record.
+  Two reasons, and the second is the load-bearing one: a number embedded in code goes stale where it sits, and a
+  debugging narrative in a comment is a second copy of a document that will not be updated with it. **A date or a
+  device name in a kernel comment is how this rule is broken**, and it is checkable with grep, which is why it is
+  stated that way.
 - **Cut:** the sweep table behind a constant (state the constant and the one line that explains it, then point at the
-  note), the multi-table before/after ledger, the architecture recap, and the campaign history narrating which
-  experiment was tried and retracted. Those belong in `docs/`, and a copy of them here goes stale where it sits —
-  that is the cost, and it is paid by every later reader.
+  record), the multi-table before/after ledger, and the architecture recap.
 - **A pointer must resolve.** Replacing a table with "see `docs/X`" is only safe if `X` actually carries it. Before
-  landing, grep the docs for the numbers you are about to delete. Some of them are only in the code; those stay.
+  landing, grep the docs for the numbers you are about to delete. If no record carries them yet, **write the record
+  first** — that is where the measurement belongs, and the dead-code policy already requires it: "if a measurement
+  is the reason a path still exists, the measurement moves to `docs/`".
 
 **A comment is invisible to the compiler and to review at this size, so "comments only" has to be gated, not
-asserted. The gate ships: `tools/comment_gate.py`.**
+asserted. The gate ships: `tools/comment_gate.py` — as a transitional tool.** It exists because the sweep that cut
+this tree to 2,530 comment lines (`e3f73cb`) needed its 28-file claim checkable; once the discipline above is the
+default, what it provides is a spot check, not an architecture. So: **do not extend it** — a blind spot gets recorded
+below, not a new branch — and read its verdict as one piece of mechanical evidence, not as the authority on what a
+change is.
 
 ```bash
 python3 tools/comment_gate.py --commit e3f73cb     # 28 documentation-only, 0 differ in code
@@ -1684,7 +1707,8 @@ It strips comments **and docstrings** from both revisions, collapses whitespace,
 byte-identical; exit status is the verdict. Run `--self-test` after any change to the gate — **a gate nobody has
 seen fail is not evidence**, and 4 of its 12 controls are pairs that must report DIFFER.
 
-**The gate lies in two ways, both measured, both defended against in that file:**
+**The gate lies in two ways, both measured, both defended against in that file, and a third that is recorded rather
+than defended:**
 
 1. **Dispatch on the real extension.** A copy staged as `/tmp/x/h.bak` does not end in `.sh`, so it reaches the C
    stripper — which strips `//` and `/* */` and **not `#`** — and every shell file reads as "code changed" while
@@ -1694,6 +1718,11 @@ seen fail is not evidence**, and 4 of its 12 controls are pairs that must report
    tokenize-only stripping treats a rewritten docstring as a behaviour change. The gate drops the spans `ast`
    reports for `Module`/`ClassDef`/`FunctionDef` bodies too. Runtime strings — `assert` messages, log lines, format
    strings — are **not** docstrings and stay in the comparison, because changing one can change behaviour.
+3. **A string literal that holds a program is string content, not comments** — recorded, not worked around.
+   `tools/ab_snapshot.py`'s `MEASURE` is the child's whole source, so a comment inside it changes a `STRING` token
+   and the gate reports DIFFERS. That is its contract applied correctly, and it is why the gate is transitional.
+   The one-off receipt for such a pair: extract both values and strip them with `strip_py` — the two programs'
+   stripped forms were identical (measured 2026-10-25 on that file's comment sweep).
 
 Landing this kind of change: `rm -rf build && ./develop.sh` (a comment edit still changes the artifact — mxcc embeds
 source line numbers — so "the md5 moved" is not evidence of a behaviour change, and the gate is), then
