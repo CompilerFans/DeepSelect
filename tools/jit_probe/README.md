@@ -2,11 +2,11 @@
 
 ## 这是什么
 
-`third-party/DeepJIT`(gitlink `e97994c`,`main` 分支;`54d85dd` 是发布准备
+`third-party/DeepJIT`(gitlink `e50a95d`,`main` 分支;`54d85dd` 是发布准备
 提交——MetaX 版权头、上游同步与注释清理,`1c81a45` 更正 CLAUDE.md 里消费者与
 fmt 的描述,`8ccb0a7` 给共享状态加锁并支持多入口选择,`4f9eaa4`/`e97994c`
-补充 Python 测试依赖并改用标准 requirements.txt;原 `main` 已备份为
-`main-pre-maca-tvm-ffi`)—— 官方
+补充 Python 测试依赖并改用标准 requirements.txt,`e50a95d` 让缓存清理不再跟随
+符号链接;TVM-FFI 改造前的 `main` 备份分支 `main-pre-maca-tvm-ffi` 已删除)—— 官方
 DeepGEMM 的 header-only JIT 层(MACA 后端的下游)。自 `712f2a3` 起它只保留
 MACA 后端,并把 pybind11 模块换成 TVM FFI 的 `get_jit()` 句柄;本 harness 走
 的是纯 C++ 头(`runtime/` + `backend/maca/`),不受那次绑定层改动影响。`third-party/fmt`(12.1.0,**完整源码树**,与 mcDeepGEMM 同形:
@@ -101,6 +101,33 @@ entries validated`;`tests/test_exception.py` RC=0。新增覆盖包括 8 线程�
 `entry_first`/`entry_second` 并分别启动出 21/32。DeepSelect 集成探针本轮
 未重跑:JIT 头文件的 ABI 与探针使用的 `create_lazy_jit`/`compile`/`launch`
 路径未改。
+
+## 更新到 `e50a95d`(2026-10-25)
+
+`e50a95d` 是本次升级的重点:`safe_remove_all()` 改用 `symlink_status()` 检查
+条目本身,遇到符号链接(包括悬空链接)只 unlink,不再递归进入链接目标;
+`commit()` 在 rename 失败后探测目标的 `.committed`,没有被赢家发布的条目
+抛出异常,而不是把半成品报成命中。组可写的共享缓存里,被植入的目录链接
+因此不能再把删除带出缓存条目。
+
+同一条线上还有三处与消费者有关的变化:`af77fd1` 从头文件里去掉 ATen
+current-stream 依赖(`runtime/` + `backend/maca/` 不再需要 ATen 就能编译,
+探针的 `build.sh` 不变);`4dbaff4` 要求 torch 2.8+,`6079917` 把
+`apache-tvm-ffi` 的版本范围对齐 MetaX 栈(`>=0.1.11,<0.1.13`),两者都只影响
+Python 构建/测试元数据,不影响本 harness 走的纯 C++ 头。
+
+在 MetaX C600-U(28 AP)上用全新 `DSPROBE_JIT_CACHE_DIR` 重跑集成探针
+(`build.sh` 由 cucc 现编,两个变体各产生一条已发布缓存条目,`contract: PASS`,
+RC=0):
+
+| KCHUNK_BLOCK_SIZE | 耗时 | 带宽 |
+|---|---:|---:|
+| 512 | 73.5 µs | 171.3 GB/s |
+| 1024 | 80.1 µs | 157.0 GB/s |
+
+同一提交上 DeepJIT 自带的 `tests/test_maca.py` 全绿,`59 cache entries
+validated`,包含新增的目录链接/悬空链接/顶层链接清理用例。探针时间是接入
+收据,不是性能记录。
 
 ## 宿主编译器改用 SDK 自带的 mxcc(2026-10-24,DeepJIT `6763222`)
 
