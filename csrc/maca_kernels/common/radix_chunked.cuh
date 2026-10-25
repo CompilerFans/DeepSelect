@@ -20,11 +20,16 @@ namespace topk_select_radix {
 // scan and `flags` is the table it raises, in place of `nan_scan_kernel`.  The
 // two share the grid by construction (`nan_scan_kernel`'s comment), so the only
 // thing that changes is which kernel reads the chunk's bytes.
-template <uint32_t TOPK, bool kNan = false>
-__global__ void topk_bf16_chunk_stage1_kernel(
+//
+// `kBlock` is a template parameter rather than `kChunkBlockSize` so a JIT feed
+// can compile this body at another width (`tools/jit_probe/stage1_probe.cu`),
+// and the feed calls this function rather than a copy: the copy a probe once
+// carried had drifted -- no `chunk_len <= topk` arm, no `topk_arg`.
+template <int kBlock, uint32_t TOPK, bool kNan>
+__device__ __forceinline__ void topk_bf16_chunk_stage1_body(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* candidate_indices,
     maca_bfloat16* candidate_values, int64_t score_stride, int topk_arg, int B,
-    int num_chunks, int chunk_size, int32_t* flags = nullptr)
+    int num_chunks, int chunk_size, int32_t* flags)
 {
     constexpr int TOPK_I = static_cast<int>(TOPK);
     const int topk = TOPK_I != 0 ? TOPK_I : topk_arg;
@@ -36,7 +41,7 @@ __global__ void topk_bf16_chunk_stage1_kernel(
     const int32_t length = lengths[bid];
     const int start = chunk * chunk_size;
     const int chunk_len = (start < length) ? min(chunk_size, static_cast<int>(length - start)) : 0;
-    constexpr int BLOCK_SIZE = kChunkBlockSize;
+    constexpr int BLOCK_SIZE = kBlock;
     const int candidate_stride = num_chunks * topk;
     int32_t* chunk_indices = candidate_indices + bid * candidate_stride + chunk * topk;
     maca_bfloat16* chunk_values = candidate_values + bid * candidate_stride + chunk * topk;
@@ -83,7 +88,7 @@ __global__ void topk_bf16_chunk_stage1_kernel(
     // take `kChunkSmem`.  `kSkip=false`: these rows carry no skip tables (the
     // candidates live in the global arrays), so the summary is compiled out.
     bool nan_row = false;
-    radix_topk_row_bf16_b<kChunkBlockSize, kNan, false>(
+    radix_topk_row_bf16_b<kBlock, kNan, false>(
         row + start, chunk_indices, chunk_len, (uint32_t)topk,
         kNan ? &nan_row : nullptr);
     if (kNan && flags != nullptr && nan_row && threadIdx.x == 0)
@@ -99,6 +104,19 @@ __global__ void topk_bf16_chunk_stage1_kernel(
             chunk_values[i] = invalid_value;
         }
     }
+}
+
+// The AOT kernel is that body at this build's chunk width; the instantiation
+// axis (and so the artifact's kernel count) is (`TOPK`, `kNan`) alone.
+template <uint32_t TOPK, bool kNan = false>
+__global__ void topk_bf16_chunk_stage1_kernel(
+    const maca_bfloat16* scores, const int32_t* lengths, int32_t* candidate_indices,
+    maca_bfloat16* candidate_values, int64_t score_stride, int topk_arg, int B,
+    int num_chunks, int chunk_size, int32_t* flags = nullptr)
+{
+    topk_bf16_chunk_stage1_body<kChunkBlockSize, TOPK, kNan>(
+        scores, lengths, candidate_indices, candidate_values, score_stride,
+        topk_arg, B, num_chunks, chunk_size, flags);
 }
 
 // Stage 2 of both arms, on the same `TOPK == 0` sentinel: `kBlock` is the

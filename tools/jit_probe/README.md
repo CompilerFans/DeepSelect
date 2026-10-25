@@ -22,12 +22,13 @@ AOT 产物与其收据纪律(md5、nm 符号闸、实例化计数)完全不动;�
   自己编)。依赖:elfutils(`libdw-dev`)、torch 头(`TORCH_API_INCLUDE_EXTENSION_H`
   与 `USE_MACA` 两个宏,ATen 头需要)、python 头与链接库。
 - `tools/jit_probe/stage1_probe.cu` — 自包含单内核的 JIT feed:直接
-  `#include <csrc/maca_kernels/common/radix_row_bf16.cuh>`(纯 device-inline
-  模板)并复写 stage1 的 40 行几何,排序走 `radix_topk_row_bf16_b`。它不直接吃
-  实例化 TU 的理由是**变量,不是内核数**:探针要改 `KCHUNK_BLOCK_SIZE`,一个
-  AOT 表里没有的模板参数;实测 2026-10-25,实例化 TU 的器件镜像里恰好一个内核
-  (见末节)。任何想 JIT 的内核都按这个范式写一个 feed,`jit_probe` 直接读它
-  (`argv[1]`,缺省 `tools/jit_probe/stage1_probe.cu`)。
+  `#include <csrc/maca_kernels/common/radix_chunked.cuh>`,调用生产端同一个
+  `topk_bf16_chunk_stage1_body`(`topk_bf16_chunk_stage1_kernel` 就是它加一层
+  `__global__` 包装),不再复写 stage1 的几何。它不直接吃实例化 TU 的理由是
+  **变量,不是内核数**:探针要改 `KCHUNK_BLOCK_SIZE`,一个 AOT 表里没有的模板
+  参数;实测 2026-10-25,实例化 TU 的器件镜像里恰好一个内核(见末节)。任何想
+  JIT 的内核都按这个范式写一个 feed,`jit_probe` 直接读它(`argv[1]`,缺省
+  `tools/jit_probe/stage1_probe.cu`)。
 - `tools/jit_probe/jit_probe.cc` — DeepJIT 用法样板:`create_lazy_jit<MACA>(
   Config(repo, "DSPROBE", include_dirs))` → `compile(tag, source, opts{extra_mxcc_flags})`
   → `launch(kernel, {.num_smem_bytes, .grid_dim, .block_dim}, args...)`。
@@ -172,3 +173,50 @@ elfutils 头,本轮以 `apt-get install --no-install-recommends libdw-dev` 补�
 输出与输入 `diff` 为空(只多第一行它自己的注释),这是它已无事可做的直接证据;
 2026-10-24 那次 `e97994c` 上的记录(`KCHUNK_BLOCK_SIZE=512` 80.4 µs /
 156.5 GB/s、`contract: PASS`、flatten 63 行、RC=0)是同一形状的读数。
+
+## feed 调用生产体,不再复写 stage1(2026-10-25)
+
+`stage1_probe.cu` 原先自带一份 stage1 内核副本,而副本已经与生产体分叉:没有
+`chunk_len <= topk` 的融合 NaN 分支、没有 `topk_arg`、chunk 几何在核内自算、候选
+索引按 `global_bid * kStage1TopK` 而不是 `bid * num_chunks * topk + chunk * topk`
+寻址、`lengths == nullptr` 时退回 `L`。探针此前量到的因此不是出货的内核。
+
+现在生产体是 `topk_bf16_chunk_stage1_body<kBlock, TOPK, kNan>`
+(`csrc/maca_kernels/common/radix_chunked.cuh`,`__device__ __forceinline__`),AOT 的
+`topk_bf16_chunk_stage1_kernel` 是它的一行 `__global__` 包装,feed 用
+`KCHUNK_BLOCK_SIZE` 调同一个函数体。宽度正是 feed 存在的理由 —— 它是 AOT 实例化
+表不展开的那一轴,所以 `kBlock` 是模板参数而不是常量。
+
+AOT 收据(MetaX C600-U(28 AP),xcore1600,`./develop.sh`;父产物由 HEAD 源码在
+同一台机器、同一条命令下现编,两份产物同尺寸):
+
+| | 父(HEAD) | 本轮 |
+|---|---:|---:|
+| 文件 | 18,808,360 B,md5 `d86fcda80a58…` | 18,808,360 B,md5 `34453e4764f4…` |
+| `.text` / `.symtab` / `.dynsym` / `.rodata` | — | 逐字节相同 |
+| `.strtab` | — | 差 6 B(mxcc 的随机中间文件名) |
+| `.mc_fatbin` | 18,406,301 B | 18,406,301 B |
+| ├ bitcode bundle | 2,496,592 B | 2,496,608 B |
+| └ device ELF bundle | 5,383,136 B | 5,383,136 B(差 20 B) |
+| 定义符号 | 893 | 893(增 0 / 删 0 / 变 0) |
+| `topk_kernel_radix` / `__device_stub__` / `__tvm_ffi_` | 60 / 87 / 2 | 60 / 87 / 2 |
+
+器件侧的 20 B 在 `topk_bf16_chunk_stage1_kernel<0,false>+0x3c0` 与
+`<0,true>+0x3e0`(`llvm-objdump-open -d` 两份清单同为 633,847 行):两处相邻独立
+指令互换(`mov_b32 r19, 0` ⇄ `sashr_i32 s9, 31, s8`),没有增删或重编码。bitcode
+去掉调试元数据后 15 行 IR 有差异,全部落在 `topk_bf16_chunk_stage1_kernel` 的实例
+化里:`icmp eq ptr addrspace(1) %9, null` → `…, addrspacecast (ptr null to ptr
+addrspace(1))`(语义相同),外加一处两个 `zext` 的操作数次序互换与其使用点重编号。
+
+端到端(MetaX C600-U device 1,DeepJIT gitlink `e97994c`,harness 由 `build.sh`
+现编;这台 pod 缺 `libdw-dev`,以 `apt-get install --no-install-recommends
+libdw-dev` 补上),形状同前几节(b6 v1048576 k512,chunks18):
+
+| feed | 512 线程 | 1024 线程 | 合同 |
+|---|---:|---:|---|
+| 生产体(本轮) | 76.0 µs / 165.5 GB/s | 82.4 µs / 152.6 GB/s | PASS / PASS |
+
+RC=0;探针时间是接入收据,不是性能记录。同一产物的门禁:`wheel_smoke.py
+--allow-checkout` 12/12,`contract_test.py` `maca_c` 74/74、`torch` 71/71,
+`test.py --backend maca_c --sample 200 -rf` 347 pass / 2 skip(OOM)/ 0 失败,
+`sample_gate.py --sample 8000 --seed 20261024 --backend maca_c` 8000/8000。
