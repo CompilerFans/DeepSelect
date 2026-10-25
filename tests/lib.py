@@ -237,8 +237,16 @@ def stick_unit_test_args(parser: argparse.ArgumentParser):
     parser.add_argument("-rf", "--run-to-finish", action="store_true", help="Don't exit when a testcase is failed")
 
 def row_wise_masked_fill_(tensor: torch.Tensor, bound: Optional[torch.Tensor], value):
-    """tensor[:, bound:] = value"""
+    """tensor[:, bound:] = value
+
+    `masked_fill_` over a broadcast mask, not `tensor[mask] = value`: the
+    boolean-index form materializes an index tensor as large as the tensor,
+    and this runs over a whole `(b, vocab)` case on every check.  The arange
+    is `bound`'s dtype and the tensor's device for the same reason -- an int64
+    range over a multi-billion-element row is memory this does not need.
+    """
     if bound is None:
         return
-    mask = torch.arange(0, tensor.shape[1]).unsqueeze(0).broadcast_to(tensor.shape) >= bound.unsqueeze(-1).broadcast_to(tensor.shape)
-    tensor[mask] = value
+    mask = torch.arange(tensor.shape[1], device=tensor.device,
+                        dtype=bound.dtype).unsqueeze(0) >= bound.unsqueeze(1)
+    tensor.masked_fill_(mask, value)
