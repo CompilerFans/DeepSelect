@@ -413,6 +413,10 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // The kept-block list's population count: eight lanes write it before the
     // walk reads it, on the barrier between them.
     __shared__ uint32_t s_nlist;
+    // The staging walk's arena population.  A count of its own, because
+    // `s_num_input` is reset by every scan and the staging is what the scan
+    // reads.
+    __shared__ uint32_t s_nstage;
     extern __shared__ uint32_t s_input_flat[];
     // The coarse histogram is laid over the candidate arena: `s_input_flat`
     // holds the 4,096 bins until the narrow is done, and the staging writes
@@ -517,8 +521,12 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // count strictly above it in `s_wide_above`.
     uint32_t exclusive_suffix = 0;
     uint32_t inclusive_suffix = 0;
-    const auto scan_threshold = [&](uint32_t want) {
-        if (tx < RADIX) {
+    // The byte the scan lands on.  `fold` is the arm's own fact: the counting
+    // walk leaves 4,096 bins in `s_wide` and they have to be folded into the
+    // 256 the scan reads, while the staging walk counts high bytes as it goes
+    // and leaves them in place.
+    const auto scan_head = [&](uint32_t want, bool fold) {
+        if (fold && tx < RADIX) {
             uint32_t c = 0;
             #pragma unroll
             for (uint32_t s = 0; s < kCoarse12SubBins; s++)
@@ -545,16 +553,18 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             s_high_threshold_bin_id = tx; s_num_input[0] = 0; s_counter = 0;
         }
         __syncthreads();
-
-        // The scan named a high byte; the 12-bit threshold is the sub-bin inside it
-        // where the count crosses `want`.  `above` ends as the count of keys
-        // strictly above that threshold, which is what the emit owes the window.
+    };
+    // The scan named a high byte; the 12-bit threshold is the sub-bin inside it
+    // where the count crosses `want`.  `above` ends as the count of keys
+    // strictly above that threshold, which is what the emit owes the window.
+    // `sub` is the sixteen counts of that byte, wherever the arm keeps them.
+    const auto narrow = [&](uint32_t want, const uint32_t* sub_bins) {
         if (tx == 0) {
             const uint32_t high = s_high_threshold_bin_id;
             uint32_t above = s_histogram[high + 1];
             uint32_t sub = 0;
             for (int s = (int)kCoarse12SubBins - 1; s >= 0; --s) {
-                const uint32_t c = s_wide[(high << kCoarse12Shift) + (uint32_t)s];
+                const uint32_t c = sub_bins[(uint32_t)s];
                 // The bin has to carry what the window still wants, and the test is
                 // against the window itself -- not against what is left once the
                 // byte above has been counted.  Testing the remainder fires a
@@ -571,6 +581,10 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             s_nlist = 0;
         }
         __syncthreads();
+    };
+    const auto scan_threshold = [&](uint32_t want) {
+        scan_head(want, true);
+        narrow(want, s_wide + (s_high_threshold_bin_id << kCoarse12Shift));
     };
 
     scan_threshold(remain_topk);
@@ -602,10 +616,6 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             const uint32_t pos = atomicAdd(&s_nlist, 1u);
             if (pos < list_cap) block_list[pos] = b;
         }
-        // The histogram is spent; the second walk fills it with element counts
-        // over the blocks above, on the far side of this same barrier.
-        if (block_hist)
-            for (uint32_t b = tx; b < kCoarse12Bins; b += BLOCK_SIZE) s_wide[b] = 0;
         __syncthreads();
         nlist = s_nlist;
         // `list_cap > 0` matters on a row with no whole block at all: there the
@@ -617,31 +627,90 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // The block summary counts blocks, not elements, so the element threshold
     // is still owed -- the k-th largest block max is only a lower bound on it.
     // What the cut buys is where those counts come from: a block it dropped
-    // holds no element at or above the cut, and the k-th element is at or
-    // above it, so the blocks it keeps are the only ones that can hold one.  On
-    // the long rows that is 6% of the row at V/k = 1024 and 22% at 256, against
-    // the whole row the single element walk pays.
+    // holds no element at or above the cut, and the k-th element is at or above
+    // it, so the blocks it keeps are the only ones that can hold one.
+    //
+    // The walk over that list stages instead of counting.  Every element whose
+    // 12-bit bin is at or above the block cut is appended to `s_input_flat`
+    // (the block histogram's own bytes, dead since the first scan) and only its
+    // high byte is counted, and two facts make those high bytes the whole
+    // histogram it needs:
+    //
+    //  * the element threshold is at or above the block cut -- the cut keeps
+    //    `topk` blocks each holding at least one element at or above it, so the
+    //    elements at or above the cut number at least `topk` -- and therefore
+    //    every element that can reach the window is in the arena;
+    //  * the scan only reads counts at or above the byte it lands on, and for
+    //    those bytes the staged counts are exact.
+    //
+    // What it buys is the third read of the row: the fine histogram and the
+    // emit read the arena instead of walking the list again, and the
+    // one-shared-atomic-per-element histogram is never taken.  An arena too
+    // small for the candidates falls back to the counting walk, which is what
+    // the row did before.  Walk and arena sizing:
+    // `docs/experiments/20261025_row_walk/`.
+    uint32_t num_staged = 0;
+    bool staged = false;
     if (block_hist) {
-        const auto hist_one = [&](uint32_t idx, maca_bfloat16 raw) {
-            atomicAdd(&s_wide[refine_bin(raw) >> kCoarse12Shift], 1u);
-        };
         if (use_list) {
-            walk_kept_blocks<BLOCK_SIZE>(input, block_list, nlist, hist_one);
-        } else {
-            for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
-                uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
-                const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
-                #pragma unroll
-                for (int i = 0; i < 8; i++) hist_one(idx + i, h[i]);
-            }
+            const uint32_t cut = s_high_threshold_bin_id;
+            for (uint32_t h = tx; h < RADIX; h += BLOCK_SIZE) s_histogram[h] = 0;
+            if (tx == 0) s_nstage = 0;
+            __syncthreads();
+            const auto stage_one = [&](uint32_t idx, maca_bfloat16 raw) {
+                const uint32_t key = refine_bin(raw);
+                if ((key >> kCoarse12Shift) < cut) return;
+                atomicAdd(&s_histogram[key >> 8], 1u);
+                const uint32_t pos = atomicAdd(&s_nstage, 1u);
+                if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
+            };
+            walk_kept_blocks<BLOCK_SIZE>(input, block_list, nlist, stage_one);
+            for (uint32_t idx = list_end + tx; idx < length; idx += BLOCK_SIZE)
+                stage_one(idx, __ldg(input + idx));
+            __syncthreads();
+            num_staged = s_nstage;
+            staged = num_staged <= SMEM_INPUT_SIZE;
         }
-        // The row past the last whole block, exactly where the collect's tail
-        // starts -- the same agreement the first walk's tail keeps.
-        const uint32_t hist_tail_start = use_list ? list_end : vec_len;
-        for (uint32_t idx = hist_tail_start + tx; idx < length; idx += BLOCK_SIZE)
-            hist_one(idx, __ldg(input + idx));
-        __syncthreads();
-        scan_threshold(remain_topk);
+        if (!staged) {
+            const auto hist_one = [&](uint32_t idx, maca_bfloat16 raw) {
+                atomicAdd(&s_wide[refine_bin(raw) >> kCoarse12Shift], 1u);
+            };
+            for (uint32_t b = tx; b < kCoarse12Bins; b += BLOCK_SIZE) s_wide[b] = 0;
+            __syncthreads();
+            if (use_list) {
+                walk_kept_blocks<BLOCK_SIZE>(input, block_list, nlist, hist_one);
+            } else {
+                for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
+                    uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
+                    const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
+                    #pragma unroll
+                    for (int i = 0; i < 8; i++) hist_one(idx + i, h[i]);
+                }
+            }
+            // The row past the last whole block, exactly where the collect's tail
+            // starts -- the same agreement the first walk's tail keeps.
+            const uint32_t hist_tail_start = use_list ? list_end : vec_len;
+            for (uint32_t idx = hist_tail_start + tx; idx < length; idx += BLOCK_SIZE)
+                hist_one(idx, __ldg(input + idx));
+            __syncthreads();
+            scan_threshold(remain_topk);
+        } else {
+            // The staged arm's scan: the high-byte counts are the walk's own, so
+            // there is no fold to take; the landing byte's sixteen sub-bins are
+            // the only counts still owed, and the arena is where they are.
+            scan_head(remain_topk, false);
+            if (tx < kCoarse12SubBins) s_histogram_buf[1][tx] = 0;
+            __syncthreads();
+            const uint32_t high = s_high_threshold_bin_id;
+            for (uint32_t i = tx; i < num_staged; i += BLOCK_SIZE) {
+                const uint32_t key = refine_bin(__ldg(input + s_input_flat[i]));
+                if ((key >> 8) == high)
+                    atomicAdd(&s_histogram_buf[1][(key >> kCoarse12Shift) &
+                                                  (kCoarse12SubBins - 1u)], 1u);
+            }
+            __syncthreads();
+            narrow(remain_topk, s_histogram_buf[1]);
+        }
     }
 
     const uint32_t coarse_threshold = s_high_threshold_bin_id;
@@ -650,7 +719,15 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         const auto threshold_bin = coarse_threshold;
         remain_topk -= s_wide_above;
         if (remain_topk == 0) {
-            if (use_list) {
+            if (staged) {
+                // The window is exactly the count above the coarse bin, and the
+                // arena holds every element at or above the block cut.
+                for (uint32_t i = tx; i < num_staged; i += BLOCK_SIZE) {
+                    const uint32_t idx = s_input_flat[i];
+                    if ((refine_bin(__ldg(input + idx)) >> kCoarse12Shift) > threshold_bin)
+                        output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+                }
+            } else if (use_list) {
                 walk_kept_blocks<BLOCK_SIZE>(
                     input, block_list, nlist,
                     [&](uint32_t idx, maca_bfloat16 raw) {
@@ -672,49 +749,68 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         __syncthreads();
         if (tx < RADIX + 1) s_histogram[tx] = 0;
         __syncthreads();
-        // One element of the collect, in the shape both walks hand it: the row
-        // walk's `idx + i` and the list walk's `base + lane*8 + i` are the same
-        // index for the same element.
-        const auto collect_one = [&](uint32_t idx, maca_bfloat16 raw) {
-            const uint32_t bin = refine_bin(raw) >> kCoarse12Shift;
-            if (bin > threshold_bin) {
-                output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            } else if (bin == threshold_bin) {
-                // The count is over the bin, the staging is over the arena.
-                // Gating both on the arena made the refine's histogram partial
-                // whenever the bin overflowed, which is what the full-row
-                // rebuild below used to repair.
-                const uint32_t pos = atomicAdd(&s_num_input[0], 1u);
-                if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
-                atomicAdd(&s_histogram[refine_bin(raw) & (kCoarse12SubBins - 1u)], 1u);
-            }
-        };
-        if (use_list) {
-            walk_kept_blocks<BLOCK_SIZE>(input, block_list, nlist, collect_one);
-        } else if (input_aligned) {
-            for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
-                uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
-                const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
-                #pragma unroll
-                for (int i = 0; i < 8; i++) collect_one(idx + i, h[i]);
+        // The fine histogram of the threshold bin, over the arena.  Every
+        // member of that bin was staged -- the bin is at or above the block cut
+        // -- so this counts the whole bin and not the part that fit: the count
+        // is a property of the bin.
+        if (staged) {
+            for (uint32_t i = tx; i < num_staged; i += BLOCK_SIZE) {
+                const uint32_t key = refine_bin(__ldg(input + s_input_flat[i]));
+                if ((key >> kCoarse12Shift) == threshold_bin)
+                    atomicAdd(&s_histogram[key & (kCoarse12SubBins - 1u)], 1u);
             }
         } else {
-            for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
+            // One element of the collect, in the shape both walks hand it: the
+            // row walk's `idx + i` and the list walk's `base + lane*8 + i` are
+            // the same index for the same element.
+            const auto collect_one = [&](uint32_t idx, maca_bfloat16 raw) {
+                const uint32_t bin = refine_bin(raw) >> kCoarse12Shift;
+                if (bin > threshold_bin) {
+                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+                } else if (bin == threshold_bin) {
+                    // The count is over the bin, the staging is over the arena.
+                    // Gating both on the arena made the refine's histogram partial
+                    // whenever the bin overflowed, which is what the full-row
+                    // rebuild below used to repair.
+                    const uint32_t pos = atomicAdd(&s_num_input[0], 1u);
+                    if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
+                    atomicAdd(&s_histogram[refine_bin(raw) & (kCoarse12SubBins - 1u)], 1u);
+                }
+            };
+            if (use_list) {
+                walk_kept_blocks<BLOCK_SIZE>(input, block_list, nlist, collect_one);
+            } else if (input_aligned) {
+                for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8) {
+                    uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
+                    const maca_bfloat16* h = reinterpret_cast<const maca_bfloat16*>(&v);
+                    #pragma unroll
+                    for (int i = 0; i < 8; i++) collect_one(idx + i, h[i]);
+                }
+            } else {
+                for (uint32_t idx = tx; idx < length; idx += BLOCK_SIZE)
+                    collect_one(idx, __ldg(input + idx));
+            }
+            // The tail of the row: the list walk covers whole blocks and the
+            // row walk covers `[0, vec_len)`, so what is left starts at
+            // `list_end` and `vec_len` respectively -- and the scalar walk has
+            // already covered the whole row.
+            const uint32_t tail_start =
+                use_list ? list_end : (input_aligned ? vec_len : length);
+            for (uint32_t idx = tail_start + tx; idx < length; idx += BLOCK_SIZE)
                 collect_one(idx, __ldg(input + idx));
         }
-        // The tail of the row: the list walk covers whole blocks and the row
-        // walk covers `[0, vec_len)`, so what is left starts at `list_end` and
-        // `vec_len` respectively -- and the scalar walk has already covered the
-        // whole row.
-        const uint32_t tail_start =
-            use_list ? list_end : (input_aligned ? vec_len : length);
-        for (uint32_t idx = tail_start + tx; idx < length; idx += BLOCK_SIZE)
-            collect_one(idx, __ldg(input + idx));
+        // The barrier both arms owe, and it is the scan's input barrier: the
+        // staged arm's histogram is its own atomics and the counting arm's is
+        // the collect's, and `run_cumsum_warp` reads `s_histogram` before its
+        // first barrier.
         __syncthreads();
     }
 
     {
-        const bool overflow = s_num_input[0] > SMEM_INPUT_SIZE;
+        // The staged arena holds every element at or above the block cut, and
+        // the element threshold is at or above that cut, so its own members
+        // cannot have overflowed -- the rescan is the counting arm's.
+        const bool overflow = !staged && s_num_input[0] > SMEM_INPUT_SIZE;
         // No rebuild pass here: the fine histogram above already counted every
         // member of the threshold bin, staged or not, so the refine below ranks
         // the bin itself rather than the part of it that fit.
@@ -758,11 +854,18 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                 emit_member(idx, __ldg(input + idx));
             __syncthreads(); return;
         }
-        const auto num = s_num_input[0];
+        // The window's own threshold as a whole 16-bit key, coarse bin and fine
+        // nibble together.  The counting arm's arena holds the threshold bin
+        // alone, so this is the same question as comparing the nibble; the
+        // staged arm's holds every element at or above the block cut, which is
+        // a superset, and one key comparison is what tells "above", "in the tie
+        // bin" and "below the cut" apart in that one.
+        const uint32_t emit_key = (coarse_threshold << kCoarse12Shift) | threshold_bin;
+        const uint32_t num = staged ? num_staged : s_num_input[0];
         if (remain_topk == 0) {
             for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
                 auto idx = s_input_flat[i];
-                if ((refine_bin(__ldg(input + idx)) & (kCoarse12SubBins - 1u)) > threshold_bin)
+                if (refine_bin(__ldg(input + idx)) > emit_key)
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             }
             __syncthreads(); return;
@@ -770,10 +873,10 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         __syncthreads();
         for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
             auto idx = s_input_flat[i];
-            uint32_t bin = refine_bin(__ldg(input + idx)) & (kCoarse12SubBins - 1u);
-            if (bin > threshold_bin) {
+            const uint32_t key = refine_bin(__ldg(input + idx));
+            if (key > emit_key) {
                 output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            } else if (bin == threshold_bin) {
+            } else if (key == emit_key) {
                 auto p = atomicAdd(&s_last_remain, -1);
                 if (p > 0) output[topk - p] = static_cast<int32_t>(idx);
             }

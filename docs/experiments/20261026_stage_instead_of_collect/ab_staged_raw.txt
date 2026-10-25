@@ -1,0 +1,25 @@
+# 147 cells from perf_data/MetaX_C600-U/20261024_062159/deepselect_perf.csv
+# 2 arms x 3 rounds x 10 iters, device 0
+# round 0 arm old lib=3bfbcc31cdb2 abort=default /root/ds_base/deep_select/deep_select_maca_xcore1600.so
+# round 0 arm new lib=883fcf249b74 abort=default /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 1 arm old lib=3bfbcc31cdb2 abort=default /root/ds_base/deep_select/deep_select_maca_xcore1600.so
+# round 1 arm new lib=883fcf249b74 abort=default /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 2 arm old lib=3bfbcc31cdb2 abort=default /root/ds_base/deep_select/deep_select_maca_xcore1600.so
+# round 2 arm new lib=883fcf249b74 abort=default /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+
+# arm old: libs=['3bfbcc31cdb2'] abort_when_nan_found=['default']
+# arm new: libs=['883fcf249b74'] abort_when_nan_found=['default']
+
+=== new vs old — all operator kernels ===
+  route c12    n= 10  median 1.0016x  [1.001, 1.003]
+  route row    n= 95  median 0.9849x  [0.896, 1.052]
+  route split  n= 16  median 1.0025x  [0.997, 1.008]
+  ALL    n=121  median 1.0006x  [0.896, 1.052]
+
+=== new vs old — selection kernels only (no follower) ===
+  route c12    n= 10  median 1.0018x  [1.000, 1.003]
+  route row    n= 95  median 0.9848x  [0.892, 1.052]
+  route split  n= 16  median 1.0026x  [0.996, 1.008]
+  ALL    n=121  median 1.0005x  [0.892, 1.052]
+
+# wrote /tmp/ab4.json/ab_paired.json
