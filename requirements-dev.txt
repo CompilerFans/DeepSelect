@@ -1,0 +1,37 @@
+# DeepSelect's development dependencies -- the test/benchmark set, on top of
+# the run-time and build-time set in `requirements.txt`.
+#
+#     pip install -r requirements-dev.txt
+#
+# Nothing in this file is reached by `import deep_select` or by a call into
+# the kernel: they are needed only by the suites under `tests/` and `scripts/`
+# (and by `run_test.sh` / `run_bench.sh` around them), which is how this tree
+# is validated.  The `-r` line below is what makes one command install the
+# whole checkout environment; installing `requirements.txt` alone is what a
+# deployment needs.
+
+-r requirements.txt
+
+# ---- tests ----------------------------------------------------------------
+# `tests/kernelkit/__init__.py` imports `bench`, and `bench` imports triton at
+# module scope (the profiler-range marker kernel is `@triton.jit`), so
+# `import kernelkit` -- and therefore `tests/test.py`, `tests/lib.py` and
+# `scripts/perf_snapshot.py`, all of which import it -- raises ImportError
+# without triton.  Note that this includes the *correctness* suite, which never
+# times anything: the import is module-scope, so it is collateral.
+#
+# The marker is upstream's own scaffolding, not this tree's -- no kernel here
+# is triton.  `bench.py`'s `KINETO_LOG_LEVEL` suppression is CUDA-side and is
+# carried here; the Ascend-only profiler surface upstream added later is not.
+# The rest of the `tests/` delta is recorded in CLAUDE.md: the
+# `--backend` / `--seed` / `--sample` surface and the status loop in
+# `test.py`, the checked `check_result` extraction, `platform.py`'s device
+# probe, `kernelkit/build.py`'s MACA stack check, and two UInt workarounds in
+# `lib.py`.
+triton
+
+# `numpy` is used in exactly one place, `tests/kernelkit/utils.py`'s
+# `set_random_seed`, and imported lazily inside the function.  It is not
+# transitively guaranteed on a torch-only install, so it is listed rather than
+# assumed.
+numpy

@@ -200,7 +200,7 @@ permission failure reports and continues. It leaves `~/.triton` and
 `~/.tilelang` alone: `~/.tilelang` nothing here writes, and `~/.triton` is
 triton's own cache — shared with every other triton user on the machine, filled
 here only by `tests/kernelkit/bench.py`'s module-scope marker (see the `tests/`
-dependency note in `requirements.txt`), so removing it is not this tree's call.
+dependency note in `requirements-dev.txt`), so removing it is not this tree's call.
 Its only option is `--dry-run`;
 `--yes` was its first spelling and is gone — a flag that is accepted and ignored
 is a flag a caller believes did something. `./clean.sh && ./develop.sh` is the
