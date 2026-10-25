@@ -1,11 +1,15 @@
 # DeepSelect
 
-DeepSelect is a high performance implementation of the TopK kernel used in DeepSeek Sparse Attention (DSA) (which is used in DeepSeek V3.2, DeepSeek V4, and DeepSeek V4.1 models) and the sampler. It achieves 2 ~ 20x speedup compared to vanilla `torch.topk`.
+DeepSelect is a high performance implementation of the TopK kernel used in DeepSeek Sparse Attention (DSA) (which is used in DeepSeek V3.2, DeepSeek V4, and DeepSeek V4.1 models) and the sampler. It supports NVIDIA CUDA, Huawei Ascend and MetaX MACA platforms, and achieves 2 ~ 20x speedup compared to vanilla `torch.topk`.
 
-This checkout is the **MACA implementation** of DeepSelect, for MetaX MACA parts (C500 / C600 / C600U). The CUDA implementation and its build live upstream; this tree builds MACA artifacts only. The public Python signature is upstream's, parameter for parameter, plus `backend=` and `check_nan=` appended after upstream's last argument, so an upstream call site works here unchanged.
+This repository is the **MetaX MACA** implementation, for the C500 / C600 / C600U parts. The public Python signature is upstream's, parameter for parameter, plus `backend=` and `check_nan=` appended after upstream's last argument, so an upstream call site works here unchanged.
+
+DeepSelect 是为 DeepSeek 稀疏注意力（DeepSeek Sparse Attention, DSA）和采样器（Sampler）定制的高性能 TopK 算子，支持 NVIDIA CUDA、华为昇腾（Ascend）与 MetaX MACA（C500 / C600 / C600U）平台。本仓库是 MetaX MACA 实现。与原生 `torch.topk` 相比，它可实现 2～20 倍的加速。
 
 ## News
 
+- 2026.10.25: We've released TopK kernels for MetaX MACA (C500 / C600 / C600U)
+- 2026.09.30: We've released TopK kernels for Huawei Ascend NPU
 - 2026.09.10: We've released a brief analysis of the algorithm and its implementation: [English](docs/DeepSelect-deep-dive.md) | [中文](docs/DeepSelect-deep-dive.zh.md)
 - 2026.09.10: We've released DeepSelect v1.0.0
 
@@ -19,10 +23,10 @@ This scenario covers:
 - Input dtype: `torch.bfloat16`
 - `batch_size`: $1 \sim +\infty$ (both large and small batch sizes are optimized)
 - `vocab_size`: $1 \sim +\infty$ (both large and small vocabularies are optimized)
-- `topk`: small (must be $\le 4096$; larger values are not supported)
+- `topk`: small (must be $\le 4096$; larger values are not supported), mainly optimized for `topk=512` (i.e., DeepSeek V4's `topk`)
 
 Recommendations:
-- Disable `sorted_index` unless the output has to be ordered by index or by value; enabling either one costs performance.
+- Disable `sorted_index` unless the output has to be ordered by index; enabling it costs performance.
 - Set `return_value=False` when the values are not needed. This skips the value output and is faster.
 
 ### Sampling Scenario
@@ -33,6 +37,8 @@ This scenario covers:
 - `vocab_size`: around 128K
 - `topk`: small (must be $\le 4096$; larger values are not supported)
 
+The MetaX MACA implementation supports both `torch.bfloat16` and `torch.float32`.
+
 ## Performance
 
 Measured with the benchmark in [`tests/test.py`](tests/test.py)
@@ -40,9 +46,13 @@ Measured with the benchmark in [`tests/test.py`](tests/test.py)
 on the same input. The metric is effective memory bandwidth: TopK does no
 floating-point math, so a FLOP rate would not be meaningful here.
 
-### Lightning Indexer Scenario
+### Lightning Indexer Scenario (MetaX MACA)
 
-bfloat16, `topk = 512`, one subplot per batch size, in GB/s on a shared axis.
+bfloat16, `topk = 512`, one subplot per batch size.
+
+MetaX C500 (104 AP):
+
+![DeepSelect vs torch.topk, bfloat16 Lightning Indexer, MetaX C500](assets/perf_bf16_maca_MetaX_C500.png)
 
 MetaX C600-A (32 AP):
 
@@ -52,9 +62,13 @@ MetaX C600-U (28 AP):
 
 ![DeepSelect vs torch.topk, bfloat16 Lightning Indexer, MetaX C600-U](assets/perf_bf16_maca_MetaX_C600-U.png)
 
-### Sampling Scenario
+### Sampling Scenario (MetaX MACA)
 
 float32, `vocab_size = 129280`, `topk = 512`.
+
+MetaX C500 (104 AP):
+
+![DeepSelect vs torch.topk, float32 Sampling, MetaX C500](assets/perf_fp32_maca_MetaX_C500.png)
 
 MetaX C600-A (32 AP):
 
@@ -90,6 +104,7 @@ x = torch.randn(batch_size, vocab_size, dtype=torch.bfloat16, device="cuda")
 values, indices = deep_select.topk(
     x,
     topk,
+    sorted=False,              # sort the result by values in descending order
     sorted_index=True,         # return each row's indices in ascending order
     indices_type=torch.int32,  # torch.int32 or torch.int64
     return_value=True,         # False skips the value output (~10% faster)
@@ -106,7 +121,7 @@ For the full signature, see [`deep_select/interface.py`](deep_select/interface.p
 
 ### Backends
 
-`backend=` selects the implementation: `"torch"` is the default and the differential reference, `"maca_c"` is the MACA kernel. A call with no `backend=` follows `DS_TOPK_BACKEND`, so a caller who wants the kernel either passes `backend="maca_c"` or exports `DS_TOPK_BACKEND=maca_c`. `check_nan=False` turns off the input scan; `abort_when_nan_found` decides what happens once a NaN is found.
+`backend=` selects the implementation: `"torch"` (the default) is the reference, `"maca_c"` is the MACA kernel. A call with no `backend=` follows `DS_TOPK_BACKEND`, so a caller who wants the kernel passes `backend="maca_c"` or exports `DS_TOPK_BACKEND=maca_c`.
 
 ### Variable-length rows
 
@@ -124,11 +139,7 @@ values, indices = deep_select.topk(x, 1000, end=end, sorted=True,
 
 ### NaN handling
 
-NaN checking is on by default (`check_nan=True`). With the default `abort_when_nan_found=True` the kernel invokes `trap()` and aborts; with `abort_when_nan_found=False` the row is flagged with `0x3F3F3F3F` in `output_idx[row, 0]` and the rest of the row is undefined. Rows whose length is `<= topk` are never NaN-checked.
-
-## Development
-
-Kernel architecture, the per-family build, routing, testing and the performance-change rules are documented in [CLAUDE.md](CLAUDE.md).
+NaN checking is on by default. With the default `abort_when_nan_found=True` the kernel invokes `trap()` and aborts; with `abort_when_nan_found=False` the row is flagged with `0x3F3F3F3F` in `output_idx[row, 0]` and the rest of the row is undefined. `check_nan=False` turns the scan off. Rows whose length is `<= topk` are never NaN-checked.
 
 ## Citation
 
