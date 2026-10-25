@@ -83,6 +83,20 @@ def _load_mcoplib():
         return None
 
 
+def _have_deep_gemm():
+    """Whether the external `deep_gemm` package can serve the `dg` column.
+
+    Probed here rather than through the package: this column measures another
+    project's kernel, and `deep_select` no longer carries a `deep_gemm`
+    backend for such a helper to gate.
+    """
+    try:
+        import deep_gemm
+        return hasattr(deep_gemm, "fp32_indexer_topk_selector")
+    except Exception:                                             # noqa: BLE001
+        return False
+
+
 def timed(fn, iters):
     """Kernel time in seconds, by `tests/test.py`'s matching rule."""
     result = kk.bench(fn, iters)
@@ -200,7 +214,7 @@ def main() -> int:
         QUICK_TOPK if args.quick else GRID_TOPK)
 
     mcp_op = _load_mcoplib()
-    have_dg = deep_select.deep_gemm_available()
+    have_dg = _have_deep_gemm()
 
     wanted, dropped = [], {}
     for b in (x.strip() for x in args.backends.split(",") if x.strip()):

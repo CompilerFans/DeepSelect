@@ -69,7 +69,7 @@ scripts/generate_instantiations.py          生成器：元组表 → .cu 清单
 setup.py                                    SOURCES = 手写 TU + 生成清单
 deep_select/
 ├── __init__.py     __version__.py          导出官方名
-├── interface.py                            公开契约 + backend 分派（torch / maca_c / deep_gemm）
+├── interface.py                            公开契约 + backend 分派（torch / maca_c）
 ├── _binding.py                             按族装载 .so（tvm-ffi）
 └── _log.py                                 DS_LOG 调用记录
 csrc/
@@ -87,8 +87,8 @@ csrc/
     │   ├── radix_row_bf16.cuh              bf16 行：radix 两趟 + skip 表 + overflow
     │   ├── radix_row_fp32.cuh              fp32 行：+ 溢出重扫
     │   ├── radix_chunked.cuh               两条 dtype 的分块 split/merge（阶段核 + 发射）
-    │   ├── topk_coarse12.cuh               deep_gemm 路线一（数据流：核 + 核启动子；路线在 routing.cuh）
-    │   └── topk_chunks.cuh                 deep_gemm 路线二（数据流：核 + 核启动子；路线在 routing.cuh）
+    │   ├── topk_coarse12.cuh               coarse12 数据流（核 + 核启动子；源自 deep_gemm csrc；路线在 routing.cuh）
+    │   └── topk_chunks.cuh                 chunks 数据流（核 + 核启动子；源自 deep_gemm csrc；路线在 routing.cuh）
     └── xcore<N>/instantiations/*.cu        族层：每族自己的生成物（一个配置元组一个文件；今日三族同表，87 × 3）
 ```
 
@@ -264,15 +264,13 @@ CUDA_VISIBLE_DEVICES=<独占的一张卡> ./run_test.sh --test       # 固定种
   `inspect.signature` 与导出表不变；冒烟用 `tests/test.py --sample 50`）。整轮收尾在 main 上跑
   一次 `./run_test.sh --test` 作为共同门。提交信息如实写"全量套件留待轮收尾"，不声称未跑的测试。
 
-  这道门的**格数不是常量**，所以收据引用状态表，不引用一个"N/N pass"：`--test` 展开为
-  `tests/test.py --seed 20260911 --sample 200 -rf`，用例数 = 200 例固定抽样 + 整个性能格
-  （`deep_gemm` 可 import 时再加它的 2 例正确性和 25 格选择器性能用例）。实测 2026-10-24
-  C600-U：2 + 200 + 122 + 25 = **349** 格，包不可用（`deep_gemm_available()` 为假）时
-  200 + 122 = **322** 格；通过数再减去 OOM `skip`——那是设备当时的内存，不是用例的属性
-  （该记录的 6 例 skip 都是 19–32 GiB 的单次分配失败，卡共 71.89 GiB）。同一次运行的状态表：
-  **343 pass / 6 skip / 0 check_fail / 0 crash**，约 8 分钟（日志自身从头部 19:51:24Z 到
-  末行 19:59:38Z 是 494 s），artifact `ccd4ad0ee312`
-  （`results/deepselect_run_20261024_195124_test.log`）。
+  `--test` 展开为 `tests/test.py --seed 20260911 --sample 200 -rf`，用例数 = 200 例固定抽样
+  + 122 格性能 = **322** 格；通过数再减去 OOM `skip`——那是设备当时的内存，不是用例的
+  属性。`deep_gemm` 后端于 2026-10-25 移除后格数是常量；移除前它可 import 时会加 2 例
+  正确性和 25 格选择器性能用例，故 2026-10-24 C600-U 的实测记录是 349 格（包不可用时
+  322），状态表 **343 pass / 6 skip / 0 check_fail / 0 crash**，约 8 分钟（494 s），
+  artifact `ccd4ad0ee312`（`results/deepselect_run_20261024_195124_test.log`）；该记录
+  的 6 例 skip 都是 19–32 GiB 的单次分配失败，卡共 71.89 GiB。
 
 - **搬迁 / 改名（码流未变）**：`nm -S --defined-only` 按**名字 → (size, type)** 比，存活符号逐项相同。
   无 size 的符号（`GCC_except_table*`、CRT 桩）按**去数字后缀的基名**比——编号与地址随布局移动，不算差异。

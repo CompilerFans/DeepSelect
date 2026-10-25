@@ -59,7 +59,7 @@ usage() {
     cat >&2 <<'EOF'
 Usage: run_bench.sh [options]
 
-  --backends LIST     comma-separated subset of maca_c,torch,deep_gemm
+  --backends LIST     comma-separated subset of maca_c,torch
   --device N          shorthand for CUDA_VISIBLE_DEVICES=N
   --set-baseline      repoint <chip>/baseline at this run (only if all stages pass)
   --baseline-dir DIR  repoint the baseline at DIR and exit without measuring
@@ -75,7 +75,7 @@ EOF
 export MACA_PATH="${MACA_PATH:-${MACA_HOME:-/opt/maca}}"
 export LD_LIBRARY_PATH="$MACA_PATH/lib:$MACA_PATH/mxgpu_llvm/lib:$MACA_PATH/ompi/lib:${LD_LIBRARY_PATH:-}"
 
-backends="maca_c,torch,deep_gemm"
+backends="maca_c,torch"
 set_baseline=0
 baseline_dir=""
 compare_only=0

@@ -87,10 +87,11 @@ def device_family_suffix() -> str:
     the family, because MACA reports the family as an sm spelling rather than a
     name.
 
-    The sm spellings are `deep_gemm/utils/arch_config.py`'s, which is the
-    repository's one table for this: `xcore1000` is sm80, `xcore1500` sm86,
+    The sm spellings are the toolkit's: `xcore1000` is sm80, `xcore1500` sm86,
     `xcore1600` sm87/88/89 (the C600U-class part renumbers across SDK
     generations, which is why the family and not the number is the anchor).
+    `tests/kernelkit/platform.py` carries the same rows -- it cannot import
+    them from anywhere, so a change to one belongs in the same review.
     Anything outside those -- H200, a CPU-only host -- gets `""`, which names
     the unsuffixed artifact and nothing else; see `_library_pattern` for why an
     unknown family must not fall through to *some* family's image.

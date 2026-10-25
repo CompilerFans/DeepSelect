@@ -424,8 +424,7 @@ def shapes(backend):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backend", default="maca_c",
-                    help="maca_c (default) or torch; deep_gemm is a subset and "
-                         "is not what these cases are about")
+                    help="maca_c (default) or torch")
     ap.add_argument("--device", type=int, default=None,
                     help="CUDA_VISIBLE_DEVICES shorthand; set before torch "
                          "initialises a context")

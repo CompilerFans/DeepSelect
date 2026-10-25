@@ -100,8 +100,7 @@ def main():
     print(provenance.package_receipt(deep_select))
     print(f"device {torch.cuda.get_device_name(0)}")
 
-    status = {"pass": [], "check_fail": [], "crash": [], "skip": [],
-              "unsupported": []}
+    status = {"pass": [], "check_fail": [], "crash": [], "skip": []}
     started = time.time()
     stopped_early = None
 
@@ -121,10 +120,6 @@ def main():
             status["skip"].append((p, f"out of memory: {str(exc)[:120]}"))
             torch.cuda.empty_cache()
             print("    SKIPPED: out of memory", flush=True)
-            continue
-        except deep_select.UnsupportedByBackend as exc:
-            status["unsupported"].append((p, str(exc)[:120]))
-            print(f"    UNSUPPORTED: {str(exc)[:120]}", flush=True)
             continue
         except Exception as exc:  # noqa: BLE001 - a crash is a status
             status["crash"].append((p, f"{type(exc).__name__}: {str(exc)[:200]}"))
@@ -147,11 +142,11 @@ def main():
     elapsed = time.time() - started
     attempted = sum(len(v) for v in status.values())
     print(f"\n{'=' * 64}")
-    for name in ("pass", "check_fail", "crash", "skip", "unsupported"):
+    for name in ("pass", "check_fail", "crash", "skip"):
         print(f"  {name:<12} {len(status[name]):>7}")
     if stopped_early:
         print(f"  (run stopped early: {stopped_early})")
-    for name in ("check_fail", "crash", "skip", "unsupported"):
+    for name in ("check_fail", "crash", "skip"):
         for p, why in status[name]:
             print(f"  {name:<12} {p}" + (f"\n{'':<15}[{why}]" if why else ""))
     print(f"  {attempted} attempted in {elapsed:.0f} s "

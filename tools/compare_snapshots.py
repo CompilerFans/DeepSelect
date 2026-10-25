@@ -15,8 +15,7 @@ means that backend is faster than `maca_c`**.  A `torch` row moving is
 informative; a `maca_c` row moving is the regression the exit status reports.
 
 Exit status: **1** when a `maca_c` cell moved beyond `--tol` or its `status`
-changed (either direction); **0** otherwise, including when `torch` or
-`deep_gemm` moved.
+changed (either direction); **0** otherwise, including when `torch` moved.
 
 Usage:
     tools/compare_snapshots.py <candidate_dir> --base <baseline_dir>
@@ -138,7 +137,7 @@ def main() -> int:
             print(f"#   - {label(k)}")
 
     failed = False
-    for backend in ("maca_c", "torch", "deep_gemm"):
+    for backend in ("maca_c", "torch"):
         results: List[Tuple] = []
         skipped: List[str] = []
         status_changes: List[Tuple] = []

@@ -6,8 +6,8 @@
 # `install_requires`.  So there is no upstream list to agree with, and what
 # follows describes THIS tree: the MACA fork, which is its own repository and
 # is also vendored inside mcDeepGEMM as `third-party/DeepSelect`.  That is why
-# `deep_gemm` below is called a cycle rather than an omission, and why
-# `tilelang` / `mctlassEx` are named as mcDeepGEMM's rather than ours.
+# `tilelang` / `mctlassEx` are named as mcDeepGEMM's rather than ours: this
+# operator has no dependency on either.
 #
 # Note the import name is not the distribution name for every one of these:
 # `import tvm_ffi` is the distribution `apache-tvm-ffi` (there is no `tvm_ffi`
@@ -94,12 +94,6 @@ ninja
 # reason; add it only if an old setuptools on the target needs it.
 
 # ---- NOT listed, and why --------------------------------------------------
-# `deep_gemm`: a SOFT dependency, reached only by `backend="deep_gemm"`, and
-# imported lazily in `deep_select/_backends.py`'s `deep_gemm_available()` /
-# `topk_deep_gemm()`.  This repository is vendored inside that package's own
-# checkout, so requiring it here would be a cycle.  The default backend
-# (`torch`) never touches it.
-#
 # `ray`: no longer relevant -- upstream deleted the Ray-based stress harness
 # (`tests/kernelkit/stress.py`) in `bfa4507`, and this tree no longer carries
 # the file either.

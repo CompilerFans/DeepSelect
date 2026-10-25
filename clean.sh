@@ -12,8 +12,8 @@
 # a second traversal.
 #
 # The `find` passes skip `csrc/3rdparty/**`, and delete nothing outside this
-# tree -- in particular not `~/.triton`, `~/.tilelang`, `~/.deep_gemm` or
-# `~/.metax`, which nothing here writes.
+# tree -- in particular not `~/.triton`, `~/.tilelang` or `~/.metax`, which
+# nothing here writes.
 #
 set -euo pipefail
 
@@ -31,8 +31,8 @@ Usage: clean.sh [--dry-run] [-h|--help]
 Removes: build/ dist/ *.egg-info/ __pycache__/ .pytest_cache/ and friends,
 loose *.pyc /*.pyo, and every *.so in the tree (all of which are build
 products -- checked, there is no vendored binary here).
-Leaves: the installed site-packages copy, and ~/.deep_gemm, ~/.triton,
-~/.tilelang, ~/.metax (this tree writes none of them).
+Leaves: the installed site-packages copy, and ~/.triton, ~/.tilelang,
+~/.metax (this tree writes none of them).
 EOF
 }
 

@@ -32,8 +32,7 @@ marks rather than one block.
 
 The CSV is written by `scripts/perf_snapshot.py`; the timings in it are
 `tests/test.py`'s own, one row per (cell, backend).  Only `maca_c` and `torch`
-appear on the figures -- `deep_gemm` answers none of these cells (float32 only,
-so every bf16 row is `unsupported`, and so are the sampler cells).
+appear on the figures: they are the two backends this tree ships.
 
 The `_maca` suffix is upstream's own convention, which names a figure for the
 part it was measured on (`perf_bf16_cuda.png`, `perf_bf16_ascend.png`); these

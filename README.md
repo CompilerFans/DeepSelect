@@ -106,7 +106,7 @@ For the full signature, see [`deep_select/interface.py`](deep_select/interface.p
 
 ### Backends
 
-`backend=` selects the implementation. `"torch"` is the default and the differential reference; `"maca_c"` is the MACA kernel; `"deep_gemm"` serves a float32 subset. A call with no `backend=` follows `DS_TOPK_BACKEND`, so a caller who wants the kernel either passes `backend="maca_c"` or exports `DS_TOPK_BACKEND=maca_c`. `check_nan=False` turns off the input scan; `abort_when_nan_found` decides what happens once a NaN is found.
+`backend=` selects the implementation: `"torch"` is the default and the differential reference, `"maca_c"` is the MACA kernel. A call with no `backend=` follows `DS_TOPK_BACKEND`, so a caller who wants the kernel either passes `backend="maca_c"` or exports `DS_TOPK_BACKEND=maca_c`. `check_nan=False` turns off the input scan; `abort_when_nan_found` decides what happens once a NaN is found.
 
 ### Variable-length rows
 

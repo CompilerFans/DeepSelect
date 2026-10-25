@@ -3,15 +3,12 @@
 A *thin* recorder: the cases, the data, the checks and the timings are all
 `tests/test.py`'s own, called rather than re-implemented.  The one axis added is
 the one the official harness cannot express: **which backend answered**, one row
-per (cell, backend), each with a `status` of `pass` / `fail` / `unsupported`.
-A cell a backend cannot serve states its reason there, and is never dropped.
+per (cell, backend), each with a `status` of `pass` / `fail`: a cell that went
+wrong states its reason there, and is never dropped.
 Backends: `maca_c` -- this repository's kernel, the production backend (the DEFAULT
 is `torch`, so it is asked for by name); `torch` -- the official reference, a
 bare `torch.topk`, NOT `backend="torch"`, which pads, masks and converts around
-the same call and measures something else entirely; `deep_gemm` -- that
-package's `fp32_indexer_topk_selector`, float32 only, hence `unsupported` on the
-whole bf16 official grid.  The fp32 grid it answers rides along whenever
-`deep_select.deep_gemm_available()` says that backend can run at all.
+the same call and measures something else entirely.
 Cases: the official grid (`tests/test.py::performance_cases()`) plus
 `--cases-file`, a JSON list of `lib.TestParam` fields, e.g.
 `{"batch_size": 6, "vocab_size": 32768, "topk": 1024}`.  Those three are the
@@ -32,11 +29,13 @@ the whole call with the L2 flush outside the span (`wall_clock_time`, the shape 
 deep_gemm's `bench_time`): every kernel the operator launches, plus launch and
 sync.  **It is noisier and it is not "more accurate"** -- it measures a different
 thing, and it is the only one of the two that can compare two *backends* fairly,
-because the excluded kernels are not the same size on both sides.  On
-`b256-v131072-k2048` the `deep_gemm` column reads 241 us by the kernel clock and
-~6.7 ms by the wall clock, and the ~5.4 ms difference is its NaN scan, which the
-matching rule does not name.  Read `wall_relative_pct_vs_maca_c` for that
-comparison and `relative_pct_vs_maca_c` for regressions.
+because the excluded kernels are not the same size on both sides.  On `torch`
+the two nearly agree -- the reference is one `torch.topk`, and its kernel name
+holds `topk` on both of torch's paths; on `maca_c` `wall_us` also carries
+whatever the call launched that the rule does not name (`nan_abort_kernel`
+when `abort_when_nan_found=True`, the launch and sync around the grid).  Read
+`wall_relative_pct_vs_maca_c` for a comparison across backends and
+`relative_pct_vs_maca_c` for regressions.
 `<device>` is the **device name torch reports** (`MetaX C500` -> `MetaX_C500`),
 never the arch family: the folder answers "which board did I measure on", and two
 boards of one family (both xcore1600) share an ISA but not a clock, a wall or an
@@ -44,7 +43,7 @@ SM count.  The family is recorded per row (`chip`), never inferred from it.
 Usage:
     CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \\
         python3 scripts/perf_snapshot.py
-    ... --backends a,b            # subset of the backends (default: all three)
+    ... --backends a,b            # subset of the backends (default: both)
     ... --cases-file extra.json   # + your own cases
     ... --out-dir DIR             # the record's own directory
     ./run_bench.sh                # the orchestrator: this + the official gate
@@ -77,39 +76,32 @@ import kernelkit as kk  # noqa: E402
 import lib  # noqa: E402
 import test as official  # noqa: E402
 PYBIN = sys.executable
-BACKENDS = ("maca_c", "torch", "deep_gemm")
+BACKENDS = ("maca_c", "torch")
 # Short spellings for `--cases-file`.  Only the pair this operator serves.
 DTYPES = {"bf16": "bfloat16", "bfloat16": "bfloat16",
           "fp32": "float32", "float32": "float32"}
 IDX_DTYPES = {"int32": "int32", "int64": "int64"}
 COUNTER = kk.Counter()
-class Unsupported(Exception):
-    """The backend refused the case; a status, never a failure."""
 def call_topk(p, t, backend: str):
     """The operator call `tests/test.py::run_testcase` makes, with a backend."""
     from deep_select import topk
-    try:
-        return topk(
-            t.input,
-            p.topk,
-            sorted=p.sorted_value,
-            begin=None,
-            end=t.end,
-            indices_type=p.out_idx_dtype,
-            sorted_index=p.sorted_index,
-            hint=None,
-            output_idx=None,
-            output_idx_offset=t.output_idx_offset,
-            idx_oob_fill_value=p.idx_oob_fill_value,
-            value_oob_fill_value=p.value_oob_fill_value,
-            return_value=p.return_value,
-            abort_when_nan_found=False,
-            backend=backend,
-        )
-    except Exception as exc:
-        if type(exc).__name__ == "UnsupportedByBackend":
-            raise Unsupported(str(exc).strip()) from None
-        raise
+    return topk(
+        t.input,
+        p.topk,
+        sorted=p.sorted_value,
+        begin=None,
+        end=t.end,
+        indices_type=p.out_idx_dtype,
+        sorted_index=p.sorted_index,
+        hint=None,
+        output_idx=None,
+        output_idx_offset=t.output_idx_offset,
+        idx_oob_fill_value=p.idx_oob_fill_value,
+        value_oob_fill_value=p.value_oob_fill_value,
+        return_value=p.return_value,
+        abort_when_nan_found=False,
+        backend=backend,
+    )
 def wall_clock_time(fn, num_iters: int = 10) -> float:
     """Seconds per call, events around the loop, L2 flushed *outside* the span.
 
@@ -127,10 +119,10 @@ def wall_clock_time(fn, num_iters: int = 10) -> float:
     **This is not a more accurate clock than `kk.bench`** -- it is a *different
     quantity*.  It sees every kernel the operator launches, including the ones
     that do not match `"topk"`, plus launch and sync.  That is exactly what the
-    official clock is defined to exclude, and it is why the two disagree by more
-    than an order of magnitude on the `deep_gemm` column (see the module
-    docstring).  Compare **across backends** on this; compare **one `maca_c`
-    build against another** on `time(us)`, which is quieter.
+    official clock is defined to exclude, and it is why the two can disagree by
+    more than the kernels' own span (see the module docstring).  Compare
+    **across backends** on this; compare **one `maca_c` build against another**
+    on `time(us)`, which is quieter.
     """
     for _ in range(3):
         fn()
@@ -191,10 +183,6 @@ def measure(p, t, backend: str) -> Dict[str, Any]:
         value, index = call_topk(p, t, backend)
         torch.cuda.synchronize()
         official.check_call_contract(p, value, index)
-    except Unsupported as exc:
-        row["status"], row["error_type"] = "unsupported", "UnsupportedByBackend"
-        row["error_message"] = str(exc)[:200]
-        return row
     except Exception as exc:
         row["status"], row["error_type"] = "fail", type(exc).__name__
         row["error_message"] = str(exc)[:200]
@@ -224,28 +212,6 @@ def _us(seconds: Optional[float]) -> Any:
     """
     return round(seconds * 1e6, 3) if seconds else ""
 # ── cases ──
-def deep_gemm_cases() -> List[Any]:
-    """The `deep_gemm` selector perf shapes, from `tests/test.py`.
-
-    The table lives there (`DEEP_GEMM_SELECTOR_PERF_SHAPES`), not here: the official
-    grid drives the *same* shapes, and a second copy drifts from the gate meant
-    to check it.  `note` marks the rows whose `seq_len`
-    is narrower than `n_cols` -- windows there, whole-row rankings here, so the
-    two are not comparable at the same shape.
-    """
-    return [(_deep_gemm_note(b, v, seq),
-             lib.TestParam(b, v, official.DEEP_GEMM_SELECTOR_PERF_TOPK, False, False,
-                           False, torch.float32, torch.int32, num_runs=10))
-            for b, v, seq in official.DEEP_GEMM_SELECTOR_PERF_SHAPES]
-
-
-def _deep_gemm_note(b: int, v: int, seq: int) -> str:
-    if seq == v:
-        return ""
-    return (f"sglang-bs{b}-seq{seq}: that grid declares a window; this "
-            f"ranks the whole row")
-
-
 # `lib.TestParam`'s four non-shape fields have no defaults, so spell them out.
 PARAM_DEFAULTS = {"sorted_value": False, "sorted_index": False,
                   "return_value": False, "dtype": "bf16", "out_idx_dtype": "int32"}
@@ -311,25 +277,6 @@ def device_name() -> str:
     return (torch.cuda.get_device_name(0) or "unknown_device").strip().replace(" ", "_")
 
 
-def _deep_gemm_package() -> Dict[str, str]:
-    """What the `deep_gemm` backend is, recorded from the *package* it imports.
-
-    A package question, not a location one: `backend="deep_gemm"` is
-    `import deep_gemm`, so what decides the numbers is the module that import
-    lands on and its version -- not which checkout holds its source, which
-    this repository has no business knowing.  Empty strings mean the package
-    is not importable, which is a true answer and the one to record.
-    """
-    try:
-        import deep_gemm
-        return {
-            "deep_gemm_package": os.path.dirname(os.path.abspath(deep_gemm.__file__)),
-            "deep_gemm_version": str(getattr(deep_gemm, "__version__", "")),
-        }
-    except Exception:
-        return {"deep_gemm_package": "", "deep_gemm_version": ""}
-
-
 def provenance(sm_count: int) -> Dict[str, Any]:
     here = REPO
     # The extension the *device* loads, asked of the loader itself
@@ -340,7 +287,6 @@ def provenance(sm_count: int) -> Dict[str, Any]:
     so = answering_extension()
     md5 = "" if so is None else md5_of(so, None)
     return {
-        **_deep_gemm_package(),
         # The device itself, not an arch derivation of it: the same string the
         # directory is named after, so the two cannot disagree.
         "chip": device_dir_name(),
@@ -438,15 +384,6 @@ def main() -> int:
         if a not in BACKENDS:
             raise SystemExit(f"unknown backend {a!r}; expected one of {', '.join(BACKENDS)}")
     cases = [("official", "", p) for p in official.performance_cases()]
-    # Whether the `deep_gemm` column can be measured is the package's answer,
-    # not a switch: no flag here, and no `--no-` on the harness above it.  A
-    # switch would have to be forwarded to every runner that probes for itself,
-    # and an override that is not forwarded is an override a caller believes
-    # they made (measured: `run_bench.sh --no-deep-gemm-shapes` reported 95
-    # cells and ran 120).
-    from deep_select import deep_gemm_available
-    if deep_gemm_available():
-        cases += [("deep_gemm_axes", note, p) for note, p in deep_gemm_cases()]
     if args.cases_file:
         cases += [("extra", note, p) for note, p in cases_from_file(args.cases_file)]
     torch.set_default_device("cuda")
@@ -517,12 +454,7 @@ def main() -> int:
         "rows": len(rows),
         "status_counts": {f"{k[0]}/{k[1]}": v for k, v in sorted(counts.items())},
         "csv_format_version": 2,
-        # The selector cells are not an axis any more: whether they are added is
-        # `deep_select.deep_gemm_available()`'s answer, and `cases` below records
-        # how many there turned out to be.  Naming a flag here would be naming
-        # one that no longer exists.
-        "case_source": "tests/test.py::performance_cases() (+ the selector grid "
-                       "when the deep_gemm package can serve it, + --cases-file)",
+        "case_source": "tests/test.py::performance_cases() (+ --cases-file)",
         "measurement": ("two clocks per cell.  `time(us)` is tests/test.py's own: "
                         "one 'topk'-matching kernel's time, else the e2e span over "
                         "the matching kernels; p.num_runs reps, L2 flushed "
@@ -531,8 +463,8 @@ def main() -> int:
                         "operator launches, plus launch and sync.  **They are not "
                         "the same quantity and neither is derived from the other**: "
                         "`time(us)` excludes kernels the matching rule does not "
-                        "name (which is where deep_gemm's NaN scan lives, ~5.4 ms "
-                        "on b256-v131072), `wall_us` includes them.  Compare "
+                        "name (the reference's many small kernels), `wall_us` "
+                        "includes them.  Compare "
                         "across backends on `wall_us`; compare one `maca_c` build "
                         "against another on `time(us)`.  Correctness: "
                         "tests/test.py::check_result / check_call_contract, "

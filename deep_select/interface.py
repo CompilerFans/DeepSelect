@@ -5,14 +5,13 @@ import torch
 from typing import Optional, Tuple
 
 from . import _binding
-from ._backends import topk_deep_gemm, topk_torch
+from ._backends import topk_torch
 from ._log import log, log_call
 
 
-# The backend names.  `maca_c` is the kernel this device has, `torch` is a
-# reference implementation of the contract, `deep_gemm` the soft-dependency
-# package's selector.
-_BACKENDS = ("maca_c", "torch", "deep_gemm")
+# The backend names.  `maca_c` is the kernel this device has; `torch` is a
+# reference implementation of the contract.
+_BACKENDS = ("maca_c", "torch")
 
 
 def _default_backend() -> str:
@@ -25,15 +24,6 @@ def _default_backend() -> str:
         return v
     return "torch"
 
-
-class UnsupportedByBackend(ValueError):
-    """This backend does not implement this part of the contract.
-
-    Raised when the request is valid and the backend is simply narrower --
-    `deep_gemm` ranks float32 only, where the operator also takes bfloat16.
-    Still a `ValueError`, so a caller that only cares that the call was
-    refused need not tell the two apart.
-    """
 
 # The extension the build produces.
 _KERNEL_NAME = "deep_select_maca"
@@ -108,9 +98,7 @@ def topk(
                 Exception: when the row's length <= topk, it is skipped. Inert when `check_nan` is False, since then nothing is ever found.
         backend: str. Which implementation to run: `"torch"` (the default), a
                 reference implementation built from torch ops that runs on any
-                device and dtype; `"maca_c"`, this device's MACA kernel; or
-                `"deep_gemm"`, the `deep_gemm` package's selector, which implements
-                a subset of the contract (see `topk_deep_gemm`).
+                device and dtype; or `"maca_c"`, this device's MACA kernel.
                 `DS_TOPK_BACKEND` overrides the default for a whole process.
         check_nan: bool. Whether each row is scanned for a NaN at all.  With
                 False no scan runs, `abort_when_nan_found` never fires, and a
@@ -180,17 +168,6 @@ def topk(
             input, topk, sorted=sorted, end=end, indices_type=indices_type,
             sorted_index=sorted_index, output_idx=output_idx,
             output_idx_offset=output_idx_offset,
-            idx_oob_fill_value=idx_oob_fill_value,
-            value_oob_fill_value=value_oob_fill_value,
-            return_value=return_value,
-            abort_when_nan_found=abort_when_nan_found,
-            check_nan=check_nan,
-        )
-    if backend == "deep_gemm":
-        return topk_deep_gemm(
-            input, topk, end=end, sorted_value=sorted,
-            sorted_index=sorted_index, indices_type=indices_type,
-            output_idx=output_idx, output_idx_offset=output_idx_offset,
             idx_oob_fill_value=idx_oob_fill_value,
             value_oob_fill_value=value_oob_fill_value,
             return_value=return_value,

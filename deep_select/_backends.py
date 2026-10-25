@@ -1,16 +1,11 @@
-"""The two reference backends: `torch` and `deep_gemm`.
+"""The reference backend: `torch` ops, the contract's slow answer.
 
-Neither is the kernel -- `maca_c` is the extension `_binding` loads, and
-`interface.py` owns the contract and dispatches to all three.  What lives here
-is what the contract is answered *in terms of*: `topk_torch` in torch ops, which
-runs on any device and dtype, and `topk_deep_gemm` through the soft-dependency
-package's selector.
-
-`deep_gemm` is imported on first use (`_deep_gemm`), never at module scope, so
-this module loads -- and the package imports -- with that package absent.
+It is not the kernel -- `maca_c` is the extension `_binding` loads, and
+`interface.py` owns the contract and dispatches to both.  What lives here is
+what the contract is answered *in terms of*: `topk_torch`, built from torch ops,
+which runs on any device and dtype, including where no kernel is built.
 """
 
-import functools
 import torch
 
 from typing import Optional, Tuple
@@ -18,52 +13,13 @@ from typing import Optional, Tuple
 from ._log import log_call
 
 
-# `deep_gemm`'s `kMaxTopK` (`csrc/kernels/fp32_topk.cu`).  Its selector refuses
-# more, so this backend refuses first, naming the gap rather than the kernel's
-# assert.
-_DEEP_GEMM_MAX_TOPK = 2048
-
-
-@functools.lru_cache(maxsize=1)
-def _deep_gemm():
-    """The `deep_gemm` package, imported on first use.
-
-    A soft dependency -- this repository is standalone -- so it is imported
-    only when `backend="deep_gemm"` is asked for.
-    """
-    import deep_gemm
-
-    return deep_gemm
-
-
-@functools.lru_cache(maxsize=1)
-def deep_gemm_available() -> bool:
-    """Whether `backend="deep_gemm"` can run in this process.
-
-    True when the `deep_gemm` package imports *and* carries the entry that
-    backend calls.  Asked of the package, not of a location: which checkout
-    `import deep_gemm` lands on is not this repository's business, only
-    whether the call will work.
-
-    The harnesses ask this to decide whether to run the cells only that
-    backend can answer; a caller can ask it before naming the backend.
-    """
-    try:
-        return callable(getattr(_deep_gemm(), "fp32_indexer_topk_selector", None))
-    except Exception:
-        return False
-
-
 def _check_common_contract(input: torch.Tensor, topk: int,
                            indices_type: torch.dtype) -> None:
-    """The rejections both reference backends owe their caller, word for word.
+    """The rejections the contract owes the caller, word for word.
 
-    These four are properties of the operator's contract rather than of an
-    implementation -- and the kernel enforces the same four in
-    `csrc/maca_kernels/common/maca_topk.cu` -- so a caller must hear the same
-    thing whichever backend it picked.  One body here rather than one per
-    backend is what stops the two drifting apart: `topk_deep_gemm` and
-    `topk_torch` each reached the same four checks by spelling them out.
+    These four are properties of the operator rather than of an implementation:
+    the kernel enforces the same four in `csrc/maca_kernels/common/maca_topk.cu`,
+    and a caller must hear the same thing whichever backend it picked.
     """
     if topk <= 0:
         raise ValueError(f"topk must be positive, got {topk}")
@@ -130,7 +86,7 @@ def _abort_on_nan_rows(nan_rows: Optional[torch.Tensor]) -> None:
 
 def _stamp_nan_rows(out_idx: torch.Tensor,
                     nan_rows: Optional[torch.Tensor]) -> None:
-    """The sentinel `abort_when_nan_found=False` leaves, for either backend.
+    """The sentinel `abort_when_nan_found=False` leaves, for the reference.
 
     Slot 0 of the NaN row only, on the tensor that goes back to the caller
     whichever buffer that is; the rest of the row stays undefined, so a NaN row
@@ -140,121 +96,6 @@ def _stamp_nan_rows(out_idx: torch.Tensor,
     """
     if nan_rows is not None and bool(nan_rows.any().item()):
         out_idx[nan_rows, 0] = 0x3F3F3F3F
-
-
-@log_call
-def topk_deep_gemm(
-    input: torch.Tensor,
-    topk: int,
-    end: Optional[torch.Tensor] = None,
-    sorted_value: bool = False,
-    sorted_index: bool = False,
-    indices_type: torch.dtype = torch.int64,
-    output_idx: Optional[torch.Tensor] = None,
-    output_idx_offset: Optional[torch.Tensor] = None,
-    idx_oob_fill_value: int = 2147483647,
-    value_oob_fill_value: float = float("-inf"),
-    return_value: bool = True,
-    abort_when_nan_found: bool = True,
-    check_nan: bool = True,
-) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
-    """`topk` served by the `deep_gemm` package's indexer selector
-    (`deep_gemm.fp32_indexer_topk_selector`).
-
-    It implements a subset of this contract, and what it cannot serve raises
-    `UnsupportedByBackend` rather than answering something narrower:
-
-        * float32 scores only (no bfloat16);
-        * `topk <= 2048`;
-        * an unordered selection (`sorted_value` / `sorted_index` need the
-          MACA kernel).
-
-    `end`, `output_idx`, `output_idx_offset`, the out-of-band fills,
-    `return_value` and the NaN contract are implemented here, on top of it.
-
-    Known limitation: a row holding more than 4096 values in one threshold
-    bucket can select an arbitrary subset of them, varying from run to run.
-    `maca_c` does not have this limitation.
-    """
-    # The contract's exception is defined in `interface.py`, which imports this
-    # module for both reference backends -- so this one name travels the other
-    # way and cannot be imported at module scope.
-    from .interface import UnsupportedByBackend
-
-    try:
-        module = _deep_gemm()
-    except ImportError as exc:
-        raise RuntimeError(
-            "backend 'deep_gemm' needs the `deep_gemm` package importable "
-            "(install it, or put the repository that provides it on "
-            "PYTHONPATH); this repository runs standalone too, and that is "
-            "the only case where the import is missing"
-        ) from exc
-
-    # The operator's own contract rejections, as `topk_torch` enforces them:
-    # they are properties of the contract, not of an implementation, so a
-    # caller must hear the same thing whichever backend it picked.
-    _check_common_contract(input, topk, indices_type)
-    if input.dtype != torch.float32:
-        raise UnsupportedByBackend(
-            f"backend 'deep_gemm' ranks float32 scores, and was given "
-            f"{input.dtype}; 'maca_c' and 'torch' take bfloat16 as well")
-    if topk > _DEEP_GEMM_MAX_TOPK:
-        raise UnsupportedByBackend(
-            f"backend 'deep_gemm' selects at most {_DEEP_GEMM_MAX_TOPK} per "
-            f"row and was asked for {topk}; 'maca_c' goes to 4096")
-    if sorted_value or sorted_index:
-        raise UnsupportedByBackend(
-            "backend 'deep_gemm' returns an unordered selection; "
-            "`sorted_value`/`sorted_index` need backend 'maca_c'")
-
-    n_rows, vocab_size = input.shape
-    device = input.device
-    if input.stride(0) != vocab_size:
-        # The `deep_gemm` kernel walks a row as `scores + row * n_cols`, i.e. it
-        # assumes tightly packed rows; a padded row stride would quietly rank
-        # the wrong elements.  Padding is legal in this contract, so normalize
-        # instead of refusing.
-        input = input.contiguous()
-    lengths = _row_lengths(end, n_rows, vocab_size, device)
-
-    # The NaN contract, checked as `topk_torch` checks it: on unless the caller
-    # turned it off, and only for the rows the contract scans.  A NaN row is
-    # answered in its first index slot at the end of this function; the clean
-    # rows of the same batch are answered by the selector like any other call
-    # (an early return here used to leave them holding uninitialized memory).
-    nan_rows = _nan_rows(input, lengths, topk) if check_nan else None
-    if abort_when_nan_found:
-        _abort_on_nan_rows(nan_rows)
-
-    selected = module.fp32_indexer_topk_selector(
-        input, lengths.to(torch.int32), topk, return_val=False,
-        backend="maca_c")["indices"]
-    valid = selected >= 0
-
-    # `-1` marks the padding; everything else is already the column index.
-    # (`.to` because the selector answers in int32 whatever `indices_type` is.)
-    columns = selected.to(torch.int64)
-    if output_idx_offset is not None:
-        columns = columns + output_idx_offset.to(torch.int64).unsqueeze(1)
-    out_idx = torch.where(valid, columns,
-                          torch.full_like(columns, idx_oob_fill_value)
-                          ).to(indices_type)
-
-    out_val = None
-    if return_value:
-        gathered = input.gather(1, selected.clamp_min(0).to(torch.int64))
-        out_val = torch.where(valid, gathered,
-                              torch.full_like(gathered, value_oob_fill_value))
-
-    if output_idx is not None:
-        output_idx.copy_(out_idx)
-        out_idx = output_idx
-
-    # Stamped on the tensor that goes back to the caller, whichever it is.
-    _stamp_nan_rows(out_idx, nan_rows)
-
-    return out_val, out_idx
 
 
 @log_call

@@ -270,52 +270,6 @@ def correctness_cases_() -> List[TestParam]:
                                 correctness_cases.append(cur_case)
     return correctness_cases
 
-# ── the `deep_gemm` selector's shapes ───────────────────────────────────────
-# `deep_gemm/tests/test_indexer_topk_selector.py`'s `SELECTOR_PERF_SHAPES`
-# (= test-topk + sglang + dsa), all `top_k = 2048`, fp32.  Without them the
-# `deep_gemm` backend is `unsupported` on every row, so nothing is compared.
-# This list is the only copy: no C++ mirror exists.
-#
-# (n_rows, n_cols, seq_len): `seq_len` is the `deep_gemm` grid's window, this
-# repo ranks the whole row, so the two are NOT numerically comparable.
-DEEP_GEMM_SELECTOR_PERF_SHAPES = (
-    [(b, 66551, 66551) for b in (1, 16, 132, 512)]                    # test-topk
-    + [(b, 131072, s) for b in (1, 132, 256, 4096)                    # sglang
-       for s in (2048, 4096, 16384, 65536)]
-    + [(1, 107520, 107520), (16, 66551, 66551), (132, 107520, 107520),  # dsa
-       (256, 107520, 107520), (4096, 107520, 107520)]
-)
-DEEP_GEMM_SELECTOR_PERF_TOPK = 2048
-
-
-def deep_gemm_selector_perf_cases() -> List[TestParam]:
-    """`DEEP_GEMM_SELECTOR_PERF_SHAPES` as `TestParam`s: fp32, `top_k=2048` -- all the
-    `deep_gemm` backend serves (`topk <= 2048`, fp32 only)."""
-    return [
-        TestParam(b, v, DEEP_GEMM_SELECTOR_PERF_TOPK, False, False, False,
-                  torch.float32, torch.int32, num_runs=10)
-        for b, v, _seq in DEEP_GEMM_SELECTOR_PERF_SHAPES
-    ]
-
-# The `deep_gemm` grid's own correctness shapes (`SELECTOR_CORRECTNESS_SHAPES`):
-# (n_rows, n_cols, top_k).  That grid declares `seq_lens` / `seq_starts` windows;
-# this repository ranks the whole row instead -- valid here, deliberately not its
-# semantics, and the shapes a `deep_gemm` column exists on at all.
-DEEP_GEMM_SELECTOR_CORRECTNESS_SHAPES = (
-    (16,  257,   31),     # deep_gemm `chunks` kernel
-    (512, 65536, 2048),   # deep_gemm `coarse12` kernel
-)
-
-
-def deep_gemm_selector_correctness_cases() -> List[TestParam]:
-    """`DEEP_GEMM_SELECTOR_CORRECTNESS_SHAPES` as `TestParam`s, fp32."""
-    return [
-        TestParam(b, v, k, False, False, False, torch.float32, torch.int32,
-                  num_runs=0)
-        for b, v, k in DEEP_GEMM_SELECTOR_CORRECTNESS_SHAPES
-    ]
-
-
 def performance_cases() -> List[TestParam]:
     """The official performance grid, `test.py`'s own case list.  A function so
     `scripts/perf_snapshot.py` drives *these* cases, not a transcription.
@@ -364,10 +318,10 @@ if __name__ == '__main__':
     parser.add_argument("--perf-only", action="store_true",
                         help="Only run performance testcases (num_runs > 0)")
     parser.add_argument("--backend", default="maca_c",
-                        choices=["maca_c", "torch", "deep_gemm"],
+                        choices=["maca_c", "torch"],
                         help="which implementation every case runs: `maca_c` "
-                             "(the kernel, the default), `torch` (the reference "
-                             "implementation) or `deep_gemm`.  Passed to "
+                             "(the kernel, the default) or `torch` (the "
+                             "reference implementation).  Passed to "
                              "`deep_select.topk` at the call site.")
     parser.add_argument("--seed", type=int, default=None,
                         help="seed the case table before it is built, so the "
@@ -379,39 +333,18 @@ if __name__ == '__main__':
                              "0 or unset = the whole table.")
     args = parser.parse_args()
 
-    # An explicit `--backend deep_gemm` on a box that cannot run it is refused
-    # before anything is measured: otherwise every case reports a failure and
-    # the run reads as a kernel defect rather than a missing package.
-    if args.backend == "deep_gemm" and not deep_select.deep_gemm_available():
-        raise SystemExit(
-            "tests/test.py: --backend deep_gemm was asked for, but `import "
-            "deep_gemm` does not succeed here or the package does not carry "
-            "`fp32_indexer_topk_selector`.  Nothing was run.")
     if args.seed is not None:
         random.seed(args.seed)
 
     correctness_cases = correctness_cases_()
-
     performance_cases = performance_cases()
-    # The selector shapes ride along whenever the backend that answers them can
-    # run here.  A package question, not a location one, and not a switch: no
-    # flag, because an override would have to reach every runner that probes for
-    # itself (measured: `run_bench.sh --no-deep-gemm-shapes` reported 95 cells
-    # and ran 120).
-    selector_cases = []
-    if deep_select.deep_gemm_available():
-        selector_cases = deep_gemm_selector_correctness_cases()
-        performance_cases = performance_cases + deep_gemm_selector_perf_cases()
 
-    # The selector shapes are prepended rather than drawn, as they were when a
-    # separate driver held them: they are 2 cases out of 105,140, so sampling
-    # would leave the one backend that answers them with nothing to compare.
     if args.sample:
         drawn = random.Random(args.seed).sample(
             correctness_cases, min(args.sample, len(correctness_cases)))
     else:
         drawn = correctness_cases
-    testcases = selector_cases + drawn + performance_cases
+    testcases = drawn + performance_cases
 
     if args.dtype is not None:
         wanted_dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}[args.dtype]
@@ -424,9 +357,8 @@ if __name__ == '__main__':
 
     # Every case ends in exactly one of these, and the run reaches its summary
     # whatever happened: which cases went wrong has to be readable, not buried
-    # behind the first one.  `unsupported` is the backend being narrower than
-    # the operator (a coverage gap, not a defect) and `skip` is the environment.
-    status = {"pass": [], "check_fail": [], "crash": [], "skip": [], "unsupported": []}
+    # behind the first one.  `skip` is the environment (an OOM), not a verdict.
+    status = {"pass": [], "check_fail": [], "crash": [], "skip": []}
     stopped_early = ""
 
     def context_alive() -> bool:
@@ -455,10 +387,6 @@ if __name__ == '__main__':
             torch.cuda.empty_cache()
             print("    SKIPPED: out of memory", flush=True)
             continue
-        except deep_select.UnsupportedByBackend as exc:
-            status["unsupported"].append((test, str(exc)[:120]))
-            print(f"    UNSUPPORTED: {str(exc)[:120]}", flush=True)
-            continue
         except Exception as exc:
             status["crash"].append((test, f"{type(exc).__name__}: {str(exc)[:200]}"))
             print(f"    CRASHED: {type(exc).__name__}: {str(exc)[:200]}", flush=True)
@@ -483,11 +411,11 @@ if __name__ == '__main__':
                 break
 
     print(f"\n{'=' * 64}")
-    for name in ("pass", "check_fail", "crash", "skip", "unsupported"):
+    for name in ("pass", "check_fail", "crash", "skip"):
         print(f"  {name:<12} {len(status[name]):>7}")
     if stopped_early:
         print(f"  (run stopped early: {stopped_early})")
-    for name in ("check_fail", "crash", "skip", "unsupported"):
+    for name in ("check_fail", "crash", "skip"):
         for test, why in status[name]:
             print(f"  {name:<12} {test}" + (f"\n{'':<15}[{why}]" if why else ""))
     # Every case that was attempted landed in exactly one status list, so this is
