@@ -9,41 +9,21 @@ a hand-written one is how a harness artifact gets mistaken for a kernel bug
 (twice, in this session: a `[:, :V]` slice that made a strided view, and a
 `-1`-padded reference whose sort put the padding first).
 """
-# **This file measures the checkout, not the installed wheel.**  It puts the
-# *repository* on `sys.path` (below), which is the only way a `deep_select`
-# import can resolve to a tree that also carries `kernelkit` and `lib` -- the
-# two modules this case is built on.  That is deliberate, and it is also the
-# trap: a bare `python tests/cases/foo.py` run from the repository root gets
-# `.` on `sys.path` from the interpreter, and with the package importable from
-# site-packages the name can resolve there instead.  Run these with
-# `PYTHONPATH=.` and read the `artifact=` line every one of them prints, or
-# `run_bench.sh`, which resolves the extension the same way and records its
-# md5 in the run header.
-import os, sys, torch
-torch.set_default_device("cuda")
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import kernelkit as kk, deep_select, lib, test as suite
-from lib import (TestParam, NormalFloatDistribution, UniformUIntDistribution,
-                 UintDistributionWithHotspotAndSpecifiedPivot, get_fp_config)
+# **This file measures the checkout, not the installed wheel.**  The path
+# bootstrap, and the trap it exists for, live in `_casebase.py`, which has to
+# be imported before `kernelkit`/`lib`/`test` can resolve to this tree.
+import torch
+
+from _casebase import (suite, build_case, call_topk, NormalFloatDistribution,
+                       UniformUIntDistribution,
+                       UintDistributionWithHotspotAndSpecifiedPivot,
+                       get_fp_config)
 
 def case(tag, b, V, k, distrib=None, end=False, si=True, sv=False, rv=False,
          idx_dtype=torch.int32, seed=3):
-    p = TestParam(batch_size=b, vocab_size=V, topk=k, sorted_value=sv,
-                  sorted_index=si, return_value=rv, dtype=torch.float32,
-                  out_idx_dtype=idx_dtype, enable_end_position=end,
-                  input_distrib=distrib or NormalFloatDistribution(), seed=seed,
-                  idx_oob_fill_value=-2000000 + V)
-    kk.set_random_seed(seed)
-    t = lib.generate_testcase(p)
-    t.input = t.input.to("cuda")
-    if t.end is not None: t.end = t.end.to("cuda")
-    val, idx = deep_select.topk(t.input, k, sorted=sv, begin=None, end=t.end,
-                                indices_type=idx_dtype, sorted_index=si, hint=None,
-                                output_idx=None, output_idx_offset=None,
-                                idx_oob_fill_value=p.idx_oob_fill_value,
-                                value_oob_fill_value=p.value_oob_fill_value,
-                                return_value=rv, abort_when_nan_found=False,
-                                backend="maca_c")
+    p, t = build_case(b, V, k, end=end, si=si, sv=sv, rv=rv,
+                      idx_dtype=idx_dtype, distrib=distrib, seed=seed)
+    val, idx = call_topk(p, t)
     torch.cuda.synchronize()
     suite.check_call_contract(p, val, idx)
     ok = suite.check_result(p, t,

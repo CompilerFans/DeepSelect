@@ -23,52 +23,12 @@ see `chunks_arm_official.py`).  The replay-vs-eager comparison is the suite's
 the same bytes must give the same bytes, and "close enough" would hide a graph
 that replayed a stale answer.
 """
-# **This file measures the checkout, not the installed wheel.**  It puts the
-# *repository* on `sys.path` (below), which is the only way a `deep_select`
-# import can resolve to a tree that also carries `kernelkit` and `lib` -- the
-# two modules this case is built on.  That is deliberate, and it is also the
-# trap: a bare `python tests/cases/foo.py` run from the repository root gets
-# `.` on `sys.path` from the interpreter, and with the package importable from
-# site-packages the name can resolve there instead.  Run these with
-# `PYTHONPATH=.` and read the `artifact=` line every one of them prints, or
-# `run_bench.sh`, which resolves the extension the same way and records its
-# md5 in the run header.
+# **This file measures the checkout, not the installed wheel.**  The path
+# bootstrap, and the trap it exists for, live in `_casebase.py`, which has to
+# be imported before `kernelkit`/`lib`/`test` can resolve to this tree.
 import os, sys, traceback, torch
-torch.set_default_device("cuda")
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import kernelkit as kk, deep_select, lib, test as suite
-from lib import TestParam, NormalFloatDistribution
 
-_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-def build(tag, b, V, k, end=False, si=True, rv=False, idx_dtype=torch.int32,
-          distrib=None, seed=3):
-    """One testcase, on the device, shaped like `chunks_arm_official.case`."""
-    p = TestParam(batch_size=b, vocab_size=V, topk=k, sorted_value=False,
-                  sorted_index=si, return_value=rv, dtype=torch.float32,
-                  out_idx_dtype=idx_dtype, enable_end_position=end,
-                  input_distrib=distrib or NormalFloatDistribution(), seed=seed,
-                  idx_oob_fill_value=-2000000 + V)
-    kk.set_random_seed(seed)
-    t = lib.generate_testcase(p)
-    t.input = t.input.to("cuda")
-    if t.end is not None:
-        t.end = t.end.to("cuda")
-    return p, t
-
-
-def call(p, t, k, si=True, rv=False, idx_dtype=torch.int32):
-    """The call under test.  `output_idx`/`output_val` are left to the operator,
-    which is what a real caller does and therefore what a graph would have to
-    capture."""
-    return deep_select.topk(t.input, k, sorted=False, begin=None, end=t.end,
-                            indices_type=idx_dtype, sorted_index=si, hint=None,
-                            output_idx=None, output_idx_offset=None,
-                            idx_oob_fill_value=p.idx_oob_fill_value,
-                            value_oob_fill_value=p.value_oob_fill_value,
-                            return_value=rv, abort_when_nan_found=False,
-                            backend="maca_c")
+from _casebase import (REPO, kk, deep_select, suite, build_case, call_topk)
 
 
 def describe(exc):
@@ -77,24 +37,24 @@ def describe(exc):
     first = "".join(traceback.format_exception_only(type(exc), exc)).strip()
     first = first.splitlines()[0] if first else type(exc).__name__
     frames = traceback.extract_tb(exc.__traceback__)
-    ours = [f"{os.path.relpath(f.filename, _REPO)}:{f.lineno} in {f.name}"
-            for f in frames if os.path.abspath(f.filename).startswith(_REPO + os.sep)]
+    ours = [f"{os.path.relpath(f.filename, REPO)}:{f.lineno} in {f.name}"
+            for f in frames if os.path.abspath(f.filename).startswith(REPO + os.sep)]
     allf = [f"{f.filename}:{f.lineno} in {f.name}" for f in frames]
     return first, ours, allf
 
 
-def capture(p, t, k, si, rv, idx_dtype):
-    """Capture `call` into a fresh graph.  Returns (graph, val, idx) or raises."""
+def capture(p, t):
+    """Capture the call into a fresh graph.  Returns (graph, val, idx) or raises."""
     s = torch.cuda.Stream()
     s.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(s):
         for _ in range(3):
-            call(p, t, k, si=si, rv=rv, idx_dtype=idx_dtype)
+            call_topk(p, t)
     torch.cuda.current_stream().wait_stream(s)
     torch.cuda.synchronize()
     g = torch.cuda.CUDAGraph()
     with torch.cuda.graph(g):
-        val, idx = call(p, t, k, si=si, rv=rv, idx_dtype=idx_dtype)
+        val, idx = call_topk(p, t)
     return g, val, idx
 
 
@@ -139,12 +99,12 @@ def capture_plain(fn):
 def cell(tag, b, V, k, end=False, si=True, rv=False, idx_dtype=torch.int32,
          distrib=None, seed=3):
     """Eager, capture, replay, replay-on-new-input.  One printed line per stage."""
-    p, t = build(tag, b, V, k, end=end, si=si, rv=rv, idx_dtype=idx_dtype,
-                 distrib=distrib, seed=seed)
+    p, t = build_case(b, V, k, end=end, si=si, rv=rv, idx_dtype=idx_dtype,
+                      distrib=distrib, seed=seed)
     head = f"{tag:<34} b={b:<3} V={V:<7} k={k:<5} end={int(end)} si={int(si)}"
 
     # ── (a) eager ──────────────────────────────────────────────────────────
-    val_e, idx_e = call(p, t, k, si=si, rv=rv, idx_dtype=idx_dtype)
+    val_e, idx_e = call_topk(p, t)
     torch.cuda.synchronize()
     eager_ok = suite.check_result(p, t, val_e.clone() if val_e is not None else None,
                                   idx_e.clone())
@@ -152,7 +112,7 @@ def cell(tag, b, V, k, end=False, si=True, rv=False, idx_dtype=torch.int32,
 
     # ── (b) capture ────────────────────────────────────────────────────────
     try:
-        g, val_c, idx_c = capture(p, t, k, si, rv, idx_dtype)
+        g, val_c, idx_c = capture(p, t)
     except Exception as exc:
         first, ours, allf = describe(exc)
         print(f"  {head}  capture=RAISED  {first}")
@@ -187,7 +147,7 @@ def cell(tag, b, V, k, end=False, si=True, rv=False, idx_dtype=torch.int32,
     try:
         p.input_distrib.generate(t.input)
         torch.cuda.synchronize()
-        val_e2, idx_e2 = call(p, t, k, si=si, rv=rv, idx_dtype=idx_dtype)
+        val_e2, idx_e2 = call_topk(p, t)
         torch.cuda.synchronize()
         eager2_ok = suite.check_result(
             p, t, val_e2.clone() if val_e2 is not None else None, idx_e2.clone())
@@ -249,9 +209,9 @@ results = [cell(tag, **kw) for tag, kw in CELLS]
 # call at a shape *is* the capture call has a raw `cudaMalloc` inside the
 # capture region.  The probe that does not depend on ordering is the next one.
 def cold_probe():
-    p, t = build("cold-chunks", b=2, V=131072, k=2048)
+    p, t = build_case(b=2, V=131072, k=2048)
     try:
-        g, val_c, idx_c = capture(p, t, 2048, True, False, torch.int32)
+        g, val_c, idx_c = capture(p, t)
         g.replay()
         torch.cuda.synchronize()
         return "OK", None

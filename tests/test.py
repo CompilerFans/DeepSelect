@@ -156,6 +156,38 @@ def bench_torch_reference(p: TestParam, t: Testcase):
     return None
 
 
+def run_topk_select(p: TestParam, testcase: Testcase, backend: str = "maca_c",
+                    start_batch_idx: int = 0,
+                    end_batch_idx: Optional[int] = None):
+    """The official call site, at module level so it has one definition.
+
+    `run_testcase` reaches the operator through it, and so does
+    `scripts/perf_snapshot.py` when it times a cell: a recorder that spelled
+    its own keyword arguments would be free to drift from the call the
+    correctness gate makes, and a perf record of a different call is not a
+    record of this one.  The keyword set here is upstream's call site verbatim.
+    """
+    if end_batch_idx is None:
+        end_batch_idx = testcase.input.size(0)
+    return deep_select.topk(
+        testcase.input[start_batch_idx: end_batch_idx],
+        p.topk,
+        sorted=p.sorted_value,
+        begin=None,
+        end=testcase.end,
+        indices_type=p.out_idx_dtype,
+        sorted_index=p.sorted_index,
+        hint=None,
+        output_idx=None,
+        output_idx_offset=testcase.output_idx_offset[start_batch_idx: end_batch_idx] if testcase.output_idx_offset is not None else None,
+        idx_oob_fill_value=p.idx_oob_fill_value,
+        value_oob_fill_value=p.value_oob_fill_value,
+        return_value=p.return_value,
+        abort_when_nan_found=False,
+        backend=backend,
+    )
+
+
 @torch.inference_mode()
 def run_testcase(p: TestParam, backend: str = "maca_c"):
     """Run one case and answer whether it selected correctly.
@@ -172,28 +204,11 @@ def run_testcase(p: TestParam, backend: str = "maca_c"):
 
     t = lib.generate_testcase(p)
 
-    def run_topk_select(testcase: Testcase = t, start_batch_idx: int = 0, end_batch_idx: Optional[int] = None):
-        if end_batch_idx is None:
-            end_batch_idx = testcase.input.size(0)
-        return deep_select.topk(
-            testcase.input[start_batch_idx: end_batch_idx],
-            p.topk,
-            sorted=p.sorted_value,
-            begin=None,
-            end=testcase.end,
-            indices_type=p.out_idx_dtype,
-            sorted_index=p.sorted_index,
-            hint=None,
-            output_idx=None,
-            output_idx_offset=testcase.output_idx_offset[start_batch_idx: end_batch_idx] if testcase.output_idx_offset is not None else None,
-            idx_oob_fill_value=p.idx_oob_fill_value,
-            value_oob_fill_value=p.value_oob_fill_value,
-            return_value=p.return_value,
-            abort_when_nan_found=False,
-            backend=backend,
-        )
+    def call(testcase: Testcase = t):
+        """This case's call: the official call site, bound to `p` and `t`."""
+        return run_topk_select(p, testcase, backend)
 
-    ans_topk_value, ans_topk_index = run_topk_select()
+    ans_topk_value, ans_topk_index = call()
     batch_topk_value = ans_topk_value.clone() if ans_topk_value is not None else None
     batch_topk_index = ans_topk_index.clone()
     check_call_contract(p, ans_topk_value, ans_topk_index)
@@ -203,7 +218,7 @@ def run_testcase(p: TestParam, backend: str = "maca_c"):
         is_correct &= check_result(p, t, batch_topk_value, batch_topk_index)
 
     if p.num_runs > 0:
-        time_usage, total_size = bench_topk(run_topk_select, p, t, ans_topk_value, ans_topk_index)
+        time_usage, total_size = bench_topk(call, p, t, ans_topk_value, ans_topk_index)
         if time_usage is None:
             print("topk           : (no kernel name contains \"topk\"; not timed)")
         else:

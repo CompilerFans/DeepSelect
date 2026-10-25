@@ -83,25 +83,13 @@ DTYPES = {"bf16": "bfloat16", "bfloat16": "bfloat16",
 IDX_DTYPES = {"int32": "int32", "int64": "int64"}
 COUNTER = kk.Counter()
 def call_topk(p, t, backend: str):
-    """The operator call `tests/test.py::run_testcase` makes, with a backend."""
-    from deep_select import topk
-    return topk(
-        t.input,
-        p.topk,
-        sorted=p.sorted_value,
-        begin=None,
-        end=t.end,
-        indices_type=p.out_idx_dtype,
-        sorted_index=p.sorted_index,
-        hint=None,
-        output_idx=None,
-        output_idx_offset=t.output_idx_offset,
-        idx_oob_fill_value=p.idx_oob_fill_value,
-        value_oob_fill_value=p.value_oob_fill_value,
-        return_value=p.return_value,
-        abort_when_nan_found=False,
-        backend=backend,
-    )
+    """`tests/test.py`'s official call site, with a backend.
+
+    Called rather than re-spelled: the keyword set is that module's
+    `run_topk_select`, so a cell cannot be timed against a call the
+    correctness gate does not make.
+    """
+    return official.run_topk_select(p, t, backend)
 def wall_clock_time(fn, num_iters: int = 10) -> float:
     """Seconds per call, events around the loop, L2 flushed *outside* the span.
 
