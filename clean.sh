@@ -12,7 +12,9 @@
 # a second traversal.
 #
 # The `find` passes skip `csrc/3rdparty/**`, and delete nothing outside this
-# tree -- in particular not `~/.metax`, which nothing here writes.
+# tree.  The one outside path this script removes is `~/.metax`, where the
+# MACA runtime caches the compiled device binaries of the kernels this tree
+# launches; those entries outlive a rebuild, so they are taken explicitly.
 #
 set -euo pipefail
 
@@ -28,10 +30,10 @@ Usage: clean.sh [--dry-run] [-h|--help]
   -h, --help   this message
 
 Removes: build/ dist/ *.egg-info/ __pycache__/ .pytest_cache/ and friends,
-loose *.pyc /*.pyo, and every *.so in the tree (all of which are build
-products -- checked, there is no vendored binary here).
-Leaves: the installed site-packages copy, and ~/.metax (which this tree
-does not write).
+loose *.pyc /*.pyo, every *.so in the tree (all of which are build products
+-- checked, there is no vendored binary here), and ~/.metax, where the MACA
+runtime caches the compiled device binaries this tree's kernels produce.
+Leaves: the installed site-packages copy.
 EOF
 }
 
@@ -97,6 +99,24 @@ else
         ! -path './csrc/3rdparty/*' ! -path './.git/*' \
         \( -type f -o -type l \) \( "${file_pred[@]}" \) -delete
     echo "clean.sh: removed."
+fi
+
+# ── the MACA shader cache, the one path outside the tree ────────────────────
+# Running this tree's kernels makes the MACA runtime cache the compiled device
+# binaries under `~/.metax`, and those entries outlive a rebuild -- the cache is
+# keyed on the compiled image, not on this checkout -- so a full clean takes
+# them.  Spelled out rather than folded into the `find` passes: a permission
+# failure reports and continues, and an unset HOME skips the step.
+metax_cache="${HOME:-}/.metax"
+if [[ -n "${HOME:-}" && -e "$metax_cache" ]]; then
+    if [[ "$dry_run" == 1 ]]; then
+        echo "clean.sh: outside the tree, would remove:"
+        echo "    $metax_cache"
+    elif rm -rf -- "$metax_cache"; then
+        echo "clean.sh: removed $metax_cache (the MACA shader cache)."
+    else
+        echo "clean.sh: could not remove $metax_cache (permission?); continuing." >&2
+    fi
 fi
 
 # ── what the environment still resolves ─────────────────────────────────────

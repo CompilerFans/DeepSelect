@@ -191,11 +191,17 @@ python setup.py bdist_wheel                                            # a wheel
 
 Removes `build/ dist/ *.egg-info/ __pycache__/` and friends plus loose `*.pyc`
 and every `*.so` in the tree (all build products — there is no vendored binary
-here). It deliberately does **not** touch `~/.deep_gemm`, `~/.triton`,
-`~/.tilelang` or `~/.metax`, unlike mcDeepGEMM's script: nothing here writes them, so
-that would be deleting another project's cache. (`~/.deep_gemm` is the outer
-package's cache; it was dropped from the list on 2026-10-25 with the backend
-that could reach that package.) Its only option is `--dry-run`;
+here), and `~/.metax`, where the MACA runtime caches the compiled device
+binaries this tree's kernels produce: those entries outlive a rebuild, so a
+clean that leaves them leaves device binaries behind. That is the only path
+outside the tree it removes, and it is spelled out rather than folded into the
+`find` passes — `--dry-run` lists it, an unset `HOME` skips it, and a
+permission failure reports and continues. It leaves `~/.triton` and
+`~/.tilelang` alone: `~/.tilelang` nothing here writes, and `~/.triton` is
+triton's own cache — shared with every other triton user on the machine, filled
+here only by `tests/kernelkit/bench.py`'s module-scope marker (see the `tests/`
+dependency note in `requirements.txt`), so removing it is not this tree's call.
+Its only option is `--dry-run`;
 `--yes` was its first spelling and is gone — a flag that is accepted and ignored
 is a flag a caller believes did something. `./clean.sh && ./develop.sh` is the
 supported full-rebuild chain, and it is `develop.sh` rather than `build.sh`
