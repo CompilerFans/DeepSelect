@@ -1,8 +1,6 @@
 #ifndef RADIX_CHUNKED_CUH
 #define RADIX_CHUNKED_CUH
 
-#include <cstdlib>           // std::getenv, for the fused scan's A/B knob
-
 #include <csrc/maca_kernels/common/radix_common.cuh>
 #include <csrc/maca_kernels/common/radix_row_bf16.cuh>
 #include <csrc/maca_kernels/common/radix_row_fp32.cuh>
@@ -631,19 +629,6 @@ inline bool f32_chunk_engine_supports(int topk) {
     // a *policy* bound from where the split was measured, not an instantiation
     // one -- which is what plan §21.2 says and this makes explicit.
     return topk > 0 && topk <= (int)kF32MaxTopK;
-}
-
-// Whether stage 1 carries the contract's NaN scan in its own first pass.  The
-// knob is the point: `DS_FUSE_NAN_OFF` puts the separate `nan_scan_kernel` back
-// on the same binary, so the two arms differ in one boolean and nothing else --
-// same chunk count, same grid, same stage 2.  Read once per process; this is a
-// per-call-invariant decision, not a per-call one.
-inline bool f32_stage1_fuses_scan() {
-    static const bool on = [] {
-        const char *v = std::getenv("DS_FUSE_NAN_OFF");
-        return v == nullptr || v[0] == '\0' || v[0] == '0';
-    }();
-    return on;
 }
 
 }  // namespace topk_select_radix

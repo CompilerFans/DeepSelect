@@ -23,6 +23,50 @@
 namespace deep_select {
 namespace detail {
 
+// ── process knobs: one reader, one parse rule ───────────────────────────────
+//
+// Every `DEEP_SELECT_*` switch is read through these and nothing else.  A knob
+// is *policy* -- which arm a call takes, which allocation policy the scratch
+// uses -- so it is read here, above the dataflows, and not in a dataflow
+// header; `radix_chunked.cuh` read `DS_FUSE_NAN_OFF` itself until this moved it
+// up, which is the layering this block exists to fix.
+//
+// **One parse rule, where the seven sites spelled three.**  They said
+// `atoi(s) != 0`, `s[0] != '0'`, and an exact match on `"1"`, so a malformed
+// value was answered differently depending on which knob it was.  The rule now:
+// unset or empty takes the caller's fallback; anything else is `atoi`, so a set
+// value that is not a number reads as 0.  Every documented spelling (`0`, `1`,
+// unset) answers exactly as it did -- what moved is `01` and `abc`, which no
+// caller writes and which now agree across knobs.
+//
+// The once-per-process cache is a `static const` at the *named* reader, not
+// here: one `static` in a shared function would cache whichever name was asked
+// for first and answer it for all of them.
+struct EnvValue {
+    bool set;
+    int value;
+};
+
+inline EnvValue env_read(const char *name) {
+    const char *s = std::getenv(name);
+    if (s == nullptr || s[0] == '\0') return {false, 0};
+    return {true, std::atoi(s)};
+}
+
+// On/off, where `fallback` is what an unset variable means -- a knob whose
+// default is on reads `env_flag(name, true)`.
+inline bool env_flag(const char *name, bool fallback) {
+    const EnvValue v = env_read(name);
+    return v.set ? v.value != 0 : fallback;
+}
+
+// A route override's three answers: -1 unset (take the measured ladder), 0
+// denied, 1 forced.
+inline int env_tri_state(const char *name) {
+    const EnvValue v = env_read(name);
+    return v.set ? (v.value != 0 ? 1 : 0) : -1;
+}
+
 // ── the 16-bit row's skip tables ────────────────────────────────────────────
 //
 // The row kernel reads its row twice.  The second pass only acts on elements
@@ -55,10 +99,7 @@ constexpr uint32_t kSkipMinRowPerSlot = 128;
 // variable, no second build.  Unset or non-zero means the tables are built,
 // which is the shipping behavior.
 inline bool bf16_skip_enabled() {
-    static const bool v = [] {
-        const char *s = std::getenv("DEEP_SELECT_BF16_SKIP");
-        return s == nullptr || s[0] == '\0' || std::atoi(s) != 0;
-    }();
+    static const bool v = env_flag("DEEP_SELECT_BF16_SKIP", true);
     return v;
 }
 
@@ -319,10 +360,7 @@ namespace {
 // cell the V-sweep flagged (parity plan §17.3).  A ceiling, not a count, so
 // b32/b64 -- already at their optimum per the sweep -- are unaffected.
 inline bool f32_chunk_ceiling_32() {
-    static const bool on = [] {
-        const char *v = std::getenv("DEEP_SELECT_F32_CHUNK32");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
-    }();
+    static const bool on = env_flag("DEEP_SELECT_F32_CHUNK32", false);
     return on;
 }
 inline constexpr int kF32ChunkCeiling = 16;
@@ -823,11 +861,7 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // *after* the AP-count test, so a probe needs that test relaxed to reach the
 // arms at all -- see the note on `is_c600u_ap_count`.)
 inline int f32_coarse12_override() {
-    static const int v = [] {
-        const char *s = std::getenv("DEEP_SELECT_F32_COARSE12");
-        if (s == nullptr || s[0] == '\0') return -1;
-        return std::atoi(s) != 0 ? 1 : 0;
-    }();
+    static const int v = env_tri_state("DEEP_SELECT_F32_COARSE12");
     return v;
 }
 
@@ -950,11 +984,7 @@ inline constexpr uint32_t kF32ChunksMinVocab = 2048;
 // is the knob for a different chunk *count*; this one only decides whether the
 // arm is entered at all.
 inline int f32_chunks_route_override() {
-    static const int v = [] {
-        const char *s = std::getenv("DEEP_SELECT_F32_CHUNKS_ROUTE");
-        if (s == nullptr || s[0] == '\0') return -1;
-        return std::atoi(s) != 0 ? 1 : 0;
-    }();
+    static const int v = env_tri_state("DEEP_SELECT_F32_CHUNKS_ROUTE");
     return v;
 }
 
@@ -997,12 +1027,8 @@ int f32_chunked_chunks(uint32_t batches, uint32_t topk, uint32_t vocab_size,
                        uint32_t sm_count) {
     const uint32_t work_target = f32_chunk_work_target(sm_count);
     static const int override_n = [] {
-        const char *v = std::getenv("DEEP_SELECT_F32_CHUNKS");
-        if (v != nullptr && v[0] != '\0') {
-            const int d = std::atoi(v);
-            return (d >= 2 && d <= 256) ? d : 0;
-        }
-        return 0;
+        const EnvValue v = env_read("DEEP_SELECT_F32_CHUNKS");
+        return (v.set && v.value >= 2 && v.value <= 256) ? v.value : 0;
     }();
     if (override_n != 0) return override_n;   // A/B knob; does not change default
     if (batches > kF32ChunksFewBatches)
@@ -1151,6 +1177,19 @@ inline ChunkedF32Workspace chunked_f32_workspace(void *base, uint32_t batches,
     return ws;
 }
 
+// Whether stage 1 carries the contract's NaN scan in its own first pass.  The
+// knob is the point: `DS_FUSE_NAN_OFF` puts the separate `nan_scan_kernel` back
+// on the same binary, so the two arms differ in one boolean and nothing else --
+// same chunk count, same grid, same stage 2.  Read once per process; this is a
+// per-call-invariant decision, not a per-call one.  The variable is named for
+// the arm it *removes*, hence the negation; the reader lives here rather than
+// in `radix_chunked.cuh`, because which of the two arms runs is a routing
+// decision and a dataflow header is the kernel and its launcher.
+inline bool f32_stage1_fuses_scan() {
+    static const bool on = !env_flag("DS_FUSE_NAN_OFF", false);
+    return on;
+}
+
 // Split, merge, then run the row kernel's contract half over the merged
 // answer.  `params` must satisfy `chunked_f32_applies`, workspace included.
 //
@@ -1177,7 +1216,7 @@ void launch_typed_f32_chunked(const RowParams &params, uint32_t batches,
     // handoff's clear covers.  Both the scan and that clear go when `check_nan`
     // is off: the row kernel reads this table only under that same flag.
     int32_t *const flags = params.check_nan ? params.scan_flags : nullptr;
-    const bool fuse_scan = params.check_nan && topk_select_radix::f32_stage1_fuses_scan();
+    const bool fuse_scan = params.check_nan && f32_stage1_fuses_scan();
     if (params.check_nan && !fuse_scan) {
         launch_nan_scan<float>(
             params.input, params.end_ptr,

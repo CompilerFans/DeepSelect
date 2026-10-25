@@ -34,7 +34,6 @@
 
 #include <cstdint>
 #include <type_traits>
-#include <cstdlib>
 #include <cstdio>
 #include <mutex>
 #include <vector>
@@ -522,10 +521,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // coupling the tvm-ffi migration removes; it is synchronous on the calling
     // thread, so it is ordered before the launches on any stream, and cached
     // across calls -- see `ChunkedScratch`.
-    static const bool kCacheScratch = [] {
-        const char *v = std::getenv("DEEP_SELECT_NO_SCRATCH_CACHE");
-        return !(v != nullptr && v[0] == '1' && v[1] == '\0');
-    }();
+    static const bool kCacheScratch =
+        !detail::env_flag("DEEP_SELECT_NO_SCRATCH_CACHE", false);
 
     // The cache is process-wide while the kernels here have no thread-safety
     // contract of their own, so the scratch carries its own lock rather than
