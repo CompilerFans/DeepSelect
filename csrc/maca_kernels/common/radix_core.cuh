@@ -12,7 +12,9 @@
 //      (`__bfloat16_as_ushort`) instead of fp16's.  The key transform is
 //      otherwise unchanged -- it only needs the sign bit at bit 15, which both
 //      formats have.  This is NOT the same as `float_to_uint8`, which rounds
-//      fp32 through fp16 before binning and so has no bf16 counterpart.
+//      fp32 through fp16 before binning and so has no bf16 counterpart -- the
+//      two do read the same fold (`refine_bin_bits16`); what differs is the
+//      encode it is applied to.
 //   2. `radix_topk_row_f32_rescan` is added, called from
 //      `radix_topk_row_f32` when its coarse bin does not fit the candidate
 //      arena.  Without it that case ranks only the members it managed to

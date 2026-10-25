@@ -118,8 +118,9 @@ __device__ __forceinline__ bool hist_add_bf16_wide(
 {
     uint4 v = __ldg(reinterpret_cast<const uint4*>(input + idx));
     const uint32_t* w = reinterpret_cast<const uint32_t*>(&v);
-    // Both halves of each 32-bit word at once.  The ordered-key flip is a
-    // per-half mask -- 0x8000 for a non-negative half, 0xffff for a negative
+    // Both halves of each 32-bit word at once.  The ordered-key flip is
+    // `topk_select_common::refine_bin_bits16`'s rule in packed form -- a
+    // per-half mask, 0x8000 for a non-negative half and 0xffff for a negative
     // one, i.e. `0x8000 + 0x7fff * sign` -- and both halves' masks pack into
     // one word: the arithmetic shift puts each half's sign at bit 0 or bit 16,
     // so one multiply by 0x7fff builds the pair with no carry between halves

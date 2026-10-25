@@ -20,13 +20,19 @@
 // it differently, so renaming either side diverges silently from the code the
 // dataflows are re-merged with.
 //
-// Siblings that look like these but are not the same operation stay where they
-// are: `topk_select_radix::float_to_uint8` / `bf16_to_uint8` (the radix row's 8-bit coarse
-// level, fp16-rounded for fp32) and `topk_select_radix::run_cumsum_warp` (a 256-thread
-// two-level scan with a different barrier contract).  deep_gemm's template
-// carries a second arm -- the `kCoarseBins` walk that needs a thread per bin --
-// which `topk_chunks.cuh`'s `block_cumsum_histogram_1024` already implements and
-// has no second caller for.
+// The coarse levels are one-liners over the key, not siblings: `bf16_to_uint8`
+// (`refine_bin(x) >> 8`), `topk_select_radix::float_to_uint8` and
+// `topk_select_chunks::coarse_bin` (`refine_bin_bits16` of the fp16-rounded
+// value, `>> 8` and `>> 6`) all read the same 16-bit key at different widths,
+// so what a dataflow owns is the width and, for fp32, the `__float2half_rn`
+// rounding -- never the fold.
+//
+// What does stay where it is: `topk_select_radix::run_cumsum_warp` (a
+// 256-thread two-level scan with a different barrier contract from
+// `warp_cumsum_histogram` below).  deep_gemm's template carries a second arm --
+// the `kCoarseBins` walk that needs a thread per bin -- which
+// `topk_chunks.cuh`'s `block_cumsum_histogram_1024` already implements and has
+// no second caller for.
 
 #pragma once
 
@@ -79,11 +85,14 @@ __device__ __forceinline__ uint32_t refine_bin(float value) {
     return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
-// The 16-bit sibling, overloaded on the value type.  On MACA the sign branch
-// is an xor rather than a select, so it cannot diverge: positive keys xor
-// 0x8000, negative keys xor 0xffff.
-__device__ __forceinline__ uint16_t refine_bin(maca_bfloat16 value) {
-    const uint16_t bits = __bfloat16_as_ushort(value);
+// The 16-bit fold, at the bits level, so that its callers share one
+// definition: this file's bf16 `refine_bin` below, and the two fp32 coarse
+// levels (`topk_select_radix::float_to_uint8` at `>> 8`,
+// `topk_select_chunks::coarse_bin` at `>> 6`), which each own the fp16
+// rounding and the width and nothing else.  On MACA the sign branch is an xor
+// rather than a select, so it cannot diverge: positive keys xor 0x8000,
+// negative keys xor 0xffff.
+__device__ __forceinline__ uint16_t refine_bin_bits16(uint16_t bits) {
 #ifdef __MACACC__
     const uint32_t sign = static_cast<uint32_t>(bits >> 15);
     const uint16_t mask = static_cast<uint16_t>(0x8000u | (0u - sign));
@@ -92,6 +101,11 @@ __device__ __forceinline__ uint16_t refine_bin(maca_bfloat16 value) {
     return (bits & 0x8000) ? static_cast<uint16_t>(~bits)
                            : static_cast<uint16_t>(bits | 0x8000);
 #endif
+}
+
+// The 16-bit sibling, overloaded on the value type.
+__device__ __forceinline__ uint16_t refine_bin(maca_bfloat16 value) {
+    return refine_bin_bits16(__bfloat16_as_ushort(value));
 }
 
 // ── the warp histogram suffix sum ───────────────────────────────────────────

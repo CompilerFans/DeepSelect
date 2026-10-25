@@ -106,27 +106,24 @@ static_assert(kCandidateCapacity >= kMaxTopK,
 
 // The NaN predicate, the key encode and the 256-bin warp suffix sum come from
 // `../common/primitives.cuh`; unqualified here because every call site below
-// is spelled that way.  `coarse_bin` below is this dataflow's own: it keys the
-// half-rounded value, which is the coarse level's shape rather than a shared
-// transform.
+// is spelled that way.  `coarse_bin` below is this dataflow's own *width*: it
+// keys the half-rounded value, which is the coarse level's shape, but the fold
+// itself is the shared `refine_bin_bits16`.
 using topk_select_common::is_nan_value;
 using topk_select_common::refine_bin;
+using topk_select_common::refine_bin_bits16;
 using topk_select_common::warp_cumsum_histogram;
 
-// deep_gemm's `coarse_bin`, verbatim: the top 10 bits of the **half**-encoded
-// key.  Half, not float -- the coarse level only has to put the threshold in
-// the right neighbourhood, and the refine below resolves within the bin on the
-// exact float bits.  `coarse_bins_pair` is its float2 form; it is not used
-// here because this port reads `float4`, so the four lanes go through
-// `coarse_bin` one at a time exactly as `topk_chunks_coarse_hist` does for its
-// vector tail.
+// deep_gemm's `coarse_bin`: the top 10 bits of the **half**-encoded key.  Half,
+// not float -- the coarse level only has to put the threshold in the right
+// neighbourhood, and the refine below resolves within the bin on the exact
+// float bits.  Upstream's `coarse_bins_pair` is its float2 form; this port
+// reads `float4`, so the four lanes go through `coarse_bin` one at a time
+// exactly as `topk_chunks_coarse_hist` does for its vector tail.
 __device__ __forceinline__ int coarse_bin(float value)
 {
-    const __half half_value = __float2half_rn(value);
-    const uint16_t bits = __half_as_ushort(half_value);
-    const uint16_t key = (bits & 0x8000u) ? static_cast<uint16_t>(~bits)
-                                          : static_cast<uint16_t>(bits | 0x8000u);
-    return static_cast<int>(key >> 6);
+    const uint16_t bits = __half_as_ushort(__float2half_rn(value));
+    return static_cast<int>(refine_bin_bits16(bits) >> 6);
 }
 
 // The 256-bin histogram suffix sum the fine level walks is

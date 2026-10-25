@@ -92,6 +92,7 @@ constexpr size_t kSMEM = KSMEM_BYTES;
 using topk_select_common::is_nan_bits32;
 using topk_select_common::bf16_is_nan;
 using topk_select_common::refine_bin;
+using topk_select_common::refine_bin_bits16;
 using topk_select_common::adopt_dynamic_smem;
 
 #ifdef __MACACC__

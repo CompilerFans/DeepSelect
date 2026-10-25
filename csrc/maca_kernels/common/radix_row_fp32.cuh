@@ -7,12 +7,13 @@
 
 namespace topk_select_radix {
 
-// 与 SGLang 原始实现一致：先转 half 再取高 8 位
+// 与 SGLang 原始实现一致：先转 half 再取高 8 位。
+// The fold is shared (`topk_select_common::refine_bin_bits16`); what is this
+// row's own is the fp16 rounding and the width -- the same 16-bit key
+// `topk_select_chunks::coarse_bin` reads at `>> 6`.
 __device__ __forceinline__ uint8_t float_to_uint8(float x) {
-    __half h = __float2half_rn(x);
-    uint16_t bits = __half_as_ushort(h);
-    uint16_t key = (bits & 0x8000) ? static_cast<uint16_t>(~bits) : static_cast<uint16_t>(bits | 0x8000);
-    return static_cast<uint8_t>(key >> 8);
+    const uint16_t bits = __half_as_ushort(__float2half_rn(x));
+    return static_cast<uint8_t>(refine_bin_bits16(bits) >> 8);
 }
 
 // ============================================================
