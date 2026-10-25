@@ -1206,6 +1206,18 @@ DS_TOPK_BACKEND=maca_c PYTHONPATH=. python tests/test.py         # the unpinned 
 - One edit under `tests/kernelkit/` is for MACA portability: `platform.py` asks torch whether it can see a device instead of grepping `lspci` (a MACA part does not enumerate as an NVIDIA controller). A second, `kernelkit/build.py` (+118), is *ours*: `check_maca_stack_frame`, the `--resource-usage` stand-in for upstream's `cuobjdump` spill gate (see the resource-audit section). `kernelkit`'s `stress.py` and `README.md` are absent — deleted, matching upstream, which dropped the Ray harness in `bfa4507`; this tree had carried them with one PEP 701 f-string (`stress.py:292`) worked around for Python 3.10. `tests/lib.py` carries two more of the same kind, about this torch's missing UInt kernels: `torch.randint(...).to(torch.uint16)` and `result.view(uint).copy_(...)` both raise `NotImplementedError: "copy_" not implemented for 'UInt16'` under `torch.set_default_device("cuda")`, which with the default device set is *every* `randint` in the distributions — the harness could not generate a case at all. `Distribution.as_uint` casts on the CPU and moves the result; `Distribution.put_uint_bits` writes through the equal-width **signed** view. Both are bit-exact; neither changes what a case contains.
 - Not covered by either suite, recorded rather than papered over: the contract rejections (strided row, wrong dtype, `topk` out of range, undersized output buffer) — the official table asserts on values and has no exception cases — and `begin` / `hint` / caller-allocated `output_idx`, which the official call site always passes as `None`. **`tests/contract_test.py` is that coverage** (2026-10-23): the refusals, the `end` / `output_idx_offset` / ordering / NaN surface, and the coarse12 route's shape edges, run against a named backend. It is a standalone runner, not pytest, like everything else here; `--backend maca_c` is 74 checks and `--backend torch` 71 (the last one added the in-window short-row rule, `7af242c`), both 0-failed on C600U. Two facts it had to pin, both now encoded there: `sorted_index` is *ascending index order* (the official suite's own assertion is `ans_topk_index[:, 1:] >= ans_topk_index[:, :-1]`), and the two backends word the same rejection differently — `torch` checks in Python (`topk must be positive`, `output_idx`), `maca_c` in `DS_HOST_CHECK` (`topk must > 0`, `output_index`) — while the 1024-byte row-stride rule is the kernel's alone (`torch` serves the padded row).
 - **`scripts/wheel_smoke.py` is the delivered-artifact gate**, and it is a different question from either suite: run it from *outside* the repository against an installed wheel (`cd /tmp && python /path/to/scripts/wheel_smoke.py`) and it refuses if the package that answers is the checkout, then prints `_binding.extension_path` + its md5 (the family-suffixed artifact the deployment will load) and runs the three production cells against the contract, with the fp32 ones compared elementwise to `backend="torch"`. It is what `install.sh`'s `cd /tmp && import deep_select` check grew into.
+- **`tests/test_hello.py` is the environment receipt** (2026-10-25), the port of mcDeepGEMM's
+  `deep_gemm/tests/test_hello.py`: interpreter, torch, the device (name, capability, AP count, memory), which
+  package answers, the artifact `_binding.extension_path` resolves **and its md5**, the device family, `tvm_ffi`, the
+  resolved default backend, the stride requirement, and one `topk` smoke per dtype. The MACA block is the trap
+  section's: `MACA_PATH`, its resolved symlink, `Version.txt`, the `mxcc`/`cucc` paths, and the `libmcruntime.so`
+  the loader **actually mapped** (read from `/proc/self/maps`) — a toolkit mismatch reports as
+  `mcErrorInvalidDeviceFunction` and looks like a kernel defect. It deliberately does **not** print the git
+  revision or build time: those ride in the wheel's version string
+  (`1.0.0+maca<toolkit>.<git-rev>.<timestamp>`) and the same line prints them, so a second derivation from `.git`
+  would be a second answer. The smoke is fp32 at 256 (exact set, 1024-byte stride) and bf16 at 1024 (contract only
+  — `arange` stops being bf16-exact above 256; see the reproduction note under "Debugging mis-ranked output").
+  0-failed on C600U, 2026-10-25.
 
 ### Full-table correctness gate (C500, hours — see the spread below)
 
@@ -1574,14 +1586,22 @@ the reference and "reproduce" nothing at all.
 CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python -c "
 import torch, deep_select
 b, v, k = 2, 512, 8
-x = torch.arange(v, device='cuda', dtype=torch.float32).unsqueeze(0).repeat(b, 1).to(torch.bfloat16)
+x = torch.arange(v, device='cuda', dtype=torch.float32).unsqueeze(0).repeat(b, 1)
 _, ii = deep_select.topk(x, k, backend="maca_c")   # the default is torch now
-print(ii[0].tolist())   # want [511,510,509,508,507,506,505,504]
+print(sorted(ii[0].tolist()))   # want [504, 505, 506, 507, 508, 509, 510, 511]
 "
 ```
 
-`arange` matters twice over: the values are exactly representable in bf16 (so the expected indices *are* `range`), and
-it removes seeding from the question. Run it a few times — a racy kernel's single run agrees with anything.
+`arange` matters twice over: the values are exactly representable (so the expected indices *are* `range`) and it
+removes seeding from the question. Run it a few times — a racy kernel's single run agrees with anything.
+
+**fp32, not bf16 — corrected 2026-10-25, and the old snippet here was wrong.** `arange(512)` is *not* exactly
+representable in bf16: bf16 has 8 significand bits, so above 256 its spacing is 2, and the cast gives a run of ties —
+index 511 holds `512` and 505 holds `504`. So "the expected indices are `range`" is false, and the selected *set* is
+itself a choice among ties (503/504/505 all hold `504`), which is why the two backends disagree there and both are
+right. A 256-wide bf16 row does not rescue the trick: 512 bytes is below the 1024-byte stride requirement, and the
+call is refused. In bf16 the only writable-down answer is the contract `min(selected) >= max(unselected)`; a fixed
+index list is available in fp32 only.
 
 ## Dead-code policy — generic helpers stay, unreachable business paths go
 
