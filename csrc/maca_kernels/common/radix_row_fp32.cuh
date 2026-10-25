@@ -89,25 +89,13 @@ __device__ __forceinline__ void stage_f32_lane(
 // ============================================================
 // 前缀和
 // ============================================================
-
-/*
- * run_cumsum: 256 元素 inclusive scan (双缓冲 Hillis-Steele)
- */
-__device__ __forceinline__ void run_cumsum(
-    uint32_t s_histogram_buf[2][256 + 32], uint32_t tx)
-{
-    #pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-        if (tx < 256) {
-            const auto j = 1 << i;
-            const auto k = i & 1;
-            auto value = s_histogram_buf[k][tx];
-            if (tx + j < 256) value += s_histogram_buf[k][tx + j];
-            s_histogram_buf[k ^ 1][tx] = value;
-        }
-        __syncthreads();
-    }
-}
+//
+// The 256-bin reverse scan is `radix_common.cuh`'s `run_cumsum_warp`, the one
+// the 16-bit row scans with: this file used to carry a second implementation
+// (a double-buffered Hillis-Steele walk, eight barriers against that one's
+// three) over the identical `[2][256 + 32]` buffer.  Both read the bin counts
+// out of `[0]` and leave the suffix sums there, so the two were
+// interchangeable and only one of them had a reason to exist.
 
 // ============================================================
 // FP32 radix topk row
@@ -168,7 +156,7 @@ __device__ __forceinline__ void radix_topk_row_f32_rescan(
             atomicAdd(&s_histogram[(key >> shift) & 0xFFu], 1u);
         }
         __syncthreads();
-        run_cumsum(s_histogram_buf, tx);
+        run_cumsum_warp(s_histogram_buf, tx);
 
         if (tx < kRadix && s_histogram[tx] > remain && s_histogram[tx + 1] <= remain) {
             s_threshold_bin_id = tx;
@@ -230,6 +218,13 @@ __device__ __forceinline__ void radix_topk_row_f32(
     // 动态区: arena 与 refine 的 ping-pong 暂存，各一半
     constexpr uint32_t SMEM_INPUT_SIZE = kF32SmemInputSize;
 
+    // `[1]` is the shape `run_cumsum_warp` takes and nothing in the fp32 path
+    // reads or writes it since the double-buffered scan went away.  It stays
+    // declared because `kSmemStaticBytes` (`radix_common.cuh`) is hand-written
+    // against this list and `kF32SmemInputSize` -- the arena -- is its
+    // remainder: shrinking the declaration alone would hand the dynamic region
+    // 1,152 B the plan does not know about, and shrinking the constant too
+    // would grow the arena, which is a capacity change, not a cleanup.
     __shared__ uint32_t s_histogram_buf[2][RADIX + 32];
     __shared__ uint32_t s_counter;
     __shared__ uint32_t s_threshold_bin_id;
@@ -283,7 +278,7 @@ __device__ __forceinline__ void radix_topk_row_f32(
     // is why the flag can be handed back as a thread-uniform bool.
     if (kNan && row_nan != nullptr)
         *row_nan = __syncthreads_or((int)nan_local) != 0;
-    run_cumsum(s_histogram_buf, tx);
+    run_cumsum_warp(s_histogram_buf, tx);
 
     if (tx < RADIX && s_histogram[tx] > remain_topk && s_histogram[tx + 1] <= remain_topk) {
         s_threshold_bin_id = tx; s_high_threshold_bin_id = tx; s_num_input[0] = 0; s_counter = 0;
@@ -342,7 +337,7 @@ __device__ __forceinline__ void radix_topk_row_f32(
         const auto r_idx = round % 2;
         const auto r_off = r_idx * SMEM_INPUT_SIZE;
         const auto num = s_num_input[r_idx] < SMEM_INPUT_SIZE ? s_num_input[r_idx] : SMEM_INPUT_SIZE;
-        run_cumsum(s_histogram_buf, tx);
+        run_cumsum_warp(s_histogram_buf, tx);
         if (tx < RADIX && s_histogram[tx] > remain_topk && s_histogram[tx + 1] <= remain_topk) {
             s_threshold_bin_id = tx; s_num_input[r_idx ^ 1] = 0;
             s_last_remain = static_cast<int32_t>(remain_topk - s_histogram[tx + 1]);

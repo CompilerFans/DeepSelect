@@ -252,16 +252,15 @@ __host__ __device__ __forceinline__ T chunk_size_for(T length, T chunks) {
  * s_histogram_buf[0][257..264] (256 stays a sentinel), warp 0 scans those
  * eight, and each warp adds its offset -- three __syncthreads (the two above
  * plus the one that publishes the per-bin result, the last barrier in this
- * function), against eight in the naive form.  Returns the calling thread's
- * bin suffix so the caller can avoid reading a neighbouring bin before another
- * barrier.
+ * function), against eight for a Hillis-Steele walk over the same buffer.
  *
- * **The 16-bit path uses this, not fp32.**  Its only caller is
- * `radix_topk_row_bf16_b` (`radix_row_bf16.cuh`), twice per row, once per
- * pass.  `run_cumsum` (the double-buffered Hillis-Steele form) is what
- * `radix_topk_row_f32` calls, at three sites in `radix_row_fp32.cuh`.  The
- * sentence here used to say the reverse, which is the kind of thing a reader
- * trusts.
+ * **Both radix rows scan with this and nothing else.**  `radix_topk_row_bf16_b`
+ * calls it twice per row, once per pass, and reads the return value to test the
+ * crossing off its own bin (`inclusive > want && exclusive <= want`) instead of
+ * a neighbouring read that would need another barrier;
+ * `radix_topk_row_f32` and its rescan call the two-argument overload below at
+ * three sites and read the scanned array instead, which the final barrier here
+ * has already published.
  */
 __device__ __forceinline__ uint32_t run_cumsum_warp(
     uint32_t s_histogram_buf[2][256 + 32], uint32_t tx, uint32_t& exclusive_suffix)
@@ -318,6 +317,14 @@ __device__ __forceinline__ uint32_t run_cumsum_warp(
     __syncthreads();
     exclusive_suffix = val - self_count;
     return val;
+}
+
+// The scan alone, for a caller that does not read its own bin's suffix.
+__device__ __forceinline__ uint32_t run_cumsum_warp(
+    uint32_t s_histogram_buf[2][256 + 32], uint32_t tx)
+{
+    uint32_t exclusive_suffix = 0;
+    return run_cumsum_warp(s_histogram_buf, tx, exclusive_suffix);
 }
 
 }  // namespace topk_select_radix
