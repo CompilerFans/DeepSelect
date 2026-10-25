@@ -1,0 +1,25 @@
+# 23 cells from /root/ab_null_sel/deepselect_perf.csv
+# 2 arms x 5 rounds x 10 iters, device 1
+# round 0 arm old lib=883fcf249b74 abort=False /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 0 arm new lib=4339dac75f5a abort=False /root/ds_exp/deep_select/deep_select_maca_xcore1600.so
+# round 1 arm old lib=883fcf249b74 abort=False /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 1 arm new lib=4339dac75f5a abort=False /root/ds_exp/deep_select/deep_select_maca_xcore1600.so
+# round 2 arm old lib=883fcf249b74 abort=False /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 2 arm new lib=4339dac75f5a abort=False /root/ds_exp/deep_select/deep_select_maca_xcore1600.so
+# round 3 arm old lib=883fcf249b74 abort=False /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 3 arm new lib=4339dac75f5a abort=False /root/ds_exp/deep_select/deep_select_maca_xcore1600.so
+# round 4 arm old lib=883fcf249b74 abort=False /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# round 4 arm new lib=4339dac75f5a abort=False /root/ds_exp/deep_select/deep_select_maca_xcore1600.so
+
+# arm old: libs=['883fcf249b74'] abort_when_nan_found=['False']
+# arm new: libs=['4339dac75f5a'] abort_when_nan_found=['False']
+
+=== new vs old — all operator kernels ===
+  route row    n= 23  median 0.9993x  [0.935, 1.004]
+  ALL    n= 23  median 0.9993x  [0.935, 1.004]
+
+=== new vs old — selection kernels only (no follower) ===
+  route row    n= 23  median 0.9993x  [0.935, 1.004]
+  ALL    n= 23  median 0.9993x  [0.935, 1.004]
+
+# wrote /root/ab_gate.json/ab_paired.json

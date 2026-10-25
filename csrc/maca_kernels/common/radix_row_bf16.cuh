@@ -236,7 +236,7 @@ __device__ __forceinline__ void walk_kept_blocks(const maca_bfloat16* input,
 // `kHist` is the element histogram, and the two callers differ in exactly it:
 // the pass that wants element counts pays the 128 atomics per block, the one
 // that wants only the block summary pays the block's own.
-template <bool kHist, bool kNan, uint32_t BLOCK_SIZE>
+template <bool kHist, bool kNan, uint32_t BLOCK_SIZE, bool kBlockCount = true>
 __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
                                              uint32_t vec_len,
                                              uint16_t* block_max,
@@ -290,10 +290,12 @@ __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
                     block_max[blk + 1u] = (uint16_t)(key1 >> kCoarse12Shift);
                     block_max[blk + 2u] = (uint16_t)(key2 >> kCoarse12Shift);
                     block_max[blk + 3u] = (uint16_t)(key3 >> kCoarse12Shift);
-                    atomicAdd(&s_wide[key0 >> kCoarse12Shift], 1u);
-                    atomicAdd(&s_wide[key1 >> kCoarse12Shift], 1u);
-                    atomicAdd(&s_wide[key2 >> kCoarse12Shift], 1u);
-                    atomicAdd(&s_wide[key3 >> kCoarse12Shift], 1u);
+                    if constexpr (kBlockCount) {
+                        atomicAdd(&s_wide[key0 >> kCoarse12Shift], 1u);
+                        atomicAdd(&s_wide[key1 >> kCoarse12Shift], 1u);
+                        atomicAdd(&s_wide[key2 >> kCoarse12Shift], 1u);
+                        atomicAdd(&s_wide[key3 >> kCoarse12Shift], 1u);
+                    }
                 }
             }
             // The four-block loop consumes whole multiples of four, so it
@@ -313,7 +315,8 @@ __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
                 DS_GROUP_MAX8_TREE(key);
                 if (lane == 0u) {
                     block_max[t] = (uint16_t)(key >> kCoarse12Shift);
-                    atomicAdd(&s_wide[key >> kCoarse12Shift], 1u);
+                    if constexpr (kBlockCount)
+                        atomicAdd(&s_wide[key >> kCoarse12Shift], 1u);
                 }
             }
         } else {
@@ -370,7 +373,8 @@ __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
 #endif
         if (lane == 0u) {
             block_max[blk] = (uint16_t)(key >> kCoarse12Shift);
-            if constexpr (!kHist) atomicAdd(&s_wide[key >> kCoarse12Shift], 1u);
+            if constexpr (!kHist && kBlockCount)
+                atomicAdd(&s_wide[key >> kCoarse12Shift], 1u);
         }
     }
     return nan_local;
@@ -457,6 +461,15 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // nothing, so the dense cells keep the single element walk.
     const bool block_hist =
         summary_wanted && topk <= length / kBlockHistMinRowPerSlot;
+    // Whether the block counts come from the summary table instead of from the
+    // walk that writes it.  Taking them from the table is a second body of that
+    // walk in the same kernel, and a kernel's registers are a whole-function
+    // budget: at the wide block the second body crosses the line where the AP
+    // holds two of its CTAs, and losing that CTA costs more than the counts are
+    // worth.  The narrow block is nowhere near that line, so it is the one that
+    // takes the table; the wide block keeps the walk it always had.
+    constexpr bool kCountFromTable =
+        BLOCK_SIZE == static_cast<uint32_t>(kBlockSize);
     bool nan_local = false;
     if (input_aligned) {
         if (summary_wanted) {
@@ -470,12 +483,32 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             // Both arms keep the NaN vote, and on the block-histogram arm it is
             // the only vote an unlisted block's elements ever get: the second
             // walk visits the listed blocks alone.
-            if (block_hist)
-                nan_local |= summary_walk<false, kNan, BLOCK_SIZE>(
-                    input, vec_len, block_max, s_wide);
-            else
+            if (block_hist) {
+                if constexpr (kCountFromTable) {
+                    nan_local |= summary_walk<false, kNan, BLOCK_SIZE, false>(
+                        input, vec_len, block_max, s_wide);
+                    // The block counts come from the table the walk just wrote,
+                    // in a loop of their own: what a shared atomic costs the walk
+                    // is the load loop's pipelining, not the atomic, and this
+                    // table is the row just summarized, so the second read is an
+                    // L2 hit.
+                    //
+                    // The barrier is the rule, not hygiene: the loop reads
+                    // `block_max` entries other threads' groups wrote, and the
+                    // walk orders nothing across groups.  Without it the count
+                    // reads a bin the row has not stored yet, which is a wrong
+                    // threshold at best and an out-of-range bin at worst.
+                    __syncthreads();
+                    for (uint32_t b = tx; b < nb; b += BLOCK_SIZE)
+                        atomicAdd(&s_wide[block_max[b]], 1u);
+                } else {
+                    nan_local |= summary_walk<false, kNan, BLOCK_SIZE>(
+                        input, vec_len, block_max, s_wide);
+                }
+            } else {
                 nan_local |= summary_walk<true, kNan, BLOCK_SIZE>(
                     input, vec_len, block_max, s_wide);
+            }
         } else {
             for (uint32_t idx = tx * 8; idx < vec_len; idx += BLOCK_SIZE * 8)
                 nan_local |= hist_add_bf16_wide<kNan>(s_wide, input, idx);
