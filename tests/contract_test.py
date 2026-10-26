@@ -361,20 +361,36 @@ def semantics(backend):
     # -- the default backend is the process default, resolved per call.
     # `_default_backend` is the resolution the signature documents; it lives
     # in `interface`, not in the package's public surface.
+    #
+    # The two checks are chosen so that a resolution which ignored the
+    # variable altogether fails one of them: `torch` is the only answer the
+    # environment can produce and the default cannot, and the unset case must
+    # be the kernel.  (Both checks used to expect `maca_c`, which is also the
+    # default -- after the default became the kernel they would have passed
+    # over a `_default_backend` that read nothing.)
+    #
+    # `DS_TOPK_BACKEND` is dropped from the inherited environment first: a
+    # developer with it exported would otherwise be testing their shell.
     code = ("from deep_select.interface import _default_backend;"
             "print(_default_backend())")
-    out = subprocess.run([sys.executable, "-c", code],
-                         env={**os.environ, "DS_TOPK_BACKEND": "maca_c",
-                              "PYTHONPATH": os.getcwd()},
-                         capture_output=True, text=True)
-    check("DS_TOPK_BACKEND=maca_c resolves the default",
-          out.stdout.strip().endswith("maca_c"), out.stdout.strip() + out.stderr[-200:])
-    out2 = subprocess.run([sys.executable, "-c", code],
-                          env={**os.environ, "DS_TOPK_BACKEND": "not-a-backend",
-                               "PYTHONPATH": os.getcwd()},
-                          capture_output=True, text=True)
+    base_env = {k: v for k, v in os.environ.items() if k != "DS_TOPK_BACKEND"}
+    base_env["PYTHONPATH"] = os.getcwd()
+
+    def resolve(**env):
+        out = subprocess.run([sys.executable, "-c", code],
+                             env={**base_env, **env},
+                             capture_output=True, text=True)
+        return out.stdout.strip(), out.stderr[-200:]
+
+    got, err = resolve()
+    check("with no DS_TOPK_BACKEND the default is the kernel",
+          got.endswith("maca_c"), got + err)
+    got, err = resolve(DS_TOPK_BACKEND="torch")
+    check("DS_TOPK_BACKEND=torch resolves the reference",
+          got.endswith("torch"), got + err)
+    got, err = resolve(DS_TOPK_BACKEND="not-a-backend")
     check("an unrecognized DS_TOPK_BACKEND is ignored",
-          out2.stdout.strip().endswith("maca_c"), out2.stdout.strip() + out2.stderr[-200:])
+          got.endswith("maca_c"), got + err)
 
 
 def shapes(backend):
