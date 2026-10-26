@@ -46,10 +46,9 @@ Measured with the benchmark in [`tests/test.py`](tests/test.py)
 on the same input. The metric is effective memory bandwidth: TopK does no
 floating-point math, so a FLOP rate would not be meaningful here.
 
-Each C600 figure names the commit it was measured on, because the boards were not
-all measured on the same one, and the C500 pair is older than both. Every figure
-is rendered from a recording committed under `perf_data/<board>/<timestamp>/`,
-whose manifest carries the device, the source commit and the artifact md5.
+Every figure is rendered from a recording committed under
+`perf_data/<board>/<timestamp>/`, whose manifest carries the device, the source
+commit and the artifact md5.
 
 ### Lightning Indexer Scenario (MetaX MACA)
 
@@ -59,11 +58,11 @@ MetaX C500 (104 AP):
 
 ![DeepSelect vs torch.topk, bfloat16 Lightning Indexer, MetaX C500](assets/perf_bf16_maca_MetaX_C500.png)
 
-MetaX C600-A (32 AP), measured on `ef57dcc` (2026-10-24, artifact `4cdaee40f496`):
+MetaX C600-A (32 AP):
 
 ![DeepSelect vs torch.topk, bfloat16 Lightning Indexer, MetaX C600-A](assets/perf_bf16_maca_MetaX_C600-A.png)
 
-MetaX C600-U (28 AP), measured on `73f8fcb` (2026-10-26, artifact `2bc99c719dd8`):
+MetaX C600-U (28 AP):
 
 ![DeepSelect vs torch.topk, bfloat16 Lightning Indexer, MetaX C600-U](assets/perf_bf16_maca_MetaX_C600-U.png)
 
@@ -75,11 +74,11 @@ MetaX C500 (104 AP):
 
 ![DeepSelect vs torch.topk, float32 Sampling, MetaX C500](assets/perf_fp32_maca_MetaX_C500.png)
 
-MetaX C600-A (32 AP), measured on `ef57dcc` (2026-10-24, artifact `4cdaee40f496`):
+MetaX C600-A (32 AP):
 
 ![DeepSelect vs torch.topk, float32 Sampling, MetaX C600-A](assets/perf_fp32_maca_MetaX_C600-A.png)
 
-MetaX C600-U (28 AP), measured on `73f8fcb` (2026-10-26, artifact `2bc99c719dd8`):
+MetaX C600-U (28 AP):
 
 ![DeepSelect vs torch.topk, float32 Sampling, MetaX C600-U](assets/perf_fp32_maca_MetaX_C600-U.png)
 
