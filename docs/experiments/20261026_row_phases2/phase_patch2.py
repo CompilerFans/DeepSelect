@@ -40,8 +40,8 @@ namespace topk_select_radix {
      "    __syncthreads();\n    DS_PH(0);\n"
      "    // The histogram is complete and the CTA's NaN vote is in, on one barrier --\n"),
     # 1 = scan #1 (the block-count fold, the scan and the narrow).
-    ("    scan_threshold(remain_topk);\n\n    // ── the kept-block list",
-     "    scan_threshold(remain_topk);\n    DS_PH(1);\n\n    // ── the kept-block list"),
+    ("    if (!one_pass) scan_threshold(remain_topk);\n\n    // ── the kept-block list",
+     "    if (!one_pass) scan_threshold(remain_topk);\n    DS_PH(1);\n\n    // ── the kept-block list"),
     # 2 = the kept-block list build.  Slot 6 counts the rows that got a list.
     ("        use_list = list_cap > 0 && nlist <= list_cap;\n    }\n",
      "        use_list = list_cap > 0 && nlist <= list_cap;\n    }\n    DS_PH(2);\n"
@@ -52,13 +52,21 @@ namespace topk_select_radix {
      "            __syncthreads();\n            DS_PH(3);\n            num_staged = s_nstage;\n"),
     # The arena's verdict, counted after it is set -- `staged` is still false on
     # the line above.
-    ("            packed = staged && fits_packed;\n",
-     "            packed = staged && fits_packed;\n"
+    ("            staged = num_staged <= SMEM_INPUT_SIZE;\n            packed = staged && fits_packed;\n",
+     "            staged = num_staged <= SMEM_INPUT_SIZE;\n            packed = staged && fits_packed;\n"
      "            if (threadIdx.x == 0u && staged) atomicAdd(&ds_phase[7], 1ull);\n"),
     # 13 = the counting arm's own histogram walk over the row, and 14 = its
     # collect.  Neither exists on the staged arm.
     ("            scan_threshold(remain_topk);\n        } else {\n",
      "            scan_threshold(remain_topk);\n            DS_PH(13);\n        } else {\n"),
+    # 13/15 as plain sums on the one-pass path: the staged population and the
+    # sampled cut, divided by the row count to read as values.
+    ("            staged = num_staged >= topk && num_staged <= SMEM_INPUT_SIZE;\n",
+     "            if (threadIdx.x == 0u) {\n"
+     "                atomicAdd(&ds_phase[13], (unsigned long long)num_staged);\n"
+     "                atomicAdd(&ds_phase[15], (unsigned long long)s_high_threshold_bin_id);\n"
+     "            }\n"
+     "            staged = num_staged >= topk && num_staged <= SMEM_INPUT_SIZE;\n"),
     ("            for (uint32_t idx = tail_start + tx; idx < length; idx += BLOCK_SIZE)\n"
      "                collect_one(idx, __ldg(input + idx));\n        }\n",
      "            for (uint32_t idx = tail_start + tx; idx < length; idx += BLOCK_SIZE)\n"

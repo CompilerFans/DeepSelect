@@ -246,8 +246,8 @@ int main(int argc, char **argv) {
     printf("%s  %12.0f %10.3f %7.1f%%   (both scans)\n", "12 narrow loop",
            (double)ph[12] / n, (double)ph[12] / n / 1e3,
            (double)ph[12] / (double)ph[5] * 100);
-    static const char *cnt[2] = {"13 count hist", "14 collect   "};
-    for (int i = 13; i < 15; i++)
+    static const char *cnt[3] = {"13 count hist", "14 collect   ", "15 sampled cut"};
+    for (int i = 13; i < 16; i++)
         printf("%s  %12.0f %10.3f %7.1f%%   (counting arm)\n", cnt[i - 13],
                (double)ph[i] / n, (double)ph[i] / n / 1e3,
                (double)ph[i] / (double)ph[5] * 100);
