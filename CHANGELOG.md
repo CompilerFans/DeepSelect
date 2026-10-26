@@ -7,6 +7,15 @@ there.
 
 ## Unreleased
 
+### The process default is the kernel (`maca_c`)
+
+A call that names no `backend=` now runs the MACA kernel.  The operator this
+tree ports has no backend selector at all -- DeepInfer's indexer and sampler
+call `topk(...)` and get the platform's kernel -- so a bare call here resolving
+to `"torch"` silently turned the DSA indexer's performance path into the
+reference implementation.  `"torch"` is still available, by name
+(`backend="torch"` or `DS_TOPK_BACKEND=torch`), for differential testing.
+
 ### The ported upstream kernel tree leaves the repository
 
 `csrc/maca_kernels/legacy/` — the port of upstream's `v3` / `v3_fp32`

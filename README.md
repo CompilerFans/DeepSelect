@@ -126,7 +126,7 @@ For the full signature, see [`deep_select/interface.py`](deep_select/interface.p
 
 ### Backends
 
-`backend=` selects the implementation: `"torch"` (the default) is the reference, `"maca_c"` is the MACA kernel. A call with no `backend=` follows `DS_TOPK_BACKEND`, so a caller who wants the kernel passes `backend="maca_c"` or exports `DS_TOPK_BACKEND=maca_c`.
+`backend=` selects the implementation: `"maca_c"` (the default) is the MACA kernel, `"torch"` is the reference implementation. A call with no `backend=` follows `DS_TOPK_BACKEND`, so the reference is asked for by naming it (`backend="torch"` or `DS_TOPK_BACKEND=torch`); a bare call runs the kernel, which is the only behaviour upstream's CUDA API has.
 
 ### Variable-length rows
 

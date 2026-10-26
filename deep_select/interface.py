@@ -15,14 +15,19 @@ _BACKENDS = ("maca_c", "torch")
 
 
 def _default_backend() -> str:
-    """`DS_TOPK_BACKEND` if it names a backend, else `"torch"`.
+    """`DS_TOPK_BACKEND` if it names a backend, else `"maca_c"`.
 
-    An unrecognized value is ignored rather than raised.
+    The kernel is the default because the operator this tree ports has no
+    backend selector at all: upstream's call sites (DeepInfer's indexer and
+    sampler) call `topk(...)` and get that platform's kernel, so a caller that
+    names nothing must get the kernel here too.  `"torch"` stays available for
+    differential testing; it is asked for by name.  An unrecognized value is
+    ignored rather than raised.
     """
     v = os.environ.get("DS_TOPK_BACKEND")
     if v and v in _BACKENDS:
         return v
-    return "torch"
+    return "maca_c"
 
 
 # The extension the build produces.
@@ -96,9 +101,11 @@ def topk(
         return_value: bool. If False, only return indices without values to accelerate the kernel. The return value is still a Tuple, but the first element will be None.
         abort_when_nan_found: bool. When a NaN is found, if True, aborts the whole kernel; if False, writes 0x3F3F3F3F to the corresponding output_idx[batch_idx][0] and exits.
                 Exception: when the row's length <= topk, it is skipped. Inert when `check_nan` is False, since then nothing is ever found.
-        backend: str. Which implementation to run: `"torch"` (the default), a
-                reference implementation built from torch ops that runs on any
-                device and dtype; or `"maca_c"`, this device's MACA kernel.
+        backend: str. Which implementation to run: `"maca_c"` (the default),
+                this device's MACA kernel, which is what the operator this tree
+                ports runs and the fast one; or `"torch"`, a reference
+                implementation built from torch ops that runs on any device and
+                dtype, and is the one to ask for when checking the kernel.
                 `DS_TOPK_BACKEND` overrides the default for a whole process.
         check_nan: bool. Whether each row is scanned for a NaN at all.  With
                 False no scan runs, `abort_when_nan_found` never fires, and a

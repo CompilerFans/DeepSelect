@@ -24,32 +24,34 @@ Public entry point is `deep_select.topk` (`deep_select/interface.py`). **Its sig
 
 Two backends, which name **implementations, not architectures** (the same vocabulary as mcDeepGEMM's `backend=`):
 
-- `"torch"` (**the default**) — reference implementation built from torch ops; runs on any device/dtype, including where no kernel is built. Also the differential-check backend.
-- `"maca_c"` — the MACA kernel this device has: the **production path** and the fast one. Which kernel that is is a property of the device, not a call-site choice.
+- `"maca_c"` (**the default**) — the MACA kernel this device has: the **production path** and the fast one. Which kernel that is is a property of the device, not a call-site choice.
+- `"torch"` — reference implementation built from torch ops; runs on any device/dtype, including where no kernel is built. Also the differential-check backend, and now the one a caller asks for by name.
 
 A third, `"deep_gemm"` (the outer package's `fp32_indexer_topk_selector`, float32 only, `topk <= 2048`, unordered), existed until **2026-10-25** and is removed, together with `UnsupportedByBackend` and the `unsupported` status the harnesses carried for it: it served a strict subset, and it was the one route through which a caller could reach a backend this tree neither tests nor ships. The evidence it produced stays in `docs/` and `perf_data/`; `git log -S'topk_deep_gemm'` is the history.
 
-**The default is correctness-first, and that is a deliberate reversal of an
-earlier one.** `backend` used to default to `"maca_c"`; it defaults to
-`"torch"` now (2026-09-15), because the reference is the backend that does not
-depend on a kernel being correct on the device in front of you — so making it
-the default costs no coverage (the kernel is validated *against* it) and
-removes the last route by which a caller who asked for nothing in particular
-could reach a kernel defect.  The cost is speed, and it is real: the `torch`
-backend is the slow one.
+**The default is the kernel (2026-10-26), and it has been the other way twice.**
+`backend` defaulted to `"maca_c"`, then to `"torch"` from 2026-09-15 (the
+reference does not depend on a kernel being correct, so as a default it cost no
+coverage and put no caller on a kernel defect), and it is `"maca_c"` again: the
+operator this tree *ports* has no backend selector at all — upstream's indexer
+and sampler call `topk(...)` and get the platform kernel — so a bare call
+resolving to the reference silently turned the DSA indexer's performance path
+into the slow one.  The cost is the opposite one now: a caller who names
+nothing gets the kernel, and the two suites still validate it against
+`"torch"`, which is asked for by name.
 
 The default is **not** a string default in the signature — `backend=None`
 means "take the process default", resolved per call by `_default_backend()`
 from `DS_TOPK_BACKEND` (unrecognized values ignored, so a typo in the
 environment cannot break every call).  Read the resolution there rather than
 in the signature: `inspect.signature(deep_select.topk)` reports `None`, and a
-caller who wants the kernel asks for it by name or exports
-`DS_TOPK_BACKEND=maca_c`.
+caller who wants the reference asks for it by name or exports
+`DS_TOPK_BACKEND=torch`.
 
 Two modes therefore say different things and both are needed when the default
-moves: `tests/test.py --backend maca_c` **pins** the call (it passes
-`backend=` into `run_testcase`), so it tests the kernel and says *nothing*
-about the default; `DS_TOPK_BACKEND=maca_c python tests/test.py` leaves the
+moves: `tests/test.py --backend torch` **pins** the call (it passes
+`backend=` into `run_testcase`), so it tests the reference and says *nothing*
+about the default; `DS_TOPK_BACKEND=torch python tests/test.py` leaves the
 official call site unmodified and sets the process default instead, so it tests
 the path a bare call actually takes.  (The suite's `--backend` defaults to
 `maca_c`, so a bare `python tests/test.py` is the pinned mode.)
@@ -1608,7 +1610,7 @@ CUDA_VISIBLE_DEVICES=1 PYTHONPATH=. python -c "
 import torch, deep_select
 b, v, k = 2, 512, 8
 x = torch.arange(v, device='cuda', dtype=torch.float32).unsqueeze(0).repeat(b, 1)
-_, ii = deep_select.topk(x, k, backend="maca_c")   # the default is torch now
+_, ii = deep_select.topk(x, k)   # the default is the kernel now
 print(sorted(ii[0].tolist()))   # want [504, 505, 506, 507, 508, 509, 510, 511]
 "
 ```

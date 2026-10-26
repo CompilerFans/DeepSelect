@@ -374,7 +374,7 @@ def semantics(backend):
                                "PYTHONPATH": os.getcwd()},
                           capture_output=True, text=True)
     check("an unrecognized DS_TOPK_BACKEND is ignored",
-          out2.stdout.strip().endswith("torch"), out2.stdout.strip() + out2.stderr[-200:])
+          out2.stdout.strip().endswith("maca_c"), out2.stdout.strip() + out2.stderr[-200:])
 
 
 def shapes(backend):
