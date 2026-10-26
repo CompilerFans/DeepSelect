@@ -1,6 +1,5 @@
 import functools
 import os
-import sys
 import torch
 
 from typing import Optional, Tuple
@@ -14,48 +13,22 @@ from ._log import log, log_call
 # reference implementation of the contract.
 _BACKENDS = ("maca_c", "torch")
 
-
-_UNKNOWN_BACKEND_REPORTED = False
-
-
-def _report_unknown_backend(value: str) -> None:
-    """Say once, on stderr, that a non-empty `DS_TOPK_BACKEND` named nothing.
-
-    Reported rather than raised: one bad environment variable must not break
-    every call in the process.  Reported at all because the default is the
-    kernel now -- a caller who exported a misspelling of `torch` would
-    otherwise be handed the fast path without a word, and that is the
-    direction in which a defect hides.  Printed rather than warned so a
-    caller's `-W error` cannot turn it into the exception this avoids.
-    """
-    global _UNKNOWN_BACKEND_REPORTED
-    if _UNKNOWN_BACKEND_REPORTED:
-        return
-    _UNKNOWN_BACKEND_REPORTED = True
-    print(f"deep_select: DS_TOPK_BACKEND={value!r} names no backend "
-          f"({', '.join(_BACKENDS)}); using maca_c", file=sys.stderr)
+# What a call that names no backend runs.  A constant rather than a process
+# setting: the choice travels in the call (`backend="torch"`), which is the one
+# place a reader of that call can see it, and the operator this tree ports has
+# no backend selector at all -- upstream's indexer and sampler call `topk(...)`
+# and get the platform's kernel, so that is what naming nothing must mean here.
+_DEFAULT_BACKEND = "maca_c"
 
 
 def _default_backend() -> str:
-    """`DS_TOPK_BACKEND` if it names a backend, else `"maca_c"`.
+    """What a call with no `backend=` runs: `"maca_c"`.
 
-    The kernel is the default because the operator this tree ports has no
-    backend selector at all: upstream's call sites (DeepInfer's indexer and
-    sampler) call `topk(...)` and get that platform's kernel, so a caller that
-    names nothing must get the kernel here too.  `"torch"` stays available for
-    differential testing; it is asked for by name.
-
-    The value is compared after `strip().lower()`, because an environment
-    variable arrives from a shell and `" torch"` or `"TORCH"` is a spelling of
-    the same name, not a request for something else.  A value that still names
-    no backend is ignored -- never raised -- and reported once.
+    Kept as a function because it is the resolution `topk`'s signature
+    documents, and because a caller that needs to know what a bare call will do
+    should ask this rather than read the constant.
     """
-    v = os.environ.get("DS_TOPK_BACKEND", "").strip().lower()
-    if v in _BACKENDS:
-        return v
-    if v:
-        _report_unknown_backend(v)
-    return "maca_c"
+    return _DEFAULT_BACKEND
 
 
 # The extension the build produces.
@@ -129,12 +102,12 @@ def topk(
         return_value: bool. If False, only return indices without values to accelerate the kernel. The return value is still a Tuple, but the first element will be None.
         abort_when_nan_found: bool. When a NaN is found, if True, aborts the whole kernel; if False, writes 0x3F3F3F3F to the corresponding output_idx[batch_idx][0] and exits.
                 Exception: when the row's length <= topk, it is skipped. Inert when `check_nan` is False, since then nothing is ever found.
-        backend: str. Which implementation to run: `"maca_c"` (the default),
-                this device's MACA kernel, which is what the operator this tree
-                ports runs and the fast one; or `"torch"`, a reference
-                implementation built from torch ops that runs on any device and
-                dtype, and is the one to ask for when checking the kernel.
-                `DS_TOPK_BACKEND` overrides the default for a whole process.
+        backend: str. Which implementation to run: `"maca_c"` (the default
+                when this is None), this device's MACA kernel, which is what
+                the operator this tree ports runs and the fast one; or
+                `"torch"`, a reference implementation built from torch ops that
+                runs on any device and dtype, and the one to ask for when
+                checking the kernel.
         check_nan: bool. Whether each row is scanned for a NaN at all.  With
                 False no scan runs, `abort_when_nan_found` never fires, and a
                 row holding a NaN is ranked like any other value -- the
@@ -156,8 +129,7 @@ def topk(
                     The output tensors may not be contiguous, when topk * sizeof(input.dtype or indices_dtype) is not a multiple of 32 Bytes
     """
 
-    # `None` means "take the process default" (see `_default_backend`), read
-    # per call so a process that sets the variable late still gets it.
+    # `None` means the constant default (see `_default_backend`).
     if backend is None:
         backend = _default_backend()
         # The call record shows `backend=None`; this is the backend it became.

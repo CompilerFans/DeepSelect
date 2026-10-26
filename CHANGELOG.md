@@ -13,8 +13,10 @@ A call that names no `backend=` now runs the MACA kernel.  The operator this
 tree ports has no backend selector at all -- DeepInfer's indexer and sampler
 call `topk(...)` and get the platform's kernel -- so a bare call here resolving
 to `"torch"` silently turned the DSA indexer's performance path into the
-reference implementation.  `"torch"` is still available, by name
-(`backend="torch"` or `DS_TOPK_BACKEND=torch`), for differential testing.
+reference implementation.  `"torch"` is still there, asked for by name
+(`backend="torch"`), for differential testing.  `DS_TOPK_BACKEND` goes with
+it: a process-wide default is read somewhere other than the call that depends
+on it, and this tree keeps one place that decides.
 
 ### The ported upstream kernel tree leaves the repository
 

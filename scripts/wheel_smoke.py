@@ -22,8 +22,8 @@ What it establishes, in order:
   3. **The declared dependencies are really there**: the extension resolves its
      `libtvm_ffi.so` through `import tvm_ffi`, and the package imports with no
      checkout on the path.
-  4. **The default backend resolution** (`DS_TOPK_BACKEND`, unrecognized values
-     ignored) still answers in a fresh process.
+  4. **The default backend** is the kernel in a fresh process with no
+     environment set, and `backend="torch"` still reaches the reference.
 
 Exit status is the verdict.  There is no timing here on purpose: this is a
 smoke test for a delivered wheel, and a record is a different act with its own
@@ -166,24 +166,24 @@ def main():
         check("ragged cell: elementwise vs torch", same,
               "" if same else f"{int((idx != ref).sum())} of {idx.numel()} differ")
 
-    # -- 3. the process default still resolves per call.
+    # -- 3. the default backend is a constant, and the argument is the only
+    # way to choose.  A fresh process with no environment set must answer the
+    # kernel; `backend="torch"` must still reach the reference.
     code = ("import deep_select;"
             "print(deep_select.interface._default_backend())")
-    env = {k: v for k, v in os.environ.items() if k != "DS_TOPK_BACKEND"}
-    out = subprocess.run([sys.executable, "-c", code], env=env,
+    base_env = {k: v for k, v in os.environ.items() if k != "DS_TOPK_BACKEND"}
+    out = subprocess.run([sys.executable, "-c", code], env=base_env,
                          capture_output=True, text=True)
-    check("the default resolves to 'maca_c' with no DS_TOPK_BACKEND",
+    check("the default backend is the kernel",
           out.stdout.strip().endswith("maca_c"), out.stdout.strip() + out.stderr[-200:])
-    out = subprocess.run([sys.executable, "-c", code],
-                         env={**env, "DS_TOPK_BACKEND": "torch"},
+    code = ("import deep_select, torch;"
+            "x = torch.arange(1024, device='cuda', dtype=torch.float32).unsqueeze(0).repeat(2, 1);"
+            "v, i = deep_select.topk(x, 8, backend='torch');"
+            "print('ok' if sorted(i[0].tolist()) == list(range(1016, 1024)) else 'bad')")
+    out = subprocess.run([sys.executable, "-c", code], env=base_env,
                          capture_output=True, text=True)
-    check("DS_TOPK_BACKEND=torch resolves the reference",
-          out.stdout.strip().endswith("torch"), out.stdout.strip() + out.stderr[-200:])
-    out = subprocess.run([sys.executable, "-c", code],
-                         env={**env, "DS_TOPK_BACKEND": " TORCH "},
-                         capture_output=True, text=True)
-    check("a padded, upper-case name still resolves to the reference",
-          out.stdout.strip().endswith("torch"), out.stdout.strip() + out.stderr[-200:])
+    check("backend='torch' still reaches the reference",
+          out.stdout.strip().endswith("ok"), out.stdout.strip() + out.stderr[-200:])
 
     print(f"\n{PASS[0]} passed, {len(FAIL)} failed")
     for f in FAIL:

@@ -41,21 +41,17 @@ nothing gets the kernel, and the two suites still validate it against
 `"torch"`, which is asked for by name.
 
 The default is **not** a string default in the signature — `backend=None`
-means "take the process default", resolved per call by `_default_backend()`
-from `DS_TOPK_BACKEND` (compared after `strip().lower()`; a value that still
-names no backend is ignored rather than raised, so a typo in the environment
-cannot break every call, and reported once on stderr so it cannot silently
-hand a caller the other implementation either).  Read the resolution there rather than
-in the signature: `inspect.signature(deep_select.topk)` reports `None`, and a
-caller who wants the reference asks for it by name or exports
-`DS_TOPK_BACKEND=torch`.
+means "the constant default", and `_default_backend()` returns it.  There is no
+process setting: `DS_TOPK_BACKEND` was removed on 2026-10-26, because a
+process-wide default is read somewhere other than the call that depends on it,
+and the call argument is the one place a reader can see the choice.  A caller
+who wants the reference passes `backend="torch"`.
 
 Two modes therefore say different things and both are needed when the default
 moves: `tests/test.py --backend torch` **pins** the call (it passes
 `backend=` into `run_testcase`), so it tests the reference and says *nothing*
-about the default; `DS_TOPK_BACKEND=torch python tests/test.py` leaves the
-official call site unmodified and sets the process default instead, so it tests
-the path a bare call actually takes.  (The suite's `--backend` defaults to
+about the default; a suite run with no `--backend` reaches that default, which
+is now the kernel and nothing else.  (The suite's `--backend` defaults to
 `maca_c`, so a bare `python tests/test.py` is the pinned mode.)
 
 ## Build
@@ -1209,7 +1205,7 @@ PYTHONPATH=. python tests/test.py --perf-only --dtype bf16 # 117 of them
 
 PYTHONPATH=. python tests/test.py --backend maca_c --sample 200   # correctness, 200 drawn
 PYTHONPATH=. python tests/test.py --backend torch                # the reference
-DS_TOPK_BACKEND=maca_c PYTHONPATH=. python tests/test.py         # the unpinned default
+PYTHONPATH=. python tests/test.py                                # the unpinned default
 ```
 
 - `tests/test.py` builds a correctness table (105,138 cases, hours) and a performance grid, and runs both through the same `run_testcase`. Its checks are the contract's own — index range, uniqueness, `value_i == input[index_i]`, the definitional `min(selected) >= max(unselected)`, the NaN guard, the orderings. **No reference implementation is computed anywhere**, so nothing can drift from the contract it checks. Every perf case is checked first and timed second, so a case that selects wrong is reported as a failure rather than as a time.

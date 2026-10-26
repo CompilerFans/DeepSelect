@@ -149,9 +149,8 @@ def main() -> int:
     if artifact:
         print("extension md5:", _md5_of(artifact))
     print("tvm_ffi version:", _module_version("tvm_ffi", "apache-tvm-ffi"))
-    # The resolver, not the environment: `DS_TOPK_BACKEND` is read per call and
-    # an unrecognized value is ignored, so the variable and the answer differ
-    # exactly when someone's setting did not take.
+    # The resolver is a constant now, so this line is the whole answer: what a
+    # call with no `backend=` runs, and what names `backend=` accepts.
     # The list is the dispatcher's, not a copy: `interface._BACKENDS` is what
     # `backend=` actually accepts, so this line cannot go stale against it.
     from deep_select.interface import _BACKENDS

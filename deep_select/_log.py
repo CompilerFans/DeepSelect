@@ -42,7 +42,7 @@ import torch
 _ENV = "DS_LOG"
 
 # Reported in the header when set: the knobs that shape what a run does.
-_KEY_ENV = ("DS_TOPK_BACKEND", "DS_RESULTS_DIR", "CUDA_VISIBLE_DEVICES",
+_KEY_ENV = ("DS_RESULTS_DIR", "CUDA_VISIBLE_DEVICES",
             "MACA_PATH", "MACA_HOME")
 
 # The outermost public call owns the record; see the module docstring.

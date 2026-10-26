@@ -33,11 +33,10 @@
 #     DS_RESULTS_DIR        same as --results
 #     MACA_PATH             MACA toolkit root (default /opt/maca; MACA_HOME is
 #                           consulted when this is unset, this one wins if both).
-#     DS_TOPK_BACKEND       what a call with no `backend=` runs (the library
-#                           default is `torch`).  **It does not reach this
-#                           suite**, whose call always carries `--backend`; use
-#                           the flag, and reach for the variable when what you
-#                           want to test is an *unpinned* caller.
+#
+# `--backend` selects the implementation for the run; a call with no
+# `backend=` runs the kernel, and there is no environment variable that says
+# otherwise.
 #
 set -euo pipefail
 cd "$(realpath "$(dirname "$0")")"
