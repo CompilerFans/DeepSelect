@@ -456,11 +456,11 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // The block histogram is the same summary spent differently: the walk
     // counts blocks instead of elements, the cut that yields names the
     // blocks that can hold a candidate, and the element counts are taken
-    // over those alone.  It pays while the kept fraction `1-(1-k/V)^64` is
-    // small -- its arithmetic is `1/855 + f/545` against the element walk's
-    // `1/545` measured on C600U, so it is a wash at V/k ~= 142 -- and the
-    // floor is twice that for margin.  Below it the row is walked twice for
-    // nothing, so the dense cells keep the single element walk.
+    // over those alone.  What it prices is pass 2 -- both arms walk the row
+    // once, and the element arm walks it again to collect while this one
+    // walks `1-(1-k/V)^64` of it -- so the floor is a density, not a
+    // constant of the dataflow: `kBlockHistMinRowPerSlot` at the far end of
+    // the list's own reach.  Record: `docs/experiments/20261026_density_floor/`.
     const bool block_hist =
         summary_wanted && topk <= length / kBlockHistMinRowPerSlot;
     // Whether the block counts come from the summary table instead of from the
@@ -501,7 +501,19 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                     // reads a bin the row has not stored yet, which is a wrong
                     // threshold at best and an out-of-range bin at worst.
                     __syncthreads();
-                    for (uint32_t b = tx; b < nb; b += BLOCK_SIZE)
+                    // Four entries a batch, and the batch matters: one load per
+                    // iteration makes the loop a chain of memory latencies, and
+                    // the four loads of a batch issue together.
+                    uint32_t b = tx;
+                    for (; b + 3u * BLOCK_SIZE < nb; b += 4u * BLOCK_SIZE) {
+                        uint32_t m[4];
+                        #pragma unroll
+                        for (uint32_t i = 0; i < 4; i++)
+                            m[i] = block_max[b + i * BLOCK_SIZE];
+                        #pragma unroll
+                        for (uint32_t i = 0; i < 4; i++) atomicAdd(&s_wide[m[i]], 1u);
+                    }
+                    for (; b < nb; b += BLOCK_SIZE)
                         atomicAdd(&s_wide[block_max[b]], 1u);
                 } else {
                     nan_local |= summary_walk<false, kNan, BLOCK_SIZE>(
@@ -646,7 +658,21 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     bool use_list = false;
     if (summary_wanted) {
         const uint32_t cut = s_high_threshold_bin_id;
-        for (uint32_t b = tx; b < nb; b += BLOCK_SIZE) {
+        // The same batch as the count loop: the table is a read per entry either
+        // way, and a batch is what keeps the loop off a latency chain.
+        uint32_t b = tx;
+        for (; b + 3u * BLOCK_SIZE < nb; b += 4u * BLOCK_SIZE) {
+            uint32_t m[4];
+            #pragma unroll
+            for (uint32_t i = 0; i < 4; i++) m[i] = block_max[b + i * BLOCK_SIZE];
+            #pragma unroll
+            for (uint32_t i = 0; i < 4; i++) {
+                if (m[i] < cut) continue;
+                const uint32_t pos = atomicAdd(&s_nlist, 1u);
+                if (pos < list_cap) block_list[pos] = b + i * BLOCK_SIZE;
+            }
+        }
+        for (; b < nb; b += BLOCK_SIZE) {
             if (block_max[b] < cut) continue;
             const uint32_t pos = atomicAdd(&s_nlist, 1u);
             if (pos < list_cap) block_list[pos] = b;
