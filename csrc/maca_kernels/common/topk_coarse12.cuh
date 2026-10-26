@@ -420,7 +420,24 @@ __device__ __forceinline__ bool topk_coarse12_row(
     if (summarize && nblk > 0) {
         kept_block_count = 0;
         __syncthreads();
-        for (int b = tid; b < nblk; b += kThreads) {
+        // Four table entries a batch: one load per iteration makes this loop a
+        // chain of memory latencies, and the table is one entry per sixteen
+        // elements -- 8,081 of them on a 129,280-wide row, which measured 13.9%
+        // of the row.  The order the kept blocks land in is nobody's business;
+        // the walk reads the list as a set.  Same batch as the 16-bit row's
+        // list build.  Record: `docs/experiments/20261026_f32_b6_floor/`.
+        int b = tid;
+        for (; b + 3 * kThreads < nblk; b += 4 * kThreads) {
+            int m[4];
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) m[i] = static_cast<int>(block_max[b + i * kThreads]);
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                if (m[i] < wide_threshold) continue;
+                block_list[atomicAdd(&kept_block_count, 1)] = static_cast<uint32_t>(b + i * kThreads);
+            }
+        }
+        for (; b < nblk; b += kThreads) {
             if (static_cast<int>(block_max[b]) < wide_threshold) continue;
             block_list[atomicAdd(&kept_block_count, 1)] = static_cast<uint32_t>(b);
         }
