@@ -1,0 +1,46 @@
+# run_bench.sh    device_dir=MetaX_C600-U
+# timestamp_utc   2026-10-26T05:25:35Z
+# host            mx-cjxu-ws-cr-2026102608504200003f11
+# extension       /root/github/DeepSelect/deep_select/deep_select_maca_xcore1600.so
+# extension_md5   2bc99c719dd85eb0f555bd1aaee5e03f
+# cuda_visible_devices 1
+# backends        maca_c,torch
+# STALE           no
+# ---
+# mx-smi
+mx-smi  version: 2.3.4
+
+=================== MetaX System Management Interface Log ===================
+Timestamp                                         : Mon Oct 26 05:25:35 2026
+
+Attached GPUs                                     : 2
++---------------------------------------------------------------------------------+
+| MX-SMI 2.3.4                       Kernel Mode Driver Version: 3.10.11          |
+| MACA Version: 3.0.1436.20261017    BIOS Version: 1.1.7.0                        |
+|------------------+-----------------+---------------------+----------------------|
+| Board       Name | GPU   Persist-M | Bus-id              | GPU-Util      sGPU-M |
+| Pwr:Usage/Cap    | Temp       Perf | Memory-Usage        | GPU-State            |
+|==================+=================+=====================+======================|
+| 0   MetaX C600-U | 0           Off | 0000:2a:00.0        | 0%          Disabled |
+| 138W / 520W      | 30C          P9 | 586/73728 MiB       | Available            |
+|                  |-----------------|---------------------|----------------------|
+|                  | 1           Off | 0000:2b:00.0        | 0%          Disabled |
+|                  | 34C          P0 | 524/73728 MiB       | Available            |
++------------------+-----------------+---------------------+----------------------+
+
++---------------------------------------------------------------------------------+
+| Process:                                                                        |
+|  GPU                    PID         Process Name                 GPU Memory     |
+|                                                                  Usage(MiB)     |
+|=================================================================================|
+|  0                     1166         python                       62             |
++---------------------------------------------------------------------------------+
+
+End of Log
+# pgrep -af python
+#   1164 bash -c cat > /root/busy2.py <<"EOF" import torch, time d = torch.device("cuda:0") x = torch.randn(2048, 2048, device=d, dtype=torch.float32) y = torch.empty_like(x) while True:     torch.mul(x, 1.000001, out=y)     torch.cuda.synchronize()     time.sleep(0.5) EOF cd /root && setsid nohup env PATH=/opt/conda/bin:$PATH python /root/busy2.py > /root/busy.log 2>&1 < /dev/null & sleep 5; pgrep -af busy2.py; echo ---; export MACA_PATH=/root/maca/maca-sdk-20261017-1436/opt/maca-20261017; export PATH=/opt/conda/bin:$PATH; cd /root/github/DeepSelect && CUCC_TARGETS=xcore1600 nohup ./develop.sh > /root/build.log 2>&1 < /dev/null & sleep 8; echo build-started; head -20 /root/build.log
+#   1166 python /root/busy2.py
+
+# ---
+# run_bench.sh: finished rc=0
+# out             perf_data/MetaX_C600-U/20261026_052535
