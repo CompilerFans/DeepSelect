@@ -172,13 +172,18 @@ def main():
     env = {k: v for k, v in os.environ.items() if k != "DS_TOPK_BACKEND"}
     out = subprocess.run([sys.executable, "-c", code], env=env,
                          capture_output=True, text=True)
-    check("the default resolves to 'torch' with no DS_TOPK_BACKEND",
+    check("the default resolves to 'maca_c' with no DS_TOPK_BACKEND",
+          out.stdout.strip().endswith("maca_c"), out.stdout.strip() + out.stderr[-200:])
+    out = subprocess.run([sys.executable, "-c", code],
+                         env={**env, "DS_TOPK_BACKEND": "torch"},
+                         capture_output=True, text=True)
+    check("DS_TOPK_BACKEND=torch resolves the reference",
           out.stdout.strip().endswith("torch"), out.stdout.strip() + out.stderr[-200:])
     out = subprocess.run([sys.executable, "-c", code],
-                         env={**env, "DS_TOPK_BACKEND": "maca_c"},
+                         env={**env, "DS_TOPK_BACKEND": " TORCH "},
                          capture_output=True, text=True)
-    check("DS_TOPK_BACKEND=maca_c resolves the kernel",
-          out.stdout.strip().endswith("maca_c"), out.stdout.strip() + out.stderr[-200:])
+    check("a padded, upper-case name still resolves to the reference",
+          out.stdout.strip().endswith("torch"), out.stdout.strip() + out.stderr[-200:])
 
     print(f"\n{PASS[0]} passed, {len(FAIL)} failed")
     for f in FAIL:
