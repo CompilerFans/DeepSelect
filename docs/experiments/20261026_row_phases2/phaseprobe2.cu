@@ -28,6 +28,7 @@
 
 #include <csrc/maca_kernels/common/radix_core.cuh>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -38,6 +39,9 @@ using namespace topk_select_radix;
 
 #ifdef DS_PHASE_TIMERS
 extern __device__ unsigned long long ds_phase[16];
+#endif
+#ifdef DS_ONEPASS
+extern __device__ unsigned int ds_probe_cut;
 #endif
 
 __global__ __launch_bounds__(512) void rowk(const maca_bfloat16 *__restrict__ in,
@@ -122,6 +126,24 @@ int main(int argc, char **argv) {
     cudaMemcpy(in, row.data(), row_bytes, cudaMemcpyHostToDevice);
     if (ROWS > 1) repl<<<168, 512>>>((uint4 *)in, (const uint4 *)in, V / 8, ROWS);
     cudaMemset(nanflags, 0, ROWS);
+
+#ifdef DS_ONEPASS
+    // The cut a one-pass dataflow would have to guess: the bin of the
+    // 1.15 x topk-th largest element, so the staged set is a superset of the
+    // answer and everything downstream stays exact.  The bin is taken off an
+    // order-preserving key, which is what `refine_bin` computes in the kernel.
+    {
+        std::vector<uint16_t> keys(row);
+        for (uint32_t i = 0; i < V; i++)
+            keys[i] = (keys[i] & 0x8000u) ? (uint16_t)~keys[i]
+                                          : (uint16_t)(keys[i] | 0x8000u);
+        const uint32_t rank = (uint32_t)((double)K * 1.15);
+        std::nth_element(keys.begin(), keys.begin() + (V - rank), keys.end());
+        const uint32_t cut = keys[V - rank] >> 4;
+        cudaMemcpyToSymbol(ds_probe_cut, &cut, sizeof(cut));
+        printf("one-pass probe: cut bin %u (rank %u of %u)\n", cut, rank, V);
+    }
+#endif
 
     const size_t smem = radix_smem_plan(K, false, true).total_bytes;
     cudaFuncSetAttribute(rowk, cudaFuncAttributeMaxDynamicSharedMemorySize,
