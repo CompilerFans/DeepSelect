@@ -192,12 +192,14 @@ __device__ __forceinline__ void overflow_emit_member(
 // a skipped entry is exactly a line the walk would have fetched and found
 // nothing to do with.
 
-// The density floor for the block summary's histogram: the second walk reads
-// the blocks whose max is at or above the cut, which is `1-(1-k/V)^64` of
-// them, so the route costs `1/855 + f/545` against the single element walk's
-// `1/545` and breaks even at V/k ~= 142 (measured on C600U).  The floor is
-// twice that, because below it the row is walked twice for nothing.
-constexpr uint32_t kBlockHistMinRowPerSlot = 256;
+// The density floor for the block summary's histogram.  Both arms count the
+// row once; the difference is pass 2 -- the element arm walks the whole row
+// again to collect, the summary arm only the blocks its cut keeps,
+// `1-(1-k/V)^64` of them.  That is the comparison the floor prices, and the
+// summary arm wins well below the density a two-pass reading of it suggests,
+// because the element arm's collect is a full row and the summary arm's is
+// not.  Record: `docs/experiments/20261026_density_floor/`.
+constexpr uint32_t kBlockHistMinRowPerSlot = 128;
 
 // Walk the blocks a summary named, with the aligned row walk's own layout: the
 // eight lanes of a group take one `uint4` each out of the same 64-element block
