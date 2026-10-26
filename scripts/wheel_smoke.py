@@ -169,8 +169,9 @@ def main():
     # -- 3. the default backend is a constant, and the argument is the only
     # way to choose.  A fresh process with no environment set must answer the
     # kernel; `backend="torch"` must still reach the reference.
-    code = ("import deep_select;"
-            "print(deep_select.interface._default_backend())")
+    code = ("import inspect, deep_select;"
+            "print(inspect.signature(deep_select.topk)"
+            ".parameters['backend'].default)")
     base_env = {k: v for k, v in os.environ.items() if k != "DS_TOPK_BACKEND"}
     out = subprocess.run([sys.executable, "-c", code], env=base_env,
                          capture_output=True, text=True)

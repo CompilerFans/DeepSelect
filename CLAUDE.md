@@ -40,12 +40,16 @@ into the slow one.  The cost is the opposite one now: a caller who names
 nothing gets the kernel, and the two suites still validate it against
 `"torch"`, which is asked for by name.
 
-The default is **not** a string default in the signature — `backend=None`
-means "the constant default", and `_default_backend()` returns it.  There is no
-process setting: `DS_TOPK_BACKEND` was removed on 2026-10-26, because a
-process-wide default is read somewhere other than the call that depends on it,
-and the call argument is the one place a reader can see the choice.  A caller
-who wants the reference passes `backend="torch"`.
+The default **is** a string default in the signature: `backend: str =
+"maca_c"`.  There is no process setting and no resolver — `DS_TOPK_BACKEND` was
+removed on 2026-10-26, because a process-wide default is read somewhere other
+than the call that depends on it, and the signature is the one place a reader
+(and `inspect.signature`) can see the choice.  A caller who wants the reference
+passes `backend="torch"`; an unknown name raises before anything is read off
+`input`.  That is mcDeepGEMM's shape (`backend: str = ""` plus a table lookup
+and a `ValueError`), minus the table: the two arms here take different
+arguments, so a dispatch table would be two closures unpacking the same
+fourteen and no reader would be better off.
 
 Two modes therefore say different things and both are needed when the default
 moves: `tests/test.py --backend torch` **pins** the call (it passes

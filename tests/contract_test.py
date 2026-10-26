@@ -361,13 +361,14 @@ def semantics(backend):
     # -- the default backend is a constant, and the call argument is the only
     # way to choose.  There is no process setting to keep in step with the
     # call, which is the point: what a bare call runs is visible in this file.
-    code = ("from deep_select.interface import _default_backend;"
-            "print(_default_backend())")
+    code = ("import inspect, deep_select;"
+            "print(inspect.signature(deep_select.topk)"
+            ".parameters['backend'].default)")
     base_env = {k: v for k, v in os.environ.items() if k != "DS_TOPK_BACKEND"}
     base_env["PYTHONPATH"] = os.getcwd()
     out = subprocess.run([sys.executable, "-c", code], env=base_env,
                          capture_output=True, text=True)
-    check("the default backend is the kernel",
+    check("the signature default is the kernel",
           out.stdout.strip().endswith("maca_c"), out.stdout.strip() + out.stderr[-200:])
     out = subprocess.run([sys.executable, "-c", code],
                          env={**base_env, "DS_TOPK_BACKEND": "torch"},

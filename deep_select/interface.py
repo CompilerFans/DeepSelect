@@ -6,30 +6,12 @@ from typing import Optional, Tuple
 
 from . import _binding
 from ._backends import topk_torch
-from ._log import log, log_call
+from ._log import log_call
 
 
 # The backend names.  `maca_c` is the kernel this device has; `torch` is a
 # reference implementation of the contract.
 _BACKENDS = ("maca_c", "torch")
-
-# What a call that names no backend runs.  A constant rather than a process
-# setting: the choice travels in the call (`backend="torch"`), which is the one
-# place a reader of that call can see it, and the operator this tree ports has
-# no backend selector at all -- upstream's indexer and sampler call `topk(...)`
-# and get the platform's kernel, so that is what naming nothing must mean here.
-_DEFAULT_BACKEND = "maca_c"
-
-
-def _default_backend() -> str:
-    """What a call with no `backend=` runs: `"maca_c"`.
-
-    Kept as a function because it is the resolution `topk`'s signature
-    documents, and because a caller that needs to know what a bare call will do
-    should ask this rather than read the constant.
-    """
-    return _DEFAULT_BACKEND
-
 
 # The extension the build produces.
 _KERNEL_NAME = "deep_select_maca"
@@ -80,7 +62,7 @@ def topk(
     value_oob_fill_value: float = float("-inf"),
     return_value: bool = True,
     abort_when_nan_found: bool = True,
-    backend: Optional[str] = None,
+    backend: str = "maca_c",
     check_nan: bool = True,
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """
@@ -102,12 +84,11 @@ def topk(
         return_value: bool. If False, only return indices without values to accelerate the kernel. The return value is still a Tuple, but the first element will be None.
         abort_when_nan_found: bool. When a NaN is found, if True, aborts the whole kernel; if False, writes 0x3F3F3F3F to the corresponding output_idx[batch_idx][0] and exits.
                 Exception: when the row's length <= topk, it is skipped. Inert when `check_nan` is False, since then nothing is ever found.
-        backend: str. Which implementation to run: `"maca_c"` (the default
-                when this is None), this device's MACA kernel, which is what
-                the operator this tree ports runs and the fast one; or
-                `"torch"`, a reference implementation built from torch ops that
-                runs on any device and dtype, and the one to ask for when
-                checking the kernel.
+        backend: str. Which implementation to run: `"maca_c"` (the default),
+                this device's MACA kernel, which is what the operator this tree
+                ports runs and the fast one; or `"torch"`, a reference
+                implementation built from torch ops that runs on any device and
+                dtype, and the one to ask for when checking the kernel.
         check_nan: bool. Whether each row is scanned for a NaN at all.  With
                 False no scan runs, `abort_when_nan_found` never fires, and a
                 row holding a NaN is ranked like any other value -- the
@@ -129,13 +110,10 @@ def topk(
                     The output tensors may not be contiguous, when topk * sizeof(input.dtype or indices_dtype) is not a multiple of 32 Bytes
     """
 
-    # `None` means the constant default (see `_default_backend`).
-    if backend is None:
-        backend = _default_backend()
-        # The call record shows `backend=None`; this is the backend it became.
-        log("backend resolved", backend=backend)
     # Checked before anything is read off `input`, so a mistyped backend name
     # is reported as such rather than as whatever a None tensor does next.
+    # There is nothing to resolve first: the default is in the signature, where
+    # `inspect.signature` and a reader of this file both see it.
     if backend not in _BACKENDS:
         raise ValueError(
             f"Unsupported backend: {backend!r}. Expected one of "
