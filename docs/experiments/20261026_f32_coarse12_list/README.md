@@ -83,7 +83,13 @@
 
 bf16 的 95 个 row 格与 13 个 split 格不动,说明改动的边界就是这段循环。
 
-## 3. 边界
+## 3. 门禁
+
+`./run_test.sh --test`(200 格抽样 + 整张性能网格),在**干净重建**的落地产物
+`f190f0dccc05` 上:**316/322 通过,0 check_fail,0 crash,6 skip** —— skip 全是已知的
+大 shape OOM,与上一轮各提交的门禁读数逐项相同。
+
+## 4. 边界
 
 - 改动在 `csrc/maca_kernels/common/topk_coarse12.cuh`,三个 family 的产物都会变;
   只在 xcore1600(C600-U)上构建和测量,xcore1000 / xcore1500 未构建、未测量。
