@@ -45,10 +45,7 @@ namespace topk_select_radix {
     # 2 = the kept-block list build.  Slot 6 counts the rows that got a list.
     ("        use_list = list_cap > 0 && nlist <= list_cap;\n    }\n",
      "        use_list = list_cap > 0 && nlist <= list_cap;\n    }\n    DS_PH(2);\n"
-     "    if (threadIdx.x == 0u) {\n"
-     "        if (use_list) atomicAdd(&ds_phase[6], 1ull);\n"
-     "        atomicAdd(&ds_phase[13], (unsigned long long)nlist);\n"
-     "    }\n"),
+     "    if (threadIdx.x == 0u && use_list) atomicAdd(&ds_phase[6], 1ull);\n"),
     # 3 = the staging walk over the list, plus the row's tail.  Slot 7 counts
     # the rows that kept the arena (the rest fell back to the counting walk).
     ("            __syncthreads();\n            num_staged = s_nstage;\n",
@@ -57,10 +54,15 @@ namespace topk_select_radix {
     # the line above.
     ("            packed = staged && fits_packed;\n",
      "            packed = staged && fits_packed;\n"
-     "            if (threadIdx.x == 0u) {\n"
-     "                if (staged) atomicAdd(&ds_phase[7], 1ull);\n"
-     "                atomicAdd(&ds_phase[14], (unsigned long long)num_staged);\n"
-     "            }\n"),
+     "            if (threadIdx.x == 0u && staged) atomicAdd(&ds_phase[7], 1ull);\n"),
+    # 13 = the counting arm's own histogram walk over the row, and 14 = its
+    # collect.  Neither exists on the staged arm.
+    ("            scan_threshold(remain_topk);\n        } else {\n",
+     "            scan_threshold(remain_topk);\n            DS_PH(13);\n        } else {\n"),
+    ("            for (uint32_t idx = tail_start + tx; idx < length; idx += BLOCK_SIZE)\n"
+     "                collect_one(idx, __ldg(input + idx));\n        }\n",
+     "            for (uint32_t idx = tail_start + tx; idx < length; idx += BLOCK_SIZE)\n"
+     "                collect_one(idx, __ldg(input + idx));\n            DS_PH(14);\n        }\n"),
     # 4 = the staged scan: the arena pass over the landing byte's members, the
     # scan over them and the narrow.
     ("            __syncthreads();\n            narrow(remain_topk, s_histogram_buf[1]);\n",

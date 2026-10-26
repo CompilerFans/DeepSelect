@@ -153,7 +153,13 @@ int main(int argc, char **argv) {
                                                   smem);
     const int concurrent = occ * 28;
 
-    rowk<<<ROWS, BLOCK, smem>>>(in, out, V, K, nanflags, bmax, blist);
+    // The tables are allocated by the call site only when the row is long and
+    // dense enough (`kSkipMinVocab`, `kSkipMinRowPerSlot`); a probe that always
+    // hands them over measures a summary the caller never asks for.
+    const bool tables = V >= 65536u && (uint64_t)V >= (uint64_t)K * 128u;
+    rowk<<<ROWS, BLOCK, smem>>>(in, out, V, K, nanflags,
+                                tables ? bmax : nullptr,
+                                tables ? blist : nullptr);
     cudaError_t err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
         printf("ERROR: %s\n", cudaGetErrorString(err));
@@ -177,7 +183,9 @@ int main(int argc, char **argv) {
     // cycles are clock-invariant; the wall is not, so `best` is reported beside
     // `last` and the ramp is the difference.
     for (int i = 0; i < 300; i++)
-        rowk<<<ROWS, BLOCK, smem>>>(in, out, V, K, nanflags, bmax, blist);
+        rowk<<<ROWS, BLOCK, smem>>>(in, out, V, K, nanflags,
+                                    tables ? bmax : nullptr,
+                                    tables ? blist : nullptr);
     cudaDeviceSynchronize();
 
     cudaEvent_t a, b;
@@ -186,7 +194,9 @@ int main(int argc, char **argv) {
     float best = 1e30f, last = 0;
     for (int i = 0; i < 30; i++) {
         cudaEventRecord(a);
-        rowk<<<ROWS, BLOCK, smem>>>(in, out, V, K, nanflags, bmax, blist);
+        rowk<<<ROWS, BLOCK, smem>>>(in, out, V, K, nanflags,
+                                    tables ? bmax : nullptr,
+                                    tables ? blist : nullptr);
         cudaEventRecord(b);
         cudaEventSynchronize(b);
         float ms = 0;
@@ -236,10 +246,14 @@ int main(int argc, char **argv) {
     printf("%s  %12.0f %10.3f %7.1f%%   (both scans)\n", "12 narrow loop",
            (double)ph[12] / n, (double)ph[12] / n / 1e3,
            (double)ph[12] / (double)ph[5] * 100);
-    printf("rows with list %.0f/%.0f, rows staged %.0f/%.0f, mean nlist %.1f, "
-           "mean num_staged %.1f\n",
+    static const char *cnt[2] = {"13 count hist", "14 collect   "};
+    for (int i = 13; i < 15; i++)
+        printf("%s  %12.0f %10.3f %7.1f%%   (counting arm)\n", cnt[i - 13],
+               (double)ph[i] / n, (double)ph[i] / n / 1e3,
+               (double)ph[i] / (double)ph[5] * 100);
+    printf("rows with list %.0f/%.0f, rows staged %.0f/%.0f\n",
            (double)ph[6] / launches, (double)ROWS, (double)ph[7] / launches,
-           (double)ROWS, (double)ph[13] / n, (double)ph[14] / n);
+           (double)ROWS);
 #endif
     return 0;
 }
