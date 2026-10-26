@@ -42,8 +42,10 @@ nothing gets the kernel, and the two suites still validate it against
 
 The default is **not** a string default in the signature — `backend=None`
 means "take the process default", resolved per call by `_default_backend()`
-from `DS_TOPK_BACKEND` (unrecognized values ignored, so a typo in the
-environment cannot break every call).  Read the resolution there rather than
+from `DS_TOPK_BACKEND` (compared after `strip().lower()`; a value that still
+names no backend is ignored rather than raised, so a typo in the environment
+cannot break every call, and reported once on stderr so it cannot silently
+hand a caller the other implementation either).  Read the resolution there rather than
 in the signature: `inspect.signature(deep_select.topk)` reports `None`, and a
 caller who wants the reference asks for it by name or exports
 `DS_TOPK_BACKEND=torch`.

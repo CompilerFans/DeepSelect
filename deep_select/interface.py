@@ -1,5 +1,6 @@
 import functools
 import os
+import sys
 import torch
 
 from typing import Optional, Tuple
@@ -14,6 +15,27 @@ from ._log import log, log_call
 _BACKENDS = ("maca_c", "torch")
 
 
+_UNKNOWN_BACKEND_REPORTED = False
+
+
+def _report_unknown_backend(value: str) -> None:
+    """Say once, on stderr, that a non-empty `DS_TOPK_BACKEND` named nothing.
+
+    Reported rather than raised: one bad environment variable must not break
+    every call in the process.  Reported at all because the default is the
+    kernel now -- a caller who exported a misspelling of `torch` would
+    otherwise be handed the fast path without a word, and that is the
+    direction in which a defect hides.  Printed rather than warned so a
+    caller's `-W error` cannot turn it into the exception this avoids.
+    """
+    global _UNKNOWN_BACKEND_REPORTED
+    if _UNKNOWN_BACKEND_REPORTED:
+        return
+    _UNKNOWN_BACKEND_REPORTED = True
+    print(f"deep_select: DS_TOPK_BACKEND={value!r} names no backend "
+          f"({', '.join(_BACKENDS)}); using maca_c", file=sys.stderr)
+
+
 def _default_backend() -> str:
     """`DS_TOPK_BACKEND` if it names a backend, else `"maca_c"`.
 
@@ -21,12 +43,18 @@ def _default_backend() -> str:
     backend selector at all: upstream's call sites (DeepInfer's indexer and
     sampler) call `topk(...)` and get that platform's kernel, so a caller that
     names nothing must get the kernel here too.  `"torch"` stays available for
-    differential testing; it is asked for by name.  An unrecognized value is
-    ignored rather than raised.
+    differential testing; it is asked for by name.
+
+    The value is compared after `strip().lower()`, because an environment
+    variable arrives from a shell and `" torch"` or `"TORCH"` is a spelling of
+    the same name, not a request for something else.  A value that still names
+    no backend is ignored -- never raised -- and reported once.
     """
-    v = os.environ.get("DS_TOPK_BACKEND")
-    if v and v in _BACKENDS:
+    v = os.environ.get("DS_TOPK_BACKEND", "").strip().lower()
+    if v in _BACKENDS:
         return v
+    if v:
+        _report_unknown_backend(v)
     return "maca_c"
 
 
