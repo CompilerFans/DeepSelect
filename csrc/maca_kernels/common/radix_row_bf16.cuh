@@ -710,6 +710,33 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // small for the candidates falls back to the counting walk, which is what
     // the row did before.  Walk and arena sizing:
     // `docs/experiments/20261025_row_walk/`.
+    // ── what the arena holds ────────────────────────────────────────────────
+    // Every loop after the walk ranks what it staged, and the ranking is a
+    // property of the element the walk already read: its 12-bit bin travels
+    // above the index, so those loops read shared memory instead of going back
+    // to the row at an index the arena handed them in no order.  The sub-bin
+    // inside the threshold bin is the one field the bin does not carry, and
+    // that set is the bin's own members rather than the arena's.
+    //
+    // A row longer than the index field keeps the bare index and every loop
+    // re-ranks from the row.  The counting walk writes the bare index as well:
+    // it fills the arena only when the staging walk overflowed or did not run.
+    constexpr uint32_t kStagedIdxBits = 20;
+    constexpr uint32_t kStagedIdxMask = (1u << kStagedIdxBits) - 1u;
+    const bool fits_packed = length <= (1u << kStagedIdxBits);
+    // Set once the arm is known, below; the readers run after that.
+    bool packed = false;
+    // The two fields, for every loop that reads what the walk staged.  The
+    // layout is the arm's: the staging walk packs, the counting walk does not,
+    // and a staged overflow hands the arena to the counting walk.
+    const auto staged_idx = [&](uint32_t e) {
+        return packed ? (e & kStagedIdxMask) : e;
+    };
+    const auto staged_bin = [&](uint32_t e, uint32_t idx) {
+        return packed ? (e >> kStagedIdxBits)
+                      : (refine_bin(__ldg(input + idx)) >> kCoarse12Shift);
+    };
+
     uint32_t num_staged = 0;
     bool staged = false;
     if (block_hist) {
@@ -720,10 +747,13 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             __syncthreads();
             const auto stage_one = [&](uint32_t idx, maca_bfloat16 raw) {
                 const uint32_t key = refine_bin(raw);
-                if ((key >> kCoarse12Shift) < cut) return;
+                const uint32_t bin = key >> kCoarse12Shift;
+                if (bin < cut) return;
                 atomicAdd(&s_histogram[key >> 8], 1u);
                 const uint32_t pos = atomicAdd(&s_nstage, 1u);
-                if (pos < SMEM_INPUT_SIZE) s_input_flat[pos] = idx;
+                if (pos < SMEM_INPUT_SIZE)
+                    s_input_flat[pos] =
+                        fits_packed ? ((bin << kStagedIdxBits) | idx) : idx;
             };
             walk_kept_blocks<BLOCK_SIZE>(input, block_list, nlist, stage_one);
             for (uint32_t idx = list_end + tx; idx < length; idx += BLOCK_SIZE)
@@ -731,6 +761,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             __syncthreads();
             num_staged = s_nstage;
             staged = num_staged <= SMEM_INPUT_SIZE;
+            packed = staged && fits_packed;
         }
         if (!staged) {
             const auto hist_one = [&](uint32_t idx, maca_bfloat16 raw) {
@@ -764,10 +795,11 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
             __syncthreads();
             const uint32_t high = s_high_threshold_bin_id;
             for (uint32_t i = tx; i < num_staged; i += BLOCK_SIZE) {
-                const uint32_t key = refine_bin(__ldg(input + s_input_flat[i]));
-                if ((key >> 8) == high)
-                    atomicAdd(&s_histogram_buf[1][(key >> kCoarse12Shift) &
-                                                  (kCoarse12SubBins - 1u)], 1u);
+                const uint32_t e = s_input_flat[i];
+                const uint32_t idx = staged_idx(e);
+                const uint32_t bin = staged_bin(e, idx);
+                if ((bin >> kCoarse12Shift) == high)
+                    atomicAdd(&s_histogram_buf[1][bin & (kCoarse12SubBins - 1u)], 1u);
             }
             __syncthreads();
             narrow(remain_topk, s_histogram_buf[1]);
@@ -784,8 +816,9 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                 // The window is exactly the count above the coarse bin, and the
                 // arena holds every element at or above the block cut.
                 for (uint32_t i = tx; i < num_staged; i += BLOCK_SIZE) {
-                    const uint32_t idx = s_input_flat[i];
-                    if ((refine_bin(__ldg(input + idx)) >> kCoarse12Shift) > threshold_bin)
+                    const uint32_t e = s_input_flat[i];
+                    const uint32_t idx = staged_idx(e);
+                    if (staged_bin(e, idx) > threshold_bin)
                         output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
                 }
             } else if (use_list) {
@@ -816,9 +849,14 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
         // is a property of the bin.
         if (staged) {
             for (uint32_t i = tx; i < num_staged; i += BLOCK_SIZE) {
-                const uint32_t key = refine_bin(__ldg(input + s_input_flat[i]));
-                if ((key >> kCoarse12Shift) == threshold_bin)
-                    atomicAdd(&s_histogram[key & (kCoarse12SubBins - 1u)], 1u);
+                const uint32_t e = s_input_flat[i];
+                const uint32_t idx = staged_idx(e);
+                if (staged_bin(e, idx) != threshold_bin) continue;
+                // The refine ranks the sixteen keys inside the threshold bin and
+                // the bin does not carry that nibble; this is that bin's own
+                // members, the one set the arena cannot answer for.
+                atomicAdd(&s_histogram[refine_bin(__ldg(input + idx)) &
+                                       (kCoarse12SubBins - 1u)], 1u);
             }
         } else {
             // One element of the collect, in the shape both walks hand it: the
@@ -915,31 +953,46 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
                 emit_member(idx, __ldg(input + idx));
             __syncthreads(); return;
         }
-        // The window's own threshold as a whole 16-bit key, coarse bin and fine
-        // nibble together.  The counting arm's arena holds the threshold bin
-        // alone, so this is the same question as comparing the nibble; the
-        // staged arm's holds every element at or above the block cut, which is
-        // a superset, and one key comparison is what tells "above", "in the tie
-        // bin" and "below the cut" apart in that one.
-        const uint32_t emit_key = (coarse_threshold << kCoarse12Shift) | threshold_bin;
+        // The window's own threshold is the coarse bin together with the fine
+        // nibble, and the arena can answer for the bin alone: an entry whose bin
+        // is above the threshold is in the window whatever its nibble is, one
+        // below it never is, and only the threshold bin's own members need the
+        // row again.
         const uint32_t num = staged ? num_staged : s_num_input[0];
         if (remain_topk == 0) {
+            // Nothing is owed from the tie bin's exact-nibble members, so the
+            // window is everything above the threshold key: a higher bin
+            // outright, the tie bin only above the fine nibble.
             for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
-                auto idx = s_input_flat[i];
-                if (refine_bin(__ldg(input + idx)) > emit_key)
+                const uint32_t e = s_input_flat[i];
+                const uint32_t idx = staged_idx(e);
+                const uint32_t bin = staged_bin(e, idx);
+                if (bin > coarse_threshold ||
+                    (bin == coarse_threshold &&
+                     (refine_bin(__ldg(input + idx)) & (kCoarse12SubBins - 1u)) >
+                         threshold_bin))
                     output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
             }
             __syncthreads(); return;
         }
         __syncthreads();
         for (uint32_t i = tx; i < num; i += BLOCK_SIZE) {
-            auto idx = s_input_flat[i];
-            const uint32_t key = refine_bin(__ldg(input + idx));
-            if (key > emit_key) {
+            const uint32_t e = s_input_flat[i];
+            const uint32_t idx = staged_idx(e);
+            const uint32_t bin = staged_bin(e, idx);
+            if (bin > coarse_threshold) {
                 output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
-            } else if (key == emit_key) {
-                auto p = atomicAdd(&s_last_remain, -1);
-                if (p > 0) output[topk - p] = static_cast<int32_t>(idx);
+            } else if (bin == coarse_threshold) {
+                // The tie bin, whose sixteen keys are what `emit_key`'s low
+                // nibble ranks.
+                const uint32_t nibble =
+                    refine_bin(__ldg(input + idx)) & (kCoarse12SubBins - 1u);
+                if (nibble > threshold_bin) {
+                    output[atomicAdd(&s_counter, 1u)] = static_cast<int32_t>(idx);
+                } else if (nibble == threshold_bin) {
+                    auto p = atomicAdd(&s_last_remain, -1);
+                    if (p > 0) output[topk - p] = static_cast<int32_t>(idx);
+                }
             }
         }
         __syncthreads();
