@@ -217,7 +217,11 @@ __device__ __forceinline__ void walk_kept_blocks(const maca_bfloat16* input,
                                                  uint32_t n, F&& body) {
     const uint32_t lane = threadIdx.x & 7u;
     const uint32_t group = threadIdx.x >> 3;
-#pragma unroll 2
+    // One load per iteration, and not unrolled: this body is inlined into every
+    // arm that carries a list, so an unroll factor multiplies the code each of
+    // them holds, and the extra loads in flight buy nothing at the occupancy
+    // the kernel runs at.  `docs/experiments/20261026_unroll_width/`.
+#pragma unroll 1
     for (uint32_t j = group; j < n; j += BLOCK_SIZE / 8u) {
         const uint32_t base = list[j] << 6;
         const uint4 v = __ldg(reinterpret_cast<const uint4*>(input + base) + lane);
