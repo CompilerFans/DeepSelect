@@ -1,5 +1,4 @@
 import functools
-import os
 import torch
 
 from typing import Optional, Tuple
@@ -14,12 +13,6 @@ _BACKENDS = ("maca_c", "torch")
 _KERNEL_NAME = "deep_select_maca"
 
 
-@functools.lru_cache(maxsize=1)
-def _backend_for():
-    """The loaded tvm-ffi extension implementing `maca_c`."""
-    return _binding.load(_KERNEL_NAME)
-
-
 # `structs.h`'s requirement, for when no kernel is built.
 _ALIGNMENT_REQUIREMENT_BYTES = (1024, 32)
 
@@ -31,7 +24,7 @@ def get_stride_requirement() -> Tuple[int, int]:
     """
     try:
         # The FFI entry returns a python list, not a C++ pair; normalize it.
-        pair = _backend_for().get_alignment_requirement()
+        pair = _binding.load(_KERNEL_NAME).get_alignment_requirement()
         return (int(pair[0]), int(pair[1]))
     except RuntimeError:
         return _ALIGNMENT_REQUIREMENT_BYTES
@@ -164,10 +157,7 @@ def topk(
         )
         # `launching()` installs torch's current stream, which the C++ side
         # reads through TVMFFIEnvGetStream; without it the null handle means
-        # the legacy default stream.  DEEP_SELECT_NO_STREAM_GUARD bisects it.
-        if os.environ.get("DEEP_SELECT_NO_STREAM_GUARD"):
-            _backend_for().topk(*backend_args)
-        else:
-            with _binding.launching():
-                _backend_for().topk(*backend_args)
+        # the legacy default stream.
+        with _binding.launching():
+            _binding.load(_KERNEL_NAME).topk(*backend_args)
         return output_val, output_idx

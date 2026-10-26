@@ -1819,8 +1819,10 @@ is the harness layer, unchanged, not the ABI.
 its stream from `TVMFFIEnvGetStream`, which reports the null handle unless
 something installs torch's current stream; the null handle is the legacy default
 stream, which does not synchronize with torch's non-blocking side streams. The
-one call site is wrapped; `DEEP_SELECT_NO_STREAM_GUARD=1` is the explicit
-escape hatch for bisecting it.
+one call site is wrapped, unconditionally: the guard it used to offer
+(`DEEP_SELECT_NO_STREAM_GUARD`) was removed on 2026-10-26 with the other
+process-wide switches — bisecting a stream problem is a source edit, not a
+setting.
 
 **One thing did not decouple, and the other now has.** `get_alignment_requirement`
 returns `Array<int64_t>` rather than the pybind build's `std::pair` (tvm-ffi
