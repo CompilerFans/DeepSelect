@@ -7,6 +7,17 @@ there.
 
 ## Unreleased
 
+### The wheel names the torch it was built against
+
+The local label carried the toolkit generation, the git revision and the build
+time, but not the torch -- the same compatibility fact one level up, since
+`CUDAExtension` links c10/torch/torch_cuda from the torch that built the
+extension.  It is now
+`<base>+maca<MACA_VERSION>torch<major>.<minor>.<git-rev>.<timestamp>`, the
+torch part read from the installed distribution metadata (a missing torch
+leaves the tag off) in the spelling mcDeepGEMM's `setup.py` folds in.  Two
+wheels that differ only in their torch ABI no longer share a filename.
+
 ### The process default is the kernel (`maca_c`)
 
 A call that names no `backend=` now runs the MACA kernel.  The operator this
