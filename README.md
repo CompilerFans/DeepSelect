@@ -127,6 +127,10 @@ For the full signature, see [`deep_select/interface.py`](deep_select/interface.p
 
 `backend=` selects the implementation: `"maca_c"` (the default) is the MACA kernel, `"torch"` is the reference implementation. A call with no `backend=` runs the kernel, which is the only behaviour upstream's CUDA API has; the reference is asked for by naming it, `backend="torch"`. There is no process-wide setting — the choice travels in the call, where it can be read.
 
+### Backend modules
+
+Upstream's `interface` imports its backend module by name — `deep_select.deep_select_cuda` on CUDA, `deep_select.deep_select_npu` on Ascend. This tree does the same with `deep_select.deep_select_maca`, and `deep_select.deep_select_cuda` is an alias of that module, so a framework that imports or probes the official CUDA backend name finds the MACA backend here.
+
 ### Variable-length rows
 
 `end` sets a per-row upper bound (exclusive). Rows shorter than `topk` are padded with

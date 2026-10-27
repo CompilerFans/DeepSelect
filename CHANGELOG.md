@@ -7,6 +7,19 @@ there.
 
 ## Unreleased
 
+### The backend is loaded by name, as upstream loads it
+
+`interface` reached the artifact through `_binding.load("deep_select_maca")`
+directly.  It now does what the official wheel does: `_import_backend()`
+returns the backend module by name -- `deep_select_npu` / `deep_select_cuda`
+from a platform probe there, `deep_select_maca` (the one platform this tree
+has) here -- and the interface calls `topk` / `get_alignment_requirement` on
+it.  `deep_select.deep_select_maca` is therefore importable: a thin surface
+over the tvm-ffi artifact, still lazy about loading it, and
+`deep_select_cuda` is an alias of it, so a framework written against the
+official CUDA backend name finds this backend without a fork-specific
+spelling.  The stream guard moved next to the launch it protects.
+
 ### The wheel names the torch it was built against
 
 The local label carried the toolkit generation, the git revision and the build

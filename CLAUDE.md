@@ -22,6 +22,8 @@ This directory is **its own git repository** (`origin` = this fork's remote,
 
 Public entry point is `deep_select.topk` (`deep_select/interface.py`). **Its signature is upstream's, parameter for parameter** — the same 14 positional-or-keyword arguments in the same order with the same defaults (`input … abort_when_nan_found`) — plus exactly two added keywords, `backend: Optional[str] = None` and `check_nan: bool = True`, **both appended after upstream's last argument**. That is checkable rather than asserted: `git diff -U0 upstream/main HEAD -- deep_select/interface.py` shows **exactly two added lines and no deleted one** inside the `def topk(` parameter list — `backend` and `check_nan`, after `abort_when_nan_found` — while the docstring and the body do differ. The base of that diff is the merge base `0f03b68`: `upstream/main` is **no longer an ancestor** of this branch (it is one commit ahead, `bfa4507`, the Ascend port), and that commit leaves the parameter list alone, which is what keeps the statement true. An upstream call site works here unchanged, including one that passes every argument positionally — which is the whole reason the added keywords go *after* `abort_when_nan_found` rather than beside the argument they belong with: `check_nan` is the NaN check's switch and reads naturally next to it, but inserting it there would shift `backend` under a caller that passed its 15 arguments positionally, silently rebinding a backend name to a bool. Upstream exports `topk` and `get_stride_requirement`; this tree adds `topk_torch`.
 
+Loading follows upstream's: `interface._import_backend()` imports the backend module by name — `deep_select.deep_select_maca`, the one arm this tree needs where upstream probes for `deep_select_npu` / `deep_select_cuda` — and `deep_select.deep_select_cuda` re-exports that module, so a framework written against the official wheel's CUDA backend finds this one by the name it already knows. The artifact behind the module is still a tvm-ffi module, not an importable extension; `_binding` resolves the per-family `.so` and the module defers that load to the first call.
+
 Two backends, which name **implementations, not architectures** (the same vocabulary as mcDeepGEMM's `backend=`):
 
 - `"maca_c"` (**the default**) — the MACA kernel this device has: the **production path** and the fast one. Which kernel that is is a property of the device, not a call-site choice.
@@ -1819,7 +1821,8 @@ is the harness layer, unchanged, not the ABI.
 its stream from `TVMFFIEnvGetStream`, which reports the null handle unless
 something installs torch's current stream; the null handle is the legacy default
 stream, which does not synchronize with torch's non-blocking side streams. The
-one call site is wrapped, unconditionally: the guard it used to offer
+one call site is `deep_select_maca.topk` — the backend module `interface`
+imports — wrapped unconditionally: the guard it used to offer
 (`DEEP_SELECT_NO_STREAM_GUARD`) was removed on 2026-10-26 with the other
 process-wide switches — bisecting a stream problem is a source edit, not a
 setting.

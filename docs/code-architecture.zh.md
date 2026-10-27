@@ -70,6 +70,8 @@ setup.py                                    SOURCES = 手写 TU + 生成清单
 deep_select/
 ├── __init__.py     __version__.py          导出官方名
 ├── interface.py                            公开契约 + backend 分派（torch / maca_c）
+├── deep_select_maca.py                     后端模块（官方 _import_backend 的单平台臂）
+├── deep_select_cuda.py                     同一后端的别名（框架按官方名对齐）
 ├── _binding.py                             按族装载 .so（tvm-ffi）
 └── _log.py                                 DS_LOG 调用记录
 csrc/
