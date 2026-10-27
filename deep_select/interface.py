@@ -1,20 +1,40 @@
 import functools
+import importlib
 import torch
 
 from typing import Optional, Tuple
 
-from . import _binding
 from ._backends import topk_torch
 from ._log import log_call
 
 
 _BACKENDS = ("maca_c", "torch")
 
-_KERNEL_NAME = "deep_select_maca"
-
 
 # `structs.h`'s requirement, for when no kernel is built.
 _ALIGNMENT_REQUIREMENT_BYTES = (1024, 32)
+
+
+def _import_backend():
+    """The backend module, by the name the build installs.
+
+    The official wheel probes the platform and imports `deep_select_npu` or
+    `deep_select_cuda`; this tree has one platform, so the probe has one arm
+    and the name is `deep_select_maca`.  `deep_select.deep_select_cuda`
+    re-exports it for frameworks that ask for the CUDA backend by name.
+    """
+    name = "deep_select_maca"
+    try:
+        return importlib.import_module(f".{name}", __package__)
+    except ImportError as e:
+        raise ImportError(
+            f"DeepSelect: failed to load the backend `{__package__}.{name}`; "
+            f"the module ships with the package, so a missing one is a "
+            f"damaged install."
+        ) from e
+
+
+_backend = _import_backend()
 
 
 @functools.lru_cache(maxsize=1)
@@ -24,7 +44,7 @@ def get_stride_requirement() -> Tuple[int, int]:
     """
     try:
         # The FFI entry returns a python list, not a C++ pair; normalize it.
-        pair = _binding.load(_KERNEL_NAME).get_alignment_requirement()
+        pair = _backend.get_alignment_requirement()
         return (int(pair[0]), int(pair[1]))
     except RuntimeError:
         return _ALIGNMENT_REQUIREMENT_BYTES
@@ -155,9 +175,7 @@ def topk(
             int(torch.cuda.get_device_properties(
                 torch.cuda.current_device()).multi_processor_count),
         )
-        # `launching()` installs torch's current stream, which the C++ side
-        # reads through TVMFFIEnvGetStream; without it the null handle means
-        # the legacy default stream.
-        with _binding.launching():
-            _binding.load(_KERNEL_NAME).topk(*backend_args)
+        # The stream guard lives in the backend module, next to the launch it
+        # protects.
+        _backend.topk(*backend_args)
         return output_val, output_idx
