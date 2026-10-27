@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import re
 import subprocess
 import warnings
 from datetime import datetime
@@ -609,7 +610,7 @@ def _maca_stack_check(ext_modules, maca_root):
             f"and unset DEEP_SELECT_MACA_STACK_CHECK to skip the check.")
 
 
-# --- the version string's three parts ---------------------------------------
+# --- the version string's four parts ----------------------------------------
 #
 # The MACA toolkit generation, read from the environment the way mcDeepGEMM's
 # `setup.py` reads it and folded in the way it folds it (`<version>+maca<v>`).
@@ -627,9 +628,33 @@ def _maca_stack_check(ext_modules, maca_root):
 # `build.sh` and `install.sh` supply it from `$MACA_PATH` so the default below
 # is what a bare `python setup.py bdist_wheel` gets -- and `maca0.0.0.0` says,
 # truthfully, that no toolkit version was given.
+#
+# The torch build is the other half of that fact and follows the MACA
+# generation in the same spelling mcDeepGEMM folds in
+# (`+maca<MACA>torch<major>.<minor>`): `CUDAExtension` links c10/torch/torch_cuda
+# from the torch that built the wheel, so a wheel bound to one torch ABI is not
+# the wheel for another, and two such wheels must not share a filename.
 maca_version = os.environ.get("MACA_VERSION", "0.0.0.0")
 if maca_version == "0.0.0.0":
     maca_version = os.environ.get("MACA_AI_VERSION", "0.0.0.0")
+
+
+def _torch_tag() -> str:
+    """``torch<major>.<minor>`` of the torch the wheel is built against.
+
+    Read from the installed distribution metadata rather than ``import torch``:
+    this file runs before the build, importing torch there is slow, and the
+    sdist path does not need it at all.  A missing or unparsable torch leaves
+    the tag off instead of inventing one.
+    """
+    try:
+        from importlib.metadata import version as dist_version
+        raw = dist_version("torch")
+    except Exception:
+        return ""
+    match = re.match(r"\s*(\d+)\.(\d+)", raw)
+    return f"torch{match.group(1)}.{match.group(2)}" if match else ""
+
 
 try:
     cmd = ["git", "rev-parse", "--short", "HEAD"]
@@ -676,7 +701,7 @@ class _BdistWheel(_bdist_wheel_base):
 
 setup(
     name="deep_select",
-    version=f"{__version__}+maca{maca_version}.{git_rev}.{datetime_rev}",
+    version=f"{__version__}+maca{maca_version}{_torch_tag()}.{git_rev}.{datetime_rev}",
     packages=find_packages(include=["deep_select"]),
     ext_modules=ext_modules,
     cmdclass={
