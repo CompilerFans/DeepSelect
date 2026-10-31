@@ -211,11 +211,33 @@ __host__ __device__ constexpr size_t radix_sort_bytes(uint32_t topk,
     return sorted ? (size_t)n_pad * sizeof(uint64_t) : (size_t)0;
 }
 
+// One bit per column of the widest row: the ordered emit's index ordering is a
+// rank over a set of distinct columns, and a bitmap turns that into a popcount
+// walk instead of `log(topk)^2` barriers of bitonic network.  The region is the
+// same one the sort scratch occupies, and the two are never live together (a
+// row emits through one or the other).
+//
+// Capped at the width whose bitmap is exactly 16 KB: past it the bitmap outgrows
+// the arena the two share, the lead region would grow with the vocabulary, and
+// the emit falls back to the network.
+constexpr uint32_t kRankBitmapMaxVocab = 131072;
+// 64 words per segment, and at most 64 segments over the capped bitmap -- the
+// second level of the rank scan is one warp-wide array and one serial pass.
+constexpr uint32_t kRankSegmentWords = 64;
+
+__host__ __device__ constexpr size_t radix_bitmap_bytes(uint32_t vocab,
+                                                        bool sorted) {
+    if (!sorted || vocab > kRankBitmapMaxVocab) return 0;
+    return (size_t)((vocab + 31u) / 32u) * sizeof(uint32_t);
+}
+
 static __host__ __device__ constexpr __forceinline__ size_t radix_lead_bytes(
-    uint32_t topk, bool sorted, bool wide) {
+    uint32_t topk, bool sorted, bool wide, uint32_t vocab) {
     const size_t sort_bytes = radix_sort_bytes(topk, sorted);
     const size_t arena_bytes = radix_arena_bytes(wide);
-    return sort_bytes > arena_bytes ? sort_bytes : arena_bytes;
+    const size_t bitmap_bytes = radix_bitmap_bytes(vocab, sorted);
+    size_t lead = sort_bytes > arena_bytes ? sort_bytes : arena_bytes;
+    return bitmap_bytes > lead ? bitmap_bytes : lead;
 }
 
 struct SmemPlan {
@@ -229,8 +251,9 @@ struct SmemPlan {
 // is 2 KB instead of 16 KB, and the difference decides the occupancy the
 // launch gets.
 __host__ __device__ constexpr SmemPlan radix_smem_plan(uint32_t topk,
-                                                       bool sorted, bool wide) {
-    const size_t lead = radix_lead_bytes(topk, sorted, wide);
+                                                       bool sorted, bool wide,
+                                                       uint32_t vocab) {
+    const size_t lead = radix_lead_bytes(topk, sorted, wide, vocab);
     return SmemPlan{radix_arena_bytes(wide), radix_sort_bytes(topk, sorted), lead,
                     lead + sizeof(uint32_t) * (size_t)topk};
 }

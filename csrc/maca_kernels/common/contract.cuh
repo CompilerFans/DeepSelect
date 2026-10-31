@@ -293,6 +293,67 @@ static __device__ __forceinline__ void emit_ordered(
     }
 }
 
+// ── index-ordered emit without a sort ───────────────────────────────────────
+//
+// `sorted_index` asks for the `topk` answers in ascending index order, and the
+// answer is a *set* of distinct columns: each one's output slot is its rank
+// among the set.  A bitmap over `[0, length)` turns that rank into a popcount
+// walk -- clear, mark the `topk` answers, scan -- where the bitonic network
+// above reorders by `log(topk) * (log(topk) + 1) / 2` barriers per row (45 at
+// `topk = 512`).  The answer is only `topk` wide, so the network's barriers,
+// not its comparisons, are what a row pays for it.
+//
+// The bitmap region is the sort scratch's (`radix_bitmap_bytes` caps the width
+// where the two would stop agreeing); `kRankSegmentWords` words per segment put
+// the scan's second level in one warp-wide array over the capped bitmap.
+constexpr uint32_t kRankSegmentWords =
+    topk_select_radix::kRankSegmentWords;
+
+template <typename ValueT, typename OutIdxT, int BLOCK, bool RV>
+static __device__ __forceinline__ void emit_rank_index(
+    uint32_t *bitmap, const uint32_t *selected, const ValueT *input_row,
+    OutIdxT *out_index_row, ValueT *out_value_row, uint32_t n_out,
+    uint32_t topk, uint32_t length, int32_t idx_offset) {
+    const uint32_t nwords = (length + 31u) >> 5u;
+    const uint32_t nseg = (nwords + kRankSegmentWords - 1u) / kRankSegmentWords;
+    __shared__ uint32_t seg_prefix[topk_select_radix::kRankBitmapMaxVocab /
+                                   (32u * topk_select_radix::kRankSegmentWords)];
+    for (uint32_t i = threadIdx.x; i < nwords; i += BLOCK) bitmap[i] = 0;
+    if (threadIdx.x < nseg) seg_prefix[threadIdx.x] = 0;
+    __syncthreads();
+    for (uint32_t i = threadIdx.x; i < n_out; i += BLOCK)
+        atomicOr(&bitmap[selected[i] >> 5u], 1u << (selected[i] & 31u));
+    __syncthreads();
+    // Segment totals, then their exclusive prefix: two barriers whatever the
+    // row's width.  The totals are one popcount and one shared atomic per
+    // *word*, not a serial 64-word walk per segment -- at the widths this path
+    // serves there are five segments and 320 words, so the serial form left
+    // 507 of 512 threads waiting on five of them.
+    for (uint32_t w = threadIdx.x; w < nwords; w += BLOCK)
+        atomicAdd(&seg_prefix[w / kRankSegmentWords], (uint32_t)__popc(bitmap[w]));
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        uint32_t running = 0;
+        for (uint32_t s = 0; s < nseg; ++s) {
+            const uint32_t total = seg_prefix[s];
+            seg_prefix[s] = running;
+            running += total;
+        }
+    }
+    __syncthreads();
+    for (uint32_t i = threadIdx.x; i < n_out; i += BLOCK) {
+        const uint32_t idx = selected[i];
+        const uint32_t w = idx >> 5u;
+        const uint32_t seg = w / kRankSegmentWords;
+        uint32_t rank = seg_prefix[seg];
+        for (uint32_t x = seg * kRankSegmentWords; x < w; ++x)
+            rank += __popc(bitmap[x]);
+        rank += __popc(bitmap[w] & ((1u << (idx & 31u)) - 1u));
+        out_index_row[rank] = (OutIdxT)((int64_t)idx + idx_offset);
+        if (RV) out_value_row[rank] = __ldg(input_row + idx);
+    }
+}
+
 // ── the operator kernel (one row per CTA) ───────────────────────────────────
 //
 // The contract layer over the ported radix selection: two passes over the row,
@@ -307,11 +368,11 @@ static __device__ __forceinline__ void emit_ordered(
 // launcher and this layout both read; `wide` must be the same flag at both
 // sites (`is_same<ValueT, maca_bfloat16>`), or the arena overwrites `selected`.
 static __device__ __forceinline__ void radix_layout(
-    uint8_t *base, uint32_t topk, bool sorted, bool wide, uint32_t *&selected,
-    uint64_t *&sort_buf) {
+    uint8_t *base, uint32_t topk, bool sorted, bool wide, uint32_t vocab,
+    uint32_t *&selected, uint64_t *&sort_buf) {
     sort_buf = reinterpret_cast<uint64_t *>(base);
     selected = reinterpret_cast<uint32_t *>(
-        base + topk_select_radix::radix_lead_bytes(topk, sorted, wide));
+        base + topk_select_radix::radix_lead_bytes(topk, sorted, wide, vocab));
 }
 
 // Both row entries cover every key length and every k **up to the public
@@ -611,7 +672,8 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
     uint32_t *selected;
     uint64_t *sort_buf;
     radix_layout(arena_raw, params.topk, SI || SV,
-                 std::is_same<ValueT, maca_bfloat16>::value, selected, sort_buf);
+                 std::is_same<ValueT, maca_bfloat16>::value, params.vocab_size,
+                 selected, sort_buf);
 
     if (tid == 0) {
         row_offset =
@@ -760,9 +822,25 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
         return;
     }
     if constexpr (SI || SV) {
-        emit_ordered<ValueT, OutIdxT, BLOCK, RV, SV>(
-            sort_buf, selected, input_row, out_index_row, out_value_row, params,
-            n_out, topk, idx_offset);
+        // `SI` is implied whenever `SV` is not: the ordered arm sorts by value
+        // and the index arm ranks (`emit_rank_index`).
+        if constexpr (!SV) {
+            if (topk_select_radix::radix_bitmap_bytes(params.vocab_size, true)
+                != 0) {
+                emit_rank_index<ValueT, OutIdxT, BLOCK, RV>(
+                    reinterpret_cast<uint32_t *>(sort_buf), selected, input_row,
+                    out_index_row, out_value_row, n_out, topk, length,
+                    idx_offset);
+            } else {
+                emit_ordered<ValueT, OutIdxT, BLOCK, RV, SV>(
+                    sort_buf, selected, input_row, out_index_row, out_value_row,
+                    params, n_out, topk, idx_offset);
+            }
+        } else {
+            emit_ordered<ValueT, OutIdxT, BLOCK, RV, SV>(
+                sort_buf, selected, input_row, out_index_row, out_value_row,
+                params, n_out, topk, idx_offset);
+        }
     }
 }
 
@@ -835,7 +913,8 @@ void launch_typed_radix(const RowParams &params, uint32_t batches,
     // the plan's total (arena or scratch, then the `topk` staging slots).
     const size_t smem = topk_select_radix::radix_smem_plan(
                             params.topk, spec.ordered(),
-                            std::is_same<ValueT, maca_bfloat16>::value)
+                            std::is_same<ValueT, maca_bfloat16>::value,
+                            params.vocab_size)
                             .total_bytes;
     // The fp32 row has a single width, so only the 16-bit row selects between
     // the two blocks -- and it selects `kLongRowBlockSize` **or** the default,
