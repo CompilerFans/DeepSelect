@@ -1,0 +1,8 @@
+[
+  {"batch_size": 8192, "vocab_size": 10240, "topk": 512, "dtype": "fp32",
+   "note": "MC3-16686 widest (qpos=81920), the judge cell"},
+  {"batch_size": 8192, "vocab_size": 9216, "topk": 512, "dtype": "fp32",
+   "note": "MC3-16686 qpos=73728"},
+  {"batch_size": 8192, "vocab_size": 8192, "topk": 512, "dtype": "fp32",
+   "note": "MC3-16686 qpos=65536"}
+]
