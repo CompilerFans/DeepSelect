@@ -1672,32 +1672,60 @@ artifact-count change (`ls …/instantiations | wc -l`, `nm -S --defined-only �
 | grep -c topk_kernel_radix`, the `__device_stub__` count), and the contract +
 sample gates.
 
-## Comment discipline — a comment carries the rule, not the campaign
+## Comment discipline — algorithm only, never provenance
 
-This tree was once 3,687 comment lines over its 28 most-touched files; it is 2,530 now (`e3f73cb`, −31%). The rule that
-produced the cut, and that governs new comments, is one question: **would a reader who is about to EDIT this line be
-wrong without it?**
+A comment carries the rule, never the campaign. The only question that decides whether a sentence belongs is:
+**would a reader who is about to EDIT this line be wrong without it?** If not, it is history, and history is deleted
+rather than reworded.
 
-- **Keep, always:** the silent-wrong-answer warning (the `above + c > remain_topk` crossing test, the
-  `s_wide = s_input_flat` aliasing, the fp32 arena overflow and its rescan, the NaN bit-pattern contract, the skip
-  tables' `nb << 6` remainder rule), the contract invariant, the naming of an env knob, and the constant that *is*
-  the decision (the arena's 1757 entries, the 64-lane mask). These are rules: a reader about to edit the line is
-  wrong without them.
-- **Cut: the measurement record.** Implementation code (`csrc/`, `deep_select/`, `setup.py`, the two shell runners,
-  `scripts/`, `tools/`) carries **no date, no device name and no before→after number**, and no narrative of an
-  experiment tried and retracted. Those are records, and records live in `docs/` — a one-off experiment in
-  `docs/experiments/YYYYMMDD_slug/README.md`, a standing before→after in the ledgers (`docs/C500-radix-perf-ledger.zh.md`,
-  `docs/C600U-algorithm-choice.zh.md`) or the handover. The code carries the rule plus a pointer to the record.
-  Two reasons, and the second is the load-bearing one: a number embedded in code goes stale where it sits, and a
-  debugging narrative in a comment is a second copy of a document that will not be updated with it. **A date or a
-  device name in a kernel comment is how this rule is broken**, and it is checkable with grep, which is why it is
-  stated that way.
-- **Cut:** the sweep table behind a constant (state the constant and the one line that explains it, then point at the
-  record), the multi-table before/after ledger, and the architecture recap.
-- **A pointer must resolve.** Replacing a table with "see `docs/X`" is only safe if `X` actually carries it. Before
-  landing, grep the docs for the numbers you are about to delete. If no record carries them yet, **write the record
-  first** — that is where the measurement belongs, and the dead-code policy already requires it: "if a measurement
-  is the reason a path still exists, the measurement moves to `docs/`".
+**In comments and docstrings, write only algorithmic logic. These are removed, not paraphrased:**
+
+1. **User / home / absolute paths** — `/sw_home/<user>/…`, `~/…`, `/root/…`, `/home/…`, or any path containing a
+   username or an internal mount. **Security red line:** this repository ships, and such a path leaks machine layout
+   and usernames into it.
+2. **Provenance** — "ported from X", another repository's name or path, `upstream`, "the original's", commit shas,
+   ticket keys.
+3. **Dates** — `2026-10-22`, `20261022_…`, "as of <month>", date-encoded experiment directories.
+4. **Measured numbers** — speedups, bandwidths, µs/ms, percentages, "measured", "benchmark showed", table or ledger
+   references.
+5. **Chip / product names used as evidence** — a part name cited to justify a value. A part name in an `#include`, an
+   `-arch` flag or a build target is code, and stays.
+6. **Debug narratives** — what was tried, what failed, which experiment led here, "in this session", any
+   multi-paragraph account.
+
+A date, a device name or a number in a kernel comment is how this rule is broken, and all three are checkable with
+grep. The implementation tree (`csrc/`, `deep_select/`, `setup.py`, the two shell runners, `scripts/`, `tools/`)
+carries none of them.
+
+**What stays, and stays good:** what the algorithm does; invariants; ordering and rounding rules; preconditions;
+failure modes; the naming of an env knob; and the reason a constant has its value, expressed as *reasoning* — "512
+threads fills one processing-element unit exactly, leaving four CTAs resident per AP" keeps the reasoning, while the
+part name and the measured number go. The silent-wrong-answer warnings must never be cut: the `above + c >
+remain_topk` crossing test, the `s_wide = s_input_flat` aliasing, the fp32 arena overflow and its rescan, the NaN
+bit-pattern contract, the skip tables' `nb << 6` remainder rule, the contract invariant, and the constant that *is*
+the decision (the arena's 1757 entries, the 64-lane mask).
+
+If the reason cannot be stated without the measurement, keep one clause of mechanism and drop the number. A reader
+who can see *what* binds still avoids the mistake; a reader handed a stale figure learns something false.
+
+**Where the removed material goes:** `docs/` — a one-off experiment in `docs/experiments/YYYYMMDD_slug/README.md`, a
+standing before→after in the ledgers (`docs/C500-radix-perf-ledger.zh.md`, `docs/C600U-algorithm-choice.zh.md`) or the
+handover. A commit message cites the record; a comment never does. A number embedded in code goes stale where it
+sits, and a debugging narrative in a comment is a second copy of a document that will not be updated with it.
+
+**A pointer must resolve.** Replacing a table with "see `docs/X`" is only safe if `X` actually carries it: grep the
+docs for the numbers you are about to delete, and if no record carries them yet, **write the record first** — that is
+where the measurement belongs, and the dead-code policy already requires it ("if a measurement is the reason a path
+still exists, the measurement moves to `docs/`").
+
+**No dangling references.** If you delete a passage a neighbouring comment points at ("see the note above"), delete
+that sentence too. A pointer into nothing is worse than the history it replaced.
+
+**The test:** delete the sentence and ask whether a reader can still avoid breaking the code. If yes, it was history.
+If no, the *reason* was missing — restore it without the numbers.
+
+This rule is the same on **both lineages** of this repository — the github one (`origin`, `main`) and the gerrit one
+(`gerrit`, `master` and its feature branches). A comment that would fail here fails there.
 
 **A comment is invisible to the compiler and to review at this size, so "comments only" has to be gated, not
 asserted. The gate ships: `tools/comment_gate.py` — as a transitional tool.** It exists because the sweep that cut
