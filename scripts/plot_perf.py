@@ -36,7 +36,7 @@ for another platform's.
 
 Usage:
     scripts/plot_perf.py                            # newest recording, both figures
-    scripts/plot_perf.py perf_data/<device>/<stamp>
+    scripts/plot_perf.py perf_data/<device>/20260919_160228
     scripts/plot_perf.py <dir-or-csv> --figure bf16 --assets-dir /tmp/figs
 """
 

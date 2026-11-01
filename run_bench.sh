@@ -27,7 +27,7 @@
 #     ./run_bench.sh                          # snapshot + the official gate
 #     ./run_bench.sh --set-baseline           # ... and repoint baseline at it
 #     ./run_bench.sh --compare-only           # no measurement; latest vs baseline
-#     ./run_bench.sh --baseline-dir <stamp>   # repoint, measure nothing
+#     ./run_bench.sh --baseline-dir 20260801  # repoint, measure nothing
 #     ./run_bench.sh --backends maca_c,torch  # a subset of the three
 #
 # Failure, and the baseline: a failing stage is reported and the run continues
