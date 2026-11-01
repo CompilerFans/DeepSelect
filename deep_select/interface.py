@@ -18,10 +18,10 @@ _ALIGNMENT_REQUIREMENT_BYTES = (1024, 32)
 def _import_backend():
     """The backend module, by the name the build installs.
 
-    The official wheel probes the platform and imports `deep_select_npu` or
-    `deep_select_cuda`; this tree has one platform, so the probe has one arm
-    and the name is `deep_select_maca`.  `deep_select.deep_select_cuda`
-    re-exports it for frameworks that ask for the CUDA backend by name.
+    Callers of this package name one backend module per platform
+    (`deep_select_npu`, `deep_select_cuda`); this tree has one platform, so the
+    name is `deep_select_maca`.  `deep_select.deep_select_cuda` re-exports it
+    for frameworks that ask for the CUDA backend by name.
     """
     name = "deep_select_maca"
     try:
@@ -51,7 +51,7 @@ def get_stride_requirement() -> Tuple[int, int]:
 
 
 def get_alignment_requirement() -> Tuple[int, int]:
-    """DeepInfer's spelling of :func:`get_stride_requirement`."""
+    """Alias of :func:`get_stride_requirement` under its other name."""
     return get_stride_requirement()
 
 
@@ -78,8 +78,8 @@ def topk(
     Arguments:
         input: (b, vocab_size), dtype=torch.bfloat16/torch.float. stride(0) must be a multiple of `deep_select.get_stride_requirement()[0]` bytes, and stride(1) must be 1.
         topk: int. Select topk elements for each row.
-        sorted: bool. Whether to return sorted **output_val**. fp32 on the
-                upstream contract; the MACA kernel also supports bfloat16.
+        sorted: bool. Whether to return sorted **output_val**. fp32 is what the
+                contract documents; the MACA kernel also supports bfloat16.
         begin(optional): (b,), dtype=int32. CURRENTLY NOT SUPPORTED. The left(inclusive) range for input row, default is 0.
         end(optional): (b,), dtype=int32. The right(exclusive) range for input row, default is vocab_size. The stride of this tensor must be 1.
                        Note when end[i] <= topk, valid elements will be gathered at the beginning of values and indices returned. The rest of `values` will be filled with `value_oob_fill_value`, while the rest of `indices` will be filled with `idx_oob_fill_value` (won't be plused by `output_idx_offset`).

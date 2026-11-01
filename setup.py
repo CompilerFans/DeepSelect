@@ -201,23 +201,19 @@ def _family_of_target(target, this_dir):
     register budget; the last two have compile-time consumers, so building an
     artifact from the wrong row can silently give it the wrong geometry.
     Runtime grids still use the device's reported `sm_count`.  Device code does
-    not settle it either: on this toolchain `xcore1500` and `xcore1600` compile
-    the same kernel to identical instructions, so "same codegen" is not "same
-    family".  A part that needs a family of its own gets a row in
-    `csrc/structs.h` rather than a guess from its name.  Measured survey,
-    including which
-    spellings mxcc accepts at all:
-    `docs/experiments/20261012_setup_family_detection/`.
+    not settle it either: on this toolchain two families can compile the same
+    kernel to identical instructions, so "same codegen" is not "same family".
+    A part that needs a family of its own gets a row in `csrc/structs.h` rather
+    than a guess from its name.
 
     **`native` is accepted, and resolved to this host's family**
     (`_native_family` above): it is what `develop.sh` and `install.sh` default
     to, and both act on *this* machine.  It is the one spelling a build must not
-    be *shipped* from -- a wheel built on a C500 carries the C500's numbers
-    under a name that claims to be whatever target machine lands on it -- which
-    is why `build.sh`'s default is the explicit list.  Resolution needs a device
-    and refuses loudly without one.  (Measured on this host,
-    `-offload-arch=native` is byte-identical to `-offload-arch=xcore1000`, so
-    resolving it here agrees with what the compiler would have done.)
+    be *shipped* from -- a wheel built here carries this host's numbers under a
+    name that claims to be whatever target machine lands on it -- which is why
+    `build.sh`'s default is the explicit list.  Resolution needs a device and
+    refuses loudly without one.  `-offload-arch=native` resolves to this host's
+    family, so resolving it here agrees with what the compiler would have done.
     """
     families = (1000, 1500, 1600)
     spelled = ", ".join("xcore%d" % f for f in families)
@@ -317,11 +313,11 @@ def build_for_maca():
     The family's shared-memory and register budgets are compile-time constants
     (`ARCH_SMEM_PER_AP_BYTES`, `ARCH_REGS_PER_AP`), which is the reason for one
     artifact per family.  `ARCH_SM_COUNT` is only a nominal record; runtime
-    grids use the calling device's `sm_count`.  The form this replaced -- one
-    file, one comma-separated `-offload-arch`, three device images -- cannot
-    carry the compile-time constants: `__MACA_ARCH__` is defined in the device
-    pass only, so a host `#if` on it takes the `#else` branch on every
-    architecture, and host code exists once in a fat binary regardless.
+    grids use the calling device's `sm_count`.  One file with a comma-separated
+    `-offload-arch` and three device images cannot carry the compile-time
+    constants: `__MACA_ARCH__` is defined in the device pass only, so a host
+    `#if` on it takes the `#else` branch on every architecture, and host code
+    exists once in a fat binary regardless.
 
     Every source is a `.cu`, so the device compiler is the only compiler this
     build invokes (torch would route a `.cpp` to `$cxx`, meaning a second flag
@@ -365,9 +361,9 @@ def build_for_maca():
     # the host `native` names, or a doubled entry -- and it is not an error: the
     # artifacts are the same set either way, so it is reported and collapsed
     # rather than refused.  It has to be handled because the two Extensions
-    # would otherwise take the same `name=` and the same output path; measured,
-    # that builds the artifact twice (ninja dedupes the compile by command hash,
-    # so the cost is one relink and one extra copy).
+    # would otherwise take the same `name=` and the same output path, which
+    # builds the artifact twice (ninja dedupes the compile by command hash, so
+    # the cost is one relink and one extra copy).
     #
     # The collapse lands in `resolved` itself, and everything downstream reads
     # that one list -- the Extension comprehension, the source summary, and the
@@ -397,9 +393,9 @@ def build_for_maca():
     # toolkit's own `include/`, which is where `maca_bfloat16.h` and `cub/` are.
     include_dirs = [
         os.path.join(this_dir, "csrc"),
-        # The repo root itself: kernel-tree includes are spelled DeepJIT's way
-        # (`<csrc/...>` from the root, angle-bracket and prefixed), so the root
-        # has to be on the path for them to resolve in this build too.
+        # The repo root itself: kernel-tree includes are spelled from the root
+        # (`<csrc/...>`, angle-bracket and prefixed), so the root has to be on
+        # the path for them to resolve in this build too.
         this_dir,
         # `csrc/ffi/` -- the tvm-ffi edge (tensor/error/check helpers).  Every
         # kernel source includes it as `"ffi_..."`, so the directory itself is
@@ -415,11 +411,9 @@ def build_for_maca():
         "-O3",
         "-std=c++20",
         "-DNDEBUG",
-        # The platform this build is for, beside the family.  Upstream declares
-        # its own the same way (`-DDEEP_SELECT_IS_BUILD_ON_CUDA` on the CUDA
-        # extension, `_ASCEND` on the NPU one) and `csrc/structs.h` refuses a
-        # build that names no platform, so the declaration is checked rather
-        # than conventional.
+        # The platform this build is for, beside the family.
+        # `csrc/structs.h` refuses a build that names no platform, so the
+        # declaration is checked rather than conventional.
         #
         # It is the only source of that fact: `cucc` defines `__CUDACC__` on
         # this platform too, so a macro test cannot tell MACA from CUDA, and
@@ -462,9 +456,8 @@ def build_for_maca():
     # `-offload-arch` -- cannot carry per-family host constants at all: that is
     # one compilation, host code exists once in it, and `__MACA_ARCH__` is
     # defined in the device pass only, so an `#if` on the target takes the
-    # `#else` branch on every architecture.  Reverting to it means the
-    # constants travel as arguments again and every reader of this file needs
-    # to know why -- see `csrc/structs.h`'s block and CLAUDE.md.
+    # `#else` branch on every architecture.  Taking that form again means the
+    # constants travel as arguments again -- see `csrc/structs.h`'s block.
     ext_modules = [
         strip_torch_libs(CUDAExtension(
                 # The artifact has no `PyInit` and is NOT an importable python
@@ -612,28 +605,26 @@ def _maca_stack_check(ext_modules, maca_root):
 
 # --- the version string's four parts ----------------------------------------
 #
-# The MACA toolkit generation, read from the environment the way mcDeepGEMM's
-# `setup.py` reads it and folded in the way it folds it (`<version>+maca<v>`).
-# `MACA_AI_VERSION` is the same variable's earlier spelling, taken second for
-# parity with that reference, whose own comment marks it for removal.
+# The MACA toolkit generation, read from the environment and folded into the
+# version as `<version>+maca<v>`.  `MACA_AI_VERSION` is the same variable's
+# earlier spelling, taken second for older environments.
 #
 # It earns its place in the *name* rather than in a manifest: the extension
 # resolves `libmcruntime.so` through the rpath baked in at link time, so a
 # wheel built against one toolkit generation dies on another with
 # `mcErrorInvalidDeviceFunction` -- 0/202, not a plausible partial -- which
-# reads like a kernel defect.  See the run-time trap in CLAUDE.md.  A wheel
-# name that does not say which toolkit it was built against is the one name a
-# consumer cannot check.
+# reads like a kernel defect.  A wheel name that does not say which toolkit it
+# was built against is the one name a consumer cannot check.
 #
 # `build.sh` and `install.sh` supply it from `$MACA_PATH` so the default below
 # is what a bare `python setup.py bdist_wheel` gets -- and `maca0.0.0.0` says,
 # truthfully, that no toolkit version was given.
 #
 # The torch build is the other half of that fact and follows the MACA
-# generation in the same spelling mcDeepGEMM folds in
-# (`+maca<MACA>torch<major>.<minor>`): `CUDAExtension` links c10/torch/torch_cuda
-# from the torch that built the wheel, so a wheel bound to one torch ABI is not
-# the wheel for another, and two such wheels must not share a filename.
+# generation in the spelling `+maca<MACA>torch<major>.<minor>`:
+# `CUDAExtension` links c10/torch/torch_cuda from the torch that built the
+# wheel, so a wheel bound to one torch ABI is not the wheel for another, and
+# two such wheels must not share a filename.
 maca_version = os.environ.get("MACA_VERSION", "0.0.0.0")
 if maca_version == "0.0.0.0":
     maca_version = os.environ.get("MACA_AI_VERSION", "0.0.0.0")

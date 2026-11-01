@@ -12,9 +12,10 @@
 # a second traversal.
 #
 # The `find` passes skip `csrc/3rdparty/**`, and delete nothing outside this
-# tree.  The one outside path this script removes is `~/.metax`, where the
-# MACA runtime caches the compiled device binaries of the kernels this tree
-# launches; those entries outlive a rebuild, so they are taken explicitly.
+# tree.  The one outside path this script removes is the MACA runtime's
+# per-user shader cache in the user's home directory, where the compiled device
+# binaries of the kernels this tree launches are cached; those entries outlive a
+# rebuild, so they are taken explicitly.
 #
 set -euo pipefail
 
@@ -31,8 +32,9 @@ Usage: clean.sh [--dry-run] [-h|--help]
 
 Removes: build/ dist/ *.egg-info/ __pycache__/ .pytest_cache/ and friends,
 loose *.pyc /*.pyo, every *.so in the tree (all of which are build products
--- checked, there is no vendored binary here), and ~/.metax, where the MACA
-runtime caches the compiled device binaries this tree's kernels produce.
+-- checked, there is no vendored binary here), and the MACA runtime's per-user
+shader cache in the user's home directory, where the compiled device binaries
+this tree's kernels produce are cached.
 Leaves: the installed site-packages copy.
 EOF
 }
@@ -49,9 +51,8 @@ done
 echo "clean.sh: ${script_dir}"
 
 # ── what counts as an artifact ──────────────────────────────────────────────
-# One copy of each predicate list, shared by the listing and the removal below.
-# This file used to carry the same two lists four times (a pass to collect and a
-# pass to delete, twice over), which is four places for one of them to be edited.
+# One copy of each predicate list, shared by the listing and the removal below:
+# a list repeated per traversal is a list with more than one place to be edited.
 dir_pred=(
     -name '__pycache__' -o -name '.pytest_cache' -o -name '.mypy_cache'
     -o -name '.ruff_cache' -o -name '.tox' -o -name '.nox'
@@ -103,10 +104,10 @@ fi
 
 # ── the MACA shader cache, the one path outside the tree ────────────────────
 # Running this tree's kernels makes the MACA runtime cache the compiled device
-# binaries under `~/.metax`, and those entries outlive a rebuild -- the cache is
-# keyed on the compiled image, not on this checkout -- so a full clean takes
-# them.  Spelled out rather than folded into the `find` passes: a permission
-# failure reports and continues, and an unset HOME skips the step.
+# binaries in the user's home directory, and those entries outlive a rebuild --
+# the cache is keyed on the compiled image, not on this checkout -- so a full
+# clean takes them.  Spelled out rather than folded into the `find` passes: a
+# permission failure reports and continues, and an unset HOME skips the step.
 metax_cache="${HOME:-}/.metax"
 if [[ -n "${HOME:-}" && -e "$metax_cache" ]]; then
     if [[ "$dry_run" == 1 ]]; then

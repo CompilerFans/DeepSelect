@@ -16,8 +16,8 @@ required keys; the rest default to the Lightning Indexer's configuration, and
 `dtype` / `out_idx_dtype` take bf16 / fp32 / int32 / int64 -- an unknown name is
 an error, not a default.
 
-Output, following mcDeepGEMM's `deep_gemm/tests/perf_data/` layout:
-`perf_data/<device>/<YYYYmmdd_HHMMSS>/` (`deepselect_perf.csv`, `manifest.json`).
+Output: `perf_data/<device>/<YYYYmmdd_HHMMSS>/` (`deepselect_perf.csv`,
+`manifest.json`).
 
 **Two clocks, and they answer different questions.**  `time(us)` is the official
 kernel clock: `kk.bench` under `tests/test.py`'s matching rule.  It is the quiet
@@ -25,9 +25,9 @@ one -- repeat a single cell and it moves by a fraction of a percent -- and it is
 the right clock for asking whether a change to *this repository's* kernels helped,
 because it holds everything else still.  It is also, by construction, blind to
 every kernel the matching rule does not name.  `wall_us` is an event pair around
-the whole call with the L2 flush outside the span (`wall_clock_time`, the shape of
-deep_gemm's `bench_time`): every kernel the operator launches, plus launch and
-sync.  **It is noisier and it is not "more accurate"** -- it measures a different
+the whole call with the L2 flush outside the span (`wall_clock_time`): every
+kernel the operator launches, plus launch and sync.  **It is noisier and it is
+not "more accurate"** -- it measures a different
 thing, and it is the only one of the two that can compare two *backends* fairly,
 because the excluded kernels are not the same size on both sides.  On `torch`
 the two nearly agree -- the reference is one `torch.topk`, and its kernel name
@@ -36,10 +36,11 @@ whatever the call launched that the rule does not name (`nan_abort_kernel`
 when `abort_when_nan_found=True`, the launch and sync around the grid).  Read
 `wall_relative_pct_vs_maca_c` for a comparison across backends and
 `relative_pct_vs_maca_c` for regressions.
-`<device>` is the **device name torch reports** (`MetaX C500` -> `MetaX_C500`),
-never the arch family: the folder answers "which board did I measure on", and two
-boards of one family (both xcore1600) share an ISA but not a clock, a wall or an
-SM count.  The family is recorded per row (`chip`), never inferred from it.
+`<device>` is the **device name torch reports**, with spaces turned into
+underscores, never the arch family: the folder answers "which board did I
+measure on", and two boards of one family share an ISA but not a clock, a wall
+or an SM count.  The family is recorded per row (`chip`), never inferred from
+the path.
 Usage:
     CUDA_VISIBLE_DEVICES=2 PYTHONPATH=$PWD:$PWD/tests \\
         python3 scripts/perf_snapshot.py
@@ -93,9 +94,9 @@ def call_topk(p, t, backend: str):
 def wall_clock_time(fn, num_iters: int = 10) -> float:
     """Seconds per call, events around the loop, L2 flushed *outside* the span.
 
-    deep_gemm's `testing/bench.py::bench_time` is the shape: one start/end event
-    pair around `num_iters` calls, elapsed time divided by the count.  Two
-    departures, both because this measures an *operator* and not one kernel:
+    The shape is one start/end event pair around `num_iters` calls, elapsed time
+    divided by the count.  Two departures, both because this measures an
+    *operator* and not one kernel:
 
       * `torch.cuda.synchronize()` before the loop, so the elapsed time cannot
         absorb work the caller queued earlier;
@@ -246,10 +247,10 @@ def _run(cmd: List[str], cwd: str) -> str:
         return ""
 def device_dir_name() -> str:
     """`perf_data/`'s directory, named after the **device** (see the module
-    docstring): `MetaX C500` -> `MetaX_C500`.
+    docstring), with spaces turned into underscores.
 
-    Falls back to the arch spelling only when torch reports no device name at
-    all (a driver quirk, not a normal case).
+    Falls back to an "unknown_device" leaf only when torch reports no device
+    name at all (a driver quirk, not a normal case).
     """
     return device_name()
 
@@ -258,9 +259,9 @@ def device_name() -> str:
     """`torch.cuda.get_device_name(0)`, with spaces turned into underscores.
 
     The one name a record carries: the directory, the manifest's `device_name`
-    and the `chip` column all come from here, so they cannot disagree. The
-    `metax_xcore<N>` spelling it used to use for `chip` was a second answer to
-    the same question, derived through the capability pair.
+    and the `chip` column all come from here, so they cannot disagree.  It is
+    the device's own string rather than an arch derivation, so a record cannot
+    name one part and be filed under another.
     """
     return (torch.cuda.get_device_name(0) or "unknown_device").strip().replace(" ", "_")
 

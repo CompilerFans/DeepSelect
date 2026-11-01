@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
 #
-# Run this tree's tests the way upstream runs them: `tests/test.py`.
+# Run this tree's tests through `tests/test.py`.
 #
 #   --perf   tests/test.py --perf-only    the performance grid, one process
 #   --test   tests/test.py                a seeded correctness sample
 #   --all    both, perf first             (the default is --perf)
 #
-# The suite is upstream's own file, extended with `--backend` / `--seed` /
-# `--sample`; its checks are untouched (`git diff upstream/main HEAD --
-# tests/test.py` touches no assertion).  What this adds over typing it in is
-# **recording**: which extension the run actually loaded, and what the box
-# looked like while it ran.
+# The suite file is extended with `--backend` / `--seed` / `--sample`; its
+# checks are untouched.  What this adds over typing it in is **recording**:
+# which extension the run actually loaded, and what the box looked like while
+# it ran.
 #
 # Usage:
 #     ./run_test.sh --perf -nc --dtype bf16
 #     ./run_test.sh --test --sample 2000
 #     ./run_test.sh --all
 #
-# Every unknown flag reaches the suite verbatim, so upstream's own (`-nc`,
-# `-rf`, `--dtype`) work without this script knowing them all.
+# Every unknown flag reaches the suite unchanged, so its own (`-nc`, `-rf`,
+# `--dtype`) work without this script knowing them all.
 #
 # There is no exclusivity gate, on purpose: `pgrep` cannot see which device a
 # process is pinned to, and `mx-smi` reports processes against the wrong device
@@ -83,7 +82,7 @@ while [[ $# -gt 0 ]]; do
 done
 suite="${suite:-perf}"
 
-# The correctness suite's defaults are the deleted driver's: a fixed seed, a
+# The correctness suite's defaults: a fixed seed, a
 # 200-case draw rather than the whole table, and `-rf` so a case that goes wrong
 # is recorded and the run still reaches its summary.  The seed is the part that
 # is easy to drop and expensive to lose: without it `--sample 200` draws a

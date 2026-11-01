@@ -17,8 +17,8 @@ What it establishes, in order:
      region's edges).  Each is checked against the contract -- index range,
      uniqueness, `value == input[index]`, `min(selected) >= max(unselected)` --
      not against a reference except on fp32, where `backend="torch"` under
-     `sorted_index` agrees elementwise (the one differential CLAUDE.md records
-     as meaningful).
+     `sorted_index` agrees elementwise (the one differential this operator
+     documents as meaningful).
   3. **The declared dependencies are really there**: the extension resolves its
      `libtvm_ffi.so` through `import tvm_ffi`, and the package imports with no
      checkout on the path.

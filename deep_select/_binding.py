@@ -27,7 +27,7 @@ _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 def _library_pattern(name: str, suffix: str) -> str:
     """The glob for ``name``'s artifact on a device of family ``suffix``.
 
-    One artifact **per family** -- `deep_select_maca_xcore1000.so` and so on.
+    One artifact **per family** -- `deep_select_maca_xcore<N>.so` and so on.
     The name is `deep_select_maca` (the C++ namespace) plus the family the
     artifact was compiled for; `family_suffix()` supplies the suffix and says
     why the *device's* family, not the build's target list, is what names the
@@ -36,7 +36,7 @@ def _library_pattern(name: str, suffix: str) -> str:
 
     An empty suffix means "this process could not tell what family the device
     is", and it must not be allowed to match a family's artifact: the naive
-    `deep_select_maca*.so` would load the C500 image on a part whose family
+    `deep_select_maca*.so` would load one family's image on a part whose family
     could not be read, which is precisely the guess the loader exists to
     refuse.  So the no-suffix case matches only an artifact that carries no
     family either -- the unsuffixed `deep_select_maca.so` an ad-hoc build
@@ -81,21 +81,20 @@ def device_family_suffix() -> str:
     `ARCH_SMEM_PER_AP_BYTES` and `ARCH_REGS_PER_AP`), so loading the wrong one
     can give host-side routing the wrong geometry.  Runtime grids separately
     use the device's `sm_count`, passed by the caller.  The build's
-    `CUCC_TARGETS` cannot
-    answer which one is in front of us -- that is the same defect
-    `perf_snapshot.provenance()` had once -- and neither can a driver query for
-    the family, because MACA reports the family as an sm spelling rather than a
-    name.
+    `CUCC_TARGETS` cannot answer which one is in front of us, and neither can a
+    driver query for the family, because MACA reports the family as an sm
+    spelling rather than a name.
 
-    The sm spellings are the toolkit's: `xcore1000` is sm80, `xcore1500` sm86,
-    `xcore1600` sm87/88/89 (the C600U-class part renumbers across SDK
-    generations, which is why the family and not the number is the anchor).
+    The spelling rows below are the toolkit's: a family is keyed by the sm pair
+    its part reports, and one family's part renumbers across SDK generations,
+    which is why the family and not the number is the anchor.
     **This function is the one copy of those rows**: `setup.py` imports it to
     resolve `native`, and no other file in the tree carries a table — so a new
     family is an edit here and nowhere else.
-    Anything outside those -- H200, a CPU-only host -- gets `""`, which names
-    the unsuffixed artifact and nothing else; see `_library_pattern` for why an
-    unknown family must not fall through to *some* family's image.
+    Anything outside those -- a part of another family, a CPU-only host -- gets
+    `""`, which names the unsuffixed artifact and nothing else; see
+    `_library_pattern` for why an unknown family must not fall through to *some*
+    family's image.
 
     Not cached: this is the raw device query, and `family_suffix` below is the
     cached view of it.  The two are separate because a process whose current
@@ -183,10 +182,10 @@ def launching():
     legacy default stream, and a producer on `torch.cuda.Stream()` followed by
     an unwrapped call races.  This is the slim spelling of
     `tvm_ffi.use_torch_stream()`: that full context calls
-    `torch.cuda.current_stream()` (~7.6 us), builds a tvm Device from a string
-    (~2.9), and constructs two context managers; this reads the raw stream
-    handle (~0.3) and makes the two FFI calls directly -- measured 12.9 us ->
-    1.1 us per call on this torch (2.10+metax, C600U).
+    `torch.cuda.current_stream()`, builds a tvm Device from a string, and
+    constructs two context managers; this reads the raw stream handle and makes
+    the two FFI calls directly, which is the same pin with less per-call host
+    work.
     """
     import tvm_ffi
     import torch

@@ -19,7 +19,7 @@
 #   7. official          `tests/test.py --perf-only -nc`, the bf16 grid.
 #   8. official_fp32     the same, `--dtype fp32` -- the Sampler cells.
 #
-# Every stage is upstream's file or this tree's own case file; nothing here
+# Every stage is the suite's file or this tree's own case file; nothing here
 # re-implements a measurement.  `--skip-gate` drops 2-8, which is the only way
 # to measure without gating.
 #
@@ -27,12 +27,12 @@
 #     ./run_bench.sh                          # snapshot + the official gate
 #     ./run_bench.sh --set-baseline           # ... and repoint baseline at it
 #     ./run_bench.sh --compare-only           # no measurement; latest vs baseline
-#     ./run_bench.sh --baseline-dir 20260801  # repoint, measure nothing
+#     ./run_bench.sh --baseline-dir <stamp>   # repoint, measure nothing
 #     ./run_bench.sh --backends maca_c,torch  # a subset of the three
 #
 # Failure, and the baseline: a failing stage is reported and the run continues
 # to the summary, but it makes the run ineligible for `--set-baseline` -- a
-# baseline whose grid was not fully measured is not a baseline.  The verdict is
+# baseline whose grid was not fully timed is not a baseline.  The verdict is
 # written to `compare_result.txt` before the baseline moves.  `--set-baseline`
 # repoints on the stages' status, not on the comparator's exit status --
 # REGRESSED does not block it but is printed loudly, so repointing past a
@@ -103,8 +103,8 @@ done
 
 # ── the extension, and the device the record belongs to ─────────────────────
 # Same resolution as `run_test.sh`, for the same reason: the package that will
-# answer names its own artifact, so an installed wheel is measured as itself and
-# the md5 in the manifest is the one the process loads.  The rule has one
+# answer names its own artifact, so an installed wheel is exercised as itself
+# and the md5 in the manifest is the one the process loads.  The rule has one
 # definition, `tools/provenance.py` -- including why the cwd comes off
 # `sys.path` -- and this script and `run_test.sh` both call it.
 so=$(python -W "ignore:Could not find flash_attn:UserWarning" -c '
@@ -244,9 +244,9 @@ run_stage() {
 }
 
 bench_status=0
-# `python tests/test.py`, not `./tests/test.py`: upstream's file is not
-# executable, and a bare path fails with rc=126 before it runs anything (which
-# reads as a bench failure but is a launcher mistake).
+# `python tests/test.py`, not `./tests/test.py`: the file is not executable,
+# and a bare path fails with rc=126 before it runs anything (which reads as a
+# bench failure but is a launcher mistake).
 #
 # The snapshot's failure does not skip the gate: it is reported as its own thing
 # (it can fail on memory) while the gate may still pass.  Any failure makes the
@@ -269,11 +269,11 @@ if [[ ${skip_gate} -eq 0 ]]; then
     # receipt someone else can re-run.  `-rf` so one bad case does not hide
     # the rest.
     #
-    # **The harness's exit status is all-or-nothing and this box cannot satisfy
-    # it.**  `tests/test.py` returns 1 for *any* non-pass bucket, and the
-    # 400-case draw always contains a few `b=4096 V~1e6` fp32 cells -- 15 GiB
-    # per tensor, three alive at once -- which a 63.6 GiB shared device cannot
-    # serve.  They land in `crash` rather than `skip` because the allocation
+    # **The harness's exit status is all-or-nothing and a shared device cannot
+    # satisfy it.**  `tests/test.py` returns 1 for *any* non-pass bucket, and the
+    # 400-case draw can contain `b=4096 V~1e6` fp32 cells whose tensors do not
+    # fit on a shared host.  They land in `crash` rather than `skip` because the
+    # allocation
     # that fails is the *operator's* `cudaMalloc` (`maca_topk.cu`), so
     # `torch.cuda.OutOfMemoryError` is never raised for the harness to classify
     # it.  So `run_stage correctness ... || true`, and the verdict is read off

@@ -12,37 +12,31 @@ bandwidth, `maca_c` (DeepSelect) beside `torch.topk` in each group, laid out as
 * `perf_fp32_maca_<device>.png` -- Sampling: fp32, `vocab_size = 129280`,
   `topk = 512`, grouped bars over batch size (6 / 256 / 512 / 768 / 4096).
 
-`<device>` is the recording's own board (`device_dir_name`'s spelling, `MetaX
-C500` -> `MetaX_C500`), and it is in the *filename* for the same reason it is in
-the title and in `perf_data/`'s directory: `perf_data/` holds one recording per
-device, and a name that stops at the platform gives two boards one output path,
-so rendering the second silently replaces the first's figure.  The title has
-always named the board; the file did not.  Named figures now sit side by side --
-`perf_bf16_maca_MetaX_C500.png`, `perf_bf16_maca_MetaX_C600-U.png` -- and the
-README picks the one it displays.
+`<device>` is the recording's own board (`device_dir_name`'s spelling), and it
+is in the *filename* for the same reason it is in the title and in
+`perf_data/`'s directory: `perf_data/` holds one recording per device, and a
+name that stops at the platform gives two boards one output path, so rendering
+the second silently replaces the first's figure.
 
-The upstream figures are in TB/s over a fixed 0-7 axis; these are in GB/s over a
-range fitted to the data, because these parts' read wall is a fraction of an
-H200's and a shared 0-7 TB/s axis would leave every bar a sliver.  The panel
-layout is upstream's (one panel per batch size, boxed legend, `16K`-style tick
-labels, a `-- {device}` suffix on each title); the marks are drawn with a
-two-hue categorical pair on a `#fcfcfb` surface, a solid hairline grid, and a
-thin surface-coloured edge on every bar so adjacent fills read as separate
-marks rather than one block.
+The figures are in GB/s over a range fitted to the data: these parts' read wall
+is a fraction of a large accelerator's, and a shared fixed TB/s axis would leave
+every bar a sliver.  The panel layout is one panel per batch size, a boxed
+legend, `16K`-style tick labels, and a `-- {device}` suffix on each title; the
+marks are drawn with a two-hue categorical pair on a `#fcfcfb` surface, a solid
+hairline grid, and a thin surface-coloured edge on every bar so adjacent fills
+read as separate marks rather than one block.
 
 The CSV is written by `scripts/perf_snapshot.py`; the timings in it are
 `tests/test.py`'s own, one row per (cell, backend).  Only `maca_c` and `torch`
 appear on the figures: they are the two backends this tree ships.
 
-The `_maca` suffix is upstream's own convention, which names a figure for the
-part it was measured on (`perf_bf16_cuda.png`, `perf_bf16_ascend.png`); these
-are the MACA member of that set, and the README shows them.  A generator that
-wrote the bare `perf_bf16.png` would land outside the convention and on a name
-that has meant the CUDA figure.
+The `_maca` suffix names the platform the figures are for, so a figure names
+both its platform and its board and a bare `perf_bf16.png` cannot be mistaken
+for another platform's.
 
 Usage:
     scripts/plot_perf.py                            # newest recording, both figures
-    scripts/plot_perf.py perf_data/MetaX_C500/20260919_160228
+    scripts/plot_perf.py perf_data/<device>/<stamp>
     scripts/plot_perf.py <dir-or-csv> --figure bf16 --assets-dir /tmp/figs
 """
 
@@ -61,8 +55,8 @@ REPO = Path(__file__).resolve().parent.parent
 PERF_ROOT = REPO / "perf_data"
 DEFAULT_ASSETS = REPO / "assets"
 
-# A validated two-hue categorical pair (blue / orange).  Not sampled from the
-# upstream figures: red-on-cyan is a poor pair for CVD readers, and the
+# A validated two-hue categorical pair (blue / orange).  Not sampled from
+# another figure set: red-on-cyan is a poor pair for CVD readers, and the
 # validator used here is the one the dataviz procedure requires.
 COLOR_MACA = "#2a78d6"
 COLOR_TORCH = "#eb6834"
@@ -74,16 +68,16 @@ GRID = "#dcdcd7"
 # A recording directory's name, `YYYYmmdd_HHMMSS`.
 STAMP = re.compile(r"\d{8}_\d{6}")
 
-# The upstream figure's grid: three batch sizes, six vocab sizes, `topk = 512`.
+# The figure's grid: three batch sizes, six vocab sizes, `topk = 512`.
 BF16_BATCHES = (6, 512, 4096)
 BF16_VOCABS = (16384, 65536, 131072, 262144, 524288, 1048576)
 
 BAR_WIDTH = 0.38
 # How much air the y-axis leaves above the tallest bar drawn.
 HEADROOM = 1.05
-# Upstream tags each figure with the platform it was measured on -- `(CUDA)`,
-# `(Ascend)`.  Ours carries the board too, since `perf_data/` holds one recording
-# per device and "MACA" alone does not say which part.
+# Each figure is tagged with the platform and with the board, since
+# `perf_data/` holds one recording per device and a platform name alone does not
+# say which part.
 PLATFORM = "MACA"
 
 
@@ -97,9 +91,9 @@ def newest_snapshot(perf_root: Path) -> Path:
       `*/*` would let that name sort last under any device and pick a recording
       from the wrong board with no sign that it did.
     * The device directory's name.  Sorting the whole path would order the
-      *boards* (`MetaX_C500` before `MetaX_C600-U`) and only then the stamps, so
-      a week-old recording on the later-named board would beat this morning's on
-      the earlier-named one.  The stamp is the timestamp; it is what is compared.
+      *boards* first and only then the stamps, so an old recording on the
+      later-named board would beat this morning's on an earlier-named one.  The
+      stamp is the timestamp; it is what is compared.
     """
     stamps = [p for p in perf_root.glob("*/*/deepselect_perf.csv")
               if STAMP.fullmatch(p.parent.name)]
@@ -138,7 +132,7 @@ def _select(rows, **want):
 
 
 def _bandwidth(row):
-    """A row's `bandwidth(GB/s)` as a float, or None when it was not measured.
+    """A row's `bandwidth(GB/s)` as a float, or None when it was not timed.
 
     An empty cell is "not timed", never zero: the two must not be conflated
     into a bar of zero height.
@@ -151,21 +145,21 @@ def device_label(row) -> str:
     """The device's name for a figure title -- `device_name`, else `chip`.
 
     Two answers to one question live in the CSV: `device_name` is the part's
-    own string ("MetaX C500"), `chip` is the directory-safe spelling of it
-    ("MetaX_C500", `perf_snapshot.device_dir_name`).  A figure names the board
-    a reader can recognize, so it takes the name; `chip` is the fallback for a
-    recording old enough to predate the column, not the preferred label.
+    own string, `chip` is the directory-safe spelling of it
+    (`perf_snapshot.device_dir_name`).  A figure names the board a reader can
+    recognize, so it takes the name; `chip` is the fallback for a recording old
+    enough to predate the column, not the preferred label.
     """
     return row.get("device_name") or row.get("chip", "")
 
 
 def device_slug(row) -> str:
-    """The same board as a filename component: `MetaX C500` -> `MetaX_C500`.
+    """The same board as a filename component, spaces turned into underscores.
 
-    `perf_snapshot.device_name`'s own rule -- spaces to underscores -- so a
-    figure, the recording it came from and `perf_data/`'s directory all spell
-    the board the same way.  Empty for a recording that names no device; the
-    caller then falls back to the bare platform name.
+    `perf_snapshot.device_name`'s own rule, so a figure, the recording it came
+    from and `perf_data/`'s directory all spell the board the same way.  Empty
+    for a recording that names no device; the caller then falls back to the bare
+    platform name.
     """
     return device_label(row).strip().replace(" ", "_")
 

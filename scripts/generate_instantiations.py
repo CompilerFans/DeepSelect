@@ -3,7 +3,7 @@ Generate one explicit-instantiation .cu per device kernel this tree carries.
 
 Usage, from the repo root:
     python3 scripts/generate_instantiations.py                  # every family
-    python3 scripts/generate_instantiations.py xcore1600        # one family
+    python3 scripts/generate_instantiations.py xcore<N>         # one family
     python3 scripts/generate_instantiations.py <instantiation_dir>
     python3 scripts/generate_instantiations.py --check          # verify only
 
@@ -27,9 +27,9 @@ kernel's device code and the launch that reaches it in one translation unit.
 The headers it instantiates are the shared implementation in
 `csrc/maca_kernels/common/`.  `setup.py` takes the list from
 `family_sources()` rather than from the printed output, so the two cannot
-drift.  All three families share the five tables today; a family-specific
-tuple set is a branch on `family` in `family_instantiations()`, and it lands
-with the measurement that earns it.
+drift.  All three families share the five tables; a family-specific tuple set
+is a branch on `family` in `family_instantiations()`, and it lands with the
+case that earns it.
 """
 
 import dataclasses
@@ -45,7 +45,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The families this build knows, and where each family's instantiation set
 # lives: `csrc/maca_kernels/xcore<N>/` is family <N>'s own source directory and
-# today carries exactly this directory -- the hand-written implementation the
+# carries exactly this directory -- the hand-written implementation the
 # instantiations reference is shared, in `csrc/maca_kernels/common/`.
 FAMILIES = (1000, 1500, 1600)
 
@@ -114,9 +114,9 @@ CHUNKS_HEADER = "<csrc/maca_kernels/common/topk_chunks.cuh>"
 
 # ── row: `topk_kernel_radix<Cfg>` ───────────────────────────────────────────
 #
-# The axes are `docs/code-architecture.zh.md` §5b's, in the config's own
-# spelling `TopkRadixConfig<ValueT, OutIdxT, BLOCK, SI, RV, SV, PRE>`, which is
-# also the spelling the table in `maca_topk.cu` uses.  The two lists must agree;
+# The axes are the config's own spelling
+# `TopkRadixConfig<ValueT, OutIdxT, BLOCK, SI, RV, SV, PRE>`, which is also the
+# spelling the table in `maca_topk.cu` uses.  The two lists must agree;
 # a tuple here that the table does not carry is an unused instantiation, and one
 # the table wants that this list does not carry is an undefined symbol.
 #
@@ -285,7 +285,7 @@ def split_instantiations() -> List[Instantiation]:
     return out
 
 
-# ── coarse12: the ported `topk_coarse12` selector ───────────────────────────
+# ── coarse12: the `topk_coarse12` selector ──────────────────────────────────
 
 
 def coarse12_instantiations() -> List[Instantiation]:
@@ -298,7 +298,7 @@ def coarse12_instantiations() -> List[Instantiation]:
         "    cudaStream_t stream);")]
 
 
-# ── chunks: the ported `topk_chunks` selector ───────────────────────────────
+# ── chunks: the `topk_chunks` selector ──────────────────────────────────────
 #
 # Three kernels per `ChunkCount`, and `ChunkCount` is what
 # `select_chunk_count` resolves the shape to.
@@ -354,10 +354,10 @@ def nan_instantiations() -> List[Instantiation]:
 def family_instantiations(family: int) -> List[Instantiation]:
     """Every device kernel family `family`'s artifact carries, one per kernel.
 
-    All three families share the five tables today.  A family-specific tuple
-    set is a branch on `family` here, and it lands with the measurement that
-    earns it -- a tuple only one family's artifact carries is that family's
-    kernel, which is what the per-family directory is for.
+    All three families share the five tables.  A family-specific tuple set is a
+    branch on `family` here, and it lands with the case that earns it -- a tuple
+    only one family's artifact carries is that family's kernel, which is what
+    the per-family directory is for.
     """
     if family not in FAMILIES:
         raise ValueError(f"unknown family {family!r}; known: {FAMILIES}")
