@@ -1,13 +1,13 @@
 """Check the chunks arm with the suite's **own** predicate.
 
-`tests/test.py:check_result` is the official correctness assertion, split out
-of `run_testcase` so a caller can check another backend against it rather than
-a copy of it.  This is that caller: it drives the same shapes the arm serves
+`tests/test.py:check_result` is the correctness assertion, split out of
+`run_testcase` so a caller can check another backend against it rather than a
+copy of it.  This is that caller: it drives the same shapes the arm serves
 (`b <= 2`, fp32, `V >= 2048`) plus the two paths that must *decline* to the row
-path, and asks the official predicate rather than a hand-written comparison --
-a hand-written one is how a harness artifact gets mistaken for a kernel bug
-(twice, in this session: a `[:, :V]` slice that made a strided view, and a
-`-1`-padded reference whose sort put the padding first).
+path, and asks that predicate rather than a hand-written comparison -- a
+hand-written one is how a harness artifact gets mistaken for a kernel bug (a
+`[:, :V]` slice that made a strided view, and a `-1`-padded reference whose sort
+put the padding first).
 """
 # **This file measures the checkout, not the installed wheel.**  The path
 # bootstrap, and the trap it exists for, live in `_casebase.py`, which has to
@@ -57,11 +57,10 @@ allok &= case("decline wide bin pivot", 2, 66551, 2048,
 # ── the NaN contract, on the band this arm actually answers ────────────────
 # The arm answers a row *without ranking it* and hands the answer to the
 # contract half as `preselected`, and that half **reads** a per-row flag
-# instead of scanning (`maca_topk.cu:463`).  So the arm has to raise it, and
-# for a while it did not: `topk_chunks.cuh` took `nan_flags` and did
-# `(void)nan_flags;`, which served a NaN row a normal top-k with
-# `abort_when_nan_found` -- the default -- inert.  These cases are what would
-# have caught it.  They are here rather than in `tests/test.py`'s own table
+# instead of scanning.  So the arm has to raise it: `topk_chunks.cuh` takes
+# `nan_flags` and must write it, or a NaN row is served a normal top-k with
+# `abort_when_nan_found` -- the default -- inert.  These cases are what catch
+# that.  They are here rather than in `tests/test.py`'s own table
 # because the *default* routing reaches this arm only at `b <= 2` with
 # `V >= 2048`, and the table's `b` values are drawn, not pinned.
 #

@@ -118,10 +118,10 @@ class SpillCheckBuildExtension(BuildExtension):
 
 # --- MACA ------------------------------------------------------------------
 #
-# [MACA] Upstream's gate above reads `cuobjdump -res-usage` out of
-# `$CUDA_HOME/bin`, which does not exist on a MACA install, so
-# `SpillCheckBuildExtension` has no MACA counterpart.  mxcc reports the same
-# triple itself under `--resource-usage`, one `maca info:` block per kernel:
+# [MACA] The gate above reads `cuobjdump -res-usage` out of `$CUDA_HOME/bin`,
+# which does not exist on a MACA install, so `SpillCheckBuildExtension` has no
+# MACA counterpart.  mxcc reports the same triple itself under
+# `--resource-usage`, one `maca info:` block per kernel:
 #
 #     Function properties for  <mangled name>
 #       <N> bytes stack frame
@@ -129,21 +129,19 @@ class SpillCheckBuildExtension(BuildExtension):
 #     staticMaxWarps/PEU : <N>
 #
 # so the check transposes rather than disappearing.  Two facts about the
-# substitution, both measured on C500 with this tree's own flags:
+# substitution:
 #
-#   - The `local > 0` half of upstream's test has no reported counterpart.  A
-#     kernel deliberately made to push a 128-element double array through
-#     `#pragma unroll 1` reports a 1032-byte stack frame and *the same 10
-#     MTregisters* as a trivial kernel -- whatever would be local memory is
+#   - The `local > 0` half of the cuobjdump test has no reported counterpart.
+#     A kernel made to push a 128-element double array through
+#     `#pragma unroll 1` reports a 1032-byte stack frame and *the same
+#     MTregister count* as a trivial kernel -- whatever would be local memory is
 #     counted in the stack frame here, not separately.  So the stack-frame
-#     reading is the whole signal, and `--stack-baseline` is the whole knob:
-#     upstream's `stack_baseline=8` is not portable, since even a kernel with
-#     no spill lands at 48 bytes on this toolchain (all 78 devices in
-#     `maca_topk.cu` report either 0 or 48).
+#     reading is the whole signal, and `--stack-baseline` is the whole knob: a
+#     baseline of 8 is not portable, since even a kernel with no spill lands at
+#     48 bytes on this toolchain.
 #   - `--resource-usage` is a second full device compile of the TU it is asked
-#     about: ~60 s for `maca_topk.cu` (one TU, 78 devices).  That is why this
-#     is a script rather than a `build_ext` subclass, and why it is opt-in per
-#     source file rather than run over the build.
+#     about.  That is why this is a script rather than a `build_ext` subclass,
+#     and why it is opt-in per source file rather than run over the build.
 
 _RESOURCE_USAGE_FUNC = re.compile(r"Function properties for\s+(\S+)")
 _RESOURCE_USAGE_FRAME = re.compile(r"(\d+)\s+bytes\s+stack\s+frame")

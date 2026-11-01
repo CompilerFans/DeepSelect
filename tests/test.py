@@ -165,7 +165,8 @@ def run_topk_select(p: TestParam, testcase: Testcase, backend: str = "maca_c",
     `scripts/perf_snapshot.py` when it times a cell: a recorder that spelled
     its own keyword arguments would be free to drift from the call the
     correctness gate makes, and a perf record of a different call is not a
-    record of this one.  The keyword set here is upstream's call site verbatim.
+    record of this one.  The keyword set here is the production call site's,
+    unchanged.
     """
     if end_batch_idx is None:
         end_batch_idx = testcase.input.size(0)
@@ -309,8 +310,8 @@ def performance_cases() -> List[TestParam]:
         # `topk=2048`.  Every axis carries a boundary the routing turns on:
         # 64 is `kChunkedMaxBatches`, 262144 is `kChunkedMinVocab`, and 2048
         # is the one `topk` the split refuses outright.  Batch 1 is not a
-        # production row count (V3's smallest is `1 x 64` heads); it is the
-        # boundary probe that holds the row-to-CTA ratio on the grid.
+        # production row count; it is the boundary probe that holds the
+        # row-to-CTA ratio on the grid.
         TestParam(b, vocab_size, topk, False, False, False, torch.bfloat16, torch.int32, num_runs=10)
         for topk in [512, 1024, 2048]
         for b in [1, 64, 128]
@@ -341,7 +342,7 @@ if __name__ == '__main__':
     parser.add_argument("--seed", type=int, default=None,
                         help="seed the case table before it is built, so the "
                              "same command draws the same shapes.  Unset = the "
-                             "unseeded table, as upstream builds it.")
+                             "unseeded table.")
     parser.add_argument("--sample", type=int, default=0,
                         help="draw this many correctness cases instead of all "
                              "of them (the perf grid is always kept whole).  "

@@ -1,7 +1,6 @@
 """Say what this machine will actually run, then run one small call.
 
-The companion of mcDeepGEMM's `deep_gemm/tests/test_hello.py`, and it prints
-the same first block for the same reason: the device, the interpreter and the
+It prints one block up front because the device, the interpreter and the
 framework are the three things every measurement here is conditional on.
 It adds what a top-K operator needs on top of that -- **which artifact this
 process will load**, and which toolkit the artifact resolves against -- because

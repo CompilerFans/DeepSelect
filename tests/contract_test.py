@@ -3,9 +3,9 @@
 `tests/test.py` builds the official table and asserts on *values*: index range,
 uniqueness, `value == input[idx]`, the definitional `min(selected) >=
 max(unselected)`, the orderings and the NaN guard.  It never constructs a call
-the operator is supposed to refuse, and its official call site passes `begin`,
-`hint` and caller-allocated buffers as `None`.  Both gaps are recorded in
-CLAUDE.md ("Not covered by either suite, recorded rather than papered over").
+the operator is supposed to refuse, and its own call site passes `begin`,
+`hint` and caller-allocated buffers as `None`.  Both gaps are covered here
+rather than papered over.
 
 This file is that coverage, as a standalone runner rather than a pytest suite
 (this tree has none):
@@ -37,8 +37,8 @@ Sections:
                      the vector region's partial last iteration, `topk` at the
                      public ceiling.  fp32 cells are compared elementwise
                      against `backend="torch"` with `sorted_index` -- the one
-                     differential this project documents as meaningful
-                     (CLAUDE.md, "What backend=torch is"); bf16 is checked
+                     differential this project documents as meaningful; bf16 is
+                     checked
                      against the contract only, because ties make set agreement
                      meaningless there.
 
@@ -408,14 +408,14 @@ def shapes(backend):
               "" if same else f"{int((idx != ref_idx).sum())} of {idx.numel()} differ")
 
     # bf16 is checked against the contract only: a k-th value can tie, and
-    # which member of a tie is selected is unspecified (CLAUDE.md).
+    # which member of a tie is selected is unspecified.
     for b, v, k in [(2, 8192, 512), (2, 8195, 512), (1, 65536, 2048)]:
         x = row_major(b, v, torch.bfloat16, seed=v)
         name = f"bf16 b{b} v{v} k{k}"
         expect_ok(name + ": contract", x, k, backend, indices_type=torch.int32)
-        # bf16 + sorted_value: this kernel orders bf16 too (upstream's ported
-        # kernel rejects it).  The arm stays on the kernel path because that is
-        # the acceptance it pins; the reference backend here serves it as well.
+        # bf16 + sorted_value: this kernel orders bf16 too.  The arm stays on
+        # the kernel path because that is the acceptance it pins; the reference
+        # backend here serves it as well.
         if backend == "maca_c":
             expect_ok(name + ": sorted value", x, k, backend, sorted=True,
                       indices_type=torch.int32)

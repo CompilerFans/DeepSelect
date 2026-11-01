@@ -1,29 +1,27 @@
-"""MC3-16686's production shapes, through the suite's own predicate.
+"""A production indexer's call shapes, through the suite's own predicate.
 
-MC3-16686 is the Step5 DSA indexer's `topk_coarse12` call in mcDeepGemm:
-fp32 logits `[rows=8192, cols=max_regions]` with `topk=512`, where
-`max_regions` has three values in the trace (`10240 / 9216 / 8192`, from the
-helper kernel's `grid[1] = 640 / 576 / 512` x `BLOCK_R=16`).
+The shapes are the fp32 `topk_coarse12` call a DSA indexer makes: logits
+`[rows=8192, cols=max_regions]` with `topk=512`, where `max_regions` has three
+values in the trace (`10240 / 9216 / 8192`, from the helper kernel's
+`grid[1] = 640 / 576 / 512` x `BLOCK_R=16`).
 
-Those shapes are outside this repo's official grid -- the largest fp32 case
-there is 4096 x 129280, a row 12.6x longer with half the batch -- so "does
-DeepSelect already serve MC3-16686's shape, and at what rate" could only be
-answered by extrapolation.  This case closes that gap: it runs the three
-shapes and asks `check_result`, the official predicate, rather than a
-hand-written comparison.
+Those shapes are outside this repo's benchmark grid -- the largest fp32 case
+there is 4096 x 129280, a row many times longer with half the batch -- so "does
+DeepSelect serve this shape, and at what rate" could only be answered by
+extrapolation.  This case closes that gap: it runs the three shapes and asks
+`check_result`, the suite's predicate, rather than a hand-written comparison.
 
-The number this prints is the one MC3-16686's target is stated in: one call's
-time, against a 335 MB operand and a **<= 800 us** target (baseline 2050.7 us
-in mcDeepGemm's own microbenchmark).
+The number this prints is one call's time against the operand size, next to a
+turnaround target in microseconds.
 """
-# This file measures the checkout, not the installed wheel; see `_casebase.py`.
+# This file tests the checkout, not the installed wheel; see `_casebase.py`.
 import time
 
 import torch
 
 from _casebase import suite, build_case, call_topk
 
-# (rows, max_regions, label) -- MC3-16686 §3.1 / §5.1.
+# (rows, max_regions, label) -- the three shapes the trace carries.
 SHAPES = ((8192, 10240, 'qpos=81920  widest / judge'),
           (8192, 9216, 'qpos=73728'),
           (8192, 8192, 'qpos=65536'))
@@ -37,8 +35,8 @@ for rows, cols, label in SHAPES:
     call_topk(p, t)                       # warm: JIT and allocator
     torch.cuda.synchronize()
 
-    # The operand size MC3-16686 quotes for the widest shape, for the reader who
-    # wants to compare against the 206 us pure-read roofline.
+    # The operand size of the widest shape, for a reader comparing against the
+    # pure-read roofline.
     operand_mb = rows * cols * 4 / 1e6
 
     reps, best = 20, float('inf')

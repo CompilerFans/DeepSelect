@@ -14,20 +14,16 @@ def get_current_platform() -> Platform:
     """
     Get the current platform by asking torch whether it can see a device
 
-    This used to grep `lspci` for "3D controller: NVIDIA Corporation Device",
-    which answers a narrower question than its callers ask -- "is there an
-    NVIDIA part on this host" rather than "is there a device I can launch on"
-    -- and answers it wrong for anything that is not NVIDIA.  A MetaX MACA part
-    enumerates as `Display controller: Device 9999:4001`, so every MACA host
-    reported CPU_ONLY and `bench()` raised `Unknown platform`.  It also threw
-    outright where `lspci` is absent, as in a container without pciutils.
+    A device-class grep over `lspci` answers a narrower question than its
+    callers ask -- "is there a known accelerator on this host" rather than "is
+    there a device I can launch on" -- and it answers wrong for any vendor whose
+    PCI description the grep does not recognize.  It also throws outright where
+    `lspci` is absent, as in a container without pciutils.
 
-    On an NVIDIA host the two agree: a 3D controller in lspci implies a driver
-    that can see it, which is what `is_available()` reports.  They can differ
+    `torch.cuda.is_available()` is the question the callers actually have:
+    they launch kernels, and no visible device means they cannot.  It is false
     when the device exists but is hidden from this process
-    (`CUDA_VISIBLE_DEVICES=""`), and there torch is the more useful answer --
-    the callers of this function launch kernels, and no visible device means
-    they cannot.
+    (`CUDA_VISIBLE_DEVICES=""`), which is the useful answer there.
 
     Cached because device visibility is a property of the process, fixed at
     first query.

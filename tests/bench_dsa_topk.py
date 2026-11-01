@@ -24,7 +24,7 @@ Comparability rules, which are what make the ratio mean something:
   from a different workload.
 * **One traffic formula** for every row and every backend:
   ``n_rows * (length + topk) * 4`` bytes (read the scores, write int32 indices).
-  Bandwidth is that divided by the measured time.
+  Bandwidth is that divided by the recorded time.
 * **One timer** -- ``kernelkit.bench``, the rule ``tests/test.py`` uses: exactly
   one kernel whose name contains "topk" is that kernel's time, several is the
   span over them.
@@ -86,9 +86,9 @@ def _load_mcoplib():
 def _have_deep_gemm():
     """Whether the external `deep_gemm` package can serve the `dg` column.
 
-    Probed here rather than through the package: this column measures another
-    project's kernel, and `deep_select` no longer carries a `deep_gemm`
-    backend for such a helper to gate.
+    Probed here rather than through the package: this column times another
+    project's kernel, and `deep_select` carries no `deep_gemm` backend to gate
+    it.
     """
     try:
         import deep_gemm
@@ -227,7 +227,7 @@ def main() -> int:
         else:
             wanted.append(b)
     if "ds" not in wanted:
-        wanted.insert(0, "ds")            # the baseline is always measured
+        wanted.insert(0, "ds")            # the baseline is always timed
     peers = [b for b in wanted if b != "ds"]
     if not peers:
         print("no peer to compare against", file=sys.stderr)

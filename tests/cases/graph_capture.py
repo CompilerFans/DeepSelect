@@ -17,8 +17,8 @@ data, replay, and check against a fresh eager call on the new data.
 
 Correctness goes through `tests/test.py:check_result`, the suite's own
 predicate, rather than a hand-written comparator: a hand-written one is how a
-harness artifact gets mistaken for a kernel bug (twice in this tree already --
-see `chunks_arm_official.py`).  The replay-vs-eager comparison is the suite's
+harness artifact gets mistaken for a kernel bug (see
+`chunks_arm_official.py`).  The replay-vs-eager comparison is the suite's
 `check_is_bitwise_equal`, which is the right relation here: the same kernel on
 the same bytes must give the same bytes, and "close enough" would hide a graph
 that replayed a stale answer.
@@ -64,11 +64,11 @@ def _pair(b, V, k, si=False):
     against the suite's predicate.
 
     `si=True` is what makes a replay comparison bitwise: the unsorted path
-    writes its indices in atomic order, so two calls on the same bytes are not
-    bitwise equal (measured: 261k of 270336 slots differ) and only a multiset
-    comparison is fair.  The four cells above run sorted for that reason; the
-    probe runs sorted too, because its whole question is whether the graph read
-    the same thing twice."""
+    writes its indices in atomic order, so two calls on the same bytes do not
+    put the same value in the same slot and only a multiset comparison is fair.
+    The four cells above run sorted for that reason; the probe runs sorted too,
+    because its whole question is whether the graph read the same thing
+    twice."""
     import math
     al = deep_select.get_stride_requirement()[0] // 4
     vr = int(math.ceil(V / al)) * al
@@ -202,12 +202,12 @@ results = [cell(tag, **kw) for tag, kw in CELLS]
 # route is graph-unsafe" from "the allocator is".
 #
 # **This probe is also its own process**, and it is only meaningful if nothing
-# before it has grown the scratch.  Measured: `capture=OK`.  The growth did not
-# land inside the capture window here because the probe's own warmup calls (the
-# three inside `capture`) reached the `cudaMalloc` first.  That is a fact about
-# the order this file calls things in, not a guarantee: a caller whose first
-# call at a shape *is* the capture call has a raw `cudaMalloc` inside the
-# capture region.  The probe that does not depend on ordering is the next one.
+# before it has grown the scratch.  The growth does not land inside the capture
+# window here because the probe's own warmup calls (the three inside `capture`)
+# reach the `cudaMalloc` first.  That is a fact about the order this file calls
+# things in, not a guarantee: a caller whose first call at a shape *is* the
+# capture call has a raw `cudaMalloc` inside the capture region.  The probe that
+# does not depend on ordering is the next one.
 def cold_probe():
     p, t = build_case(b=2, V=131072, k=2048)
     try:
@@ -232,32 +232,29 @@ if __name__ == "__main__" and "--probe" in sys.argv:
 # -- so the question this asks is whether a later call at another shape can move
 # what the graph recorded out from under it.
 #
-# Two hazards were found here, and both are fixed:
+# Two hazards this probe exists for, both closed by construction:
 #
-#   1. **The scratch was freed on growth.**  `ChunkedScratch` was grow-only with
-#      a `cudaFree` of the old buffer, and the graph had recorded that buffer's
-#      address.  Fixed by *retiring* the old buffer (`scratch_retire`) instead of
-#      freeing it -- the peak is held, which is what the cache already does for a
-#      shape that never shrinks.
-#   2. **The row table was rewritten in place.**  One `lengths` buffer plus an
-#      epoch keyed on `(batches, vocab_size)` meant a call at another shape wrote
-#      the *same address* with different lengths, and the graph re-read it: a
-#      `b132 V66551` capture replayed after a `b16 V131072` call ranked a
-#      131072-wide window against a 66551-wide row, **131 of 132 rows wrong**.
-#      Fixed by keying the table on its shape (`ChunkedScratch::lengths_table`),
-#      so a key never reuses another key's address.
+#   1. **The scratch must not be freed on growth.**  `ChunkedScratch` is
+#      grow-only, and a graph records the old buffer's address.  The old buffer
+#      is *retired* (`scratch_retire`) instead of freed -- the peak is held,
+#      which is what the cache already does for a shape that never shrinks.
+#   2. **The row table must not be rewritten in place.**  One `lengths` buffer
+#      plus an epoch keyed on `(batches, vocab_size)` writes the *same address*
+#      with different lengths, and the graph re-reads it: a captured
+#      66551-wide row replayed after a call at 131072 ranks the wrong window.
+#      The table is keyed on its shape (`ChunkedScratch::lengths_table`), so a
+#      key never reuses another key's address.
 #
 # **What this probe can and cannot see.**  It compares *multisets*, because the
 # `return_value=False` path writes its indices in atomic order and two eager
-# calls on the same bytes are not bitwise equal either (measured: the control
-# below differs in 261k of 270336 slots, exactly as the probe does).  A bitwise
-# comparator here would be red on a correct kernel; a multiset comparator is
-# still sharp enough for both hazards, because both corrupt *which columns are
-# selected* -- hazard 2 turned 131 rows into a different window's answer, and a
-# freed-and-reused scratch turns rows into whatever the allocator left there.
-# What it would miss is a reordering-only corruption, which is what
-# `sorted_index=True` exists to rule out (the four cells above run that mode and
-# do compare bitwise).
+# calls on the same bytes do not put the same value in the same slot either (the
+# control below differs the same way the probe does).  A bitwise comparator here
+# would be red on a correct kernel; a multiset comparator is still sharp enough
+# for both hazards, because both corrupt *which columns are selected* -- hazard
+# 2 turns rows into a different window's answer, and a freed-and-reused scratch
+# turns rows into whatever the allocator left there.  What it would miss is a
+# reordering-only corruption, which is what `sorted_index=True` exists to rule
+# out (the four cells above run that mode and do compare bitwise).
 def grow_probe():
     """Every intervening shape that has a distinct table, then a replay.
 
@@ -267,11 +264,10 @@ def grow_probe():
 
     **No eager call at the captured shape may run between the intervening call
     and the replay.**  That is not a detail; it is the difference between a
-    probe that works and one that cannot.  Under the old policy the eager call
-    *is* the repair: `small()` refills the one table back to `V=66551`, so a
-    probe that takes its reference first (as the shipped version did) hands the
-    graph a correct table and goes green on a broken kernel.  Measured: the
-    version with the reference taken first reports MATCH on the pre-fix build.
+    probe that works and one that cannot.  A shared table makes the eager call
+    *the repair*: `small()` refills it back to `V=66551`, so a probe that takes
+    its reference first hands the graph a correct table and goes green on a
+    broken kernel.
 
     So the reference is the graph's own first replay, on input that is never
     written to again, and the comparison is bitwise.  `sorted_index=True` is
