@@ -1693,9 +1693,24 @@ rather than reworded.
 6. **Debug narratives** — what was tried, what failed, which experiment led here, "in this session", any
    multi-paragraph account.
 
+**Do not use code as documentation.** A comment stops being a comment when it needs section headings, background,
+trade-off discussion, or the history of why a design was chosen: that material belongs in `docs/`, and the code
+keeps **one sentence** naming the constraint or invariant that matters. Measured numbers and debug narratives were
+the two largest classes in the sweeps precisely because they are documentation written into code; this clause names
+the general case they were instances of. **The test: a comment's length should be proportional to how badly a
+reader would break the code by ignoring it, not to how complicated the design is.** However complex the design,
+what the code needs is "changing this breaks X".
+
 A date, a device name or a number in a kernel comment is how this rule is broken, and all three are checkable with
 grep. The implementation tree (`csrc/`, `deep_select/`, `setup.py`, the two shell runners, `scripts/`, `tools/`)
 carries none of them.
+
+**Exception: copyright / licence / attribution headers are never changed, and their dates are never touched.** A
+`Copyright (c) <year>` line is an attribution statement, not experiment history — the date class does not apply to
+it. Neither does it apply to a bare modification stamp at the head of a file, e.g. `// 2026 - Modified for X.` —
+**it has no `Copyright` word in it and is still attribution**; judge by position (file header) and intent (a
+modification or ownership stamp), not by keyword. A sweep removed stamps of that shape once because they looked
+like dates.
 
 **What stays, and stays good:** what the algorithm does; invariants; ordering and rounding rules; preconditions;
 failure modes; the naming of an env knob; and the reason a constant has its value, expressed as *reasoning* — "512
