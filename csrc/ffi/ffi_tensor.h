@@ -1,3 +1,4 @@
+// 2026 - Modified for DeepSelect.
 // DLTensor edge helpers for the tvm-ffi binding layer.
 //
 // The extension is torch-free: tensors cross the FFI boundary as

@@ -1,3 +1,4 @@
+// 2026 - Modified for DeepSelect.
 // Host-side error reporting for the tvm-ffi binding layer.
 //
 // The boundary wants a plain C++ exception: `tvm::ffi::Error` is what the

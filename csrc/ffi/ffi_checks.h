@@ -1,3 +1,4 @@
+// 2026 - Modified for DeepSelect.
 // The torch-free host-layer checks.
 //
 // These are the spellings every call site below uses.  The validation
