@@ -28,16 +28,12 @@ namespace detail {
 // Every `DEEP_SELECT_*` switch is read through these and nothing else.  A knob
 // is *policy* -- which arm a call takes, which allocation policy the scratch
 // uses -- so it is read here, above the dataflows, and not in a dataflow
-// header; `radix_chunked.cuh` read `DS_FUSE_NAN_OFF` itself until this moved it
-// up, which is the layering this block exists to fix.
+// header: a dataflow header is the kernel and its launcher, and nothing else.
 //
-// **One parse rule, where the seven sites spelled three.**  They said
-// `atoi(s) != 0`, `s[0] != '0'`, and an exact match on `"1"`, so a malformed
-// value was answered differently depending on which knob it was.  The rule now:
-// unset or empty takes the caller's fallback; anything else is `atoi`, so a set
-// value that is not a number reads as 0.  Every documented spelling (`0`, `1`,
-// unset) answers exactly as it did -- what moved is `01` and `abc`, which no
-// caller writes and which now agree across knobs.
+// **One parse rule.**  Unset or empty takes the caller's fallback; anything
+// else is `atoi`, so a set value that is not a number reads as 0.  Every
+// documented spelling (`0`, `1`, unset) answers exactly as written, and a
+// malformed value (`01`, `abc`) reads the same way for every knob.
 //
 // The once-per-process cache is a `static const` at the *named* reader, not
 // here: one `static` in a shared function would cache whichever name was asked
@@ -60,7 +56,7 @@ inline bool env_flag(const char *name, bool fallback) {
     return v.set ? v.value != 0 : fallback;
 }
 
-// A route override's three answers: -1 unset (take the measured ladder), 0
+// A route override's three answers: -1 unset (take the fitted ladder), 0
 // denied, 1 forced.
 inline int env_tri_state(const char *name) {
     const EnvValue v = env_read(name);
@@ -70,9 +66,9 @@ inline int env_tri_state(const char *name) {
 // ── the 16-bit row's skip tables ────────────────────────────────────────────
 //
 // The row kernel reads its row twice.  The second pass only acts on elements
-// whose 12-bit bin is at or above the threshold -- a constant ~600 of them at
-// k=512, regardless of the row's length -- so on a long row more than 95% of
-// that pass is reading lines it does nothing with.  Pass 1 leaves each
+// whose 12-bit bin is at or above the threshold -- a small constant number of
+// them at a fixed k, regardless of the row's length -- so on a long row more
+// than 95% of that pass is reading lines it does nothing with.  Pass 1 leaves each
 // 64-element block's max bin in a summary; the collect compacts the blocks that
 // can hold a candidate into a list and walks that instead.
 //
@@ -83,14 +79,12 @@ inline int env_tri_state(const char *name) {
 // row anyway.  Both tables are sized by `vocab_size`; the kernel's own switch
 // (a density past three quarters falls back to walking the row) needs no host
 // input.
-//
-// Kept fractions, the pass-2 speedup each buys, and the density sweep:
-// `docs/experiments/20261010_skim_rate/`.
 constexpr uint32_t kSkipMinVocab = 65536;
 
 // The density half of the same gate: `vocab_size >= kSkipMinRowPerSlot * topk`
 // bounds `k/V`, which is what the kept-block fraction `1 - (1 - k/V)^64` follows
-// from. See the gate for the two measurements that bracket it.
+// from.  The two constants bracket the region where the summary's bytes are
+// cheaper than the walk it replaces.
 constexpr uint32_t kSkipMinRowPerSlot = 128;
 
 // The campaign's A/B switch for the tables above, read once per process:
@@ -103,25 +97,24 @@ inline bool bf16_skip_enabled() {
     return v;
 }
 
-// **A set, not a count: the C600U ships at 28 APs and at 32, and both are
+// **A set, not a count: this family ships at 28 APs and at 32, and both are
 // ordinary parts.**  Every gate fitted on that family takes the set.
 inline bool is_c600u_ap_count(uint32_t sm_count) {
     return sm_count == 28 || sm_count == 32;
 }
 
 // `needs_long_row_bf16` sends every long row to the 1024-thread instantiation,
-// and its crossover belongs to the 104-AP part -- its own comment says so.  On
-// a 128 KiB family the narrow row takes over once the batch alone is large:
-// the AP holds 2 x 1024- or 4 x 512-thread CTAs, so a full wave gives the
-// narrow row four independent CTAs against the wide row's two, while below a
-// wave the wide row's extra threads on a lone row win.  The batch at which the
-// two cross climbs with the row length, so no one batch crosses every row; 256
-// is the smallest batch at which the narrow row wins **every** cell, and below
-// it the wide row is kept because that is where the narrow row's losses are.
-// Table: `docs/experiments/20261010_c600u_narrow_row/`.
+// and its crossover belongs to the 104-AP part.  On a 128 KiB family the narrow
+// row takes over once the batch alone is large: the AP holds 2 x 1024- or
+// 4 x 512-thread CTAs, so a full wave gives the narrow row four independent
+// CTAs against the wide row's two, while below a wave the wide row's extra
+// threads on a lone row win.  The batch at which the two cross climbs with the
+// row length, so no one batch crosses every row; 256 is the smallest batch at
+// which the narrow row wins **every** cell, and below it the wide row is kept
+// because that is where the narrow row's losses are.
 inline constexpr uint32_t kC600UNarrowRowBatches = 256;
 
-// The ported dispatcher's long-row regime is the only thing that differs
+// The long-row regime is the only thing that differs
 // between the two block widths (`topk_select_radix::needs_long_row_bf16`); the batch is the
 // launch's row count, one row per CTA.
 inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk,
@@ -139,11 +132,10 @@ inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk,
 //
 // One row per CTA leaves the machine idle when the batch is small and the rows
 // long: B=6 at L=1M is 6 CTAs for the whole device.  The split ranks each row
-// across `chunked_chunks(params)` CTAs and merges.  It wins by 11x at B=6/L=1M and
-// loses above ~256 rows, which is the batch bound.  Upstream's own gate
-// (`needs_chunked`: L >= 1M) is the same idea with a higher floor; 262144 is
-// where the row count is still the problem here.  Measurements in
-// `docs/C500-radix-perf-ledger.zh.md`.
+// across `chunked_chunks(params)` CTAs and merges.  It pays on that shape and
+// loses above ~256 rows, which is the batch bound.  A higher row-length floor
+// (L >= 1M) is the same idea with a coarser gate; 262144 is where the row count
+// is still the problem here.
 constexpr uint32_t kChunkedMaxBatches = 64;
 constexpr uint32_t kChunkedMinVocab = 262144;
 
@@ -157,52 +149,49 @@ constexpr uint32_t kChunkedMinVocab = 262144;
 // it does grows with the row length, because the row kernel's cost is flat in
 // the batch for as long as it fits one wave.
 //
-// The measured crossings are not proportional to the row length, so no single
-// line through the origin passes through all three; 21000 is the constant with
-// the best worst case over the grid.  Crossing table, the two rejected
-// constants and their regrets: `docs/experiments/20261009_c500_dsa_decode/`
-// (`probe_crossing.py`).
+// The crossings are not proportional to the row length, so no single line
+// through the origin passes through all three; 21000 is the constant with the
+// best worst case over the grid.
 constexpr uint32_t kChunkedVocabPerRow = 21000;
 
 // ── the same crossing on a 128 KiB family: the batch grows like sqrt(vocab) ─
 //
 // The constant above is a line through the origin, and on that family no line
 // of that shape holds the three crossings: they grow about half as fast as the
-// rows do.  The square-root form `batches^2 * 6400 <= vocab` holds all three
-// to 0.7 batch, and its worst regret is the boundary cell itself.
-// Table: `docs/experiments/20261010_c600u_split_crossing/`.
-// The official grid has no cell in the band the rule moves -- its batches
+// rows do.  The square-root form `batches^2 * 6400 <= vocab` holds all three,
+// and its worst regret is the boundary cell itself.
+// The benchmarks' grid has no cell in the band the rule moves -- its batches
 // below 64 are 1 and 6, which both rules send to the split -- so this is a
 // routing fix for decode shapes, not a grid number.
 constexpr uint32_t kC600UChunkedVocabPerBatchSq = 6400;
 
 // The split is SM-count-sensitive: a grid of `kBatch * chunks` CTAs leaves
 // `ctas mod SM` SMs idle unless it is a whole number of waves, and the same 16
-// is a different fraction of a wave on a 104-AP part, a 28-AP one and a 32-AP
-// one.  `params.sm_count` (the caller's, from the device) makes that
-// decidable at launch time -- and it is the *device's* number rather than
-// `ARCH_SM_COUNT` on purpose, because a caller that hands this entry a tensor
-// on another part should get a grid sized for the part in front of it, not for
-// the family the artifact was compiled for.
+// is a different fraction of a wave at 104, 28 and 32 APs.  `params.sm_count`
+// (the caller's, from the device) makes that decidable at launch time -- and it
+// is the *device's* number rather than `ARCH_SM_COUNT` on purpose, because a
+// caller that hands this entry a tensor on another part should get a grid sized
+// for the part in front of it, not for the family the artifact was compiled
+// for.
 //
 // The rule: **keep the count where it already fills at least half of its last
 // wave, and otherwise round up to a whole number of waves.**  The half-wave
-// floor is what leaves the 104-AP part exactly where it was fitted.
+// floor is what leaves the 104-AP part where it was fitted.
 // The fp32 split's work target, derived rather than tabulated.
 //
 // The split exists to fill a machine a short batch leaves empty, so its size
-// is a *machine* property and the only question the sweep had to answer is
-// what multiple of the SM count it is.  The one fit ever made is 256 slots on
-// the 104-AP part, written as 5/2.  A per-family table would be three rows of
-// which one is fitted; this is that one fact, written once.
+// is a *machine* property, and the question is what multiple of the SM count it
+// is.  The fitted value is 256 slots on the 104-AP part, written as 5/2.  A
+// per-family table would be three rows of which one is fitted; this is that one
+// fact, written once.
 //
 // **It reads the device's count, not `ARCH_SM_COUNT`, and that is deliberate.**
-// The artifact is per-family now, so the macro *could* be used here, and it
-// would be wrong to: this is the one rule whose whole purpose is to fill the
-// machine in front of the call, and a 1600 image reached by a caller with a
-// 1000 tensor would then size the grid for 32 APs on a 104-AP part.  The
-// family constants answer questions about the *artifact*; this answers a
-// question about the *run*.
+// The artifact is per-family, so the macro *could* be used here, and it would
+// be wrong to: this is the one rule whose whole purpose is to fill the machine
+// in front of the call, and a 1600 image reached by a caller with a 1000 tensor
+// would then size the grid for 32 APs on a 104-AP part.  The family constants
+// answer questions about the *artifact*; this answers a question about the
+// *run*.
 inline uint32_t f32_chunk_work_target(uint32_t sm_count) {
     return sm_count * 5 / 2;
 }
@@ -216,10 +205,9 @@ inline int wave_filled_chunks(int base_chunks, int sm_count) {
     return ((ctas + kSms - 1) / kSms) * kSms / kBatch;
 }
 
-// [MACA] SM-count-sensitive.  16 is what the chunk sweep was taken at on the
-// 104-AP ladder (flat from 16 to 32 there); a 128 KiB family rounds it by
-// `wave_filled_chunks`, at whichever AP count the device reports -- the
-// 28/32-AP part ships at both.
+// [MACA] SM-count-sensitive.  16 is the base count, flat across the 104-AP
+// ladder; a 128 KiB family rounds it by `wave_filled_chunks`, at whichever AP
+// count the device reports -- the 28/32-AP part ships at both.
 inline int chunked_chunks(const RowParams &params) {
     return wave_filled_chunks(16, (int)params.sm_count);
 }
@@ -235,7 +223,6 @@ struct ChunkedWorkspace {
 // default branch, already compiled) and is admitted on the 128 KiB parts only:
 // the per-chunk ranking at topk=2048 costs shared memory the 64 KiB part has
 // less of, and no measurement stands behind the extension there.
-// Measurements: `docs/experiments/20261018_bf16_split_k2048/`.
 inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
     if (batches == 0 || batches > kChunkedMaxBatches) return false;
     if (params.vocab_size < kChunkedMinVocab) return false;
@@ -244,7 +231,7 @@ inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
     } else if (params.topk != 512 && params.topk != 1024) {
         return false;
     }
-    // The C600U's crossing has its own shape -- see the table on
+    // The 28/32-AP family's crossing has its own shape -- see the note on
     // `kC600UChunkedVocabPerBatchSq`.  `batches` is <= 64 here, so the square
     // cannot overflow.
     if (is_c600u_ap_count(params.sm_count)) {
@@ -299,20 +286,19 @@ inline ChunkedWorkspace chunked_workspace(void *base, uint32_t batches,
 // batch because the two row regimes disagree: long rows prefer fewer chunks
 // monotonically (hence the constant 2 above 64 rows), short rows want
 // `largest power of two <= K / batches`, where K is the caller's
-// `f32_chunk_work_target(params.sm_count)`.  Sweeps and caveats:
-// `docs/C500-radix-perf-ledger.zh.md`.
+// `f32_chunk_work_target(params.sm_count)`.
 //
-// At an SM count other than the one measured, the large-batch arm's merge CTA
-// per row becomes a much larger share of the waves.  The fix the sweep points
-// at is dropping that CTA (`chunks + 1` -> `chunks`) -- a change to the merge
-// launch, not a constant, so it is not made on arithmetic alone.
+// At an SM count other than the one the band was fitted on, the large-batch
+// arm's merge CTA per row becomes a much larger share of the waves.  The
+// structural fix is dropping that CTA (`chunks + 1` -> `chunks`) -- a change to
+// the merge launch, not a constant, so it is not made on arithmetic alone.
 namespace {
 // The work target is `f32_chunk_work_target(sm_count)` above -- `sm_count * 5
-// / 2`, the 2.5 being the only fit ever measured (on C500).  The SM count is
-// read where the split is sized, not cached in a module-level constant.
+// / 2`, the 2.5 being the one fitted value.  The SM count is read where the
+// split is sized, not cached in a module-level constant.
 //
-// `DEEP_SELECT_F32_CHUNK32` raises the ceiling from 16 to 32 for the b6/V=1M
-// cell the V-sweep flagged (parity plan §17.3).  A ceiling, not a count, so
+// `DEEP_SELECT_F32_CHUNK32` raises the ceiling from 16 to 32 for the
+// small-batch, wide-V cell the sweep flags.  A ceiling, not a count, so
 // b32/b64 -- already at their optimum per the sweep -- are unaffected.
 inline bool f32_chunk_ceiling_32() {
     static const bool on = env_flag("DEEP_SELECT_F32_CHUNK32", false);
@@ -331,60 +317,48 @@ inline int f32_chunks_for(uint32_t batches, int ceiling, uint32_t work_target) {
 // -- `candidate_stride` in `topk_select_radix::launch_f32_chunk_stage2` -- and
 // `f32_chunks_for` sizes itself from the batch alone.  The batch rule is
 // already at the optimum for `topk <= 512`; above that the merge weights the
-// count and a `topk`-aware cap is what §8.6 added.  Small-batch tier only --
+// count and a `topk`-aware cap is what bounds it.  Small-batch tier only --
 // above `kF32ChunksFewBatches` the count is the large-batch rule and never
 // reaches this.
 //
-// §8.6's version of that cap pinned the count at 8 and was measured over a
-// sweep that is now superseded: it was wrong at both ends.  What this one is
-// bounded by is the **chunk length**, and every length measured wants a count
-// that is a multiple of two -- so the count is written as the product of two
-// independent doubled quantities rather than as one number.
+// The cap is bounded by the **chunk length**, and every usable length wants a
+// count that is a multiple of two -- so the count is written as the product of
+// two independent doubled quantities rather than as one number.
 //
 // `kF32ChunkSplitCeiling` (32) bounds the second one and is a *smem* bound, not
 // a fit.  The arena is `kF32SmemInputSize` = 1757 slots and the 8-bit coarse
 // level's threshold bin is not `L / 256` wide but about `L / 58` -- the suffix
 // count reaches `topk` several bins below the mean, so it stops in the wider
-// tail of the distribution (ratio flat at 57.9 / 56.8 / 58.2 for `L` in
-// {87384, 65536, 131072}).  A bin that does not fit falls through to
+// tail of the distribution (the ratio is flat across the lengths this rule
+// decides in).  A bin that does not fit falls through to
 // `radix_topk_row_f32_rescan`, which re-walks the whole window once per key
-// byte -- five passes instead of two.  So `L / 58 <= 1757`, i.e. **L <= 101906**.
-// The largest power of two under that is 65536.  That is the whole constant:
-// two geometry facts, no measured value.
+// byte -- five passes instead of two.  So `L / 58 <= 1757`, i.e. **L <=
+// 101906**.  The largest power of two under that is 65536.  That is the whole
+// constant: two geometry facts, no fitted value.
 //
-// **There used to be a `topk`-aware cap here and it was wrong in both
-// directions.**  It read `c_default * topk * 10 <= vocab` and returned 8 when
-// that failed.  It exempted the top of the ladder, where the batch rule's count
-// is worth a double-digit percentage, and where it did fire it pinned the count
-// at 8 -- above the optimum at every V below 131072, because the 8 was the
-// merge weight `topk` puts on it, not a measurement of this tier's optimum.
-// Not an artefact of the fused NaN scan: the `DS_FUSE_NAN_OFF` cross puts both
-// arms' optimum at the same count.  Ladder and per-cell deltas: ledger §10.9.
-//
-// **What the optimum actually is: where stage 1 and stage 2 balance.**  They
-// move in opposite directions in `c` -- stage 1 falls (`V / c` per CTA, more
-// CTAs to hide the latency) and stage 2 rises (`num_chunks * topk` candidates
-// read per row, and it is one CTA per row either way).  Setting the two
-// derivatives against each other gives `c = theta * sqrt(V / topk)`, and the
-// ladder is that curve with `theta = 1/2` to within a mean error under 1.5%
-// (worst cell 6.4%, the curve's own rounding included).  The two structural
-// instincts are both in it: the count grows as `sqrt(V)` (more chunks only pay
-// while stage 1's per-CTA latency is what is hiding) and falls as
-// `1/sqrt(topk)` (a bigger merge is more expensive per candidate read).
+// **What the optimum is: where stage 1 and stage 2 balance.**  They move in
+// opposite directions in `c` -- stage 1 falls (`V / c` per CTA, more CTAs to
+// hide the latency) and stage 2 rises (`num_chunks * topk` candidates read per
+// row, and it is one CTA per row either way).  Setting the two derivatives
+// against each other gives `c = theta * sqrt(V / topk)`, and the ladder is that
+// curve with `theta = 1/2`.  The two structural instincts are both in it: the
+// count grows as `sqrt(V)` (more chunks only pay while stage 1's per-CTA
+// latency is what is hiding) and falls as `1/sqrt(topk)` (a bigger merge is
+// more expensive per candidate read).
 //
 // `theta = 1/2` is the one fitted number and it is fitted on `topk = 2048`
-// only -- the `topk` axis of the curve is *predicted*, not measured, so the
-// formula is applied only where `topk > 512` (the same gate §8.6 used) and the
-// result is a cap: the caller takes `min` with the batch rule, so a cell the
-// formula would raise past its measured count is unaffected.
+// only -- the `topk` axis of the curve is *predicted*, not fitted, so the
+// formula is applied only where `topk > 512` and the result is a cap: the
+// caller takes `min` with the batch rule, so a cell the formula would raise
+// past its count is unaffected.
 //
 // **`kF32ChunkCurveFloor` is a discontinuity in the data, not in the model.**
 // The curve gives the same count on both sides of the 98304..114688 interval,
 // but the optimum steps across it -- the stage split flips sign there (stage
 // 1's slope dominates below, stage 2's above).  Above the floor the curve is
-// used; below it the count is the measured 8, which is what both cells below
-// want.  Between those two V there is no measurement, so the boundary is
-// placed on the measured point.  Table: ledger §10.9.
+// used; below it the count is 8, which is what both cells below want.  Between
+// those two V there is no fitted point, so the boundary is placed on the one
+// that exists.
 //
 // `work_target` is the batch rule's own cap (`c * b <= 2.5 * sm_count`): the
 // split exists to fill a machine a short batch leaves empty, so at a large
@@ -392,10 +366,10 @@ inline int f32_chunks_for(uint32_t batches, int ceiling, uint32_t work_target) {
 inline constexpr uint32_t kF32ChunkSplitCeiling = 32;
 inline constexpr uint32_t kF32ChunkCurveFloor = 114688;
 // The curve is fitted on `k = 2048` only, and it is applied on that axis only.
-// For `512 < topk < 2048` §8.6's measurements still stand and still disagree
-// with the curve: at `V = 262144, k = 1024` the batch rule's own 16 measures
-// 99.5 us against 138.4 us for the curve's 8, so extrapolating down the `topk`
-// axis would replace a measured optimum with a predicted one.
+// For `512 < topk < 2048` the fitted optima still disagree with the curve: at
+// `V = 262144, k = 1024` the batch rule's own 16 beats the curve's 8, so
+// extrapolating down the `topk` axis would replace a fitted optimum with a
+// predicted one.
 inline constexpr uint32_t kF32ChunkCurveTopK = 2048;
 
 inline uint32_t f32_isqrt(uint64_t v) {
@@ -427,25 +401,21 @@ inline int f32_topk_chunk_cap(uint32_t topk, uint32_t vocab, uint32_t c_default,
         if (c > (int)kF32ChunkSplitCeiling) c = (int)kF32ChunkSplitCeiling;
         return c;
     }
-    // §8.6's rule for everything the curve does not cover.  The guard is
+    // The rule for everything the curve does not cover.  The guard is
     // `c_default * topk * 10 <= vocab` -- the merge reading under a tenth of the
     // row is already at the batch rule's own count, so capping it is a pure
-    // loss.  **The curve above had to be split out of this because the guard
-    // fires exactly at the cells the ladder says the curve should decide**: at
+    // loss.  **The curve above is split out of this because the guard fires
+    // exactly at the cells the ladder says the curve should decide**: at
     // `k = 2048` the product is `8 * 2048 * 10 = 163840` (cap in force) or
-    // `16 * 2048 * 10 = 327680` (exempt), so every `V >= 327680` took the
-    // `return 0` arm and ran the batch rule's 16.  That is why `rule_ab.py`
-    // read `V = 393216 / 524288` at `-0.2% / +0.2%` while the ladder's optimum
-    // there is worth `-24.7% / -18.8%` (in force 0.2859 / 0.2959 against
-    // 0.2152 / 0.2414 at `c = 6 / 8`).
+    // `16 * 2048 * 10 = 327680` (exempt), so every `V >= 327680` would take the
+    // `return 0` arm and run the batch rule's 16 rather than the ladder's count.
     if ((uint64_t)c_default * topk * 10 <= vocab) return 0;
-    return 8;   // §8.6's measured cap for `512 < topk < 2048`
+    return 8;   // the fitted cap for `512 < topk < 2048`
 }
 
 // ── the chunk count above `kF32ChunksFewBatches` ────────────────────────────
 //
-// This used to be the constant 2.  What bounds it is the chunk *length*, and
-// the bound is a shared-memory one.
+// What bounds it is the chunk *length*, and the bound is a shared-memory one.
 //
 // `radix_topk_row_f32` stages the members of the coarse threshold bin into an
 // arena of `kF32SmemInputSize` slots.  A bin that does not fit falls through to
@@ -464,45 +434,39 @@ inline int f32_topk_chunk_cap(uint32_t topk, uint32_t vocab, uint32_t c_default,
 //     overflow when  L / 58 > kF32SmemInputSize  =>  L > kF32OverflowChunkLen
 //
 // Both factors are device geometry (`kF32SmemInputSize` from `kSMEM`, `kRadix`)
-// except the 58, which is the measurement.  The count is then the smallest `c`
+// except the 58, which is the fitted ratio.  The count is then the smallest `c`
 // that clears it:
 //
-//     V = 131072 -> 1.29 -> 2      (unchanged; the sweep is flat here)
-//     V = 262144 -> 2.57 -> 3      (the measured optimum is 3)
-//     V = 524288 -> 5.14 -> 6      (the measured optimum is 6)
+//     V = 131072 -> 1.29 -> 2
+//     V = 262144 -> 2.57 -> 3
+//     V = 524288 -> 5.14 -> 6
 //
-// and both measured optima land where the rule says they do, with no fitted
-// boundary: rounding down to 5 at `V = 524288` would put every chunk 3% over
-// the arena and the merge pays for it by an order of magnitude.
-// Sweep and before→after: `docs/C500-radix-perf-ledger.zh.md`.
+// with no fitted boundary: rounding down to 5 at `V = 524288` would put every
+// chunk 3% over the arena and the merge pays for it by an order of magnitude.
 //
-// `V < 262144` is untouched, which is where the sweep has the whole gate
-// losing to the row path anyway; that is the batch bound at
-// `topk_worth_splitting_f32`, not this.
+// `V < 262144` is untouched, which is where the gate loses to the row path
+// anyway; that is the batch bound at `topk_worth_splitting_f32`, not this.
 //
-// **Provenance, not a device test.**  Both inputs to the rule are device
+// **A device test, not a record of where a number came from.**  Both inputs to the rule are device
 // geometry -- the arena and the AP count the grid is sized against -- and the
-// two fitted numbers below were read off one machine.  C600/C600U disagree on
-// both (28/32 APs against 104, and a different smem budget), so they keep
-// `c = 2`.  `__MACA_ARCH__` looks like the obvious discriminator and is the
-// wrong one: it is defined only in the *device* pass, and this is a host
-// function, so every architecture would take the `#else` branch.
+// ratio was fitted on one machine.  A 28/32-AP family disagrees on both (28/32
+// APs against 104, and a different smem budget), so it keeps `c = 2`.
+// `__MACA_ARCH__` looks like the obvious discriminator and is the wrong one: it
+// is defined only in the *device* pass, and this is a host function, so every
+// architecture would take the `#else` branch.
 //
-// This is the same shape as the coarse12 gate's provenance half: a constant
-// naming *where a number was measured*, not what the device is.  It reads
-// `sm_count` because that is the only machine identity this file has -- unlike
-// the coarse12 gate, there is no budget question here to answer instead, since
-// the rule's own first factor already carries the arena.
+// This is the same shape as the coarse12 gate's fitted half: a constant naming
+// *where a number came from*, not what the device is.  It reads `sm_count`
+// because that is the only machine identity this file has -- unlike the
+// coarse12 gate, there is no budget question here to answer instead, since the
+// rule's own first factor already carries the arena.
 //
 // The first factor is not written down: it is `kF32SmemInputSize`, the arena
-// the kernel actually has, and transcribing its value here is what let the
-// small-batch branch above go without it for so long.  Deriving it means a
-// `-DKSMEM_BYTES=` build moves this bound with the arena instead of leaving it
-// behind -- the two numbers agreed at 1757 only because nothing had changed
-// `kSMEM`.  The second factor, 58, is the one measured quantity here and is
-// the only one that stays a literal.
+// the kernel actually has, so a `-DKSMEM_BYTES=` build moves this bound with
+// the arena instead of leaving it behind.  The second factor, 58, is the one
+// fitted quantity here and is the only one that stays a literal.
 inline constexpr uint32_t kF32OverflowChunkLen = topk_select_radix::kF32SmemInputSize * 58u;
-// The 58 was measured against the default arena, and `f32_chunks_large_batch`
+// The 58 was fitted against the default arena, and `f32_chunks_large_batch`
 // applies this bound to *every* `topk` -- so a build that moves `kSMEM` would
 // carry the old ratio into a new arena without anything noticing.
 //
@@ -513,7 +477,7 @@ inline constexpr uint32_t kF32OverflowChunkLen = topk_select_radix::kF32SmemInpu
 // passes `-DKSMEM_BYTES=`.  So it is a trap for a build nobody runs, and the
 // default build -- the one that ships -- has the assert compiled out.  It is
 // kept because the day someone does pass the flag is exactly the day the 58
-// stops being the measurement, and a silent wrong bound is worse than a
+// stops being the fitted ratio, and a silent wrong bound is worse than a
 // compile error.  Making it fire would take an `#else` branch asserting the
 // default `1757`, which is the same check written twice; the honest statement
 // is that the default is unguarded and `radix_common.cuh`'s `kSMEM` is the one
@@ -522,10 +486,9 @@ inline constexpr uint32_t kF32OverflowChunkLen = topk_select_radix::kF32SmemInpu
 // **A `-DKSMEM_BYTES=` build cannot get that far anyway**, which is a stronger
 // statement than "nobody passes it": `radix_common.cuh`'s
 // `kCoarse12ArenaEntries` assert fails for both 32 KB and 48 KB, so the only
-// value that compiles
-// is the 16 KB default.  This assert is therefore unreachable twice over --
-// once because nothing sets the macro, and once because setting it to anything
-// else does not build (checked with `-fsyntax-only` on both passes).
+// value that compiles is the 16 KB default.  This assert is therefore
+// unreachable twice over -- once because nothing sets the macro, and once
+// because setting it to anything else does not build.
 #ifdef KSMEM_BYTES
 static_assert(topk_select_radix::kF32SmemInputSize == 1757,
               "KSMEM_BYTES moved the arena, so kF32OverflowChunkLen's 58 is no "
@@ -533,17 +496,15 @@ static_assert(topk_select_radix::kF32SmemInputSize == 1757,
               "kF32SmemInputSize (the ladder is in the ledger, SS12.5) before "
               "shipping this build.");
 #endif
-// The AP count the coarse12 ladder was measured on, and the same kind of
-// constant as the `sm_count` test just above -- a number naming a
-// measurement's provenance, not a claim about what a device is.  There used to
-// be a `kC500SmCount` here as well, for the coarse12 gate's device half; that
-// half is now the budget comparison in `f32_coarse12_applies`, and the only
-// question left that `sm_count` can answer is "was this the machine the
-// numbers came from".  One constant, one job.
+// The AP count the coarse12 ladder was fitted on -- a number naming where a
+// fitted constant came from, not a claim about what a device is.  The coarse12
+// gate's device half is now the budget comparison in `f32_coarse12_applies`,
+// and the only question left that `sm_count` can answer is "was this the
+// machine the numbers came from".  One constant, one job.
 inline constexpr uint32_t kF32Coarse12MeasuredSmCount = 104;
 inline int f32_chunks_large_batch(uint32_t vocab_size, uint32_t sm_count) {
-    // Same shape as the coarse12 gate's provenance half, and the same reason:
-    // the `58` below was read off this device.
+    // Same shape as the coarse12 gate's fitted half, and the same reason: the
+    // `58` below was fitted on this device.
     if (sm_count != kF32Coarse12MeasuredSmCount) return 2;
     // `c = 2` is the floor: `launch_f32_chunk_stage1` rejects
     // `num_chunks <= 1`, so fewer than two is not a split at all.
@@ -564,9 +525,9 @@ inline constexpr uint32_t kF32ChunksFewBatches = 64;
 //
 // Two regimes fall out of the ladder, and one constant cannot hold both.  At or
 // below `kF32Coarse12NarrowVocab` the route is already ahead at the 16 floor and
-// is never measured behind; the first width above it is where the 16 floor
-// loses, and the two widths between are unmeasured and deliberately left on the
-// wide side, which is the conservative direction.
+// never falls behind; the first width above it is where the 16 floor loses, and
+// the two widths between are deliberately left on the wide side, which is the
+// conservative direction.
 //
 // Above the boundary 64 is the one value that is a win at every wide cell
 // except the one sitting on the flat part of the crossing.  The widest row
@@ -579,29 +540,25 @@ inline constexpr uint32_t kF32ChunksFewBatches = 64;
 // `topk = 512` crosses earlier than the product puts it, so the floor is
 // **conservative there by design** -- it declines a win rather than entering
 // the cells where the route loses badly at that `topk`.
-// Ladders, per-cell ratios and the excluded cells:
-// `docs/C500-radix-perf-ledger.zh.md` §12.
 inline constexpr uint64_t kF32Coarse12WorkTarget = 114688;
 inline constexpr uint32_t kF32Coarse12MinBatchesNarrow = 16;
 inline constexpr uint32_t kF32Coarse12NarrowVocab = 131072;
 
-// ── C600U's ladder: the same two arms, re-sited on the 28-AP part ────────────
+// ── the 28/32-AP ladder: the same two arms, re-sited ────────────────────────
 //
-// The C500 ladder above is a measurement on 104 APs, and on a 28/32-AP family it
-// is not merely conservative -- it is **unreachable**, because the performance
-// half of `f32_coarse12_applies` refuses any device that is not the one it was
-// measured on.  So the route has never run here, and what follows is what it
-// does when it can.
+// The ladder above is fitted on 104 APs, and on a 28/32-AP family its
+// performance half refuses any device that is not the one it was fitted on.  So
+// the route has never run here, and what follows is what it does when it can.
 //
-// **Both arms are a product `batches * topk` here, not a batch.**  On C500 the
-// narrow arm is a flat `batches >= 16` and the wide one is a product; here the
-// narrow crossing moves with `topk` as plainly as the wide one does, and a
-// product holds all three arms.  The C500 narrow arm's flat 16 is wrong in
-// *both* directions on this part: it declines a band of wins at the long `topk`
-// and it enters the loss beside them at the short one.
+// **Both arms are a product `batches * topk` here, not a batch.**  On the 104-AP
+// ladder the narrow arm is a flat `batches >= 16` and the wide one is a product;
+// here the narrow crossing moves with `topk` as plainly as the wide one does,
+// and a product holds all three arms.  A flat 16 is wrong in *both* directions
+// on this part: it declines a band of wins at the long `topk` and it enters the
+// loss beside them at the short one.
 //
 // The two floors are sited on the crossings and are **conservative in exactly
-// the way the C500 ladder's `topk = 512` arm is** -- a product cannot hold a
+// the way the 104-AP ladder's `topk = 512` arm is** -- a product cannot hold a
 // crossing that moves with `topk` at the low end, so each declines a band of
 // wins rather than risk the loss beside it.  The narrow floor is `b18` at
 // `k = 512` and the wide one `b24` at `k = 2048`, which is where the two
@@ -615,105 +572,92 @@ inline constexpr uint32_t kF32Coarse12NarrowVocab = 131072;
 // past `b24` at that `topk`, and the healthy cell at the same `topk` is why it
 // is not sited there either.
 //
-// On the production fp32 shapes the route takes about a third off the operator.
-// Ladder, per-cell ratios and before→after: `docs/C500-radix-perf-ledger.zh.md`
-// §12.
-//
 // The ladder below was fitted on the 28-AP part -- the set `is_c600u_ap_count`
-// names -- so the 32-AP arm is served by *extrapolation*, and this is where
-// that says so.
+// names -- so the 32-AP arm is served by *extrapolation*, and this is where that
+// says so.
 //
 // Two reasons it is extrapolated rather than declined.  The routes the floors
-// sit between are **both one CTA per row**, so the per-row costs the crossing
-// is made of do not move with the AP count, and the step from 28 to 32 APs is
-// small against the 104 -> 28 step this ladder was already re-sited across.
-// And declining is not the conservative arm: a 32-AP part then takes the row
-// path on every shape the route serves, which is the slower arm by a wide
-// margin.  Both halves of that were checked on one binary by varying this
-// entry's own `sm_count` argument at a fixed 28, so the two arms differ in the
-// route and in nothing else this file decides.
+// sit between are **both one CTA per row**, so the per-row costs the crossing is
+// made of do not move with the AP count, and the step from 28 to 32 APs is small
+// against the 104 -> 28 step this ladder re-sites across.  And declining is not
+// the conservative arm: a 32-AP part then takes the row path on every shape the
+// route serves, which is the slower arm by a wide margin.  Both halves are
+// checkable on one binary by varying this entry's own `sm_count` argument at a
+// fixed 28, so the two arms differ in the route and in nothing else this file
+// decides.
 //
 // `DEEP_SELECT_F32_COARSE12` is how a 32-AP machine would turn the
-// extrapolation into a measurement, but it is read *below* the AP test, so a
+// extrapolation into a fitted point, but it is read *below* the AP test, so a
 // probe has to be on a part in this set already.
 inline constexpr uint64_t kF32Coarse12C600UNarrowProduct = 9216;
 inline constexpr uint64_t kF32Coarse12C600UWideProduct = 49152;
 
 
 // The width floor is the one value in this gate that is not a crossing at all.
-// The port wins at every width the split is legal at -- `V = 4096` is -29.1%,
-// `8192` is -45.9%, `16384` is -53.4%, and the `(V, k)` sweeps above that are
-// all wins -- so there is nothing to site it on.  What sets it instead is the
-// original's own bound: `select_topk_policy` never routes to coarse12 below
-// `n_cols = 2049`.  Below that the split is the only arm anyone has measured,
-// so the gate matches the original rather than inventing a floor.  (2048, not
-// 2049: the facade's own stride guard already rejects anything that is not a
-// multiple of 256 floats, and 2048 is the largest legal width under 2049.)
+// The route wins at every width the split is legal at, so there is nothing to
+// site it on.  What sets it instead is the caller-facing bound:
+// `select_topk_policy` never routes to coarse12 below `n_cols = 2049`.  Below
+// that the split is the only arm, so the gate matches that bound rather than
+// inventing a floor.  (2048, not 2049: the facade's own stride guard already
+// rejects anything that is not a multiple of 256 floats, and 2048 is the largest
+// legal width under 2049.)
 inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 
-// ── the deep_gemm coarse12 route ────────────────────────────────────────────
+// ── the coarse12 route ──────────────────────────────────────────────────────
 //
-// `topk_coarse12.cuh` carries `topk_coarse12`, extracted whole from
-// `mcDeepGEMM/csrc/kernels/fp32_topk.cu`.  It answers one row in one CTA and
-// writes *positions in the row*, which is exactly what the contract half below
-// consumes, so it replaces the whole split for the shapes it serves rather than
-// sitting beside it.
+// `topk_coarse12.cuh` carries the `topk_coarse12` selector.  It answers one row
+// in one CTA and writes *positions in the row*, which is exactly what the
+// contract half below consumes, so it replaces the whole split for the shapes
+// it serves rather than sitting beside it.
 //
-// **Budget-gated, and for once the reason is not a measurement.**
+// **Budget-gated, and for once the reason is not a fit.**
 // The kernel's 16 KB arena holds a 4096-bin coarse histogram first and the
 // candidate array second, so it needs 16 KB of dynamic shared memory.  That is
-// `kF32RowSmemBytes`-sized on C500 and is not on a device with a smaller
-// budget -- and unlike every other C500-only rule in this file, a smaller
-// budget does not make it slower, it makes it **wrong**.
+// `kF32RowSmemBytes`-sized on the 64 KiB family and is not on a device with a
+// smaller budget -- and unlike every other 64-KiB-only rule in this file, a
+// smaller budget does not make it slower, it makes it **wrong**.
 //
-// **Two questions, and this predicate used to answer both with one number.**
+// **Two questions, and this predicate answers both.**
 //
 // *Does the route fit?*  A budget question, and it is answered against
 // `ARCH_SMEM_PER_AP_BYTES` -- this artifact's own family's budget, a
-// compile-time constant (`csrc/structs.h`).  The predicate used to read
-// `sm_count != 104`, which is a fact about the C500 that has nothing to do
-// with shared memory; the two agreed on every device anyone had looked at, and
-// that agreement was the whole argument for the old form.  In between it read
-// `cudaDevAttrMaxSharedMemoryPerBlockOptin` at the entry point, which is the
-// same number obtained one call later and from the wrong place: the artifact
-// already knows which family it was built for, so asking the driver at launch
-// time was a second source for a fact the build had.
+// compile-time constant (`csrc/structs.h`).  It is not a device query at launch
+// time: the artifact already knows which family it was built for, so asking the
+// driver would be a second source for a fact the build had.
 //
-// *Is the route faster here?*  A measurement, and this one is not adaptive --
-// the crossing in the tables above is a 104-AP ladder, and applying it to a
-// machine nobody measured would be a guess dressed as a rule.  So it is
-// guarded by the device it was fitted on, named for what it is.  **There are
-// two ladders now**, the 104-AP one above and the 28/32-AP one beside it; the
-// second exists because the route had never run on that family at all, so
-// "unmeasured" was declining shapes it wins by a wide margin.  The second set
-// carries both of that family's AP counts -- the 32-AP arm is an extrapolation
-// and says so at its own definition.
+// *Is the route faster here?*  A fitted answer, and it is not adaptive -- the
+// crossing in the tables above is a 104-AP ladder, and applying it to a machine
+// nobody fitted would be a guess dressed as a rule.  So it is guarded by the
+// device it was fitted on, named for what it is.  **There are two ladders**,
+// the 104-AP one above and the 28/32-AP one beside it; the second exists
+// because the route had never run on that family at all, so "unfitted" was
+// declining shapes it wins by a wide margin.  The second set carries both of
+// that family's AP counts -- the 32-AP arm is an extrapolation and says so at
+// its own definition.
 //
 // Splitting them is the point, and it still is under the macro: the budget
-// half is now a *compile-time* property of the family, while the performance
-// half stays a runtime property of the machine in front of the call.  A family
-// 1600 image carries the 128 KiB budget without carrying the C500 ladder --
-// the two halves move independently, which is the whole reason they are two
-// halves.  An artifact whose `ARCH_SMEM_PER_AP_BYTES` is too small for the
-// arena takes the `#if` and never routes at all, and that is a *build* fact
-// now: it cannot be talked out of at runtime by a device that reports more.
+// half is a *compile-time* property of the family, while the performance half
+// stays a runtime property of the machine in front of the call.  A 1600 image
+// carries the 128 KiB budget without carrying the 104-AP ladder -- the two
+// halves move independently, which is the whole reason they are two halves.  An
+// artifact whose `ARCH_SMEM_PER_AP_BYTES` is too small for the arena takes the
+// `#if` and never routes at all, and that is a *build* fact now: it cannot be
+// talked out of at runtime by a device that reports more.
 //
-// Why it is worth having at all: on the shapes deep_gemm routes here it is
-// about twice as fast as the row kernel (ledger §12).  The two structural
-// differences are 12 coarse bits against 8 and one 16 KB arena against 14 KB
-// plus a ping-pong refine buffer; the block size is the original's 512 as
-// well, sized so the AP's 2048 thread slots are filled evenly
-// (`docs/experiments/20261022_f32_occupancy/`).
+// Why it is worth having at all: the two structural differences are 12 coarse
+// bits against 8 and one 16 KB arena against 14 KB plus a ping-pong refine
+// buffer, both of which shrink what pass 2 must read; the block size is 512,
+// sized so the AP's 2048 thread slots are filled evenly.
 // `DEEP_SELECT_F32_COARSE12`: `1` forces the route onto every shape that is
 // otherwise *legal* for it, `0` denies it, unset takes the ladder.  In the same
 // shape as `DEEP_SELECT_F32_CHUNKS` below, and for the same reason: the ladder
-// is a set of measured crossings, and re-siting one means measuring the route on
-// the shapes the current floor declines -- which is otherwise a source edit and a
+// is a set of fitted crossings, and re-siting one means fitting the route on the
+// shapes the current floor declines -- which is otherwise a source edit and a
 // three-artifact rebuild per probe.  It replaces the floor and **nothing else**:
 // the arena budget, the `topk` bound and the width bound are still enforced, so
 // a forced route is a legal route.  It does not change any default, and it
-// cannot reach a family the ladder was not measured on -- the `sm_count` test
-// above it runs first.  (It is what sited the C600U ladder: the knob is read
+// cannot reach a family the ladder was not fitted on -- the `sm_count` test
+// above it runs first.  (It is what sited the 28/32-AP ladder: the knob is read
 // *after* the AP-count test, so a probe needs that test relaxed to reach the
 // arms at all -- see the note on `is_c600u_ap_count`.)
 inline int f32_coarse12_override() {
@@ -743,8 +687,8 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         // ── the performance half: where each ladder below was fitted ──
         // The 28/32-AP family is the exception to "a device the ladder was not
         // fitted on": it has its own ladder (above), so the test is which of
-        // the two applies rather than whether any does.  A part that is
-        // neither takes the row path, as before.
+        // the two applies rather than whether any does.  A part that is neither
+        // takes the row path.
         if (is_c600u_ap_count(params.sm_count)) {
             if (params.topk > (uint32_t)topk_select_coarse12::kMaxTopK) return false;
             if (batches == 0) return false;
@@ -761,21 +705,21 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
         // in the *staged* refine that can make a larger answer correct.
         if (params.topk > (uint32_t)topk_select_coarse12::kMaxTopK) return false;
         if (batches == 0) return false;
-        // The original's own width bound (`n_cols >= 2049`).  It matters more
-        // now than it did: the narrow arm below is `return batches >= 16` with
-        // no other `V` test, so without this line a 1024-wide row would route,
-        // which is below every width anyone has measured on either arm.
+        // The caller-facing width bound (`n_cols >= 2049`).  It matters: the
+        // narrow arm below is `return batches >= 16` with no other `V` test, so
+        // without this line a 1024-wide row would route, which is below every
+        // width either arm serves.
         if (params.vocab_size < kF32Coarse12MinVocab) return false;
         // The two arms below are the only part of this predicate that is a
-        // *measured floor* rather than a bound -- everything above is a limit
-        // the route would be wrong or impossible outside of.  So this is where
-        // the A/B knob goes, and it is the whole of what it replaces.
+        // *fitted floor* rather than a bound -- everything above is a limit the
+        // route would be wrong or impossible outside of.  So this is where the
+        // A/B knob goes, and it is the whole of what it replaces.
         if (f32_coarse12_override() >= 0) return f32_coarse12_override() != 0;
-        // Route on the shape deep_gemm itself routes on
-        // (`select_topk_policy`), with the floor taken from the measured
+        // Route on the shape the caller's own policy routes on
+        // (`select_topk_policy`), with the floor taken from the fitted
         // crossing on this device.  The narrow-width arm is why there are two
         // arms and not one: at or below `V = 131072` the route is ahead at
-        // `b16` and never measured behind, so the width decides which floor
+        // `b16` and never behind, so the width decides which floor
         // applies, and only the wide one is a function of `topk`.  The tables
         // above have both.
         if (params.vocab_size <= kF32Coarse12NarrowVocab)
@@ -784,34 +728,26 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
     }
 }
 
-// ── the deep_gemm chunks route: the `b <= 2` band ───────────────────────────
+// ── the chunks route: the `b <= 2` band ─────────────────────────────────────
 //
-// `topk_chunks.cuh` carries `topk_chunks`, deep_gemm's third kernel family, in the
+// `topk_chunks.cuh` carries `topk_chunks`, the third dataflow, in the
 // same shape as `topk_coarse12.cuh` carries the second.  It is here because the
-// two arms this file already has are both the wrong shape at one or two rows,
-// and that is measured rather than argued (ledger §12.16.6, interleaved five
-// rounds on device 2, `k = 2048`):
+// two arms this file already has are both the wrong shape at one or two rows:
+// one CTA per row leaves the machine empty.
 //
-//     b     V        split    deep_gemm    deep_gemm/split
-//     1     66551     90.8      53.0        0.584x
-//     2     66551     93.4      54.1        0.580x
-//     4     66551     93.8     360.8        3.844x
-//     1    107520    174.8      60.6        0.347x
-//     1    131072    135.0      62.7        0.464x
+// **The cliff is the chunks kernel's own, at `b = 4`.**  Its
+// `topk_chunks_compact_refine` is one CTA per (row, chunk); once the batch
+// pushes the grid past a wave its per-row cost jumps, while the CTA count grows
+// only linearly.  So this is not a fallback to reach for whenever we are
+// behind: it is a `b <= 2` special case, and the batch bound below is sited on
+// that step, not on a guess.
 //
-// **The cliff is deep_gemm's, at `b = 4`.**  Its own `topk_chunks_compact_refine`
-// goes from 24.4 us at one row to 310.7 us at sixteen -- 12.7x per row -- while
-// the CTA count only goes from 6 to 96 on a 104-AP part.  So this is not a
-// fallback to reach for whenever we are behind: it is a `b <= 2` special case,
-// and the batch bound below is sited on the measured step, not on a guess.
-//
-// Why it wins there: deep_gemm walks the row a second time and writes every
-// element **above** the threshold bin straight to the output in that same walk
-// (its `guaranteed` half), staging only the threshold bin's members.  The split
+// Why it wins there: it walks the row a second time and writes every element
+// **above** the threshold bin straight to the output in that same walk (its
+// `guaranteed` half), staging only the threshold bin's members.  The split
 // instead materializes `num_chunks * topk` candidates and merges them, and at
 // `k = 2048, V = 66551` the elements above the threshold bin are already almost
-// the whole answer -- which is why the sweep over `DEEP_SELECT_F32_CHUNKS`
-// (2..32, ledger §12.16.6) moves the split by 46% and never reaches this.
+// the whole answer -- so the merge is the cost this arm avoids.
 //
 // **Not `constexpr`-gated, and it does not need to be**: the arena here is
 // **device** memory in the per-row workspace (`TopKChunksWorkspace::candidate_indices`,
@@ -819,23 +755,23 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
 // shared memory -- and every family this repository builds has at least 64 KB
 // per AP (`csrc/structs.h`), so the budget half of `f32_coarse12_applies` would
 // be satisfied by all three.  The one question is whether the machine in front
-// of the call is one this was measured on, which is the same `sm_count` test
-// the coarse12 tuning half uses and for the same reason.
+// of the call is one this was fitted on, which is the same `sm_count` test the
+// coarse12 tuning half uses and for the same reason.
 inline constexpr uint32_t kF32ChunksMaxBatches = 2;
 inline constexpr uint32_t kF32ChunksMinVocab = 2048;
 
 // `DEEP_SELECT_F32_CHUNKS_ROUTE`: `1` forces this arm on, `0` denies it, unset
 // takes the band.  Same shape and same reason as `DEEP_SELECT_F32_COARSE12` --
-// the band is a measured step and re-siting it means measuring the arm on the
+// the band is a fitted step and re-siting it means fitting the arm on the
 // batches it declines.  It replaces the band and nothing else.
 //
 // **"And nothing else" is a property of where `f32_chunks_applies` calls it,
 // not of this function.**  Every bound above the band still applies: the AP
-// count the ladder was measured on, `kMaxTopK`, the width floor, and
+// count the ladder was fitted on, `kMaxTopK`, the width floor, and
 // `batches <= kF32ChunksMaxBatches`.  In particular the AP-count test comes
-// first, so this knob **cannot reach a C600U at either of its AP counts** --
-// that family takes the row path at every batch, whatever the variable is set
-// to.  `DEEP_SELECT_F32_CHUNKS=n`
+// first, so this knob **cannot reach the 28/32-AP family at either of its AP
+// counts** -- that family takes the row path at every batch, whatever the
+// variable is set to.  `DEEP_SELECT_F32_CHUNKS=n`
 // is the knob for a different chunk *count*; this one only decides whether the
 // arm is entered at all.
 inline int f32_chunks_route_override() {
@@ -847,27 +783,27 @@ inline bool f32_chunks_applies(const RowParams &params, uint32_t batches) {
     // ── the limits: outside these the route is wrong or impossible ──
     if (params.sm_count != kF32Coarse12MeasuredSmCount) return false;
     if (params.topk > (uint32_t)topk_select_chunks::kMaxTopK) return false;
-    // The original's own width bound, as on the coarse12 arm: `2048`, not
+    // The caller-facing width bound, as on the coarse12 arm: `2048`, not
     // `2049`, because the facade already rejects a stride that is not a
     // multiple of 256 floats.
     if (params.vocab_size < kF32ChunksMinVocab) return false;
     if (batches == 0 || batches > kF32ChunksMaxBatches) return false;
-    // ── the measured band, and the A/B knob over it ──
+    // ── the fitted band, and the A/B knob over it ──
     // **The override replaces the band and only the band**, which is why it
     // sits below the bounds rather than among them.  `batches <= 2` here is a
     // *limit*, not the band: the chunks kernel is one CTA per row and its
     // scratch sizing (`chunks_workspace_bytes`) is `batches *` one row's
     // workspace, so a batch past this is a route that was never sized for.
     // What the override moves is the step between "the row path" and "the
-    // chunks arm" at the batch the arm was measured on, and the coarse12 arm
+    // chunks arm" at the batch the arm was fitted on, and the coarse12 arm
     // orders the same two pieces the same way (`f32_coarse12_applies` puts its
     // `batches == 0` test above its `f32_coarse12_override`).
     //
     // **The AP-count test above is a limit for the same reason, and it is why
-    // the knob cannot reach a C600U**: `f32_chunks_route_override()` is read
-    // only from here, so `DEEP_SELECT_F32_CHUNKS_ROUTE=1` changes nothing on
-    // that family, at either of its AP counts.  See `structs.h`'s note on the
-    // family table.
+    // the knob cannot reach the 28/32-AP family**: `f32_chunks_route_override()`
+    // is read only from here, so `DEEP_SELECT_F32_CHUNKS_ROUTE=1` changes
+    // nothing on that family, at either of its AP counts.  See `structs.h`'s
+    // note on the family table.
     if (f32_chunks_route_override() >= 0) return f32_chunks_route_override() != 0;
     return true;
 }
@@ -892,36 +828,29 @@ int f32_chunked_chunks(uint32_t batches, uint32_t topk, uint32_t vocab_size,
     const int c = f32_chunks_for(batches, ceiling, work_target);
     const int cap = f32_topk_chunk_cap(topk, vocab_size, (uint32_t)c, work_target);
     int n = (cap != 0 && c > cap) ? cap : c;
-    // **The arena floor, which this branch never had.**  `f32_chunks_large_batch`
-    // above is derived from exactly one thing -- the largest chunk whose
-    // threshold bin still fits `kF32SmemInputSize` -- but the small-batch
-    // branch below `kF32ChunksFewBatches` was sized from the batch alone and
-    // never learned it.  The omission is not a slope, it is a cliff, and it
-    // lands precisely on the branch boundary: at `V = 524288` the batch rule
-    // gives `c = 4` for `33 <= batches <= 64`, which is a 131072-element chunk
-    // against the `kF32OverflowChunkLen` bound, so `radix_topk_row_f32_rescan`
-    // runs five passes where it should run two.  Measured, split alone,
-    // `k = 2048`: `b32` is 0.3732 ms (c = 8, 65536/chunk, no rescan) and `b33`
-    // is 1.77 ms (c = 4); `b65` takes the branch above, gets 6, and is fine
-    // again.  So the two branches disagreed about the same row at their own
-    // seam.  With the floor, split alone: `b40` **-77.6%**, `b64` **-72.5%**,
-    // and the two controls that have no overflow (`b32`, `b40 V = 262144`) at
-    // -0.1% / -0.3%.
+    // **The arena floor.**  `f32_chunks_large_batch` above is derived from
+    // exactly one thing -- the largest chunk whose threshold bin still fits
+    // `kF32SmemInputSize` -- but the small-batch branch below
+    // `kF32ChunksFewBatches` is sized from the batch alone.  The omission is not
+    // a slope, it is a cliff, and it lands precisely on the branch boundary: at
+    // `V = 524288` the batch rule gives `c = 4` for `33 <= batches <= 64`, which
+    // is a 131072-element chunk against the `kF32OverflowChunkLen` bound, so
+    // `radix_topk_row_f32_rescan` runs five passes where it should run two.  The
+    // two branches then disagree about the same row at their own seam.
     //
     // Applied *after* the cap and as a floor, not a replacement: the batch rule
     // and the curve still decide the count wherever they are already above the
     // bound.
     //
-    // **The `topk` guard is the measurement; the branch above is geometry.**
-    // `f32_chunks_large_batch` applies the same arena bound to *every* `topk`,
-    // because that is the only way it can be a derivation rather than a table.
-    // Here the bound has to be checked against a measurement instead: the 58 is
-    // a `k = 2048` value, and at `k = 512` the threshold bin is narrower and
-    // `c = 4` never overflowed -- so raising it there is free in the arena and
-    // the merge pays for it, measured `b64 V = 524288 k = 512` at **+14.3%**
-    // against -0.1% / -0.3% on the controls.  So this arm fires where its
-    // constant was derived, and `k = 1024` keeps the `k = 2048` verdict for
-    // want of a measurement rather than for want of a reason.
+    // **The `topk` guard is where the ratio was fitted; the branch above is
+    // geometry.**  `f32_chunks_large_batch` applies the same arena bound to
+    // *every* `topk`, because that is the only way it can be a derivation rather
+    // than a table.  Here the bound has to be checked against the fitted ratio
+    // instead: the 58 is a `k = 2048` value, and at `k = 512` the threshold bin
+    // is narrower and `c = 4` never overflowed -- so raising it there is free in
+    // the arena and the merge pays for it.  So this arm fires where its constant
+    // was derived, and `k = 1024` keeps the `k = 2048` verdict for want of a
+    // fitted point rather than for want of a reason.
     if (topk == kF32ChunkCurveTopK) {
         const uint32_t arena =
             (vocab_size + kF32OverflowChunkLen - 1) / kF32OverflowChunkLen;
@@ -932,23 +861,20 @@ int f32_chunked_chunks(uint32_t batches, uint32_t topk, uint32_t vocab_size,
 
 // The batch bound has no single value: the split costs a merge over `batches`
 // CTAs on an otherwise idle machine and saves the row kernel's per-CTA time, so
-// which way it goes has to be measured per shape.  The floor was 262144 and the
-// chunk count above is why it can drop to the small-batch tier's value -- with
-// the count a constant 2 above 64 rows the merge is 3 CTAs per row at every
-// shape, so the cost stops scaling with the gate.
+// which way it goes is a per-shape property.  The floor can drop to the
+// small-batch tier's value because with the count a constant 2 above 64 rows
+// the merge is 3 CTAs per row at every shape, so the cost stops scaling with
+// the gate.
 //
-// **The band `32768 <= V < 65536` is what that unification newly serves**, and
-// it was measured before being opened: the controls at `V >= 65536`, which the
-// change cannot reach, hold flat, and every cell in the band wins with the
-// magnitude falling as the batch rises -- the same curve every other result
-// here shows.  Full tables in `docs/C500-radix-perf-ledger.zh.md`.
+// **The band `32768 <= V < 65536` is what that unification serves**, and the
+// controls at `V >= 65536`, which the predicate cannot reach, hold flat; every
+// cell in the band wins with the magnitude falling as the batch rises -- the
+// same curve every other result here shows.
 //
-// There used to be four constants here, a small-batch tier (`V >= 65536`,
-// `batches <= 64`) and a large-batch one (`V >= 262144`, later 65536,
-// `batches <= 4096`).  Lowering the large tier's floor to 32768 makes the small
-// branch unreachable (it would need `V < 32768` and `V >= 65536` at once), so
-// the predicate is one condition and the two constants below are what is left.
-// A constant that cannot select anything is a knob a reader will try to turn.
+// Two constants are left: `kF32ChunkedMinVocab` is the row-length floor, and
+// `topk_worth_splitting_f32` adds the short-row/large-batch corner (`V <= 65536`
+// serves at most 256 rows).  A constant that cannot select anything is a knob a
+// reader will try to turn, so the dead tier is folded into these two.
 constexpr uint32_t kF32ChunkedMinVocab = 32768;
 constexpr uint32_t kF32ChunkedMaxBatches = 4096;
 
@@ -963,11 +889,9 @@ constexpr uint32_t kF32ChunkedMaxBatches = 4096;
 // per-CTA cost, and a row costs `V * c` at a per-element rate `c`; with
 // chunks = 2 that makes rows win below `V < B * 6.0e6`.  A two-term model is
 // not trustworthy near the corner it was fitted at, so it is **coupled to the
-// measured region**: inside the sweep the sweep decides, and only outside it
-// does the model speak.  The sweep's verdicts, and the one cell it leaves
-// ambiguous (`b768-v65536`, which the model sends to the split and the gate
-// follows), are in `docs/C500-radix-perf-ledger.zh.md` -- recorded there rather
-// than smoothed over.
+// fitted region**: inside the sweep the sweep decides, and only outside it does
+// the model speak.  The one cell the sweep leaves ambiguous
+// (`b768-v65536`) is sent to the split by the model, and the gate follows it.
 
 inline bool topk_worth_splitting_f32(const RowParams &params,
                                      uint32_t batches) {
@@ -988,15 +912,13 @@ inline bool chunked_f32_applies(const RowParams &params, uint32_t batches) {
     // a device read.
     if (params.vocab_size < kF32ChunkedMinVocab) return false;
     if (batches > kF32ChunkedMaxBatches) return false;
-    // The topk clause that used to sit here (`== 512 || == 1024`) was a *policy*
-    // bound, not an instantiation one -- the fp32 chunk engine is dynamic-k
-    // (`topk_select_radix::f32_chunk_engine_supports`) -- so it is replaced by a
-    // measured one rather than by a wider constant.  Opening it to
-    // `topk <= kF32MaxTopK` wins big on the long rows and gives it back on short
-    // ones at a large batch; the cause is the shape of what a split buys, so the
-    // bound is the shape-aware predicate below rather than a `topk` clause.
-    // Plan §21.3 has the numbers.
-    if (params.topk == 512 || params.topk == 1024) return true;   // measured
+    // A `topk` clause here would be a *policy* bound, not an instantiation one
+    // -- the fp32 chunk engine is dynamic-k
+    // (`topk_select_radix::f32_chunk_engine_supports`) -- and opening it to
+    // `topk <= kF32MaxTopK` wins on the long rows and gives it back on short
+    // ones at a large batch.  The cause is the shape of what a split buys, so
+    // the bound is the shape-aware predicate below rather than a `topk` clause.
+    if (params.topk == 512 || params.topk == 1024) return true;   // the fitted band
     return topk_worth_splitting_f32(params, batches);
 }
 
@@ -1010,10 +932,10 @@ inline size_t chunked_f32_workspace_bytes(uint32_t batches, uint32_t topk,
 // `radix_topk_row_f32`'s unguarded `float4` walkers need -- and this function
 // is the one place that composes them: the pad is exactly the kind of thing a
 // second copy of the arithmetic would miss, and the launch takes the three
-// pointers rather than re-deriving them from the arena base.  The region in
-// front used to be the flag table; it lives in the dispatcher's dedicated
-// `scan_flags` now, so the arena base is the `cudaMalloc`'d workspace and
-// `cols` is its first region, which is what `chunked_f32_cols` documents.
+// pointers rather than re-deriving them from the arena base.  The flag table
+// lives in the dispatcher's dedicated `scan_flags`, not in front of this
+// arena, so the arena base is the `cudaMalloc`'d workspace and `cols` is its
+// first region, which is what `chunked_f32_cols` documents.
 struct ChunkedF32Workspace {
     int32_t *cols;
     float *vals;
@@ -1413,7 +1335,7 @@ inline Route select_route(const RouteGates &gates, const RowParams &params,
             return Route::kSplitBf16;
         return Route::kRowBf16;
     }
-    // ── the `b <= 2` arm: deep_gemm's chunks kernel ────────────────────────
+    // ── the `b <= 2` arm: the chunks selector ──────────────────────────────
     // Same handoff as the coarse12 arm below it -- answer in row columns, staged
     // through the scratch, contract half reads the per-row `-1` -- because it is
     // the same class of kernel: one CTA per row, walking the row itself.  Tested
@@ -1434,8 +1356,8 @@ inline Route select_route(const RouteGates &gates, const RowParams &params,
     if (gates.f32_coarse12) return Route::kF32Coarse12;
     // The fp32 split, for rows too long for one CTA at a batch too small for
     // the row path.  The engine's own bound is kept separate from the policy
-    // predicate so the two cannot be confused (they were one expression until
-    // §21.2); the row path serves anything the engine cannot.
+    // predicate so the two cannot be confused; the row path serves anything
+    // the engine cannot.
     if (gates.f32_split && workspace != nullptr && params.end_ptr != nullptr &&
         bytes >= chunked_f32_workspace_bytes(
                      batches, params.topk,
@@ -1458,8 +1380,8 @@ void topk_launch(const RowParams &params, int64_t batches,
                  cudaStream_t cuda_stream, detail::Route route, int index_dtype,
                  OutputSpec spec, void *chunked_workspace) {
     const uint32_t n = (uint32_t)batches;
-    // Both dtypes run the ported radix dataflow; only the block width differs,
-    // and the fp32 row has a single width.
+    // Both dtypes run the radix dataflow; only the block width differs, and the
+    // fp32 row has a single width.
     const bool bf16 = route == detail::Route::kRowBf16 ||
                       route == detail::Route::kSplitBf16;
     const int block =

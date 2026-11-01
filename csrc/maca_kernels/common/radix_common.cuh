@@ -40,37 +40,20 @@ constexpr int kChunkBlockSize = KCHUNK_BLOCK_SIZE;
 #endif
 // smem 大小：可通过编译参数 -DKSMEM_BYTES= 覆盖
 //
-// **The two lines this comment used to carry were wrong about the shipped
-// build.**  They read "RTX 4080: 48KB" and "MetaX C500: 32KB", but nothing in
-// this tree passes `-DKSMEM_BYTES` and no build entry defines it -- so the
-// `__MACACC__` arm is what ships, and that is **16 KB**, not 32.  The 48 KB
-// arm is the non-MACA fallback that no build here takes.
+// Nothing in this tree passes `-DKSMEM_BYTES` and no build entry defines it,
+// so the `__MACACC__` arm is what ships, and that is **16 KB**.  The 48 KB arm
+// is the non-MACA fallback that no build here takes.
 //
-// 32 KB was not merely unused, it is unbuildable -- and so is 48 KB, the
-// `#else` arm below.  Neither is reachable through a build entry here, but a
-// reader who reaches for `-DKSMEM_BYTES` should know the ceiling is not a
-// preference.  Measured on this tree, both passes, with `-fsyntax-only`:
-//
-//     -DKSMEM_BYTES=16384  compiles
-//     -DKSMEM_BYTES=32768  static_assert fails: '16384 >= 30440'
-//     -DKSMEM_BYTES=49152  static_assert fails: '16384 >= 46824'
-//
-// The failing assert is this file's
+// A larger `kSMEM` is not merely unused, it is unbuildable: this file's
 // `kCoarse12ArenaEntries * sizeof(uint32_t) >= kSmemInputSize * sizeof(uint32_t)`
-// -- the 16-bit coarse level's 12-bit histogram aliases the *whole* dynamic
-// arena, so 4096 bins (16,384 B) is a hard floor and any `kSMEM` that grows the
-// arena past it fails to compile.  `kSmemInputSize` is
+// assert fails.  The 16-bit coarse level's 12-bit histogram aliases the
+// *whole* dynamic arena, so 4096 bins (16,384 B) is a hard floor and any
+// `kSMEM` that grows the arena past it fails to compile.  `kSmemInputSize` is
 // `(kSMEM - kSmemStaticBytes) / 4`, i.e. 14,056 B / 30,440 B / 46,824 B for
-// the three values above.  So the 16 KB arm is not a conservative choice that
-// a bigger part could raise: on this source it is the only buildable one.
-// (Both larger builds fail on the same assert -- the 48 KB `#else` with
-// `'16384 >= 46824'`, 32 KB with `'16384 >= 30440'` -- which is why they are
-// unbuilt rather than merely untaken.)
+// 16 / 32 / 48 KB.  So the 16 KB arm is not a conservative choice that a
+// bigger part could raise: on this source it is the only buildable one.
 //
 // Read `kF32SmemInputSize` (below) for what 16 KB actually buys.
-//
-// `maca_topk.cu`'s `#ifdef KSMEM_BYTES` assert has the same shape of problem
-// from the other side -- see the note there.
 #ifndef KSMEM_BYTES
 #ifdef __MACACC__
 constexpr size_t kSMEM = 16 * 1024;
@@ -87,7 +70,7 @@ constexpr size_t kSMEM = KSMEM_BYTES;
 
 // The NaN predicates and the key encodes come from `../common/primitives.cuh`,
 // the launch primitive from `../common/launch.cuh` (one definition each, shared
-// with the two ported dataflows and `maca_topk.cu`); they are pulled in
+// with the two staged dataflows and `maca_topk.cu`); they are pulled in
 // unqualified because every call site below is spelled that way.
 using topk_select_common::is_nan_bits32;
 using topk_select_common::bf16_is_nan;
@@ -143,9 +126,8 @@ static_assert(kF32RowSmemBytes == (size_t)kSmemInputSize * sizeof(uint32_t),
 // leave four, which is exactly the rest of a bf16 key: the two levels together
 // determine the key, so the refine never ranks past the fine ties.
 //
-// The 8-bit level made the threshold bin wider than the arena on ordinary rows,
-// so every one of them paid a third row walk.  See
-// `docs/C500-radix-perf-ledger.zh.md` §2.3.
+// An 8-bit coarse level makes the threshold bin wider than the arena on
+// ordinary rows, so every one of them pays a third row walk.
 constexpr uint32_t kKeyBits = 16;
 constexpr uint32_t kCoarse12Bits = 12;
 constexpr uint32_t kCoarse12Shift = kKeyBits - kCoarse12Bits;      // 4

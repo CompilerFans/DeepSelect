@@ -1,20 +1,15 @@
-// 2026 - Modified for DeepSelect.  DLTensor edge helpers for the tvm-ffi
-// binding layer, modelled on mcDeepGEMM's
-// `csrc/utils/ffi_tensor.hpp` (branch `dev_tvm_ffi`, commit
-// 3a6e6ba3) and pared to what this tree uses.
+// DLTensor edge helpers for the tvm-ffi binding layer.
 //
 // The extension is torch-free: tensors cross the FFI boundary as
-// `tvm::ffi::TensorView` (the non-owning form the upstream tvm-ffi
-// kernel-library guide recommends for kernel parameters), and every method
-// call the old pybind11 layer made on `torch::Tensor` is reproduced here
+// `tvm::ffi::TensorView` (the non-owning form tvm-ffi recommends for kernel
+// parameters), and every method call on `torch::Tensor` is reproduced here
 // against the DLTensor payload.
 //
-// Why this exists at all: the pybind11 entry points linked libtorch/libc10,
-// so the extension carried six torch DT_NEEDED entries and its behavior was
-// tied to whichever torch built it (the c10_cuda_check_implementation trap).
-// A DLPack boundary at TensorView removes that: the .so no longer links
-// torch, and the DWARF line number in its error messages -- the only other
-// version-dependent thing in it -- goes with it.
+// Why this exists at all: a torch-linked extension ties its behavior to
+// whichever torch built it, and its error path pulls torch-internal symbols
+// into the artifact.  A DLPack boundary at TensorView removes that: the .so
+// does not link torch, and the DWARF line number in its error messages -- the
+// only other version-dependent thing in it -- goes with it.
 
 #pragma once
 

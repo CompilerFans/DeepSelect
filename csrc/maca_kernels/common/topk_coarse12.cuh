@@ -1,46 +1,40 @@
-// deep_gemm's `topk_coarse12`, ported whole.
+// The fp32 coarse12 selector: one CTA ranks a row by histogramming its high
+// bits, picking the bin that holds rank `topk`, and refining that bin.
 //
 // Why this file exists
 // -------------------
-// `radix_topk_row_f32` (`radix_row_fp32.cuh`) and `topk_coarse12`
-// (`mcDeepGEMM/csrc/kernels/fp32_topk.cu`) answer the same question with the
-// same class of algorithm -- histogram the high bits, pick the bin holding
-// rank `topk`, rank that bin -- and the ported one is **2.0-2.3x faster** on
-// the shapes where deep_gemm routes to it (the ledger's §12 table).  Both are
-// two row walks, so the walk count is not the difference; the differences
-// that are measurable are:
+// `radix_topk_row_f32` (`radix_row_fp32.cuh`) answers the same question with
+// the same class of algorithm -- histogram the high bits, pick the bin holding
+// rank `topk`, rank that bin -- and the two structural differences here are
+// what make this the faster arm on the shapes `routing.cuh` sends to it:
 //
 //   * 12 coarse bits against 8, so the bin the refine ranks is 2-3x smaller.
 //   * one 16 KB arena doing double duty (coarse histogram, then candidates)
 //     against a 14 KB arena plus a ping-pong refine buffer.
 //
-// The block size is the original's 512 as well, and the reason is occupancy:
-// 640 x 3 CTAs is 1920 threads, under the 2048-thread/AP ceiling, so that width
-// ran 3 CTAs/SM where 512 fills four.  Measurements:
-// `docs/experiments/20261022_f32_occupancy/`.
+// The block size is 512, and the reason is occupancy: the AP exposes 2048
+// thread slots, so 512 fills four CTAs exactly, while 640 fits three (1920
+// threads) and leaves slots unused.
 //
-// The port is deliberately an *extraction*, not a rewrite: the arithmetic,
-// the round structure and the overflow handler below are deep_gemm's, so the
-// two can be compared without asking which of them is better written.  What
-// is dropped is the page-table transform (`Transform = true`), which needs
-// the `page_table` / `cu_seqlens_row` / `q_positions` plumbing this
-// repository does not synthesize -- the same subtraction the ported
-// extraction made.
-// What is added is the one thing deep_gemm keeps outside the kernel: this
-// runs over `[0, length)` of the row, which on this path is the whole row,
-// and it returns *positions in that window*, so the caller's contract half
+// The arithmetic, the round structure and the overflow handler below are the
+// dataflow, and nothing here depends on the caller beyond the row and its
+// length.  What is not carried is the page-table transform
+// (`Transform = true`), which needs the `page_table` / `cu_seqlens_row` /
+// `q_positions` plumbing this repository does not synthesize.  What is added
+// is the one thing kept outside the kernel elsewhere: this runs over
+// `[0, length)` of the row, which on this path is the whole row, and it
+// returns *positions in that window*, so the caller's contract half
 // (`topk_kernel_radix`) can treat them exactly like the split's answer.
 //
 // Route selection lives in `routing.cuh` (`f32_coarse12_applies`) and has two
-// halves.  The *budget* half -- does this part's shared memory
-// hold the arena -- is a compile-time constant of the artifact's family
+// halves.  The *budget* half -- does this part's shared memory hold the arena
+// -- is a compile-time constant of the artifact's family
 // (`ARCH_SMEM_PER_AP_BYTES`, `csrc/structs.h`), which is possible because
 // `setup.py` builds one artifact per family.  The *tuning* half -- is the
-// measured crossing the right one here -- stays a runtime test on `sm_count`,
-// because a ladder read off one machine does not transfer by arithmetic.
+// fitted crossing the right one here -- stays a runtime test on `sm_count`,
+// because a ladder fitted on one machine does not transfer by arithmetic.
 // Neither half is an arch macro: `__MACA_ARCH__` is device-pass only, so a host
-// `#ifdef` on it is dead in every image (see the memory note
-// `maca-arch-macro-and-torch-free-builds`).  Nothing in this file reads the
+// `#ifdef` on it is dead in every image.  Nothing in this file reads the
 // architecture, so no other target's code changes when it is enabled: the
 // kernels are only ever launched from the gated route.
 
@@ -61,13 +55,12 @@
 
 namespace topk_select_coarse12 {
 
-// ── deep_gemm's `detail` constants, verbatim ───────────────────────────────
+// ── the selector's constants ───────────────────────────────────────────────
 //
-// `kMaxTopK` is 2048 in the original and the arena below is sized from
-// `kSmemBytes` (the original's `kCoarse12SmemBytes`, renamed here), so this
-// port serves `topk <= 2048`.  That is also
-// where deep_gemm's own dispatch stops consulting coarse12 for `top_k`, so
-// the boundary is the original's rather than a new one.  Callers gate on it
+// `kMaxTopK` is 2048 and the arena below is sized from `kSmemBytes`, so this
+// dataflow serves `topk <= 2048`.  That is also where the routing's own
+// dispatch stops consulting this arm for `top_k`, so the boundary is the
+// selector's rather than a new one.  Callers gate on it
 // (`f32_coarse12_applies`), and this header asserts it rather than trusting
 // the call site.
 constexpr int kThreads = 512;
@@ -100,42 +93,39 @@ static_assert((size_t)kCoarseBins * sizeof(int32_t) <= kSmemBytes,
 // The second pass reads a list, not the row.
 //
 // Pass 2 acts only on the elements whose 12-bit bin is at or above the
-// threshold -- 2.6% of them at `b4096 V131072 k2048`, so >95% of that pass is
-// lines it fetches and does nothing with.  Pass 1 therefore leaves each
+// threshold -- a few percent of them on a long random row -- so >95% of that
+// pass is lines it fetches and does nothing with.  Pass 1 therefore leaves each
 // 4-float4 block's max bin in a per-row table, the threshold is compared
 // against that table, and the blocks that survive are compacted into a list the
 // walk strides over.  All of it mirrors the 16-bit row (`radix_row_bf16.cuh`),
 // and the compaction is not optional: a test in front of the walk costs what
 // the walk costs, because one kept block in a 64-lane warp puts every lane of
 // that warp through the block body -- a table-gated walk is the dense walk's
-// cost, and only the compacted list pays off
-// (`docs/experiments/20261022_f32_pass2_skip/`).
+// cost, and only the compacted list pays off.
 constexpr int kBlockElems = 16;                 // = 4 float4, the whole block
 constexpr int kBlockVecs = kBlockElems / 4;     // one lane per float4
 constexpr int kBlockLanes = 4;                  // lanes per block in the walk
 // Past three quarters of the blocks the walk reads most of the row anyway and
-// the list is traffic on top of it (the 16-bit row measured 0.63 of the dense
-// walk at half the blocks and 1.21 at all of them); the count decides.
+// the list is traffic on top of it; the kept-block count decides.
 constexpr int kListMaxNumerator = 3;
 constexpr int kListMaxDenominator = 4;
 
 // The block's max bin from its four lanes' bins.  Two xor steps: a chained
-// tree, not three shuffles off the same value (`radix_row_bf16.cuh`'s group max
-// paid for that once -- a shuffle of the original gives the max over a subset).
+// tree, not three shuffles off the same value (a shuffle taken off the original
+// value gives the max over a subset).
 //
 // **Two spellings, and the split is what makes the mask honest.**  Pass 1's
 // vector loop is per-lane, so its last iteration can run a *prefix* of the
 // lanes and a four-lane group can straddle that edge; a full-mask shuffle there
-// names lanes that are not executing it -- undefined, and measured: it dropped
-// one block per row and mis-selected 5 slots of `b512 V998123 k2048`
-// (docs/experiments/20261022_f32_pass2_skip/).  So the loop is split at
-// `vector_length / kThreads`, the iteration count every lane runs: in that bulk
-// the whole block is live and `block_max_bin` may use the constant mask, while
-// the tail -- at most one iteration, a prefix of the lanes -- takes
-// `block_max_bin_edge`, which shuffles on `__activemask()` and has a group that
-// is not whole claim the maximum bin, so its block is always kept: it walks up
-// to one block per row twice and can never drop one.  Guarding *every*
-// iteration instead cost 1.4% of the fp32 grid (same note).
+// names lanes that are not executing it -- undefined, and it can drop a block
+// and mis-select slots.  So the loop is split at `vector_length / kThreads`,
+// the iteration count every lane runs: in that bulk the whole block is live and
+// `block_max_bin` may use the constant mask, while the tail -- at most one
+// iteration, a prefix of the lanes -- takes `block_max_bin_edge`, which
+// shuffles on `__activemask()` and has a group that is not whole claim the
+// maximum bin, so its block is always kept: it walks up to one block per row
+// twice and can never drop one.  Guarding *every* iteration instead would pay
+// the edge spelling in the bulk, which is the common path.
 // The 16-bit row has no such boundary -- its loops are block-granular and enter
 // a whole group or none of it.
 __device__ __forceinline__ int block_max_bin(int b0, int b1, int b2, int b3) {
@@ -167,17 +157,15 @@ using topk_select_common::warp_cumsum_histogram;
 // `output` receives *positions in this window*, which is the row's own columns
 // on this path (the window always starts at column 0 here -- see the contract
 // half in `contract.cuh`).  Ties are broken by whichever order the radix
-// passes produce, exactly as in the original: the caller compares as
-// multisets, not elementwise.
+// passes produce: the caller compares as multisets, not elementwise.
 //
 // **Always returns true, and every `return` below is that same `true`.**  The
-// original's out-of-arena case is handled by the caller rather than here:
+// out-of-arena case is handled by the caller rather than here:
 // `topk_coarse12_kernel` checks `length <= topk` (the padding contract) and
 // `topk <= kMaxTopK` before calling, and falls back to a `-1`-filled row if
 // the call declines -- a `served` variable that is constant today.  The
 // `bool` is kept so that the day the arena bound moves back inside this
-// function, the call site does not have to change.  deep_gemm asserts instead
-// (its dispatch never picks coarse12 there).
+// function, the call site does not have to change.
 __device__ __forceinline__ bool topk_coarse12_row(
     const float *__restrict__ input, int32_t *__restrict__ output,
     int length, int requested_topk, int32_t *__restrict__ nan_flag,
@@ -207,9 +195,9 @@ __device__ __forceinline__ bool topk_coarse12_row(
     __shared__ int num_input[2];
     __shared__ int last_remain;
 
-    // 16-byte alignment prefix/tail, as the original walks it.  Keeping this
-    // identical matters: the whole point of the port is that the two
-    // implementations differ in their *design*, not in how they read memory.
+    // 16-byte alignment prefix/tail, the same way the row walk reads a row.
+    // Keeping this identical matters: the two implementations differ in their
+    // *design*, not in how they read memory.
     const auto address = reinterpret_cast<uintptr_t>(input);
     const int prefix_unclamped =
         static_cast<int>((alignof(float4) - (address & (alignof(float4) - 1))) / sizeof(float));
@@ -233,10 +221,10 @@ __device__ __forceinline__ bool topk_coarse12_row(
     // Pass 1, with the contract half's NaN scan folded into it: one predicate
     // per element on words this kernel is already loading, against a whole
     // separate pass over the row (`nan_scan_kernel` on the split, or the
-    // contract half's own scan otherwise).  The same fusion on the split's pass
-    // 1 measured ~3% of that pass (ledger §10.7), which is the cost this buys
-    // back -- and without it this route cannot be entered under `check_nan` at
-    // all: the contract half's preselected arm reads this row's flag instead of
+    // contract half's own scan otherwise).  The predicate is a few bit tests on
+    // data already in registers, so it is far below a second row walk -- and
+    // without it this route cannot be entered under `check_nan` at all: the
+    // contract half's preselected arm reads this row's flag instead of
     // scanning, and it has to be a slot someone wrote.
     //
     // `nan_flag` is this row's slot in the caller's per-row table, zero when
@@ -252,12 +240,12 @@ __device__ __forceinline__ bool topk_coarse12_row(
         nan_found |= is_nan_value(value);
         atomicAdd(&wide_histogram[refine_bin(value) >> kFirstShift], 1);
     }
-    // Two loads in flight per thread where the register file affords it --
-    // same measurement as the bf16 row's pair walk (265 -> 956 GB/s at one
-    // 512-thread CTA per SM on a C600U): the loop below keeps one float4 in
-    // flight per thread otherwise.  The body is spelled out twice inline on
-    // purpose -- no function boundary around a load + process pair, per the
-    // miscompile documented in docs/experiments/20261019_c600u_pass1/ §4.
+    // Two loads in flight per thread where the register file affords it: the
+    // loop below keeps one float4 in flight per thread otherwise, and on a
+    // long row the loads, not the arithmetic, are what the walk waits on.  The
+    // body is spelled out twice inline on purpose -- a function boundary around
+    // a load-plus-process pair is where the compiler has been seen to change
+    // the schedule.
     // `bulk_iters` is the iteration count every lane runs (`tid + m * kThreads`
     // stays under `vector_length` for all of them), and it is where the loop
     // splits so the summary's shuffle mask can be the constant one -- see
@@ -414,7 +402,7 @@ __device__ __forceinline__ bool topk_coarse12_row(
     // and the compaction is its own step rather than a test in front of the
     // walk, because a test in front of the walk leaves the decision and the
     // fetch on one chain and every lane of a warp pays for the one member that
-    // survived (measured; see `kBlockElems`).
+    // survived (see `kBlockElems`).
     int nlist = 0;
     bool use_list = false;
     if (summarize && nblk > 0) {
@@ -422,10 +410,9 @@ __device__ __forceinline__ bool topk_coarse12_row(
         __syncthreads();
         // Four table entries a batch: one load per iteration makes this loop a
         // chain of memory latencies, and the table is one entry per sixteen
-        // elements -- 8,081 of them on a 129,280-wide row, which measured 13.9%
-        // of the row.  The order the kept blocks land in is nobody's business;
+        // elements.  The order the kept blocks land in is nobody's business;
         // the walk reads the list as a set.  Same batch as the 16-bit row's
-        // list build.  Record: `docs/experiments/20261026_f32_b6_floor/`.
+        // list build.
         int b = tid;
         for (; b + 3 * kThreads < nblk; b += 4 * kThreads) {
             int m[4];
@@ -449,10 +436,10 @@ __device__ __forceinline__ bool topk_coarse12_row(
     if (tid < kRadix + 1) histogram[tid] = 0;
     __syncthreads();
 
-    // Pass 2.  Explicitly expanded rather than a lambda: deep_gemm measured
-    // the capturing-lambda form 1.7-2.2% slower on large batches on MetaX and
-    // left the note at the original site.  Keeping the macro keeps the port
-    // byte-for-byte in what it generates.
+    // Pass 2.  Explicitly expanded rather than a lambda: the capturing-lambda
+    // form changes what the compiler generates around the atomic sequence, so
+    // the macro keeps the body's shape explicit and identical across the four
+    // call sites below.
 #define DG12_COLLECT(value, index)                                                       \
     do {                                                                                 \
         const uint32_t key = refine_bin(value);                                          \
@@ -536,8 +523,8 @@ __device__ __forceinline__ bool topk_coarse12_row(
     // histogram-then-narrow over whole-row re-reads, each round consuming 8,
     // 8 and 4 more key bits, so the prefix is exact after the third for any
     // input.  This is the branch that makes the algorithm correct on shapes
-    // where the coarse bin is huge; the sizing question ("does it fire on the
-    // shapes we care about") is measured, not assumed.
+    // where the coarse bin is huge; whether it fires on the shapes we care
+    // about is a fitted fact about those shapes, not an assumption.
     if (num_input[0] > kCandidateCapacity) {
         int selected_prefix = wide_threshold;
         int prefix_bits = kCoarseBits;
@@ -656,11 +643,10 @@ __device__ __forceinline__ bool topk_coarse12_row(
     return true;
 }
 
-// One CTA per row.  `__launch_bounds__` is `kThreads` (512, the original's
-// width): the widest cooperative step is the 4096-bin histogram clear and the
-// candidate walk, and 512 is what fills the AP -- 640 x 3 CTAs is 1920
-// threads, under the 2048-thread/AP ceiling, so it leaves slots unused
-// (`docs/experiments/20261022_f32_occupancy/`).
+// One CTA per row.  `__launch_bounds__` is `kThreads` (512): the widest
+// cooperative step is the 4096-bin histogram clear and the candidate walk, and
+// 512 is what fills the AP -- 640 x 3 CTAs is 1920 threads, under the
+// 2048-thread/AP ceiling, so it would leave slots unused.
 //
 // The width is a template parameter because the kernel is instantiated
 // explicitly in the generated TU that owns its launch; the row body below is

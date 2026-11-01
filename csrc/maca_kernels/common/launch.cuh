@@ -5,10 +5,9 @@
 // the platform.  This is the host half, and it is the only one: launching a
 // kernel that stages in dynamic shared memory needs the driver's opt-in, and
 // four dataflows (the radix rows, the split's stages, the coarse12 selector)
-// plus the contract half all need it.  It sat in `radix_common.cuh` until the
-// two ported dataflows needed it too: they reached across into the radix
-// namespace for a helper that has nothing to do with the radix dataflow, which
-// is the one thing this layer exists to prevent.
+// plus the contract half all need it.  It lives in the neutral namespace so a
+// dataflow header does not have to reach across into another dataflow's for a
+// helper that has nothing to do with that kernel.
 //
 // The namespace is the neutral one (`topk_select_common`), beside the device
 // primitives, and the file boundary is host vs device rather than a taste:
@@ -27,14 +26,13 @@ namespace topk_select_common {
 // Every launcher that stages in dynamic shared memory opts its kernel in to
 // that much before the first launch.  The opt-in is per function, so it is
 // done once and the launcher's `static bool` is what keeps
-// `cudaFuncSetAttribute` off the per-call path: measured 0.15 us per call on a
-// C600U, which every row-path launch used to pay.
+// `cudaFuncSetAttribute` off the per-call path.
 //
 // It is not a no-op in the other direction either.  On this platform the
-// default ceiling is the whole per-AP shared memory -- measured 131072 B on an
-// xcore1600 C600U -- so a call *lowers* the function's limit to the value it
-// asks for.  Each caller therefore asks for the largest block its own kernel is
-// ever launched with, which is what makes the value it installs the right one;
+// default ceiling is the whole per-AP shared memory (131072 B on a 128 KiB
+// part), so a call *lowers* the function's limit to the value it asks for.
+// Each caller therefore asks for the largest block its own kernel is ever
+// launched with, which is what makes the value it installs the right one;
 // asking for a per-call size instead would fail the next, larger call.
 //
 // A failed adoption leaves `adopted` false, so the next launch retries rather

@@ -5,30 +5,26 @@
 #include <csrc/maca_kernels/common/radix_common.cuh>
 
 // The block-max summary's step-down tree as a MACRO, so the text the compiler
-// sees is byte-identical to the inline form it replaced.  A function form
-// (`group_max8(key, tx)`, `__forceinline__`) is instruction-identical in an
-// isolated kernel and **wrong in the full row kernel**: it computes a low block
-// max on a third of the blocks, because the tree reads other lanes' registers
-// and the function boundary shifts the compiler's schedule around it.  Never
-// extract this into a function again -- the bisect is in
-// `docs/experiments/20261019_c600u_pass1/`.
+// sees is exactly the inline form.  A function form (`group_max8(key, tx)`,
+// `__forceinline__`) is instruction-identical in an isolated kernel and
+// **wrong in the full row kernel**: it computes a low block max on a third of
+// the blocks, because the tree reads other lanes' registers and the function
+// boundary shifts the compiler's schedule around it.  Never extract this into
+// a function.
 #ifdef __MACACC__
-// Row shuffle (`mov_shfl`), NOT `bsm_bpermute`.  SASS: `mov_shfl` lowers to ONE
+// Row shuffle (`mov_shfl`), NOT `bsm_bpermute`.  `mov_shfl` lowers to one
 // `mov_b32 ... row_shl:N rmsk bmsk bc` (ALU pipe, DPP form) while
 // `sm_bperm_b32` travels the shared-memory pipe, so a bpermute tree competes
-// with this walk's own block-max atomics for the one pipe.  A chained row
-// shuffle is the cheapest of the three forms by an order of magnitude, and at
-// the real shape the tree costs nothing measurable because it leaves that pipe
-// alone AND the row-paired mapping below reads 8 adjacent blocks per row.
-// Probe, instruction counts and per-form timings:
-// `docs/experiments/20261021_mov_shfl_tree/`.
+// with this walk's own block-max atomics for the one pipe; the row shuffle
+// leaves that pipe alone, and the row-paired mapping below reads 8 adjacent
+// blocks per row.
 //
-// Direction, measured: `row_shl:d` reads lane i+d into lane i, so the
-// chained d=4,2,1 lands each half-row's max on its FIRST lane -- the same
-// `(tx & 7) == 0` leaders as before.  Every source in a leader's chain is
-// in-row; out-of-row reads return hardware garbage (the guide's bc promise
-// does not hold at the rows' edges), so non-leader partials must never be
-// read -- the same contract the bpermute form carried.
+// Direction: `row_shl:d` reads lane i+d into lane i, so the chained d=4,2,1
+// lands each half-row's max on its FIRST lane -- the same `(tx & 7) == 0`
+// leaders as before.  Every source in a leader's chain is in-row; out-of-row
+// reads return hardware garbage (the guide's bc promise does not hold at the
+// rows' edges), so non-leader partials must never be read -- the same contract
+// the bpermute form carried.
 #define DS_GROUP_MAX8_TREE(key)                                       \
     do {                                                              \
         uint32_t o_ = (uint32_t)__builtin_mxc_mov_shfl(               \
@@ -71,8 +67,8 @@ __device__ __forceinline__ void hist_add_bf16_aligned(
 // device-side primitive is not a route, and this pair is the one place the
 // "aligned fast path, scalar fallback" shape is stated as a unit.  The live
 // bf16 walk is `hist_add_bf16_wide` below; it carries its own 8-wide load and
-// does not call this.  (The fp32 lane's missing guard is the bug this shape
-// would have prevented -- ledger §12.20.6.)
+// does not call this.  (The fp32 lane has no such guard, and this shape is what
+// would prevent it.)
 __device__ __forceinline__ void hist_add_bf16(
     uint32_t* s_histogram, const maca_bfloat16* input, uint32_t idx)
 {
@@ -87,21 +83,15 @@ __device__ __forceinline__ void hist_add_bf16(
 
 // 12 位粗层：一次 uint4 搬 8 个元素，每个元素一个原子加。
 //
-// Measured, so the next person does not re-open the merge idea (ledger §12.23).
-// Same vectorized walk, same 4,096-bin coarse level, 134.2M elements, uniform
-// bf16 keys, device 2: walk with no atomic 88.3 us, walk + one shared atomic
-// per element 183.6 us.  So this loop is **95 us of atomic** and 88 us of walk
-// -- the atomic is half the cost, which is what makes the merge idea tempting.
-//
-// It does not work.  `__match_any_sync` on MACA is a 32-iteration `cmp_lg_u32`
-// software loop (2,048 instructions per 64-element warp step, 16/element); the
-// atomic it would save is ~0.7/element.  Match-and-merge measures 2,133 us
-// against the walk's 88 -- 20x, and identical for uniform and clustered keys
-// because the loop is fixed-length.  Removing the atomic from the merge (1 us
-// saved) is what proves the 2,045 us is the match itself.  Any de-atomized
-// form has to skip `__match_any_sync` entirely: a per-thread private histogram
-// with one flush at the end is the only shape left, and its risk is the
-// per-element register dependency chain, not conflicts (that is what P4 hit).
+// The per-element shared atomic dominates this loop, which makes a
+// match-and-merge form tempting: detect equal keys within a warp and add once
+// per distinct key.  It does not work on this platform.  `__match_any_sync` is
+// a fixed-length `cmp_lg_u32` software loop whose cost per element is far
+// larger than the atomic it would save, and because the loop is fixed-length it
+// buys nothing for clustered keys either.  Any de-atomized form has to skip
+// `__match_any_sync` entirely: a per-thread private histogram with one flush at
+// the end is the only shape left, and its risk is the per-element register
+// dependency chain, not conflicts.
 // `kNan` folds the contract's NaN scan into this very load -- the same trade
 // `hist_add_f32` makes, and for the same reason: the bytes are read anyway, so
 // the scan is one compare per element here instead of a whole extra row walk.
@@ -130,12 +120,10 @@ __device__ __forceinline__ bool hist_add_bf16_wide(
     // 0x8000 - 0x7f81 = 0x7f >= 0.  Both forms are verified against the
     // per-element ones on all 65,536 half patterns.
     uint32_t z = 0u;
-    // Fully unrolled, and that is a measured constraint rather than taste: the
-    // walk is memory-latency bound on a long row, and a partial unroll halves
-    // the loads in flight per thread.  `unroll 2` costs the row kernel +92% at
-    // `b4096 x 1048576 k512` bf16 (+14% at 16384, where the row is too short to
-    // be latency bound) while saving 3-4 MT of registers, which is the wrong
-    // trade at every length.
+    // Fully unrolled, and that is a structural constraint rather than taste:
+    // the walk is memory-latency bound on a long row, and a partial unroll
+    // halves the loads in flight per thread.  The registers it saves are not
+    // worth the latency at any row length.
     #pragma unroll
     for (int i = 0; i < 4; i++) {
         const uint32_t kp =
@@ -198,7 +186,7 @@ __device__ __forceinline__ void overflow_emit_member(
 // `1-(1-k/V)^64` of them.  That is the comparison the floor prices, and the
 // summary arm wins well below the density a two-pass reading of it suggests,
 // because the element arm's collect is a full row and the summary arm's is
-// not.  Record: `docs/experiments/20261026_density_floor/`.
+// not.
 constexpr uint32_t kBlockHistMinRowPerSlot = 128;
 
 // Walk the blocks a summary named, with the aligned row walk's own layout: the
@@ -210,7 +198,6 @@ constexpr uint32_t kBlockHistMinRowPerSlot = 128;
 // This is the shape the lever needs, not a detail: a test in front of the walk
 // leaves the decision and the line on one latency chain, so it saves a fraction
 // of what skipping the same blocks should save; walking a list does not.
-// `docs/experiments/20261010_skim_rate/`.
 template <uint32_t BLOCK_SIZE, typename F>
 __device__ __forceinline__ void walk_kept_blocks(const maca_bfloat16* input,
                                                  const uint32_t* list,
@@ -220,7 +207,7 @@ __device__ __forceinline__ void walk_kept_blocks(const maca_bfloat16* input,
     // One load per iteration, and not unrolled: this body is inlined into every
     // arm that carries a list, so an unroll factor multiplies the code each of
     // them holds, and the extra loads in flight buy nothing at the occupancy
-    // the kernel runs at.  `docs/experiments/20261026_unroll_width/`.
+    // the kernel runs at.
 #pragma unroll 1
     for (uint32_t j = group; j < n; j += BLOCK_SIZE / 8u) {
         const uint32_t base = list[j] << 6;
@@ -260,12 +247,12 @@ __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
     uint32_t blk = group;
 #ifdef __MACACC__
     // The block-histogram arm visits four ADJACENT blocks per group iteration;
-    // the dense arm keeps its step-strided pair.  Adjacency is a large win on
-    // the walk that has no per-element atomics and nothing on the one that has
-    // them -- four is the width, eight blows the register/schedule budget --
-    // so the change is confined to this arm.  What moves is only the order
-    // blocks are visited in: the summary, the list, every bin and every count
-    // are the same.  Walk table: `docs/experiments/20261021_adjacent_walk/`.
+    // the dense arm keeps its step-strided pair.  Adjacency pays on the walk
+    // that has no per-element atomics and nothing on the one that has them --
+    // four is the width, eight blows the register/schedule budget -- so the
+    // change is confined to this arm.  What moves is only the order blocks are
+    // visited in: the summary, the list, every bin and every count are the
+    // same.
     constexpr bool kAdjacent4 = ARCH_HAS_WIDE_REG_FILE && !kHist;
     if constexpr (ARCH_HAS_WIDE_REG_FILE) {
         if constexpr (!kHist) {
@@ -274,8 +261,8 @@ __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
             // CTA's row count), which tiles exactly as `4*group` did.  The
             // `4*group` mapping would still be CORRECT with the row-shuffle
             // tree (each 8-lane group gets its own max on its own leader);
-            // pairing the halves is the locality half of the measured win --
-            // the row's 16 lanes read 8 consecutive blocks between them.
+            // pairing the halves is the locality half of the win -- the row's
+            // 16 lanes read 8 consecutive blocks between them.
             blk = 8u * (tx >> 4) + (((tx >> 3) & 1u) << 2);
             for (; ((blk + 4u) << 6) <= vec_len; blk += 4u * step) {
                 uint32_t key0 = 0, key1 = 0, key2 = 0, key3 = 0;
@@ -328,12 +315,10 @@ __device__ __forceinline__ bool summary_walk(const maca_bfloat16* input,
         } else {
             // Two blocks in flight per iteration where the register file
             // affords it: the walk keeps one outstanding uint4 per thread,
-            // which is a memory-latency cap, not a bandwidth one -- the
-            // measured read curve on a C600U is 265 -> 956 -> 1390 GB/s for
-            // 1/2/4 outstanding at one 512-thread CTA per SM (1024 -> 1616 at
-            // two).  The second block is the whole gap on under-filled grids
-            // and ~6% once the shared atomics cap.  The C500's 32 MT wall keeps
-            // the single-issue walk.
+            // which is a memory-latency cap, not a bandwidth one, so a second
+            // block in flight is the whole gap on under-filled grids and
+            // matters less once the shared atomics cap.  The smaller register
+            // file keeps the single-issue walk.
             for (; ((blk + step + 1u) << 6) <= vec_len; blk += 2 * step) {
                 uint32_t key0 = 0, key1 = 0;
                 nan_local |= hist_add_bf16_wide<kNan, kHist>(
@@ -406,8 +391,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // and `contract.cuh`'s 64-bit-index row on a part below the register
     // floor -- its epilogue already costs it two registers more than the
     // 32-bit row's, and carrying the summary on top of that puts it over the
-    // 32 MT a 1024-thread block needs for its second CTA per SM (measured
-    // with `--resource-usage`).
+    // register budget a 1024-thread block needs for its second CTA per SM.
     uint16_t* block_max = nullptr, uint32_t* block_list = nullptr)
 {
     constexpr uint32_t RADIX = kRadix;
@@ -440,8 +424,9 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     for (uint32_t b = tx; b < kCoarse12Bins; b += BLOCK_SIZE) s_wide[b] = 0;
     __syncthreads();
 
-    // C500 has an intermittent race in the mixed vector-plus-tail path for
-    // 1024-thread blocks. Use one uniform load mode for odd-length rows.
+    // The mixed vector-plus-tail path has an intermittent race for
+    // 1024-thread blocks on this platform. Use one uniform load mode for
+    // odd-length rows.
     const bool input_aligned = (length & 7u) == 0 && bf16x8_is_aligned(input);
     uint32_t vec_len = length / 8 * 8;
     // Whole blocks: the summary, the list and every walk that follows one cover
@@ -464,7 +449,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // once, and the element arm walks it again to collect while this one
     // walks `1-(1-k/V)^64` of it -- so the floor is a density, not a
     // constant of the dataflow: `kBlockHistMinRowPerSlot` at the far end of
-    // the list's own reach.  Record: `docs/experiments/20261026_density_floor/`.
+    // the list's own reach.
     const bool block_hist =
         summary_wanted && topk <= length / kBlockHistMinRowPerSlot;
     // Whether the block counts come from the summary table instead of from the
@@ -647,8 +632,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // second read of the row into a read of a list -- and the compaction has to
     // be its own step: a test in front of the walk leaves the decision and the
     // fetch on one latency chain, so it saves a fraction of what skipping the
-    // same blocks should save; walking a list does not
-    // (`docs/experiments/20261010_skim_rate/`).
+    // same blocks should save; walking a list does not.
     //
     // Past three quarters of the blocks it stops paying -- the walk reads most
     // of the row anyway and the list is traffic on top of it -- so the count
@@ -711,9 +695,7 @@ __device__ __forceinline__ void radix_topk_row_bf16_b(
     // What it buys is the third read of the row: the fine histogram and the
     // emit read the arena instead of walking the list again, and the
     // one-shared-atomic-per-element histogram is never taken.  An arena too
-    // small for the candidates falls back to the counting walk, which is what
-    // the row did before.  Walk and arena sizing:
-    // `docs/experiments/20261025_row_walk/`.
+    // small for the candidates falls back to the counting walk.
     // ── what the arena holds ────────────────────────────────────────────────
     // Every loop after the walk ranks what it staged, and the ranking is a
     // property of the element the walk already read: its 12-bit bin travels

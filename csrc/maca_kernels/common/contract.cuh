@@ -25,10 +25,9 @@
 // the dataflows uses.
 #include <csrc/maca_kernels/common/primitives.cuh>
 #include <csrc/maca_kernels/common/launch.cuh>
-// The ported C500 dataflow (see the provenance banner in that file).  Its row
-// entries are what `radix_select_row` dispatches to, and the launchers below
-// are how every route -- the two splits and the two ported ones -- hands its
-// answer to `topk_kernel_radix`.
+// The radix row dataflow.  Its row entries are what `radix_select_row`
+// dispatches to, and the launchers below are how every route -- the two splits
+// and the two staged selectors -- hands its answer to `topk_kernel_radix`.
 #include <csrc/maca_kernels/common/radix_core.cuh>
 
 namespace deep_select {
@@ -36,7 +35,7 @@ namespace deep_select {
 // ── tunables ────────────────────────────────────────────────────────────────
 // The public contract: `topk <= 4096` (checked in `topk()`), which the radix
 // row entries serve as they come -- they take `topk` at runtime and the staging
-// buffer below is sized for the whole range.  The ported core's own `kMaxTopK`
+// buffer below is sized for the whole range.  The radix core's own `kMaxTopK`
 // (2048) is the *kernel arm* limit of its static-k dispatch, not the row
 // entries'; the chunked gate stays inside it because its merge only compiles
 // the k=512/1024 arms.
@@ -67,8 +66,8 @@ struct RowParams {
     // every route that scans as its `nan_flags` (both splits included -- a
     // split must not put flags in its own workspace, whose offset is a
     // geometry-dependent expression into process-global scratch, so a slot can
-    // hold another shape's candidate index; measured: a b1 v262144 bf16 call
-    // returned the sentinel after a b6 v1048576 call).  `ScratchPlan::scan_table`
+    // hold another shape's candidate index and read as a raised flag).
+    // `ScratchPlan::scan_table`
     // (`routing.cuh`) decides which calls get one.  Written by the scanning
     // kernel, read and cleared by the contract half (`nan_flags` above is the
     // field it reaches it through).  Null when nothing scans.
@@ -79,10 +78,9 @@ struct RowParams {
     // writes **every** row -- 0 at the top of `topk_kernel_radix`, 1 in the NaN
     // disposition -- which is what lets it go without a per-call
     // `cudaMemsetAsync`: a slot left over from the previous call cannot be
-    // read, because no slot is left over.  (That memset is not free: measured
-    // on C500, one `mcMemsetAsync` of this table is ~11 us -- a launch, not a
-    // bandwidth cost -- and the calls that would pay it are the small-batch
-    // ones that gain nothing from the occupancy this change buys.)
+    // read, because no slot is left over.  (That memset is not free: one
+    // `mcMemsetAsync` of this table is a launch, not a bandwidth cost, and the
+    // calls that would pay it are the small-batch ones.)
     //
     // "Every row" is a property of the launch, and it is the invariant this
     // table rests on: `topk_kernel_radix` is launched `<<<batches, BLOCK>>>`,
@@ -147,24 +145,23 @@ struct RowParams {
     // `check_nan` is whether the row is scanned at all.  Every production
     // route folds the scan into a pass that already reads the row -- the row
     // path's pass 1, both splits' stage 1, the coarse12 and chunks arms -- so
-    // a caller that has established its input is NaN-free saves only the
-    // fused predicate's marginal cost (~3% of the fp32 split's stage 1,
-    // `docs/C500-radix-perf-ledger.zh.md` §10.7), while a caller that has not
-    // still gets the full contract by default.  The 22-32% the pre-fusion
-    // build measured was a separate grid-wide `nan_scan_kernel`; that kernel
-    // now survives only as the A/B arm behind `DS_FUSE_NAN_OFF=1`.
+    // a caller that has established its input is NaN-free saves only the fused
+    // predicate's marginal cost, while a caller that has not still gets the
+    // full contract by default.  The separate grid-wide `nan_scan_kernel` now
+    // survives only as the A/B arm behind `DS_FUSE_NAN_OFF=1`.
     //
     // What happens to a row that *is* found poisoned is not the kernel's
     // decision: the contract half raises the row's flag, and `nan_abort_kernel`
-    // reads it.  The abort answered here instead cost this kernel 15 MT of
+    // reads it.  Answering the abort here instead would cost this kernel
     // registers (see that kernel).
     bool check_nan;
 };
 
 // ── the answer's shape: the caller's three output switches, as one value ────
 //
-// `topk()` takes them as three separate booleans -- that signature is
-// upstream's and stays -- and it is the one place they stay three, because it
+// `topk()` takes them as three separate booleans -- that signature is the
+// public contract's and stays -- and it is the one place they stay three,
+// because it
 // is also the one place that rejects the combinations that mean nothing
 // (`sorted_value` needs `return_value` and excludes `sorted_index`).  Every
 // layer below wants them as one thing, and as the *normalized* triple the
@@ -356,7 +353,7 @@ static __device__ __forceinline__ void emit_rank_index(
 
 // ── the operator kernel (one row per CTA) ───────────────────────────────────
 //
-// The contract layer over the ported radix selection: two passes over the row,
+// The contract layer over the radix selection: two passes over the row,
 // whatever the key width.
 //
 // Dynamic shared memory is one region: the core's arena at the base --
@@ -479,13 +476,12 @@ static __device__ __forceinline__ bool row_has_nan(const ValueT *row,
 // row's flag is raised by whichever chunk read the bit pattern; the contract
 // half reads and clears it.
 //
-// **Neither split launches this any more.**  Stage 1 reads exactly these bytes
-// at exactly this width, so the scan rides its own load instead: fp32 through
-// `topk_select_radix::topk_f32_chunk_stage1_kernel`'s `kNan` (the ledger's §10.7 for the A/B:
-// the whole walk goes, for ~3% on the pass that absorbs it), the 16-bit split
+// **Neither split launches this.**  Stage 1 reads exactly these bytes at
+// exactly this width, so the scan rides its own load instead: fp32 through
+// `topk_select_radix::topk_f32_chunk_stage1_kernel`'s `kNan`, the 16-bit split
 // through the stage-1 kernels', whose vote feeds this same `flags` table over
 // the same window.  What still reaches it is the fp32 *row* path and the fp32
-// A/B arm `DS_FUSE_NAN_OFF=1`, which is why it is not deleted.
+// A/B arm `DS_FUSE_NAN_OFF=1`, which is why it is kept.
 constexpr int kScanBlock = 256;
 
 template <typename ValueT>
@@ -529,13 +525,12 @@ extern template void launch_nan_scan<float>(
 
 // The abort half of the NaN contract, in its own kernel because the contract
 // half must not carry it: `printf` + `__trap` answered inline costs the row
-// kernel **15 MT of registers on C500** (37 -> 22, one source line at a time),
-// and a 1024-thread block stops fitting two CTAs per SM at 32 MT, so the block
-// costs the whole kernel a resident CTA on every call, including the calls that
-// never reach it.  The `printf` is 13 of the 15 -- dropping it alone takes the
-// kernel to 24 MT, dropping the `__trap` alone changes nothing.  With the block
-// moved here the row kernel runs two CTAs/SM, and that is the difference
-// between 9,310 us and 6,144 us on `b4096 V524288 k512` bf16.
+// kernel registers, and a 1024-thread block stops fitting two CTAs per SM past
+// the register budget that second CTA needs -- so the block would cost the
+// whole kernel a resident CTA on every call, including the calls that never
+// reach it.  The `printf` is most of the cost; dropping it alone recovers most
+// of the registers, dropping the `__trap` alone changes nothing.  With the
+// block moved here the row kernel keeps its two CTAs/SM.
 //
 // `flags` is `RowParams::nan_abort_flags`: the contract half clears a row's
 // entry as the kernel starts and raises it in the NaN disposition, so one
@@ -571,7 +566,7 @@ extern template void launch_nan_abort<kNanAbortBlock>(const int32_t *, uint32_t,
 // in `maca_topk.cu` (not in this header -- see the note at its definition).
 //
 // - `BLOCK` is `topk_select_radix::kBlockSize`, or `topk_select_radix::kLongRowBlockSize`
-//   for the regime the ported dispatcher picks the wider block for (see
+//   for the regime the dispatcher picks the wider block for (see
 //   `needs_long_row_bf16`).  Only the 16-bit row has a wide-block arm.
 // - `PRE` is for the chunked path: the two-stage split over a long row has
 //   already ranked it and left its answer in the workspace (raw column indices,
@@ -602,9 +597,9 @@ struct TopkRadixConfig {
 //
 // A 32-bit output index pays for the summary on every family; a 64-bit one
 // pays only where the register file can afford it.  The tables cost the body
-// ~3 MT over the bare one, and a 1024-thread block keeps its second CTA per SM
-// at <= 64 MT, which is within reach of the 128 Ki-register parts and not of
-// the C500's 65536 (`structs.h`'s `ARCH_HAS_WIDE_REG_FILE`).
+// registers, and a 1024-thread block keeps its second CTA per SM only within
+// the larger register file -- within reach of the 128 KiB parts and not of the
+// 64 KiB one (`structs.h`'s `ARCH_HAS_WIDE_REG_FILE`).
 __host__ __device__ constexpr bool radix_skip_row(bool index_is_32bit) {
     return index_is_32bit || ARCH_HAS_WIDE_REG_FILE;
 }
@@ -640,7 +635,7 @@ struct radix_index_dtype<int64_t> {
 //
 // Neither caller aborts from here: the flag is what `nan_abort_kernel` reads
 // after this kernel, and the abort belongs in that kernel rather than in this
-// one (see it for the 15 MT this costs when inlined).
+// one (see it for the register cost when inlined).
 template <typename OutIdxT>
 static __device__ __forceinline__ void dispose_nan_row(OutIdxT *out_index_row,
                                                        const RowParams &params,
@@ -847,10 +842,10 @@ __global__ __launch_bounds__(Cfg::BLOCK) void topk_kernel_radix(RowParams params
 // ── host-side launch ────────────────────────────────────────────────────────
 namespace detail {
 
-// The dynamic-smem ceiling every mode is configured with.  It is the retired
-// byte-wise path's `Arena` (kMaxTopK * (4 + 8) bytes), which was the worst case
-// over all of them; `cudaFuncSetAttribute` only has to admit what a launch
-// actually asks for, and every mode asks for less than this.
+// The dynamic-smem ceiling every mode is configured with: `kMaxTopK * (4 + 8)`
+// bytes, the worst case over all modes; `cudaFuncSetAttribute` only has to
+// admit what a launch actually asks for, and every mode asks for less than
+// this.
 constexpr size_t kSmemBudgetBytes =
     (size_t)kMaxTopK * (sizeof(uint32_t) + sizeof(uint64_t));
 
@@ -893,8 +888,7 @@ inline void launch_radix_config(const RowParams &params, uint32_t batches,
 // including this header with no table of its own still carries every
 // `topk_kernel_radix` kernel in the table.  With the table out of this header,
 // an instantiation TU's device image holds the one kernel its
-// `instantiations/*.cu` names.  Keep the table there; the measured sizes are in
-// the build section of `CLAUDE.md`.
+// `instantiations/*.cu` names.  Keep the table there.
 //
 // The two spellings of the key are the same number by construction: the table's
 // `value_dtype` / `index_dtype` come from the trait above, and the entry point

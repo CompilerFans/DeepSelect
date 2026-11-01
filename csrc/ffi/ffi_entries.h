@@ -1,13 +1,10 @@
-// 2026 - Modified for DeepSelect.  The tvm-ffi entry points, one function per
-// architecture extension -- the torch-free replacement for the pybind11 `topk`
-// entry that used to live at the bottom of `maca_topk.cu`.
+// The tvm-ffi entry points, one function per architecture extension.
 //
 // The signature is all-DLTensor and all-positional (this tvm-ffi build has no
 // kwargs or defaults), and output buffers are caller-allocated: the FFI layer
 // cannot return new tensors.
 //
-// Contract, exactly as the pybind11 entry enforced it (`TORCH_CHECK`, now
-// `DS_HOST_CHECK`):
+// Contract, enforced with `DS_HOST_CHECK`:
 //
 //   input              (b, v)        float32 or bfloat16, stride(1) == 1,
 //                                    stride(0) * element_size % 1024 == 0
@@ -32,10 +29,9 @@
 namespace deep_select {
 
 // What `deep_select/interface.py` reads to size its output rows.  Two int64s
-// in an `Array<int64_t>`: tvm-ffi marshals that as a python list, and `std::pair`
-// is not a type it knows how to carry across the boundary (it fails to
-// instantiate `TypeTraits`).  The old pybind11 entry returned a C++ `std::pair`
-// and pybind converted it; that convenience does not survive the FFI edge.
+// in an `Array<int64_t>`: tvm-ffi marshals that as a python list, and
+// `std::pair` is not a type it knows how to carry across the boundary (it fails
+// to instantiate `TypeTraits`), so the pair goes out as an array.
 tvm::ffi::Array<int64_t> get_alignment_requirement();
 
 // One row-wise top-K over a 2-D input.  `idx_oob_fill_value` /
@@ -52,13 +48,11 @@ tvm::ffi::Array<int64_t> get_alignment_requirement();
 // in front of the call rather than of the part the image was built for.
 //
 // Keep this in step with the definition in `csrc/maca_kernels/common/maca_topk.cu`,
-// parameter for parameter.  It has drifted before: `sm_count` was added to the
-// definition and never here, and nothing failed -- the built extension takes
-// the definition's arity and rejects the declaration's with
-// `TypeError: Mismatched number of arguments`, so the stale form was never the
-// one being exported.  A declaration off by a parameter on this side is a
-// defect no build or test reports: read the definition, or check the
-// artifact's own arity, when you change either.
+// parameter for parameter.  A declaration off by a parameter on this side is a
+// defect no build or test reports: the built extension takes the definition's
+// arity and rejects the declaration's with `TypeError: Mismatched number of
+// arguments`, so the stale form is never the one exported.  Read the
+// definition, or check the artifact's own arity, when you change either.
 void topk(const tvm::ffi::TensorView &input, int64_t topk,
           const tvm::ffi::Optional<tvm::ffi::TensorView> &end,
           bool sorted_value, bool sorted_index,

@@ -1,26 +1,24 @@
 // Wave and group reductions with CUB's `WarpReduce` semantics, lowered to
 // MACA's row shuffle + lane read instead of the shared-memory-pipe permute.
 //
-// Why not the spellings this tree already carries:
+// Why not the other spellings:
 //
-// - `__shfl_*_sync` is a wrapper: measured from the emitted device assembly,
-//   a 5-step `__shfl_down_sync` scan costs 71 instructions where the same
-//   scan on the raw builtin costs 44 -- every call re-derives `__lane_id()`
-//   and the width-bound arithmetic, and the compiler does not hoist it.  And
-//   the instruction both lower to, `sm_bperm_b32`, travels the shared-memory
-//   pipe (the `bsm` in the name), so a reduction in a hot walk competes with
-//   the walk's own shared atomics for one pipe (the hist1a summary walk
-//   issues 3 of them per 64-element block).
+// - `__shfl_*_sync` is a wrapper: a 5-step `__shfl_down_sync` scan costs far
+//   more instructions than the same scan on the raw builtin -- every call
+//   re-derives `__lane_id()` and the width-bound arithmetic, and the compiler
+//   does not hoist it.  And the instruction both lower to, `sm_bperm_b32`,
+//   travels the shared-memory pipe (the `bsm` in the name), so a reduction in a
+//   hot walk competes with the walk's own shared atomics for one pipe (the
+//   hist1a summary walk issues three of them per 64-element block).
 // - `__builtin_mxc_bsm_bpermute` drops the wrapper but keeps the pipe.
 //
-// What the guide (OG-26013-000-F5_V01, §5.1) offers instead is the 16-lane
-// row shuffle: the wave's 64 lanes are 4 rows of 16, `mov_shfl` shifts/
-// rotates/mirrors within a row in the ALU pipe, and `readlane` lifts one
-// lane's register into a scalar (SALU).  A full-wave reduction is then 4
-// chained row shifts + 4 vector ops (each row's reduction lands on the row's
-// leader lane), 4 `readlane` + 3 scalar ops -- 15 ALU/SALU instructions,
-// zero shared-memory traffic, and the result is a *scalar*: uniform across
-// the wave with no broadcast step at all.
+// The 16-lane row shuffle is the cheap form: the wave's 64 lanes are 4 rows of
+// 16, `mov_shfl` shifts/rotates/mirrors within a row in the ALU pipe, and
+// `readlane` lifts one lane's register into a scalar (SALU).  A full-wave
+// reduction is then four chained row shifts plus four vector ops (each row's
+// reduction lands on the row's leader lane), then four `readlane` and three
+// scalar ops -- zero shared-memory traffic, and the result is a *scalar*:
+// uniform across the wave with no broadcast step at all.
 //
 // Contract:
 //
@@ -35,25 +33,21 @@
 // - Keys are compared as uint32.  mov_shfl moves bits without interpreting
 //   them; float values must arrive pre-encoded (`refine_bin`).
 //
-// **Direction, established by probe and SASS** (`docs/experiments/
-// 20261021_mov_shfl_tree/tree_probe`'s lane table): Row Shift Left
-// (modes 0x10d) reads lane i+d into lane i, so a chained reduce lands on the
-// row's/group's FIRST lane -- this header's default.  Row Shift Right
-// (0x11d) reads lane i-d; `-DDS_ROW_SHIFT_RIGHT` flips every mode and leader
-// constant from the one spelling below.  The same table carries an edge
-// caveat: out-of-row reads do NOT honor the guide's bc promise (the rows'
-// top lanes returned a stale cross-lane value; lane 0 returned garbage
-// 0x1E00000) -- only reads that stay strictly inside the row are
-// trustworthy.  Every chain here reads in-row lanes only by construction,
-// which is also why non-leader partials must never be read.  SASS gate
-// PASSED: mov_shfl lowers to one `mov_b32 ... row_shl:N rmsk bmsk bc`
-// (ALU pipe, DPP form), readlane to `rl_b32 sD, ...` (SALU); no sm_/ds_/bsm
-// instruction anywhere in the probe kernel.
+// **Direction:** Row Shift Left (modes 0x10d) reads lane i+d into lane i, so a
+// chained reduce lands on the row's/group's FIRST lane -- this header's
+// default.  Row Shift Right (0x11d) reads lane i-d; `-DDS_ROW_SHIFT_RIGHT`
+// flips every mode and leader constant from the one spelling below.  An edge
+// caveat applies: out-of-row reads do NOT honor the guide's bc promise, so
+// only reads that stay strictly inside the row are trustworthy.  Every chain
+// here reads in-row lanes only by construction, which is also why non-leader
+// partials must never be read.  `mov_shfl` lowers to one `mov_b32 ...
+// row_shl:N rmsk bmsk bc` (ALU pipe, DPP form) and `readlane` to
+// `rl_b32 sD, ...` (SALU); no sm_/ds_/bsm instruction is emitted for either.
 //
-// The `#else` arm keeps the upstream-CUDA dual-build form (32-lane
-// `__shfl_down_sync` chain + broadcast), matching `radix_common.cuh`'s
-// `kWarpSize` convention; this tree compiles only the MACA arm
-// (`DEEP_SELECT_IS_BUILD_ON_MACA` is asserted in `csrc/structs.h`).
+// The `#else` arm keeps the 32-lane `__shfl_down_sync` chain + broadcast,
+// matching `radix_common.cuh`'s `kWarpSize` convention; this tree compiles only
+// the MACA arm (`DEEP_SELECT_IS_BUILD_ON_MACA` is asserted in
+// `csrc/structs.h`).
 
 #pragma once
 

@@ -1,12 +1,9 @@
-// 2026 - Modified for DeepSelect.  The torch-free replacements for the
-// `KU_CHECK_*` family the upstream host layer used (torch-only helpers, not
-// carried here).
+// The torch-free host-layer checks.
 //
-// These are the DeepSelect spellings of the corresponding `KU_CHECK_*`
-// checks.  The validation semantics and messages are unchanged, so a rejected
-// call still says which tensor and what was wrong.  The `_opt` forms accept a
-// `tvm::ffi::Optional` and are a no-op when it holds nothing -- that is what
-// `_check_optional_tensor` meant.
+// These are the spellings every call site below uses.  The validation
+// semantics and messages are what a caller sees, so a rejected call still says
+// which tensor and what was wrong.  The `_opt` forms accept a
+// `tvm::ffi::Optional` and are a no-op when it holds nothing.
 
 #pragma once
 
@@ -17,8 +14,8 @@
 
 namespace deep_select::ffi {
 
-// Shape as a compile-time list, so KU_CHECK_SHAPE(t, b, v) can compare
-// against it without the torch::IntArrayRef the old macro built.
+// Shape as a compile-time list, so `DS_CHECK_SHAPE(t, b, v)` can compare
+// against it without building a torch::IntArrayRef.
 inline bool shape_is(const tvm::ffi::TensorView &t, std::initializer_list<int64_t> dims) {
     if ((size_t)t.ndim() != dims.size()) return false;
     size_t i = 0;
@@ -31,7 +28,8 @@ inline bool shape_is(const tvm::ffi::TensorView &t, std::initializer_list<int64_
 
 }  // namespace deep_select::ffi
 
-// `#tensor` in the old macros spelled the argument; these keep that.
+// `#tensor` spells the argument, so an error names the operand the caller
+// passed rather than a position in the call.
 #define DS_CHECK_DEVICE(t)                                                      \
     do {                                                                        \
         DS_HOST_CHECK(t.device().device_type == kDLCUDA,                        \

@@ -1,64 +1,43 @@
-// deep_gemm's `topk_chunks`, ported for the b <= 2 band.
+// The fp32 chunked selector: the `b <= 2` band.
 //
 // Why this file exists
 // -------------------
-// `radix_topk_row_f32` (`radix_row_fp32.cuh`) and `topk_coarse12`
-// (`topk_coarse12.cuh`) both serve this operator, and neither is the right shape
-// at one or two rows.  Measured, interleaved five rounds, device 2, `k = 2048`
-// (ledger §12.16.6):
+// `radix_topk_row_f32` (`radix_row_fp32.cuh`) and the coarse12 selector
+// (`topk_coarse12.cuh`) both serve this operator, and neither is the right
+// shape at one or two rows: one CTA per row leaves the machine idle.
 //
-//     b     V        ours     deep_gemm    deep_gemm/ours
-//     1     66551     90.8      53.0        0.584x
-//     2     66551     93.4      54.1        0.580x
-//     4     66551     93.8     360.8        3.844x   <- deep_gemm's own cliff
-//     1    107520    174.8      60.6        0.347x
-//     1    131072    135.0      62.7        0.464x
+// What this dataflow does differently is **structural**: it walks the row a
+// second time and, in that same walk, writes every element above the threshold
+// bin **straight to the output** (the `guaranteed` half), staging only the
+// threshold bin's own members for refinement.  The split instead materializes
+// `num_chunks * topk` candidates and merges them, and at a long row with a
+// large `topk` the elements above the threshold bin are already almost the
+// whole answer -- so that merge is the cost this arm avoids.
 //
-// So the gap is real, it is confined to `b <= 2`, and it is **not** the chunk
-// count: sweeping `DEEP_SELECT_F32_CHUNKS` from 2 to 32 at `b1 V=66551` moves
-// ours between 89.5 and 135.6 with the optimum at 5-8, and the auto rule
-// already picks 8.  What deep_gemm has instead is a **structural** difference
-// (`mcDeepGEMM/csrc/kernels/fp32_topk.cu`, `topk_chunks_compact_refine`): it
-// walks the row a second time and, in that same walk, writes every element
-// above the threshold bin **straight to the output** (the `guaranteed` half),
-// staging only the threshold bin's own members for refinement.  The split
-// instead materializes `num_chunks * topk` candidates and merges them, and at
-// `k = 2048, V = 66551` the elements above the threshold bin are already
-// almost the whole answer -- so the merge is the entire stage-2 cost (43.9 of
-// the 78.3 us, ledger §12.16.6).
-//
-// What this port is, and what it is not
-// -------------------------------------
+// What this dataflow is, and what it is not
+// -----------------------------------------
 // The arithmetic -- `coarse_bin`, `refine_bin`, the 1024-bin coarse level, the
-// 256-bin fine level, the four refine bytes, the three rounds -- is deep_gemm's,
-// verbatim.  What is dropped:
+// 256-bin fine level, the four refine bytes, the three rounds -- is the
+// operator's.  What is dropped:
 //
 //   * the `Transform` page-table half, which needs the `page_table` /
 //     `cu_seqlens_row` / `q_positions` plumbing this repository does not
 //     synthesize (the same subtraction `topk_coarse12.cuh` makes);
-//   * the `rescanned` branch, where deep_gemm re-walks the row when the
-//     threshold bin is wider than `kCandidateCapacity`.  This port **declines**
-//     the row instead: the coarse merge sets `workspace.declined`, the refine
-//     leaves that row's output at `-1`, and the contract half re-ranks it on
-//     the row path.  That changes coverage, not correctness, and the branch it
-//     removes only fires on a bin wider than 4096, which `randn` at these
-//     widths does not produce (the same measurement `kF32OverflowChunkLen`
-//     rests on, `routing.cuh`).
+//   * the `rescanned` branch, where the row is re-walked when the threshold bin
+//     is wider than `kCandidateCapacity`.  This dataflow **declines** the row
+//     instead: the coarse merge sets `workspace.declined`, the refine leaves
+//     that row's output at `-1`, and the contract half re-ranks it on the row
+//     path.  That changes coverage, not correctness, and the branch it removes
+//     only fires on a bin wider than 4096.
 //
-// **The multi-CTA chunking was originally dropped here and has since been
-// restored.**  The paragraph that used to sit in this list said the port was
-// one CTA per row, "so it needs no workspace, no arrival protocol and no
-// per-row allocation -- and at `b <= 2` the chunking buys at most 6 CTAs on a
-// 104-AP part, which is the one thing it cannot be buying."  Every clause of
-// that is wrong about the shipped code: the three `topk_chunks_*` kernels
-// below are deep_gemm's, with `NChunks in [3, 6]` from `select_chunk_count`,
-// the per-row `TopKChunksWorkspace` arena, the `arrival` counter and the
-// cross-CTA merge -- see `chunks_workspace_bytes`.  The count was the wrong
-// thing to count: without chunking a row is **one** CTA on a 104-AP part, and
-// the one-CTA version measured slower than the split it was meant to replace
-// at every width (ledger §12.17).  The history is kept in the `chunked form`
-// note further down; this list is what the *shipped* code drops, and the only
-// thing on it is the `Transform` half and `rescanned`.
+// **The multi-CTA chunking is part of the shipped code.**  The three
+// `topk_chunks_*` kernels below use `NChunks in [3, 6]` from
+// `select_chunk_count`, the per-row `TopKChunksWorkspace` arena, the `arrival`
+// counter and the cross-CTA merge -- see `chunks_workspace_bytes`.  Without
+// chunking a row is **one** CTA, and that is precisely what this arm cannot
+// afford at one or two rows.  A `select_chunk_count` of 0 therefore means the
+// shape does not reach this form at all -- a decline, never a fallback to a
+// one-CTA arm.
 
 #pragma once
 
@@ -75,7 +54,7 @@
 
 namespace topk_select_chunks {
 
-// ── deep_gemm's `detail` constants, verbatim ───────────────────────────────
+// ── the selector's constants ───────────────────────────────────────────────
 constexpr int kThreads = 1024;
 constexpr int kMaxTopK = 2048;
 constexpr int kCoarseBins = 1024;
@@ -83,15 +62,13 @@ constexpr int kFineBins = 256;
 constexpr int kCandidateCapacity = 4096;
 constexpr int kHistogramPadding = 1;
 // **UNUSED, and it has no call sites anywhere in this tree** -- grep the name
-// before assuming otherwise.  It is deep_gemm's own name for the two-half
-// staging arena, and it does not describe this port's: the arena here is
-// `TopKChunksWorkspace::candidate_indices` below, **device** memory in the
+// before assuming otherwise.  It is the two-half staging arena's size in the
+// namespace's own terms, and it does not describe this dataflow's arena: that
+// is `TopKChunksWorkspace::candidate_indices` below, **device** memory in the
 // workspace rather than a shared buffer, and all three launches pass `0`
-// dynamic shared memory.  Nothing else reads it either -- the three
-// `static_assert`s beneath it are about `kCandidateCapacity` and the block
-// width, not about this.  Kept rather than deleted because it is deep_gemm's
-// own constant and a reader comparing the two files should find it where the
-// original has it.
+// dynamic shared memory.  The three `static_assert`s beneath it are about
+// `kCandidateCapacity` and the block width, not about this.  Nothing reads it,
+// so it cannot affect a launch.
 constexpr size_t kSmemBytes = 2 * (size_t)kCandidateCapacity * sizeof(int32_t);
 
 static_assert(kFineBins + kHistogramPadding <= kThreads,
@@ -114,12 +91,11 @@ using topk_select_common::refine_bin;
 using topk_select_common::refine_bin_bits16;
 using topk_select_common::warp_cumsum_histogram;
 
-// deep_gemm's `coarse_bin`: the top 10 bits of the **half**-encoded key.  Half,
+// The coarse level's key: the top 10 bits of the **half**-encoded value.  Half,
 // not float -- the coarse level only has to put the threshold in the right
 // neighbourhood, and the refine below resolves within the bin on the exact
-// float bits.  Upstream's `coarse_bins_pair` is its float2 form; this port
-// reads `float4`, so the four lanes go through `coarse_bin` one at a time
-// exactly as `topk_chunks_coarse_hist` does for its vector tail.
+// float bits.  The walk reads `float4`, so the four lanes go through
+// `coarse_bin` one at a time, exactly as the vector tail does.
 __device__ __forceinline__ int coarse_bin(float value)
 {
     const uint16_t bits = __half_as_ushort(__float2half_rn(value));
@@ -131,28 +107,23 @@ __device__ __forceinline__ int coarse_bin(float value)
 // pulled in above); this file's fine histogram is exactly the `[256 + 1]`
 // shape it takes.
 
-// The same suffix sum over the 1024-bin coarse level: deep_gemm's
-// `warp_cumsum_histogram<kCoarseBins>`, i.e. its **coarse** arm.
+// The same suffix sum over the 1024-bin coarse level -- the **coarse** arm of
+// `warp_cumsum_histogram`.
 //
-// **This used to be a block-wide Hillis-Steele walk and that was the wrong
-// shape.**  `kCoarseBins` is 1024 and `kThreads` is 1024, so `histogram[tid]`
-// is already a complete per-thread value; the coarse arm needs no
-// `kItemsPerLane` at all.  The old comment here justified the walk by "1024
-// bins over 64 lanes would need 16 items per lane", which describes the *fine*
-// arm (`Bins == kFineBins == 256`, 4 items per lane) -- the coarse arm is
+// **The shape is what matters.**  `kCoarseBins` is 1024 and `kThreads` is
+// 1024, so `histogram[tid]` is already a complete per-thread value; the coarse
+// arm needs no `kItemsPerLane` at all, where the *fine* arm
+// (`Bins == kFineBins == 256`) has 4 items per lane.  The coarse arm is
 // `kWarps = 1024 / 64 = 16` warps each owning 64 consecutive bins.  The
 // `static_assert(kWarps <= kWarpSize)` the arm carries (16 <= 64) holds here,
-// and `topk_chunks.cuh`'s own `blockDim >= kCoarseBins` assert is what makes
+// and this file's own `blockDim >= kCoarseBins` assert is what makes
 // `histogram[tid]` readable by every thread.
 //
-// The barrier count is the point, not the instruction count.  The walk was
-// 10 rounds x 2 `__syncthreads()` plus one before the loop = **21 barriers**,
-// all of them block-wide, in the merge CTA -- the one CTA that every other CTA
-// of the row has already finished waiting for.  This arm is **3**.
-// `docs/C500-radix-profile.zh.md` §5.3
-// measures the fp32 row's own residual the same way: of its ~104 us
-// unaccounted, ~103 us is barrier wait and ~1 us is atomics.  Barriers are the
-// cost this path was paying.
+// The barrier count is the point, not the instruction count.  A block-wide
+// Hillis-Steele walk over the same buffer is 10 rounds x 2 `__syncthreads()`
+// plus one before the loop = **21 barriers**, all of them block-wide, in the
+// merge CTA -- the one CTA that every other CTA of the row has already finished
+// waiting for.  This arm is **3**.  Barriers are the cost this path pays.
 //
 // The padding slot `histogram[kCoarseBins]` is written here rather than
 // before a barrier, because the arm's read of it (`lane < kWarps ? ... : 0`
@@ -242,44 +213,25 @@ inline cudaError_t launch_topk_chunks_impl(
 
 // ── the chunked form ───────────────────────────────────────────────────────
 //
-// The three kernels below are deep_gemm's `topk_chunks_*`, restored after the
-// first version of this port dropped them.  That version was one CTA per row
-// and it was **slower than the split it was meant to replace** at every width
-// (ledger §12.17): 82/116/132 us against deep_gemm's 53/61/63.  The reason is
-// not subtle -- a single CTA sweeping 66551 floats twice on a 104-AP part --
-// and the conclusion recorded there, that chunking "buys at most 6 CTAs" at
-// `b <= 2`, counted the wrong thing: without it the count is **one**.  A
-// `select_chunk_count` of 0 therefore means the shape does not reach this form
-// at all -- a decline, never a fallback to that one-CTA arm.
+// The three kernels below rank one row across `ChunkCount` CTAs and merge the
+// per-chunk histograms.  Without chunking a row is a **single** CTA -- a
+// sweeping walk of the whole row -- which at one or two rows leaves most of
+// the machine idle.
 //
-// `select_chunk_count` is deep_gemm's own, including its constants.  It is a
-// *scheduling* heuristic rather than a shape rule: it only adds chunks when the
-// last scheduling wave would otherwise be under-filled, which is exactly the
-// situation at one or two rows.
+// `select_chunk_count` is a *scheduling* heuristic rather than a shape rule: it
+// only adds chunks when the last scheduling wave would otherwise be
+// under-filled, which is exactly the situation at one or two rows.  It has
+// three stages: `max_chunks` bounded by the row's width; the largest count that
+// still fits a single wave; and -- when no count fits one -- the smallest whose
+// tail fills at least half a wave, else the widest tail seen.  The last two are
+// scheduling refinements rather than shape rules: a waves/chunks-only model
+// misses the fixed histogram, arrival and merge cost that every chunk pays
+// regardless of how much of the row it walks.
 //
-// **"Including its constants" used to overstate this, and the two missing
-// stages were a real divergence.**  The port stopped at `return max_chunks`
-// while the original (deep_gemm's `select_chunk_count`) has two more: the largest count that
-// still fits a single wave, and -- when no count fits one -- the smallest whose
-// tail fills at least half a wave, else the widest tail seen.  Both are
-// *scheduling* refinements rather than shape rules, which is why they are worth
-// having: the comment above them in the original says the waves/chunks-only
-// model misses the fixed histogram, arrival and merge cost that every chunk
-// pays regardless of how much of the row it walks.
-//
-// **At this port's band the two stages are inert, and that is a checked claim
-// rather than an assumption.**  `b <= 2` against `num_sms = 104` gives 6 either
-// way, and an exhaustive walk of `b in {1,2} x V in [2048, 2e6)` at
-// `sm_count in {104, 28, 32}` finds **zero** disagreements -- so no measurement
-// in this ledger moves, on any of the three families this repository builds.
-//
-// It is carried anyway because the divergence is **latent**: `select_chunk_count`
-// is reachable at any `b`, and it is *not* inert away from the band -- at
-// `sm_count = 104` the two functions disagree on 834 of 1,393 `(b, V)` pairs
-// over `b in [1,199]` (e.g. `b18-v66551`: 6 before, 5 after).  Those shapes do
-// not reach here today because `f32_chunks_applies` stops at `b <= 2`; a future
-// widening of that bound would have been silently mis-sized by a function whose
-// comment claimed to be the original's.
+// The function is general over `n_rows`, and the band gate
+// (`f32_chunks_applies`, `routing.cuh`) is what confines it to `b <= 2`; a
+// widening of that bound takes the count this function gives, not a second
+// rule.
 
 constexpr int kMinChunkCount = 3;
 constexpr int kMaxChunkCount = 6;
@@ -365,12 +317,12 @@ inline void dispatch_chunk_count(int chunks, Fn &&fn) {
 // instantiations, which is what lets the dispatcher allocate one byte buffer
 // sized for whichever `NChunks` this call resolves to.
 //
-// `candidate_indices` is deep_gemm's own `alignas(16)`, and it is the *arena*:
-// 16 KB, which the refine stages alias as two 8 KB halves.  It lives here in
-// the workspace, as **device** memory, and not in shared -- the three kernels
-// are separate CTAs, so a shared buffer would not be visible to the one that
-// does the merge (see the member's own note below).  Nothing here asks for
-// dynamic shared memory: all three launches pass `0`.
+// `candidate_indices` is `alignas(16)`, and it is the *arena*: 16 KB, which
+// the refine stages alias as two 8 KB halves.  It lives here in the workspace,
+// as **device** memory, and not in shared -- the three kernels are separate
+// CTAs, so a shared buffer would not be visible to the one that does the merge
+// (see the member's own note below).  Nothing here asks for dynamic shared
+// memory: all three launches pass `0`.
 template <int ChunkCount>
 struct TopKChunksWorkspace {
     int coarse[ChunkCount][kCoarseBins];
@@ -389,18 +341,16 @@ struct TopKChunksWorkspace {
     // row is one this kernel serves at all.
     int row_length;
     // Set by the coarse merge when the threshold bin is wider than the staging
-    // arena.  deep_gemm re-reads the row under a narrowing prefix in that case
-    // (its `rescanned` path); this port does not carry that path, so a row it
-    // cannot stage is **declined** -- the whole row goes back to the row path,
-    // which is a coverage statement and never a wrong answer.
+    // arena.  There is no re-walk under a narrowing prefix, so a row that
+    // cannot be staged is **declined** -- the whole row goes back to the row
+    // path, which is a coverage statement and never a wrong answer.
     int declined;
     // Two halves, because the refine ping-pongs them: `[0]` receives the coarse
     // stage's members (written by the coarse kernel's merge CTA, hence device
     // memory rather than shared -- the chunks are separate CTAs) and the two
-    // alternate from there.  deep_gemm spells this as
-    // `extern __shared__ int staged_indices[][kCandidateCapacity]`, i.e. also
-    // two rows; sizing it as one is what made `write_buf[put]` run off the end
-    // of the workspace and into the next row's.
+    // alternate from there.  The dimension is two, not one: sizing it as one
+    // row makes `write_buf[put]` run off the end of the workspace and into the
+    // next row's.
     alignas(16) int candidate_indices[2][kCandidateCapacity];
 };
 
@@ -414,15 +364,11 @@ constexpr size_t chunks_workspace_bytes_for() {
 // launch is given the same `select_chunk_count`, so the allocation and the grid
 // cannot disagree about which instantiation is in play.
 //
-// **`batches` multiplies, and it is not decoration.**  The first version of
-// this returned `sizeof(TopKChunksWorkspace<NChunks>)` alone -- one row's worth
-// -- while the kernels index `workspaces[row]`.  At the band this arm shipped
-// with (`batches <= 2`) that is a two-row overflow of a one-row buffer, which
-// is why it took a batch the band excludes to see it: `topk_chunks_init` zeroes
-// `arrival`/`declined` for row 1 just past the end of the arena, and whether
-// that is fatal depends on what the allocator put there and on how many calls
-// have run since.  deep_gemm's own sizing has the factor
-// (`n_rows * sizeof(...)`); this is the port's copy of it.
+// **`batches` multiplies, and it is not decoration.**  The kernels index
+// `workspaces[row]`, so a size without the factor is a two-row overflow of a
+// one-row buffer: `topk_chunks_init` zeroes `arrival`/`declined` for row 1 just
+// past the end of the arena, and whether that is fatal depends on what the
+// allocator put there and on how many calls have run since.
 //
 // `sm_count` is the device's, as everywhere else in this file.
 inline size_t chunks_workspace_bytes(uint32_t batches, uint32_t vocab_size,
@@ -435,9 +381,9 @@ inline size_t chunks_workspace_bytes(uint32_t batches, uint32_t vocab_size,
 }
 
 // One CTA per (row, chunk): resolves the row's window and its own chunk bounds.
-// deep_gemm's Wave-0/Wave-1 shape is kept even though this port has no
-// page-table half to resolve in Wave 1 -- the second warp's slot is simply
-// unused, and keeping the block shape means the arrival protocol below matches.
+// The block is two waves wide even though there is no page-table half to
+// resolve in Wave 1 -- the second warp's slot is simply unused, and the block
+// shape keeps the arrival protocol below consistent.
 //
 // The window is clamped into `[0, default_length]` and **stored**, because it
 // is the only place the three kernels can agree on it: `lengths` is a table
@@ -497,9 +443,8 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     // top-k, silently, with `abort_when_nan_found` -- the default -- inert.
     // Raising it here is what makes the route enterable under `check_nan` at
     // all, and it is why the scan is folded into pass 1 below rather than left
-    // to a separate pass: `topk_coarse12.cuh:223-245` pays the same predicate on
-    // words it is already loading (ledger §10.7, ~3% of that pass), and this
-    // kernel is already walking the row twice.
+    // to a separate pass: the predicate is a few bit tests on words already in
+    // registers, and this kernel is already walking the row twice.
     //
     // The `length <= topk` arm above returns *before* this point and writes no
     // slot.  That is not a gap: the contract half's shortcut arm runs before its
@@ -566,11 +511,10 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     // reason `f32_stage1_fuses_scan()` exists on the split.  The branch is
     // uniform and loop-invariant, so it costs a predicate register.
     //
-    // What it costs when it *is* on: measured, ~2.3-3.5% of this route's own
-    // time (b1-v66551 69.6 -> 71.8 us, b1-v131072 79.6 -> 82.4 us, snapshot
-    // clock, device 2, interleaved rounds).  That is the same order as the ~3%
-    // of pass 1 `topk_coarse12.cuh` measured for the same fold (ledger §10.7);
-    // it is the price of the contract rather than an artifact of this port.
+    // What it costs when it *is* on: four bit tests per 16 bytes on data the
+    // pass already loaded -- a fraction of the pass that absorbs it, not a
+    // second walk.  That is the price of the contract, not an artifact of this
+    // dataflow.
     const bool scan_nan = row_nan != nullptr;
     bool nan_found = false;
     for (int index = tid; index < prefix; index += kThreads) {
@@ -621,14 +565,12 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
     // *true* count, which is what lets the refine below decide without a second
     // merge.
     //
-    // **One pass, not two.**  This used to sum into a `total` local, then
-    // re-run the identical `ChunkCount`-deep loop into `histogram`, with the
-    // first result discarded (`(void)total`).  The original sums once
-    // (`histogram[tid] = total`).  The loop reads
+    // **One pass, not two.**  Summing into a `total` local and then re-running
+    // the identical `ChunkCount`-deep loop into `histogram` reads
     // `ChunkCount * kCoarseBins` ints of **device** memory -- 24 KB per row at
-    // `ChunkCount == 6` -- so the duplicate was a second device-memory pass
-    // over the whole coarse workspace, taken in the one CTA every other CTA of
-    // the row has already finished waiting for.
+    // `ChunkCount == 6` -- twice, in the one CTA every other CTA of the row has
+    // already finished waiting for.  One sum into `histogram[tid]` is the whole
+    // merge.
     //
     // The `tid < kCoarseBins ? tid : 0` guard the duplicate carried is dead at
     // this width (`kThreads == kCoarseBins`, and the cumsum below asserts it);
@@ -673,10 +615,9 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_coarse_hist(
         workspace.guaranteed_count = guaranteed_base;
         workspace.boundary_take = topk - guaranteed_base;
         workspace.candidate_count = boundary_base;
-        // A threshold bin wider than the staging arena is a row this port does
-        // not serve: deep_gemm re-reads the row under a narrowing prefix in
-        // that case (its `rescanned` path), and this port does not carry that
-        // path, so the row is handed back whole.  Declining is a *coverage*
+        // A threshold bin wider than the staging arena is a row this dataflow does
+        // not serve: there is no re-walk under a narrowing prefix, so the row
+        // is handed back whole.  Declining is a *coverage*
         // decision -- the route's launcher turns it into the per-row
         // `-1` that sends the row down the row path -- and it must be taken
         // here, before the refine walks anything, because a truncated arena
@@ -772,8 +713,7 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_compact_refine(
             const int global_pos = boundary_base + local_pos;
             if (global_pos < kCandidateCapacity) {
                 // Into the *first* arena row: the refine below starts with
-                // `read_buf == staging_a`, exactly as the original does with
-                // `staged_indices[0]`.
+                // `read_buf == staging_a`.
                 staging_a[global_pos] = column;
             }
         }
@@ -851,8 +791,8 @@ __global__ __launch_bounds__(kThreads) void topk_chunks_compact_refine(
         return;
     }
 
-    // Byte 16, then the three rounds over bytes 16, 8 and 0 -- deep_gemm's
-    // ordering, which the `remaining` accounting depends on.
+    // Byte 16, then the three rounds over bytes 16, 8 and 0 -- the ordering the
+    // `remaining` accounting depends on.
     if (tid < kFineBins + kHistogramPadding) histogram[tid] = 0;
     if (tid == 0) boundary_counter = 0;
     __syncthreads();

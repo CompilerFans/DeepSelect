@@ -7,7 +7,7 @@
 
 namespace topk_select_radix {
 
-// 与 SGLang 原始实现一致：先转 half 再取高 8 位。
+// 先转 half 再取高 8 位。
 // The fold is shared (`topk_select_common::refine_bin_bits16`); what is this
 // row's own is the fp16 rounding and the width -- the same 16-bit key
 // `topk_select_chunks::coarse_bin` reads at `>> 6`.
@@ -25,18 +25,14 @@ __device__ __forceinline__ uint8_t float_to_uint8(float x) {
 // so adjacent lanes of one load instruction are 16 bytes apart and a 128-byte
 // segment carries 128 useful bytes.
 //
-// **The `tx*4` walk this note used to describe is a different loop.**  It is
-// pass 2's two open-coded `__ldg(float4*)` loops, in that same function, which
+// **Pass 2's two open-coded `__ldg(float4*)` loops are a different walk.**  They
 // take four CONSECUTIVE float4 per thread -- 64 bytes between adjacent lanes,
-// 32 useful bytes per 128-byte segment.  They do not call this function, and
-// they were left alone on purpose when pass 1 was coalesced (`eaa0131`).
+// 32 useful bytes per 128-byte segment.  They do not call this function.
 //
-// The stride is real and deliberate -- but it is NOT why pass 1 is short of
-// the wall.  Coalescing that walk is a 65% win in a microbench and -0.7% in
-// the kernel: at the kernel's occupancy the two patterns are 7% apart, not
-// 65%, because pass 1 issues one shared-bucket atomic per element and that is
-// what it is waiting on.  See `docs/C500-radix-perf-ledger.zh.md` before
-// changing it.
+// That stride is real and deliberate, but it is NOT why pass 1 is short of the
+// wall.  Pass 1 issues one shared-bucket atomic per element and that is what it
+// is waiting on, so reshaping the load pattern around it buys the microbench
+// and not the kernel.  Do not change it expecting the coalescing gap.
 //
 // `kNan` is the contract's NaN scan folded into this very load.  The two walks
 // (`radix_topk_row_f32`'s pass 1 and `nan_scan_kernel`) read exactly the same
@@ -92,11 +88,9 @@ __device__ __forceinline__ void stage_f32_lane(
 // ============================================================
 //
 // The 256-bin reverse scan is `radix_common.cuh`'s `run_cumsum_warp`, the one
-// the 16-bit row scans with: this file used to carry a second implementation
-// (a double-buffered Hillis-Steele walk, eight barriers against that one's
-// three) over the identical `[2][256 + 32]` buffer.  Both read the bin counts
-// out of `[0]` and leave the suffix sums there, so the two were
-// interchangeable and only one of them had a reason to exist.
+// the 16-bit row scans with: both rows read the bin counts out of `[0]` and
+// leave the suffix sums there, so one implementation serves both and a second
+// copy would only be a place for the two to drift.
 
 // ============================================================
 // FP32 radix topk row
@@ -115,10 +109,9 @@ __device__ __forceinline__ void stage_f32_lane(
 // `SMEM_INPUT_SIZE` members of the coarse threshold bin and drops the rest,
 // after which the refinement ranks that subset rather than the bin.  The
 // answer still has `topk` distinct indices, so nothing looks wrong: the values
-// are simply from the wrong place.  Measured on a uniform row of L=129280,
-// k=512, the bin holds 8025 members against an arena of 1757 and **391 of the
-// 512 picks land below the row's true k-th largest** -- which is why this path
-// is not a fallback but part of the answer for that shape.
+// are simply from the wrong place.  A threshold bin wider than the arena is
+// ordinary on a uniform row, which is why this path is part of the answer
+// rather than a fallback.
 //
 // The 16-bit path handles the same case by re-walking the row -- see the
 // `overflow` branch of `radix_topk_row_bf16_b`.  For a four-byte key that
@@ -220,12 +213,12 @@ __device__ __forceinline__ void radix_topk_row_f32(
     constexpr uint32_t SMEM_INPUT_SIZE = kF32SmemInputSize;
 
     // `[1]` is the shape `run_cumsum_warp` takes and nothing in the fp32 path
-    // reads or writes it since the double-buffered scan went away.  It stays
-    // declared because `kSmemStaticBytes` (`radix_common.cuh`) is hand-written
-    // against this list and `kF32SmemInputSize` -- the arena -- is its
-    // remainder: shrinking the declaration alone would hand the dynamic region
-    // 1,152 B the plan does not know about, and shrinking the constant too
-    // would grow the arena, which is a capacity change, not a cleanup.
+    // reads or writes it.  It stays declared because `kSmemStaticBytes`
+    // (`radix_common.cuh`) is hand-written against this list and
+    // `kF32SmemInputSize` -- the arena -- is its remainder: shrinking the
+    // declaration alone would hand the dynamic region 1,152 B the plan does not
+    // know about, and shrinking the constant too would grow the arena, which is
+    // a capacity change, not a cleanup.
     __shared__ uint32_t s_histogram_buf[2][RADIX + 32];
     __shared__ uint32_t s_counter;
     __shared__ uint32_t s_threshold_bin_id;
@@ -253,9 +246,8 @@ __device__ __forceinline__ void radix_topk_row_f32(
     // Four float4 per lane per leg, but *unit-strided* between the four: the
     // leg takes `tx, tx+BS, tx+2BS, tx+3BS` (float4 units) rather than
     // `4tx .. 4tx+3`.  Same bytes, same instruction count -- but each load
-    // instruction's 64 lanes now sit 16 B apart instead of 64 B, which is the
-    // difference between 998.7 and 1650.9 GB/s on pass 1's own shape (measured;
-    // see the note above `hist_add_f32`).
+    // instruction's 64 lanes now sit 16 B apart instead of 64 B, so a
+    // 128-byte segment carries 128 useful bytes instead of 32.
     uint32_t n4 = vec_len / 4;
     uint32_t i4 = tx;
     bool nan_local = false;

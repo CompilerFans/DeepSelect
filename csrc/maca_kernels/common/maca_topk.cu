@@ -15,13 +15,13 @@
 //   * Portable primitives only: `__shfl_down_sync`, `atomicAdd`, `__ldg`,
 //     `__syncthreads`, `__syncthreads_or`.  No inline asm, no TMA, no mbarrier,
 //     no cluster.
-//   * The wave is 64 lanes, not 32.  Any mask or `/ 32` inherited from the
-//     CUDA-era kernels is suspect -- `skills/maca-wave64-port/` is the audit.
+//   * The wave is 64 lanes, not 32.  Any mask or `/ 32` inherited from a
+//     32-lane source is suspect.
 //
-// The upstream clustered variant (`v3_cluster`) is not carried: MACA has no
-// cluster launch, so the shapes it served fall through to this kernel -- the
-// same path every other shape takes, with `topk <= 4096` and no vocabulary
-// bound, so they are served, only without the cluster-specific scheduling.
+// A clustered variant is not carried: MACA has no cluster launch, so the shapes
+// it served fall through to this kernel -- the same path every other shape
+// takes, with `topk <= 4096` and no vocabulary bound, so they are served, only
+// without the cluster-specific scheduling.
 //
 // This file is the shared half of every family's artifact: family <N> compiles
 // `common/` plus its own tuple set in `csrc/maca_kernels/xcore<N>/instantiations/`.
@@ -42,12 +42,12 @@
 // The NaN predicates and the order-preserving key encodes, shared with the
 // dataflow headers below.
 #include <csrc/maca_kernels/common/primitives.cuh>
-// The ported C500 dataflow (see the provenance banner in that file).  It is
-// included here so that this translation unit -- the one `setup.py` builds --
-// is what proves it compiles under the mxcc/cu-bridge toolchain, and so that
-// the bf16 selection path in `contract.cuh` is a header-only dependency.
+// The radix row dataflow.  It is included here so that this translation unit --
+// the one `setup.py` builds -- is what proves it compiles under the
+// mxcc/cu-bridge toolchain, and so that the bf16 selection path in
+// `contract.cuh` is a header-only dependency.
 #include <csrc/maca_kernels/common/radix_core.cuh>
-// The contract half, the two ported dataflows, and the routing that picks
+// The contract half, the two staged selectors, and the routing that picks
 // between every route (the handoff each one ends on is `routing.cuh`'s: the
 // dataflow headers carry the kernels and their launchers, not the emit).  The
 // ladder itself is `routing.cuh`'s `select_route` (whose answer `topk_launch`
@@ -63,11 +63,11 @@
 
 // ── the tvm-ffi entry points ────────────────────────────────────────────────
 //
-// Torch-free: this TU no longer includes <torch/extension.h> or
+// Torch-free: this TU does not include <torch/extension.h> or
 // <ATen/cuda/CUDAContext.h>, so the extension carries no torch DT_NEEDED
 // entry and its behavior is not tied to the host's torch build.  The contract
-// checks that used to be `TORCH_CHECK` are `DS_HOST_CHECK`, the tensors are
-// `tvm::ffi::TensorView`, and the stream comes from the FFI environment.
+// checks are `DS_HOST_CHECK`, the tensors are `tvm::ffi::TensorView`, and the
+// stream comes from the FFI environment.
 #include <csrc/ffi/ffi_error.h>
 #include <csrc/ffi/ffi_tensor.h>
 
@@ -99,8 +99,7 @@ namespace detail {
 // instantiates every row in the *device* pass -- the `extern template` below is
 // honored by the host pass and ignored there, so such a TU's device image
 // holds every kernel in the table rather than its own.  With the table confined
-// to this file, each `instantiations/*.cu` carries only its own kernel; the
-// measured sizes are in the build section of `CLAUDE.md`.
+// to this file, each `instantiations/*.cu` carries only its own kernel.
 
 #define DEEP_SELECT_RADIX_EXTERN(VD, ID, BLK, SI, RV, SV, PRE)                \
     extern template void launch_radix_config<                                 \
@@ -158,11 +157,11 @@ radix_launcher_fn radix_launcher_for(int value_dtype, int index_dtype,
 
 // ── the chunked path's scratch, held across calls ───────────────────────────
 //
-// `cudaMalloc`/`cudaFree` on this runtime cost ~70-100 us per *pair* at this
-// size class, and the cost is non-monotonic in size (a 12 MB allocation is
-// nearly free; 300 KB is the worst case).  The split needs this workspace plus
-// a row-length table on every call, so a fresh pair each time put a ~265 us
-// host floor in front of a ~96 us kernel -- `e2e = max(host, device)`.
+// `cudaMalloc`/`cudaFree` on this runtime are expensive per *pair* at this size
+// class, and the cost is non-monotonic in size.  The split needs this workspace
+// plus a row-length table on every call, so a fresh pair each time puts a host
+// floor in front of a kernel that can be shorter than it -- `e2e =
+// max(host, device)`.
 //
 // So they are cached process-wide and **grown only**.  Growing rather than
 // keying by shape is the design: a caller alternating between two batches would
@@ -182,31 +181,28 @@ radix_launcher_fn radix_launcher_for(int value_dtype, int index_dtype,
 //     is `[vocab_size] * batches`, a pure function of that pair, so the pair
 //     *is* the content; see `lengths_table`.
 //
-// The high-water mark is **not** bounded by one gate, and the number below is
+// The high-water mark is **not** bounded by one gate, and the widest gate is
 // the one to check against a memory budget rather than the smallest one.
 // `chunked_bf16_applies` (`batches <= 64`, `topk in {512, 1024}`) does bound
-// the bf16 split at ~6.3 MB, but it does not govern the fp32 one: the fp32
-// split is admitted by `chunked_f32_applies` (`batches <= 4096`,
-// `vocab_size >= 32768`, `topk <= kF32MaxTopK`), which is a far wider gate, and
-// the two branches below share this one `workspace` field.  The fp32 split also
-// carries no `sm_count` test -- unlike `f32_coarse12_applies` and
-// `f32_chunks_applies`, whose provenance halves are `kF32Coarse12MeasuredSmCount`
-// -- so a C600U image takes this same branch with its own chunk count.
+// the bf16 split, but it does not govern the fp32 one: the fp32 split is
+// admitted by `chunked_f32_applies` (`batches <= 4096`, `vocab_size >= 32768`,
+// `topk <= kF32MaxTopK`), which is a far wider gate, and the two branches below
+// share this one `workspace` field.  The fp32 split also carries no `sm_count`
+// test -- unlike `f32_coarse12_applies` and `f32_chunks_applies`, whose
+// performance halves are guarded -- so a 1600 image takes this same branch with
+// its own chunk count.
 //
 // The footprint is `batches * chunks * topk * 8` bytes for the candidates plus
-// `batches * topk * 4` for the merged answer.  On the perf grid that peaks at
-// `b4096 V131072 k2048` = **160 MiB** (held for the life of the process); at
-// the gate's own edge it is `b4096 k4096` with a large `V`, which is gigabytes
-// but also needs a tensor that does not fit on this box.  Plus `batches * 4`
+// `batches * topk * 4` for the merged answer, held for the life of the process;
+// at the gate's own edge it is a multi-gigabyte buffer.  Plus `batches * 4`
 // bytes per distinct `(batches, vocab_size)` for the row tables, which at
 // `b4096` is 16 KB per shape visited.
 //
 // A bounded, one-time footprint in exchange for removing a per-call host cost
-// larger than the kernel it fronts -- 265 us of host floor in front of a 96 us
-// kernel.  Freeing instead of holding gives most of that back: free-then-malloc
-// *should* be cheap, and measured on this runtime it is not.  A caller that
-// cannot afford the peak has `DEEP_SELECT_NO_SCRATCH_CACHE=1`, which allocates
-// per call and keeps only `retired` alive.
+// larger than the kernel it fronts.  Freeing instead of holding gives most of
+// that back: free-then-malloc *should* be cheap, and on this runtime it is not.
+// A caller that cannot afford the peak has `DEEP_SELECT_NO_SCRATCH_CACHE=1`,
+// which allocates per call and keeps only `retired` alive.
 
 struct ChunkedScratch {
     std::mutex mu;
@@ -215,16 +211,14 @@ struct ChunkedScratch {
     // The row tables, one per distinct `(batches, vocab_size)` this process has
     // asked for, each holding `[vocab_size] * batches`.
     //
-    // **A table is never rewritten for a different key.**  The policy this
-    // replaced was one buffer plus an epoch, refilled whenever the pair moved
-    // -- correct only for a caller that runs one shape at a time.  A caller
-    // that has recorded the pointer (a CUDA graph) keeps
+    // **A table is never rewritten for a different key.**  One buffer refilled
+    // whenever the pair moved is correct only for a caller that runs one shape
+    // at a time.  A caller that has recorded the pointer (a CUDA graph) keeps
     // reading the address it captured, so rewriting that address with another
-    // shape's lengths silently re-scopes the row the graph ranks: measured, a
-    // `b132 V66551` capture replayed after a `b16 V131072` call ranked a
-    // 131072-wide window against a 66551-wide row and 131 of 132 rows differed.
-    // Retiring the old buffer does not help -- nothing was freed, the content
-    // was overwritten -- so the fix is to stop reusing the address at all.
+    // shape's lengths silently re-scopes the row the graph ranks: the graph
+    // replays a 131072-wide window against a 66551-wide row.  Retiring the old
+    // buffer does not help -- nothing was freed, the content was overwritten --
+    // so the fix is to stop reusing the address at all.
     //
     // The footprint is `batches * 4` bytes per distinct shape.  The bf16
     // split's gate bounds `batches` at 64, while the fp32 split can reach
@@ -317,18 +311,15 @@ struct ChunkedScratch {
 // launched against -- `ChunkedScratch` is process-wide and its pointers are
 // handed to the kernel layer directly, so the address a graph froze is the
 // address the driver is now free to hand to the next allocation of that size.
-// Every replay after a growth reads whatever the allocator put there.  Measured
-// (`tests/cases/graph_capture.py --grow-probe`, three runs): capture at
-// `b132 V66551`, grow with `b4096 V131072`, replay -> **~262k of 270336 indices
-// differ**, deterministically.  A replay that happens to match means the page
-// was not reused, not that this is safe.
+// Every replay after a growth reads whatever the allocator put there, which is
+// a wrong answer rather than a fault.  A replay that happens to match means the
+// page was not reused, not that this is safe.
 //
 // So the peak is held.  The cost is bounded by the number of distinct sizes one
-// process grows through -- one or two in every workload measured -- and it buys
-// the operator being capturable at all, which is the price a caller integrating
-// it into a decode loop actually cares about.  This is not a leak in the
-// sense that matters: it is a high-water mark, and it is the same policy the
-// cache already applies to a shape that never shrinks.
+// process grows through, and it buys the operator being capturable at all --
+// the price a caller integrating it into a decode loop actually cares about.
+// This is not a leak in the sense that matters: it is a high-water mark, and it
+// is the same policy the cache already applies to a shape that never shrinks.
 //
 // The mutex is held by the caller (`ScratchGuard`), which is what makes the
 // push safe without a lock of its own.
@@ -411,8 +402,8 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // The three switches are validated; the routing, the launchers and the
     // instantiation table read them only through this value (`contract.cuh`'s
     // `OutputSpec`), which is also where the normalization the table is keyed
-    // on lives.  The public signature keeps them apart because it is
-    // upstream's.  (`return_value` is still read directly below -- for the
+    // on lives.  The public signature keeps them apart because callers write
+    // them that way.  (`return_value` is still read directly below -- for the
     // output tensor it gates and the strides it decides -- but that is the
     // boundary's own bookkeeping, not the answer's shape.)
     const OutputSpec output{.sorted_index = sorted_index,
@@ -493,12 +484,11 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // The *other* machine number -- the shared-memory budget -- is not read
     // here and not passed here: it is `ARCH_SMEM_PER_AP_BYTES`, a compile-time
     // constant of the family this artifact was built for (`csrc/structs.h`).
-    // It used to be a `cudaDeviceGetAttribute` on this line, which is the same
-    // number obtained a call later and from a place that did not need to be
-    // asked: the artifact already knows its family, `_binding.py` loads the
-    // artifact matching the device, and the only way the two can disagree is a
-    // call that crossed devices -- which this file would rather refuse than
-    // silently re-tune for.
+    // A driver query would be the same number obtained a call later and from a
+    // place that does not need to be asked: the artifact already knows its
+    // family, `_binding.py` loads the artifact matching the device, and the
+    // only way the two can disagree is a call that crossed devices -- which
+    // this file would rather refuse than silently re-tune for.
     p.idx_fill = (int32_t)idx_oob_fill_value;
     p.value_fill = (float)value_oob_fill_value;
     p.check_nan = check_nan;
@@ -659,17 +649,15 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
             if (!end.has_value()) {
                 // The row table, keyed by the *pair* that is its content.
                 //
-                // It used to be one buffer plus an epoch: refill when
-                // `(batches, vocab_size)` differs from what was last written.
-                // That is correct for a caller that runs one shape at a time
-                // and wrong for a caller that has *recorded a pointer* -- a CUDA
-                // graph.  Capture freezes `end_ptr` at the address this call
-                // handed out; a later call at another shape then rewrote that
-                // same address in place (measured: `b132 V66551` captured, a
-                // `b16 V131072` call in between, replay -> row 0 ranked a
-                // 131072-wide window against a 66551-wide row, 131 of 132 rows
-                // differ).  `scratch_retire` does not help here: nothing was
-                // freed, the content was overwritten.
+                // One buffer refilled whenever `(batches, vocab_size)` differs
+                // from what was last written is correct for a caller that runs
+                // one shape at a time and wrong for a caller that has
+                // *recorded a pointer* -- a CUDA graph.  Capture freezes
+                // `end_ptr` at the address this call handed out; a later call
+                // at another shape then rewrites that same address in place,
+                // and the replay ranks a 131072-wide window against a
+                // 66551-wide row.  `scratch_retire` does not help here: nothing
+                // was freed, the content was overwritten.
                 //
                 // So the table is per-key and never reused across keys.  The
                 // footprint is `batches * 4` bytes per distinct shape, with the
@@ -695,10 +683,9 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // **The splits must not raise into their own workspace.**  That region is
     // a geometry-dependent offset inside one grow-only scratch shared by
     // every split shape and both dtypes, so the slot a call reads is whatever
-    // the previous call wrote at that offset -- a candidate index, not a flag
-    // (measured: a b1 v262144 bf16 cell after a b6 v1048576 call returns the
-    // NaN sentinel on a clean row).  This table is the one region that is only
-    // ever flags.
+    // the previous call wrote at that offset -- a candidate index, not a flag,
+    // and it can make a clean row read as poisoned.  This table is the one
+    // region that is only ever flags.
     //
     // **Zeroed when it is allocated, never per call.**  What makes that safe is
     // the contract half's invariant, not this buffer's: `topk_kernel_radix`
@@ -707,9 +694,9 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     // time that call's kernel completes (see `RowParams::nan_flags`).  The
     // fresh buffer is therefore the only place a stale 1 could come from, and
     // this one `cudaMemset` — once, when the scratch grows — replaces an
-    // allocation-bound `cudaMemsetAsync` on every call (~4 us on a C600U, ~15%
-    // of a b1 decode cell, measured).  A caller that ever supplies its own
-    // table owns zeroing it.
+    // allocation-bound `cudaMemsetAsync` on every call, which is a launch the
+    // small-batch cells would pay for nothing.  A caller that ever supplies its
+    // own table owns zeroing it.
     if (plan.scan_table && p.scan_flags == nullptr) {
         if (scratch_grow(scratch.retired, scratch.scan_flags,
                          scratch.scan_flags_count, (size_t)batches)) {
@@ -720,7 +707,7 @@ void topk(const tvm::ffi::TensorView &input, int64_t topk,
     }
     // The abort table: same grow-only pattern, opposite zeroing policy.  The
     // contract half writes a slot for every row before it can return, so a
-    // memset here would buy nothing and cost the call ~11 us (see the field's
+    // memset here would buy nothing and cost the call a launch (see the field's
     // note).  It is allocated for the whole `abort_on_nan` class rather than
     // for the route that will need it, because every route the plan admits
     // answers through the same contract half.

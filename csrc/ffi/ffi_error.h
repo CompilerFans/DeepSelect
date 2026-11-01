@@ -1,25 +1,21 @@
-// 2026 - Modified for DeepSelect.  Host-side error reporting for the tvm-ffi
-// binding layer.
+// Host-side error reporting for the tvm-ffi binding layer.
 //
-// The pybind11 entries used `TORCH_CHECK`, which threw a `c10::Error`.  The
-// tvm-ffi boundary wants a plain C++ exception: `tvm::ffi::Error` is what the
+// The boundary wants a plain C++ exception: `tvm::ffi::Error` is what the
 // runtime turns into a python exception, and constructing one through the
 // `TVMFFIErrorSetRaisedFromCStr` env API is the documented way for a host
 // function to report a failure that carries a useful message.
 //
-// Two levels, mirroring `deep_gemm`'s `DG_HOST_ASSERT` /
-// `DG_CUDA_RUNTIME_CHECK` pair:
+// Two levels:
 //
 //   DS_HOST_ASSERT(cond)            a contract violation the caller caused
 //   DS_CUDA_RUNTIME_CHECK(cmd)      a CUDA runtime call that returned != success
 //   DS_HOST_UNREACHABLE(reason)     a case the dispatch cannot represent
 //
 // The message carries `__FILE_NAME__:__LINE__` -- the file, not the path.
-// torch passes sources to the compiler as absolute paths, so `__FILE__` would
-// put *this build machine's* checkout directory into an error a caller reads;
-// mxcc accepts no `-ffile-prefix-map` to strip it (measured: rejected both
-// bare and through `-Xclang`), and the basename is what the diagnostic needs
-// anyway.
+// The compiler is given sources as absolute paths, so `__FILE__` would put a
+// build machine's checkout directory into an error a caller reads; mxcc accepts
+// no `-ffile-prefix-map` to strip it, and the basename is what the diagnostic
+// needs anyway.
 
 #pragma once
 
@@ -61,7 +57,7 @@ std::string concat(const Args &...args) {
 
 // A caller-visible contract violation.  Every use carries the condition's own
 // spelling so the message says what was required, not just that something was
-// wrong -- `TORCH_CHECK(cond, "msg")` gave both and callers read them.
+// wrong -- callers read both.
 #define DS_HOST_ASSERT(cond)                                                    \
     do {                                                                        \
         if (!(cond)) {                                                          \

@@ -21,8 +21,9 @@ namespace topk_select_radix {
 //
 // `kBlock` is a template parameter rather than `kChunkBlockSize` so a JIT feed
 // can compile this body at another width (`tools/jit_probe/stage1_probe.cu`),
-// and the feed calls this function rather than a copy: the copy a probe once
-// carried had drifted -- no `chunk_len <= topk` arm, no `topk_arg`.
+// and the feed calls this function rather than a copy: a copy would have to
+// restate the `chunk_len <= topk` arm and `topk_arg`, and the two bodies would
+// then be free to drift.
 template <int kBlock, uint32_t TOPK, bool kNan>
 __device__ __forceinline__ void topk_bf16_chunk_stage1_body(
     const maca_bfloat16* scores, const int32_t* lengths, int32_t* candidate_indices,
@@ -78,13 +79,11 @@ __device__ __forceinline__ void topk_bf16_chunk_stage1_body(
 
     // The chunk is ranked by the coarse12 row: this walk is over the input's
     // bytes, and the 12-bit coarse level is what makes that walk a streaming
-    // one.  Measured on C500, device 2
-    // (`docs/experiments/20261009_c500_dsa_decode/README.md`): the same chunk
-    // runs at 382 GB/s on the 12-bit level against 256 on the 8-bit one
-    // (§9.12), and `b6 x 262144 k512` goes from 103.9 to 70.5 us e2e against
-    // the row kernel's 97.7.  Both stages rank with it, and both therefore
-    // take `kChunkSmem`.  `kSkip=false`: these rows carry no skip tables (the
-    // candidates live in the global arrays), so the summary is compiled out.
+    // one -- its threshold bin is narrow enough that the refine reads the row
+    // once more, where the 8-bit level's wider bin costs an extra pass.  Both
+    // stages rank with it, and both therefore take `kChunkSmem`.
+    // `kSkip=false`: these rows carry no skip tables (the candidates live in
+    // the global arrays), so the summary is compiled out.
     bool nan_row = false;
     radix_topk_row_bf16_b<kBlock, kNan, false>(
         row + start, chunk_indices, chunk_len, (uint32_t)topk,
@@ -137,11 +136,9 @@ __global__ void topk_bf16_chunk_stage2_kernel(
     constexpr int BLOCK_SIZE = kBlock;
 
     // The merge's input is `chunks * topk` candidate values rather than the
-    // row's bytes, and the coarse12 row is the faster one over it too:
-    // measured at 10/10 of the split's cells, 0.804x summed, where the same
-    // swap on stage 1 was 0.832x (`README.md` §9.15 and §9.12).  The arena is
-    // `kCoarse12ArenaEntries` on a `chunks * topk` row, not the row kernel's
-    // longer one.
+    // row's bytes, and the coarse12 row is the right one over it too: the
+    // arena is `kCoarse12ArenaEntries` on a `chunks * topk` row, not the row
+    // kernel's longer one.
     radix_topk_row_bf16_b<kBlock, false, false>(values, out, candidate_stride, (uint32_t)topk);
     for (int i = threadIdx.x; i < topk; i += BLOCK_SIZE) {
         const int32_t candidate_pos = out[i];
@@ -180,9 +177,9 @@ inline cudaError_t launch_bf16_chunk_stage1_k(
     if (smem_err != cudaSuccess) return smem_err;
 
     const int chunk_size = chunk_size_for(L, num_chunks);
-    // Deviation 3: the row stride can be wider than the window (`L`), which is
-    // how a caller with padded input rows reaches this path; upstream passes
-    // `L` and so can only split packed rows.
+    // The row stride can be wider than the window (`L`), which is how a caller
+    // with padded input rows reaches this path; a caller that passes `L` here
+    // could only split packed rows.
     const int64_t stride = score_stride > 0 ? score_stride : (int64_t)L;
     topk_bf16_chunk_stage1_kernel<TOPK, kNan>
         <<<B * num_chunks, kChunkBlockSize, kChunkSmem, stream>>>(
@@ -333,9 +330,9 @@ struct TopKConfig {
 
 inline bool needs_long_row_bf16(const TopKConfig& cfg)
 {
-    // The measured crossover is specific to the 16 KiB C500 row variant. A
-    // larger arena, a short batch, or an unsupported k keeps the 512 path so
-    // compact-fit and small-row latency do not regress.
+    // The crossover is specific to the 16 KiB row variant. A larger arena, a
+    // short batch, or an unsupported k keeps the 512 path so compact-fit and
+    // small-row latency do not regress.
     if (kBlockSize != 512 || kSMEM > 16 * 1024 || cfg.B <= 0 || cfg.B > 4096 ||
         cfg.L < 60000)
         return false;
@@ -508,7 +505,7 @@ inline int32_t *chunked_f32_cols(void *base, uint32_t batches, uint32_t topk,
 //
 // `chunks` is even by construction (`f32_chunked_chunks` returns a power of two
 // or `f32_chunk_round_even`'s result) and `topk >= 512` on every arm the split
-// is measured on, so `chunks * topk` is even and the offset is a multiple of 8
+// serves, so `chunks * topk` is even and the offset is a multiple of 8
 // bytes -- the padding is `0` or `8`, and the answer is determined by
 // `batches & 1u`.  Written as a round-up so it stays correct if `chunks` ever
 // becomes odd.
@@ -516,8 +513,8 @@ inline int32_t *chunked_f32_cols(void *base, uint32_t batches, uint32_t topk,
 // Without it `vals` sits at `batches * chunks * topk * 4` bytes: 8 mod 16
 // whenever `batches` is odd, which is every `b1-*` fp32 cell in the perf grid
 // (`b1-v66551-k2048`, `b1-v131072-k2048`, `b1-v107520-k2048`).  The flag table
-// that used to sit in front of the arena moved `cols` too, but that prefix is
-// the dispatcher's own allocation now; the region size alone decides the pad.
+// is a separate dispatcher allocation, not a prefix of this arena, so the
+// region size alone decides the pad.
 // MACA tolerates the misaligned load, which is exactly why the old gap
 // survived: it is UB that works, not a visible mis-computation.
 inline size_t chunked_f32_vals_offset(uint32_t batches, uint32_t topk,
@@ -618,16 +615,16 @@ extern template cudaError_t launch_f32_chunk_stage2<(int)kF32ChunkBlocks>(
 
 // `f32_chunk_engine_supports` is the *engine* bound, not the policy one:
 // `chunked_f32_applies` (in
-// `maca_topk.cu`) decides whether to split and calls this to find out whether
-// the split can serve the topk.  Keeping them separate is what stops the policy
-// from looking more expensive than the engine actually is.
+// `maca_kernels/common/maca_topk.cu`) decides whether to split and calls this
+// to find out whether the split can serve the topk.  Keeping them separate is
+// what stops the policy from looking more expensive than the engine actually
+// is.
 inline bool f32_chunk_engine_supports(int topk) {
     // The fp32 split is dynamic-k: stage1/stage2 are templated on `kBlockSize`
     // alone and take `topk` as an argument (`radix_topk_row_f32`'s `topk` is a
     // runtime parameter too), so the engine's bound is the array limit, not a
-    // switch.  The `512 || 1024` that used to sit in `chunked_f32_applies` was
-    // a *policy* bound from where the split was measured, not an instantiation
-    // one -- which is what plan §21.2 says and this makes explicit.
+    // switch.  A narrower `topk` bound belongs in `chunked_f32_applies`, where
+    // it is policy, not here.
     return topk > 0 && topk <= (int)kF32MaxTopK;
 }
 
