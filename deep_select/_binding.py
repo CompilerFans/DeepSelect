@@ -88,9 +88,9 @@ def device_family_suffix() -> str:
     The spelling rows below are the toolkit's: a family is keyed by the sm pair
     its part reports, and one family's part renumbers across SDK generations,
     which is why the family and not the number is the anchor.
-    **This function is the one copy of those rows**: `setup.py` imports it to
-    resolve `native`, and no other file in the tree carries a table — so a new
-    family is an edit here and nowhere else.
+    **This function is the loader's copy of those rows**: `setup.py` imports it
+    to resolve `native`, and the kernel's runtime twin is
+    `csrc/maca_kernels/common/family.cuh` — a new family is an edit to both.
     Anything outside those -- a part of another family, a CPU-only host -- gets
     `""`, which names the unsuffixed artifact and nothing else; see
     `_library_pattern` for why an unknown family must not fall through to *some*

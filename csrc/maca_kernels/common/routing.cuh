@@ -17,8 +17,10 @@
 
 #include <csrc/structs.h>
 #include <csrc/maca_kernels/common/contract.cuh>
+#include <csrc/maca_kernels/common/family.cuh>
 #include <csrc/maca_kernels/common/topk_coarse12.cuh>
 #include <csrc/maca_kernels/common/topk_chunks.cuh>
+#include <csrc/maca_kernels/xcore1600/xcore1600_routing.cuh>
 
 namespace deep_select {
 namespace detail {
@@ -97,32 +99,16 @@ inline bool bf16_skip_enabled() {
     return v;
 }
 
-// **A set, not a count: this family ships at 28 APs and at 32, and both are
-// ordinary parts.**  Every gate fitted on that family takes the set.
-inline bool is_c600u_ap_count(uint32_t sm_count) {
-    return sm_count == 28 || sm_count == 32;
-}
-
-// `needs_long_row_bf16` sends every long row to the 1024-thread instantiation,
-// and its crossover belongs to the 104-AP part.  On a 128 KiB family the narrow
-// row takes over once the batch alone is large: the AP holds 2 x 1024- or
-// 4 x 512-thread CTAs, so a full wave gives the narrow row four independent
-// CTAs against the wide row's two, while below a wave the wide row's extra
-// threads on a lone row win.  The batch at which the two cross climbs with the
-// row length, so no one batch crosses every row; 256 is the smallest batch at
-// which the narrow row wins **every** cell, and below it the wide row is kept
-// because that is where the narrow row's losses are.
-inline constexpr uint32_t kC600UNarrowRowBatches = 256;
-
-// The long-row regime is the only thing that differs
-// between the two block widths (`topk_select_radix::needs_long_row_bf16`); the batch is the
-// launch's row count, one row per CTA.
-inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk,
-                           uint32_t sm_count) {
+// The long-row regime is the only thing that differs between the two block
+// widths (`topk_select_radix::needs_long_row_bf16`); the batch is the launch's
+// row count, one row per CTA.  The narrow-row floor is the xcore1600 family's
+// own (`xcore1600_routing.cuh`); every other device keeps the wide body on a
+// long row, which is what the 104-AP crossover was fitted for.
+inline int radix_block_for(uint32_t batches, uint32_t vocab_size, uint32_t topk) {
     const topk_select_radix::TopKConfig cfg{(int)batches, (int)vocab_size, (int)topk};
     const bool long_row = topk_select_radix::needs_long_row_bf16(cfg);
-    if (long_row && is_c600u_ap_count(sm_count) &&
-        batches >= kC600UNarrowRowBatches) {
+    if (family() == Family::Xcore1600 &&
+        xcore1600_narrow_row_applies(ap_count(), long_row, batches)) {
         return topk_select_radix::kBlockSize;
     }
     return long_row ? topk_select_radix::kLongRowBlockSize : topk_select_radix::kBlockSize;
@@ -154,16 +140,9 @@ constexpr uint32_t kChunkedMinVocab = 262144;
 // best worst case over the grid.
 constexpr uint32_t kChunkedVocabPerRow = 21000;
 
-// ── the same crossing on a 128 KiB family: the batch grows like sqrt(vocab) ─
-//
-// The constant above is a line through the origin, and on that family no line
-// of that shape holds the three crossings: they grow about half as fast as the
-// rows do.  The square-root form `batches^2 * 6400 <= vocab` holds all three,
-// and its worst regret is the boundary cell itself.
-// The benchmarks' grid has no cell in the band the rule moves -- its batches
-// below 64 are 1 and 6, which both rules send to the split -- so this is a
-// routing fix for decode shapes, not a grid number.
-constexpr uint32_t kC600UChunkedVocabPerBatchSq = 6400;
+// The xcore1600 family's crossing has its own shape -- the batch grows like
+// sqrt(vocab) rather than along a line through the origin -- and lives with
+// that family's other floors in `xcore1600_routing.cuh`.
 
 // The split is SM-count-sensitive: a grid of `kBatch * chunks` CTAs leaves
 // `ctas mod SM` SMs idle unless it is a whole number of waves, and the same 16
@@ -207,7 +186,7 @@ inline int wave_filled_chunks(int base_chunks, int sm_count) {
 
 // [MACA] SM-count-sensitive.  16 is the base count, flat across the 104-AP
 // ladder; a 128 KiB family rounds it by `wave_filled_chunks`, at whichever AP
-// count the device reports -- the 28/32-AP part ships at both.
+// count the device reports -- the xcore1600 part ships at both.
 inline int chunked_chunks(const RowParams &params) {
     return wave_filled_chunks(16, (int)params.sm_count);
 }
@@ -220,23 +199,20 @@ struct ChunkedWorkspace {
 
 // The split is 16-bit only.  `topk` 512 and 1024 are the static-k arms of the
 // merge; 2048 is carried by the runtime-k arms (`launch_typed_chunked`'s
-// default branch, already compiled) and is admitted on the 128 KiB parts only:
-// the per-chunk ranking at topk=2048 costs shared memory the 64 KiB part has
-// less of, and no measurement stands behind the extension there.
+// default branch, already compiled) and is admitted on the xcore1600 family
+// only: the per-chunk ranking at topk=2048 costs shared memory the 64 KiB
+// family has less of, and no measurement stands behind the extension there.
 inline bool chunked_bf16_applies(const RowParams &params, uint32_t batches) {
     if (batches == 0 || batches > kChunkedMaxBatches) return false;
     if (params.vocab_size < kChunkedMinVocab) return false;
     if (params.topk == 2048) {
-        if (!is_c600u_ap_count(params.sm_count)) return false;
+        if (family() != Family::Xcore1600) return false;
     } else if (params.topk != 512 && params.topk != 1024) {
         return false;
     }
-    // The 28/32-AP family's crossing has its own shape -- see the note on
-    // `kC600UChunkedVocabPerBatchSq`.  `batches` is <= 64 here, so the square
-    // cannot overflow.
-    if (is_c600u_ap_count(params.sm_count)) {
-        return batches * batches <=
-               params.vocab_size / kC600UChunkedVocabPerBatchSq;
+    if (family() == Family::Xcore1600) {
+        return xcore1600_chunked_bf16_applies(ap_count(), batches,
+                                              params.vocab_size);
     }
     // `kChunkedVocabPerRow` is exact and overflow-free as a division; the
     // product would need 64-bit arithmetic to say the same thing.
@@ -449,8 +425,8 @@ inline int f32_topk_chunk_cap(uint32_t topk, uint32_t vocab, uint32_t c_default,
 //
 // **A device test, not a record of where a number came from.**  Both inputs to the rule are device
 // geometry -- the arena and the AP count the grid is sized against -- and the
-// ratio was fitted on one machine.  A 28/32-AP family disagrees on both (28/32
-// APs against 104, and a different smem budget), so it keeps `c = 2`.
+// ratio was fitted on one machine.  The xcore1600 family disagrees on both (a
+// 128 KiB budget, and an AP count that is not 104), so it keeps `c = 2`.
 // `__MACA_ARCH__` looks like the obvious discriminator and is the wrong one: it
 // is defined only in the *device* pass, and this is a host function, so every
 // architecture would take the `#else` branch.
@@ -544,53 +520,12 @@ inline constexpr uint64_t kF32Coarse12WorkTarget = 114688;
 inline constexpr uint32_t kF32Coarse12MinBatchesNarrow = 16;
 inline constexpr uint32_t kF32Coarse12NarrowVocab = 131072;
 
-// ── the 28/32-AP ladder: the same two arms, re-sited ────────────────────────
+// ── the xcore1600 ladder: the same two arms, re-sited ───────────────────────
 //
-// The ladder above is fitted on 104 APs, and on a 28/32-AP family its
-// performance half refuses any device that is not the one it was fitted on.  So
-// the route has never run here, and what follows is what it does when it can.
-//
-// **Both arms are a product `batches * topk` here, not a batch.**  On the 104-AP
-// ladder the narrow arm is a flat `batches >= 16` and the wide one is a product;
-// here the narrow crossing moves with `topk` as plainly as the wide one does,
-// and a product holds all three arms.  A flat 16 is wrong in *both* directions
-// on this part: it declines a band of wins at the long `topk` and it enters the
-// loss beside them at the short one.
-//
-// The two floors are sited on the crossings and are **conservative in exactly
-// the way the 104-AP ladder's `topk = 512` arm is** -- a product cannot hold a
-// crossing that moves with `topk` at the low end, so each declines a band of
-// wins rather than risk the loss beside it.  The narrow floor is `b18` at
-// `k = 512` and the wide one `b24` at `k = 2048`, which is where the two
-// constants below come from.
-//
-// **The `k = 1024` wide column's mid-batch cells are not a crossing.**  They
-// read as a large win because the *default* route falls into its rescan there
-// (a chunk above the overflow bound, and the arena floor in `f32_chunked_chunks`
-// is guarded to `topk == 2048`), which is the chunk curve's own hole rather
-// than a property of this route.  Those cells are why the floor is not raised
-// past `b24` at that `topk`, and the healthy cell at the same `topk` is why it
-// is not sited there either.
-//
-// The ladder below was fitted on the 28-AP part -- the set `is_c600u_ap_count`
-// names -- so the 32-AP arm is served by *extrapolation*, and this is where that
-// says so.
-//
-// Two reasons it is extrapolated rather than declined.  The routes the floors
-// sit between are **both one CTA per row**, so the per-row costs the crossing is
-// made of do not move with the AP count, and the step from 28 to 32 APs is small
-// against the 104 -> 28 step this ladder re-sites across.  And declining is not
-// the conservative arm: a 32-AP part then takes the row path on every shape the
-// route serves, which is the slower arm by a wide margin.  Both halves are
-// checkable on one binary by varying this entry's own `sm_count` argument at a
-// fixed 28, so the two arms differ in the route and in nothing else this file
-// decides.
-//
-// `DEEP_SELECT_F32_COARSE12` is how a 32-AP machine would turn the
-// extrapolation into a fitted point, but it is read *below* the AP test, so a
-// probe has to be on a part in this set already.
-inline constexpr uint64_t kF32Coarse12C600UNarrowProduct = 9216;
-inline constexpr uint64_t kF32Coarse12C600UWideProduct = 49152;
+// The ladder above is fitted on 104 APs, and its performance half refuses any
+// device that is not the one it was fitted on.  The xcore1600 family's two
+// arms -- both products `batches * topk`, with their own crossings -- live in
+// `xcore1600_routing.cuh` beside the rest of that family's floors.
 
 
 // The width floor is the one value in this gate that is not a crossing at all.
@@ -629,11 +564,11 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // crossing in the tables above is a 104-AP ladder, and applying it to a machine
 // nobody fitted would be a guess dressed as a rule.  So it is guarded by the
 // device it was fitted on, named for what it is.  **There are two ladders**,
-// the 104-AP one above and the 28/32-AP one beside it; the second exists
+// the 104-AP one above and the xcore1600 family's beside it; the second exists
 // because the route had never run on that family at all, so "unfitted" was
-// declining shapes it wins by a wide margin.  The second set carries both of
-// that family's AP counts -- the 32-AP arm is an extrapolation and says so at
-// its own definition.
+// declining shapes it wins by a wide margin.  It selects on the device's
+// family and takes the AP count as a tuning input, because that family ships
+// at more than one AP count.
 //
 // Splitting them is the point, and it still is under the macro: the budget
 // half is a *compile-time* property of the family, while the performance half
@@ -656,10 +591,9 @@ inline constexpr uint32_t kF32Coarse12MinVocab = 2048;
 // three-artifact rebuild per probe.  It replaces the floor and **nothing else**:
 // the arena budget, the `topk` bound and the width bound are still enforced, so
 // a forced route is a legal route.  It does not change any default, and it
-// cannot reach a family the ladder was not fitted on -- the `sm_count` test
-// above it runs first.  (It is what sited the 28/32-AP ladder: the knob is read
-// *after* the AP-count test, so a probe needs that test relaxed to reach the
-// arms at all -- see the note on `is_c600u_ap_count`.)
+// cannot reach a family the ladder was not fitted on -- the family test above
+// it runs first.  Within the xcore1600 family the knob is read after that test,
+// so a probe there reaches the arms and a probe elsewhere does not.
 inline int f32_coarse12_override() {
     static const int v = env_tri_state("DEEP_SELECT_F32_COARSE12");
     return v;
@@ -684,20 +618,19 @@ inline bool f32_coarse12_applies(const RowParams &params, uint32_t batches) {
     if constexpr (ARCH_SMEM_PER_AP_BYTES < kNeeded) {
         return false;
     } else {
-        // ── the performance half: where each ladder below was fitted ──
-        // The 28/32-AP family is the exception to "a device the ladder was not
-        // fitted on": it has its own ladder (above), so the test is which of
-        // the two applies rather than whether any does.  A part that is neither
-        // takes the row path.
-        if (is_c600u_ap_count(params.sm_count)) {
+        // ── the performance half: which ladder applies ──
+        // The xcore1600 family is the exception to "a device the ladder was not
+        // fitted on": it has its own ladder (`xcore1600_routing.cuh`), so the
+        // test is which of the two applies rather than whether any does.  A
+        // part that is neither takes the row path.
+        if (family() == Family::Xcore1600) {
             if (params.topk > (uint32_t)topk_select_coarse12::kMaxTopK) return false;
             if (batches == 0) return false;
             if (params.vocab_size < kF32Coarse12MinVocab) return false;
             if (f32_coarse12_override() >= 0) return f32_coarse12_override() != 0;
-            const uint64_t product = (uint64_t)batches * params.topk;
-            if (params.vocab_size <= kF32Coarse12NarrowVocab)
-                return product >= kF32Coarse12C600UNarrowProduct;
-            return product >= kF32Coarse12C600UWideProduct;
+            return xcore1600_coarse12_applies(ap_count(), batches, params.topk,
+                                              params.vocab_size,
+                                              kF32Coarse12NarrowVocab);
         }
         if (params.sm_count != kF32Coarse12MeasuredSmCount) return false;
         // The arena's bound, not a fitted one: `topk_coarse12_row` serves at
@@ -769,7 +702,7 @@ inline constexpr uint32_t kF32ChunksMinVocab = 2048;
 // not of this function.**  Every bound above the band still applies: the AP
 // count the ladder was fitted on, `kMaxTopK`, the width floor, and
 // `batches <= kF32ChunksMaxBatches`.  In particular the AP-count test comes
-// first, so this knob **cannot reach the 28/32-AP family at either of its AP
+// first, so this knob **cannot reach the xcore1600 family at either of its AP
 // counts** -- that family takes the row path at every batch, whatever the
 // variable is set to.  `DEEP_SELECT_F32_CHUNKS=n`
 // is the knob for a different chunk *count*; this one only decides whether the
@@ -800,7 +733,7 @@ inline bool f32_chunks_applies(const RowParams &params, uint32_t batches) {
     // `batches == 0` test above its `f32_coarse12_override`).
     //
     // **The AP-count test above is a limit for the same reason, and it is why
-    // the knob cannot reach the 28/32-AP family**: `f32_chunks_route_override()`
+    // the knob cannot reach the xcore1600 family**: `f32_chunks_route_override()`
     // is read only from here, so `DEEP_SELECT_F32_CHUNKS_ROUTE=1` changes
     // nothing on that family, at either of its AP counts.  See `structs.h`'s
     // note on the family table.
@@ -1385,8 +1318,7 @@ void topk_launch(const RowParams &params, int64_t batches,
     const bool bf16 = route == detail::Route::kRowBf16 ||
                       route == detail::Route::kSplitBf16;
     const int block =
-        bf16 ? detail::radix_block_for(n, params.vocab_size, params.topk,
-                                       params.sm_count)
+        bf16 ? detail::radix_block_for(n, params.vocab_size, params.topk)
              : (int)topk_select_radix::kBlockSize;
     detail::dispatch_index_width(index_dtype, [&]<typename OutIdxT>() {
         switch (route) {

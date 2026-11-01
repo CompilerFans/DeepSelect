@@ -387,8 +387,9 @@ The kernel tree is split **by per-SM shared memory**, because that is what a top
 
 | tree | what it is |
 | --- | --- |
-| `csrc/maca_kernels/common/` | the shared implementation — `maca_topk.cu` + the contract/routing/radix headers, hand-written for MACA — compiled into **every** family's artifact |
+| `csrc/maca_kernels/common/` | the shared implementation — `maca_topk.cu` + the contract/routing/radix headers, hand-written for MACA — compiled into **every** family's artifact; also `family.cuh`, the runtime `Family` / `family()` / `ap_count()` |
 | `csrc/maca_kernels/xcore<N>/instantiations/` | family `<N>`'s own template-instantiation set (87 generated `.cu` today, identical tables across families) — what makes an artifact family `<N>`'s |
+| `csrc/maca_kernels/xcore<N>/` (other headers) | family `<N>`'s own implementation, where it has one: `xcore1600/xcore1600_routing.cuh` carries that family's routing ladder and constants |
 
 The upstream port that used to sit beside these two was **removed on
 2026-10-24**; it is in git history (`git log --all -- csrc/maca_kernels/legacy/`),
@@ -428,7 +429,7 @@ fire in this direction — see "Can a C600U run the C500 kernel" below.
 
 ### The platform layer
 
-**Two dimensions, not one.** The kernel tree is named for its *platform* and then for its *family*: `csrc/maca_kernels/common/` is the MACA platform's shared implementation, `csrc/maca_kernels/xcore<N>/` family `<N>`'s own instantiation set under it. That is upstream's shape — `csrc/cuda_kernels/` and `csrc/ascend_kernels/` sit at the same level for the same reason — and the family is the variant *below* the platform, not its peer. `csrc/structs.h` and
+**Two dimensions, not one.** The kernel tree is named for its *platform* and then for its *family*: `csrc/maca_kernels/common/` is the MACA platform's shared implementation, `csrc/maca_kernels/xcore<N>/` family `<N>`'s own instantiation set — and its own routing ladder, where it has one — under it. That is upstream's shape — `csrc/cuda_kernels/` and `csrc/ascend_kernels/` sit at the same level for the same reason — and the family is the variant *below* the platform, not its peer. `csrc/structs.h` and
 `csrc/ffi/` stay above it: shared by every platform this tree builds, which is
 currently one.
 

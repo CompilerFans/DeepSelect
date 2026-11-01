@@ -81,6 +81,7 @@ csrc/
     ├── common/                             共享实现（每族产物都编它）
     │   ├── primitives.cuh                  跨族共享件：位运算 / NaN 位型 / 键编码 / cumsum（device）
     │   ├── launch.cuh                      跨族共享件：`adopt_dynamic_smem`（host，启动原语）
+    │   ├── family.cuh                      跨族共享件：`Family` / `family()` / `ap_count()`（设备身份，运行期）
     │   ├── maca_topk.cu                    唯一手写 TU：include + host 入口 + 按表派发
     │   ├── contract.cuh                    契约半：RowParams / 常量 / 键与 NaN / emit / 布局 / 行核与发射
     │   ├── routing.cuh                     选路：形状 → 数据流（纯函数，一处可读）＋梯子 `select_route`＋每条路线的 `launch_typed_*`（`topk_launch` 只分派）
@@ -91,7 +92,9 @@ csrc/
     │   ├── radix_chunked.cuh               两条 dtype 的分块 split/merge（阶段核 + 发射）
     │   ├── topk_coarse12.cuh               coarse12 数据流（核 + 核启动子；源自 deep_gemm csrc；路线在 routing.cuh）
     │   └── topk_chunks.cuh                 chunks 数据流（核 + 核启动子；源自 deep_gemm csrc；路线在 routing.cuh）
-    └── xcore<N>/instantiations/*.cu        族层：每族自己的生成物（一个配置元组一个文件；今日三族同表，87 × 3）
+    └── xcore<N>/                           族层
+        ├── instantiations/*.cu             每族自己的生成物（一个配置元组一个文件；今日三族同表，87 × 3）
+        └── xcore1600/xcore1600_routing.cuh xcore1600 专属路由梯子：常数 + 门（`common/routing.cuh` 在 `family()` 判定后调用）
 ```
 
 ### 3b. 命名空间（用户 2026-10-12 裁定：一条逻辑、一套词汇，照官方的）
