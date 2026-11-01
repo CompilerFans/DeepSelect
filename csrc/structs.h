@@ -68,30 +68,28 @@ setup.py's build_for_maca."
 // single number -- see below -- and that is exactly why the *performance* half
 // of every fitted rule is guarded at run time rather than by this macro: one
 // ladder by `kF32Coarse12MeasuredSmCount` (the AP count it was fitted at),
-// another by `is_c600u_ap_count`.  Geometry compiles in, tuning still has to be
-// earned.
+// another by the device's own family (`common/family.cuh`).  Geometry compiles
+// in, tuning still has to be earned.
 //
-// **`is_c600u_ap_count` is an AP-count set, not a family** -- it is
-// `sm_count == 28 || sm_count == 32`, so it catches the 1500 row's 28-AP part
-// as well -- and the three ladders it admits all carry the name of the family
-// they were fitted on: `kC600UNarrowRowBatches` (`radix_block_for`), the
-// constant below (`chunked_bf16_applies`), and the two `kF32Coarse12C600U*`
-// products (`f32_coarse12_applies`).  Each was fitted on one SKU, and the
-// sibling SKU has no measurement of its own in this tree, so it is served by a
-// set fitted on the other.
+// **The family a device is, and the AP count it reports, are two questions.**
+// `family()` answers the first from the device's sm pair; `ap_count()` answers
+// the second.  The xcore1600 ladders are selected by the first and their floors
+// are chosen within the family by the second
+// (`xcore1600/xcore1600_routing.cuh`).  Inferring the family from the AP count
+// would misroute a part that reports a number another family also reports --
+// the 1500 row is 28 APs, the same as one of the 1600 row's parts.
 //
 // **The split predicates are where this paragraph gets checked, and the two
-// are not in the same state**: `chunked_bf16_applies` has a 28/32-AP arm
-// (`kC600UChunkedVocabPerBatchSq`) keyed on the same set `is_c600u_ap_count`
-// names -- while `chunked_f32_applies` has no such guard, so a 1600 image
-// routes its fp32 split on the chunk *band* (`wave_filled_chunks` adapts the
-// count, not the band).
+// are not in the same state**: `chunked_bf16_applies` has a family arm
+// (`k_xcore1600_chunked_vocab_per_batch_sq`) -- while `chunked_f32_applies` has
+// no such guard, so a 1600 image routes its fp32 split on the chunk *band*
+// (`wave_filled_chunks` adapts the count, not the band).
 //
 // **The 1600 family ships at 28 APs and at 32, and both are ordinary parts, so
 // this row cannot name the family's count and the 1500 row's 28 is not a
 // counterexample to it.**  The number picked here is the one the *ladder* was
 // fitted on, and the gap it leaves is closed at the route rather than here --
-// `routing.cuh`'s `is_c600u_ap_count` accepts both, and says why.
+// `xcore1600_routing.cuh`'s accessors take the AP count.
 //
 // Nothing routes on *this* -- `ARCH_SM_COUNT` has no behavioral consumer (the
 // paragraph above is the audit finding that established that) -- so the value
@@ -124,8 +122,8 @@ static constexpr uint32_t ARCH_REGS_PER_AP = 131072;        // see below
 #elif DEEP_SELECT_ARCH == 1600
 static constexpr uint32_t ARCH_FAMILY = 1600;
 static constexpr uint32_t ARCH_SM_COUNT = 28;               // the family
-// also ships at 32 -- see above, and `is_c600u_ap_count` for the
-// route that must accept both
+// also ships at 32 -- see above, and `xcore1600_routing.cuh` for the
+// AP count its ladders take
 static constexpr uint32_t ARCH_SMEM_PER_AP_BYTES = 128 * 1024;
 static constexpr uint32_t ARCH_REGS_PER_AP = 131072;
 #else
@@ -143,9 +141,9 @@ static_assert(ARCH_REGS_PER_AP > 0,
 // The register file is the budget the bf16 row's skip tables are sized
 // against.  The 128 KiB rows are that number (`regs_per_multiprocessor`),
 // against the 64 KiB family's 65536; the 1500 row carries its sibling's number
-// -- the same extrapolation `radix_block_for`'s 28/32-AP arm already makes when
+// -- the same extrapolation `radix_block_for`'s xcore1600 arm already makes when
 // it reasons "2 x 1024- or 4 x 512-thread CTAs (128 KiB of registers)" about a
-// part reached through `is_c600u_ap_count`.
+// part reached through that ladder.
 //
 // **Four decisions ask the register file the same question, so it is named
 // once.**  Each of them reads "at least 131072 registers per AP" and each
